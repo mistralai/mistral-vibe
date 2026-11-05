@@ -215,6 +215,10 @@ def test_file_watcher_for_autocomplete_is_enabled_by_default() -> None:
     assert VibeConfigSchema().file_watcher_for_autocomplete is True
 
 
+def test_file_autocomplete_defaults_to_enabled() -> None:
+    assert VibeConfigSchema().enable_file_autocomplete is True
+
+
 def test_subagent_status_list_is_enabled_by_default() -> None:
     assert VibeConfigSchema().show_subagent_status_list is True
 
@@ -266,21 +270,6 @@ def test_subagent_limits_default_to_32() -> None:
 def test_subagent_limits_reject_non_positive_values(setting: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         VibeConfigSchema.model_validate(setting)
-
-
-def test_smart_approve_is_not_offered_by_default() -> None:
-    config = VibeConfigSchema()
-    assert config.smart_approve_offered() is False
-
-
-def test_smart_approve_available_flag_offers_without_defaulting() -> None:
-    config = VibeConfigSchema(smart_approve_available=True, default_agent="ask")
-    assert config.smart_approve_offered() is True
-
-
-def test_smart_approve_default_flag_offers_and_defaults() -> None:
-    config = VibeConfigSchema(smart_approve_default=True)
-    assert config.smart_approve_offered() is True
 
 
 def test_default_model_carries_the_sourced_values() -> None:

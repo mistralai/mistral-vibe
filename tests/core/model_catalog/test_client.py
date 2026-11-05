@@ -6,10 +6,17 @@ import respx
 
 from vibe.core.model_catalog._constants import build_model_catalog_url
 from vibe.core.model_catalog.client import ModelCatalogClient
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 
 _TEST_API_BASE = "https://api.mistral.ai/v1"
 _TEST_URL = build_model_catalog_url(_TEST_API_BASE)
 assert _TEST_URL is not None
+
+
+def _key() -> ApiKeyPlatformCredentialProvider:
+    # Fresh per call: a provider remembers the credential a 401 rejected.
+    return ApiKeyPlatformCredentialProvider.from_api_key("test-key")
+
 
 _CATALOG_PAYLOAD = {
     "models": [
@@ -41,7 +48,7 @@ async def test_fetch_happy_path_sends_bearer_token() -> None:
         return_value=httpx.Response(200, json=_CATALOG_PAYLOAD)
     )
     client = _make_client()
-    response = await client.fetch("test-key")
+    response = await client.fetch(_key())
     await client.aclose()
 
     assert route.called
@@ -55,7 +62,7 @@ async def test_fetch_happy_path_sends_bearer_token() -> None:
 async def test_fetch_empty_catalog_is_a_success() -> None:
     respx.get(_TEST_URL).mock(return_value=httpx.Response(200, json={"models": []}))
     client = _make_client()
-    response = await client.fetch("test-key")
+    response = await client.fetch(_key())
     await client.aclose()
 
     assert response is not None
@@ -67,7 +74,7 @@ async def test_fetch_empty_catalog_is_a_success() -> None:
 async def test_fetch_http_error_returns_none() -> None:
     respx.get(_TEST_URL).mock(return_value=httpx.Response(503, text="unavailable"))
     client = _make_client()
-    response = await client.fetch("test-key")
+    response = await client.fetch(_key())
     await client.aclose()
 
     assert response is None
@@ -78,7 +85,7 @@ async def test_fetch_http_error_returns_none() -> None:
 async def test_fetch_network_error_returns_none() -> None:
     respx.get(_TEST_URL).mock(side_effect=httpx.ConnectError("offline"))
     client = _make_client()
-    response = await client.fetch("test-key")
+    response = await client.fetch(_key())
     await client.aclose()
 
     assert response is None
@@ -89,7 +96,7 @@ async def test_fetch_network_error_returns_none() -> None:
 async def test_fetch_non_json_body_returns_none() -> None:
     respx.get(_TEST_URL).mock(return_value=httpx.Response(200, text="<html>"))
     client = _make_client()
-    response = await client.fetch("test-key")
+    response = await client.fetch(_key())
     await client.aclose()
 
     assert response is None
@@ -100,7 +107,7 @@ async def test_fetch_non_json_body_returns_none() -> None:
 async def test_fetch_non_catalog_payload_returns_none() -> None:
     respx.get(_TEST_URL).mock(return_value=httpx.Response(200, json={"error": True}))
     client = _make_client()
-    response = await client.fetch("test-key")
+    response = await client.fetch(_key())
     await client.aclose()
 
     assert response is None
@@ -111,7 +118,7 @@ async def test_fetch_without_url_makes_no_request() -> None:
     client = ModelCatalogClient(url=build_model_catalog_url(""))
 
     assert client._url is None
-    response = await client.fetch("test-key")
+    response = await client.fetch(_key())
     await client.aclose()
 
     assert response is None

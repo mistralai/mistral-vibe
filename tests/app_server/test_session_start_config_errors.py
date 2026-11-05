@@ -16,6 +16,7 @@ from vibe.app_server.protocol import (
     AppServerResponseError,
     ClientInfo,
     ProtocolErrorCode,
+    SessionListParams,
     SessionStartParams,
 )
 from vibe.app_server.transport import memory_transport_pair
@@ -122,6 +123,33 @@ async def test_a_config_that_breaks_a_schema_rule_is_a_configuration_error(
     assert error.code is ProtocolErrorCode.INVALID_PARAMS
     assert error.data == {"kind": "configuration"}
     assert message in error.message
+
+
+@pytest.mark.asyncio
+async def test_listing_sessions_with_a_config_that_breaks_a_schema_rule_is_a_configuration_error(
+    write_config: Callable[[str], None], client: AppServerClient
+) -> None:
+    """*Prepare*: A config with a bash default timeout above Vibe's maximum and
+    no maximum.
+    *Do*: List the sessions.
+    *Assert*: The configuration error a session start gives, so a client can
+    say what to fix instead of "Internal server error".
+    """
+    # Prepare
+    write_config("[tools.bash]\ndefault_timeout = 600\n")
+
+    # Do
+    with pytest.raises(AppServerResponseError) as exc_info:
+        await client.request("session/list", SessionListParams())
+
+    # Assert
+    error = exc_info.value.error
+    assert error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert error.data == {"kind": "configuration"}
+    assert (
+        "tools.bash: default_timeout is set without max_timeout_seconds."
+        " Set both, or neither." in error.message
+    )
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,9 @@ async def test_teleport_summary_uses_model_temperature_and_no_token_cap(
     completion = FakeUtilityCompletion("<summary>Fix the parser</summary>").install(
         monkeypatch
     )
-    adapter = SimpleNamespace(config=config, launch_context=None, session_id="s")
+    adapter = SimpleNamespace(
+        config=config, launch_context=None, session_id="s", provider_credentials=None
+    )
     summarizer = UnifiedTeleportContextSummarizer(cast(Any, adapter))
 
     summary = await summarizer.summarize(

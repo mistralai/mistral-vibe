@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from vibe.app_server.protocol import NarrationSummarizeParams
 from vibe.core.config import ModelConfig, VibeConfigSchema
@@ -12,6 +13,9 @@ from vibe.core.telemetry.types import LaunchContext
 from vibe.core.types import LLMMessage, Role
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
+
+if TYPE_CHECKING:
+    from mistralai_vibe_local_harness.vibe import ProviderCredentialProvider
 
 _NARRATION_MODEL = ModelConfig(
     name="mistral-vibe-cli-fast",
@@ -28,6 +32,8 @@ class NarrationContext:
     launch_context: LaunchContext | None
     parent_session_id: str | None
     user_plan: str | None
+    # The session's credential for a provider by name; None reads the API key.
+    credentials: Callable[[str], ProviderCredentialProvider] | None = None
 
 
 class NarrationService:
@@ -47,7 +53,14 @@ class NarrationService:
         )
         if provider is None:
             return None
-        if provider.api_key_env_var and not resolve_api_key(provider.api_key_env_var):
+        credentials = (
+            context.credentials(provider.name) if context.credentials else None
+        )
+        if (
+            credentials is None
+            and provider.api_key_env_var
+            and not resolve_api_key(provider.api_key_env_var)
+        ):
             return None
 
         sections = [f"## User Request\n{params.user_message}"]
@@ -76,6 +89,7 @@ class NarrationService:
                 max_tokens=512,
                 metadata=metadata,
                 transport=CompletionTransport.from_config(config),
+                credentials=credentials,
             )
         except Exception as exc:
             logger.warning("Turn summary generation failed", exc_info=exc)

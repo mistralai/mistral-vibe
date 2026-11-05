@@ -35,16 +35,12 @@ expected_actions = [Action("open_url", _LISTED_URL)]
 screen_contains = ("PRs (2)",)
 screen_excludes = ("Pull Requests",)
 
-# The replay-pinned bar edges around the centered count link.
-_LEFT = "/test/workdir"
-_RIGHT = "mistral-medium-3.5[medium] · 0/600k tokens (0%)"
+# The count link follows the replay-pinned cwd.
+_LEFT = "/test/workdir ⧉  "
+_RIGHT = "ctx        0/600k"
 _LABEL = "PRs (2)"
-_LABEL_X = (COLUMNS - len(_LABEL)) // 2
-screen_rows = {
-    ROWS - 1: _LEFT.ljust(_LABEL_X)
-    + _LABEL.ljust(COLUMNS - len(_RIGHT) - _LABEL_X)
-    + _RIGHT
-}
+_LABEL_X = len(_LEFT)
+screen_rows = {ROWS - 1: (_LEFT + _LABEL).ljust(COLUMNS - len(_RIGHT)) + _RIGHT}
 
 # SGR mouse coordinates are 1-indexed; the bar is the last row.
 _CLICK_COL = _LABEL_X + len(_LABEL) // 2 + 1

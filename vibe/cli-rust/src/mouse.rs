@@ -38,7 +38,7 @@ pub(crate) const MOUSE_SCROLL_STEP: u16 = 2;
 pub enum MouseTarget {
     Blocked,
     Transcript,
-    Toast,
+    JumpToBottom,
     Composer,
     Completion,
     Approval,
@@ -242,7 +242,9 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         // The console's wheel scrolls its log and may load older pages, which
         // needs the client: dispatch (not this client-free router) runs it.
         MouseTarget::DebugConsole => return false,
-        MouseTarget::Transcript => scroll_chat(app, up, MOUSE_SCROLL_STEP),
+        MouseTarget::Transcript | MouseTarget::JumpToBottom => {
+            scroll_chat(app, up, MOUSE_SCROLL_STEP)
+        }
         MouseTarget::Composer => scroll_input(app, up),
         MouseTarget::Completion => completion_manager::wheel(app, !up, MOUSE_SCROLL_STEP as usize),
         MouseTarget::ThemePicker => theme_picker::navigate(app, !up),
@@ -278,7 +280,6 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         // pre-session surface with its own mouse handling.
         MouseTarget::Blocked
         | MouseTarget::Loading
-        | MouseTarget::Toast
         | MouseTarget::BottomApp
         | MouseTarget::McpOAuth
         | MouseTarget::ConnectorAuth

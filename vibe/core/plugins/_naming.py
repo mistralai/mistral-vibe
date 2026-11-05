@@ -6,10 +6,10 @@ and targeted by hooks, so it has to come out the same on every host: names are
 assigned from the whole set of identities at once, ordered by raw identity, so
 discovery order cannot reach the result.
 
-The algorithm is the one in `docs/design/unified-harness-mcp-support.md`
-("Naming and identity"), matching `resolveMcpGroupNames` in the TypeScript
-runtime's `plugins/materializer.ts` step for step. The two runtimes share
-fixtures, so a divergence here is a divergence in checked-in expected output.
+A group is named `plugin_<namespace>_<source>`. When several sources share that
+name, or another group already claims it, each of them appends the shortest
+prefix, eight characters or more, of the SHA-256 digest of its identity that is
+still free.
 """
 
 from __future__ import annotations

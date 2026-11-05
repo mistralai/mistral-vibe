@@ -1,3 +1,42 @@
+"""Fetch from a repository whose Git configuration is untrusted.
+
+Vibe can open repositories it did not create, so a fetch must not run a command
+chosen by the repository's configuration or by process state the checkout can
+influence. Teleport and the worktree refresh share this policy:
+
+- The remote is resolved to an explicit SSH or HTTPS URL, and the fetch passes
+  that URL with explicit refspecs, so ``remote.<name>.vcs``, upload-pack
+  overrides and remote-helper selection by remote name never apply.
+- Repository ``core.sshCommand``, ``core.gitProxy``, ``core.askPass``,
+  ``core.fsmonitor`` and every ``credential.helper`` are cleared. Repository
+  hooks never run: ``core.hooksPath`` points at a directory that does not
+  exist, which also bypasses ``$GIT_DIR/hooks``.
+- Only these keys are replayed, from system and global configuration only:
+  ``credential.*``, ``http.*``, ``https.*``, ``safe.directory`` and
+  ``url.*.insteadOf``. Invalid UTF-8 in a replayed key or value fails closed.
+  Replayed ``safe.directory`` values keep intentionally shared repositories
+  usable.
+- Repository ``http.*`` / ``https.*`` configuration is rejected for network
+  remotes, as is a repository ``url.*.insteadOf`` rewrite that matches the
+  selected remote. A trusted global rewrite from HTTPS to SSH still works.
+- Global configuration paths derived from ``HOME``, ``XDG_CONFIG_HOME``, or the
+  Windows ``USERPROFILE`` and ``HOMEDRIVE``/``HOMEPATH`` fallbacks are rejected
+  when they resolve inside the checkout.
+- The SSH client and named credential helpers resolve from ``PATH`` entries
+  that are absolute and outside the checkout. Inherited ``GIT_SSH*``, askpass,
+  proxy-command, ``GIT_CONFIG_*`` and ``GIT_EXEC_PATH`` values are replaced
+  with controlled ones.
+- Git protocols are restricted to SSH and HTTPS, plus local files when the
+  caller opts in. Submodule recursion and automatic maintenance are disabled.
+
+Only the worktree refresh opts in to local file remotes. Absolute and relative
+local paths are accepted. UNC paths, file URLs with a host, and encoded or
+backslash network-path spellings are rejected, so the opt-in cannot start SMB
+or other network authentication. An accepted file URL is decoded to a validated
+local path before Git receives it. Every other scheme, including ``git://``,
+``ext::`` and arbitrary remote helpers, fails closed before Git runs.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Sequence

@@ -6,7 +6,7 @@ use futures::stream;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Error, Message};
-use vibe_rs::app::{App, ToastSeverity};
+use vibe_rs::app::App;
 use vibe_rs::voice::signal::RecordingSignal;
 use vibe_rs::voice::transcribe::read_events;
 use vibe_rs::voice::{TranscribeState, VoiceEvent};
@@ -95,11 +95,9 @@ fn transcription_errors_have_the_failure_prefix_and_settle_recording() {
     app.apply_voice_event(VoiceEvent::Error(NO_AUDIO.to_owned()));
 
     assert!(!app.recording_active());
-    let toast = app.overlays.toasts.back().unwrap();
-    assert!(matches!(toast.severity, ToastSeverity::Error));
     assert_eq!(
-        toast.text,
-        format!("Voice transcription failed: {NO_AUDIO}")
+        crate::feedback_support::errors(&app),
+        [format!("Voice transcription failed: {NO_AUDIO}")]
     );
 }
 

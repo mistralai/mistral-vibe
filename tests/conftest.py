@@ -20,7 +20,6 @@ from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from tests.stubs.process_services import FakeOrgConfigServer, fake_process_services
 from tests.stubs.respx_httpx2 import HTTPCore2Mocker
 from vibe.app_server._process_services import ProcessServices
-from vibe.app_server.connector_catalog import reset_bootstrap_failures
 from vibe.core.config import (
     SessionLoggingConfig,
     VibeConfigSchema,
@@ -105,6 +104,17 @@ class _EmptyKeyring(KeyringBackend):
         raise keyring.errors.PasswordDeleteError()
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _skip_fsync() -> Generator[None]:
+    # Session storage fsyncs on every journal write, about a hundred times per
+    # session test. On CI's shared disks those fsyncs, from every worker at once,
+    # pushed whole files of tests past the 10 s timeout. Nothing in-process ever
+    # crashes, so tests never rely on the durability fsync buys.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(os, "fsync", lambda _fd: None)
+        yield
+
+
 @pytest.fixture(autouse=True)
 def _reset_windows_shell_cache() -> None:
     # resolve_windows_shell is cached for the process; tests vary sys.platform,
@@ -135,13 +145,17 @@ def _no_provider_model_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_experiments_eval_failed() -> None:
-    reset_experiments_eval_failed()
+def _no_billing_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Account reads never ask the billing API over the network; a test of the
+    # plan or budget passes its own gateway.
+    from vibe.app_server import _billing
+
+    monkeypatch.setattr(_billing, "billing_gateway_factory", None)
 
 
 @pytest.fixture(autouse=True)
-def _reset_connector_bootstrap_failures() -> None:
-    reset_bootstrap_failures()
+def _reset_experiments_eval_failed() -> None:
+    reset_experiments_eval_failed()
 
 
 @pytest.fixture(autouse=True)

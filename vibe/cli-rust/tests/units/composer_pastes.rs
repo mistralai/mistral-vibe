@@ -1,8 +1,6 @@
 //! Collapsed pastes and image placeholders across composer round trips:
 //! history and queue drafts, cut, line deletion, undo, and rewind.
 
-use std::time::Instant;
-
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::App;
 use vibe_rs::input::handle_paste;
@@ -106,7 +104,7 @@ fn an_undo_checkpoint_taken_before_a_sync_keeps_the_placeholder() {
     input.input.push_str(" dictated");
     input.cursor = input.input.len();
 
-    input.record_edit(before, true, Instant::now());
+    input.record_edit(before, true, vibe_rs::clock::now());
     assert!(input.restore_edit(false));
     assert!(input.restore_edit(true));
 

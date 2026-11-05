@@ -6,8 +6,6 @@ from e2e.app_server.effect_fixtures import effect_settled, effect_started
 from e2e.app_server.events import turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-settle_per_key = True
 capture_steps = {2, 3, 4}
 
 screen_contains = [

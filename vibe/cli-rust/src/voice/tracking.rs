@@ -20,7 +20,7 @@ pub struct RecordingTracking {
 impl RecordingTracking {
     pub fn start(&mut self) {
         *self = Self {
-            started_at: Some(Instant::now()),
+            started_at: Some(crate::clock::real_now()),
             ..Self::default()
         };
     }
@@ -28,7 +28,10 @@ impl RecordingTracking {
     /// Milliseconds since the recording began, spanning capture and transcription.
     pub fn elapsed_ms(&self) -> u64 {
         self.started_at.map_or(0, |at| {
-            at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+            crate::clock::real_now()
+                .duration_since(at)
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64
         })
     }
 

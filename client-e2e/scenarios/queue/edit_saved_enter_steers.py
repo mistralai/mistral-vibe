@@ -13,7 +13,6 @@ from e2e.app_server.scenario import Timeline
 
 _SECOND_QUEUE_ITEM_ID = f"{QUEUE_ITEM_ID}-2"
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 handshake = {
     "session/turn/queue/steer": {
         "lastEventId": 5,
@@ -28,7 +27,6 @@ _UP = "\x1b[A"
 # visible; the steer itself is proven by the requests.json golden.
 screen_contains = ("second edited",)
 screen_excludes = ("↑↓/jk to select", "Enter to save")
-settle_per_key = True
 capture_steps = {5, 6}
 
 timeline: Timeline = [

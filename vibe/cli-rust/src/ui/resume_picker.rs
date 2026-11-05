@@ -30,7 +30,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(theme::popup_border()).bg(bg)),
+            .border_style(theme::border_style().bg(bg)),
         area,
     );
     let title = Style::default().fg(theme::secondary()).bg(bg);

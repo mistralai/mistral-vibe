@@ -76,6 +76,7 @@ impl CheckpointAgentResultTermination {
 pub(super) enum CheckpointAgentResultStopReason {
     IterationLimit,
     Skipped,
+    Rejected,
 }
 
 impl CheckpointAgentResultStopReason {
@@ -83,6 +84,7 @@ impl CheckpointAgentResultStopReason {
         match stop_reason {
             TurnStopReason::IterationLimit => Self::IterationLimit,
             TurnStopReason::Skipped => Self::Skipped,
+            TurnStopReason::Rejected => Self::Rejected,
         }
     }
 
@@ -90,6 +92,7 @@ impl CheckpointAgentResultStopReason {
         match self {
             Self::IterationLimit => TurnStopReason::IterationLimit,
             Self::Skipped => TurnStopReason::Skipped,
+            Self::Rejected => TurnStopReason::Rejected,
         }
     }
 }

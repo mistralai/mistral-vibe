@@ -30,7 +30,7 @@ fn url_help_visible(state: &BrowserSignInState) -> bool {
         && (state.show_url_help
             || state
                 .sign_in_started_at
-                .is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(4)))
+                .is_some_and(|at| crate::clock::since(at) >= std::time::Duration::from_secs(4)))
 }
 
 /// The revealed URL text: the fallback prefix, the raw

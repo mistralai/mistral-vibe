@@ -1,8 +1,7 @@
 //! Shift+Tab agent switches: submit guard, delayed prompt spinner, failure recovery and chasing.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::KeyCode;
 use ratatui::layout::Rect;
@@ -15,6 +14,7 @@ use vibe_rs::input::handle_key;
 use vibe_rs::server::Client;
 use vibe_rs::ui_event::{self, UiEvent};
 
+use crate::feedback_support::errors;
 use crate::support::{key, render, row};
 
 const PRIMARY: [&str; 3] = ["default", "plan", "accept-edits"];
@@ -105,15 +105,11 @@ impl Harness {
         target
     }
 
-    fn in_flight(&self) -> u32 {
-        self.app.pending_commits.load(Ordering::Relaxed)
-    }
-
     /// The composer's first content row, which starts with the prompt marker.
-    fn prompt_row(&self) -> String {
+    fn prompt_row(&mut self) -> String {
         let width = 40;
         let buffer = render(width, 4, |frame| {
-            vibe_rs::ui::chat_input::draw(&self.app, frame, Rect::new(0, 0, width, 4));
+            vibe_rs::ui::chat_input::draw(&mut self.app, frame, Rect::new(0, 0, width, 4));
         });
         row(&buffer, 1)
     }
@@ -163,7 +159,6 @@ async fn a_slow_switch_swaps_the_prompt_marker_for_a_spinner_until_it_settles() 
     assert!(harness.app.agents.spinner_at.is_none());
     assert!(harness.prompt_row().starts_with("> "));
     assert_eq!(harness.app.agents.active.name, "plan");
-    assert_eq!(harness.in_flight(), 0);
 }
 
 #[tokio::test]
@@ -178,13 +173,10 @@ async fn a_failed_switch_clears_the_in_flight_state_and_restores_the_prompt() {
     let event = harness.next_event().await;
     assert!(event.runtime.is_err());
     ui_event::apply(&mut harness.app, &harness.client, event.into());
-    let toast = harness
-        .app
-        .overlays
-        .toasts
-        .back()
-        .expect("the failure is shown");
-    assert!(toast.text.starts_with("Failed to switch agent: "));
+    let failures = errors(&harness.app);
+    assert!(failures
+        .last()
+        .is_some_and(|text| text.starts_with("Failed to switch agent: ")));
 
     assert!(!agents::switching(&harness.app));
     assert!(!harness.app.agents.switching_indicator);
@@ -192,7 +184,6 @@ async fn a_failed_switch_clears_the_in_flight_state_and_restores_the_prompt() {
     assert!(harness.app.agents.desired.is_none());
     assert_eq!(agents::displayed(&harness.app).name, "default");
     assert!(harness.prompt_row().starts_with("> draft"));
-    assert_eq!(harness.in_flight(), 0);
     // A due spinner timer after the failure must not bring the spinner back.
     agents::show_switch_spinner(&mut harness.app);
     assert!(agents::spinner_glyph(&harness.app).is_none());
@@ -231,7 +222,7 @@ async fn an_external_switch_rebases_the_next_cycle_on_the_new_active_agent() {
 async fn shift_tab_keeps_switching_agents_while_a_turn_runs() {
     let mut harness = Harness::new(true);
     harness.app.set_status(Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     });
     for expected in ["plan", "accept-edits"] {
         harness.press(KeyCode::BackTab);
@@ -252,8 +243,8 @@ async fn a_press_during_a_switch_is_chased_after_it_settles_and_releases_the_gua
     assert_eq!(harness.requested_agent().await, "plan");
     agents::show_switch_spinner(&mut harness.app);
     harness.press(KeyCode::BackTab);
-    // Coalesced: one round-trip in flight, the label already on the latest target.
-    assert_eq!(harness.in_flight(), 1);
+    // Coalesced: the press waits for the round-trip in flight, the label already on the latest target.
+    assert!(harness.app.agents.desired.is_some());
     assert_eq!(agents::displayed(&harness.app).name, "accept-edits");
 
     assert_eq!(harness.settle().await, "plan");
@@ -268,5 +259,4 @@ async fn a_press_during_a_switch_is_chased_after_it_settles_and_releases_the_gua
     assert!(!harness.app.agents.switching_indicator);
     assert!(harness.app.agents.spinner_at.is_none());
     assert!(harness.prompt_row().starts_with("> "));
-    assert_eq!(harness.in_flight(), 0);
 }

@@ -17,8 +17,10 @@ pub type Tui = ratatui::Terminal<ResyncBackend<std::io::Stdout>>;
 pub struct TerminalGuard {
     active: bool,
     keyboard_pushed: bool,
-    /// Mouse capture, following `enable_mouse_capture`; resume restores it.
+    /// Mouse capture, following `captures_mouse`; resume re-reads tmux and restores it.
     mouse: bool,
+    /// The `enable_mouse_capture` setting last applied.
+    configured: bool,
     /// Whether `ENABLE_WINDOW_INPUT` was added to the Windows console, to clear on suspend.
     window_input: bool,
 }
@@ -46,16 +48,24 @@ pub fn require_interactive_terminal() {
     std::process::exit(1);
 }
 
-/// Own the terminal, capturing the mouse only when `mouse` (the cached `enable_mouse_capture`).
-pub fn init(mouse: bool) -> std::io::Result<(Tui, TerminalGuard)> {
+/// Whether to capture the mouse: the `enable_mouse_capture` setting, off inside a tmux session with `mouse off`.
+pub fn captures_mouse(configured: bool) -> bool {
+    configured && !crate::tmux::mouse_off()
+}
+
+/// Own the terminal, capturing the mouse only when `captures_mouse(configured)`.
+pub fn init(configured: bool) -> std::io::Result<(Tui, TerminalGuard)> {
     // Own the terminal before arming the guard: a failed `try_init` must not
     // write teardown sequences to a terminal we never took over.
     let terminal = try_init()?;
+    crate::tmux::refresh_mouse();
+    let mouse = captures_mouse(configured);
     crate::mouse::pixels::set_capture(mouse);
     let mut guard = TerminalGuard {
         active: true,
         keyboard_pushed: false,
         mouse,
+        configured,
         window_input: false,
     };
     if let Err(error) = guard.enter() {
@@ -155,7 +165,9 @@ impl TerminalGuard {
     }
 
     /// Follow `enable_mouse_capture` live; while suspended, only `resume` applies it.
-    pub fn set_mouse_capture(&mut self, enabled: bool) -> std::io::Result<()> {
+    pub fn set_mouse_capture(&mut self, configured: bool) -> std::io::Result<()> {
+        self.configured = configured;
+        let enabled = captures_mouse(configured);
         if enabled == self.mouse {
             return Ok(());
         }
@@ -207,6 +219,10 @@ impl TerminalGuard {
         // Raw mode is on, so teardown is owed even if the rest fails below.
         self.active = true;
         execute!(std::io::stdout(), EnterAlternateScreen, Hide)?;
+        // tmux's `mouse` option may have changed while suspended.
+        crate::tmux::refresh_mouse();
+        self.mouse = captures_mouse(self.configured);
+        crate::mouse::pixels::set_capture(self.mouse);
         self.enable_raw_modes()
     }
 }

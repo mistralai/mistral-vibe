@@ -1,7 +1,6 @@
 //! Turn, queue, and dialog transitions preserve ordinary titles and bells.
 
 use serde_json::{json, Value};
-use std::time::Instant;
 use vibe_rs::app::{App, Status};
 use vibe_rs::server::notification;
 use vibe_rs::{approval, message_queue, question_app};
@@ -13,7 +12,7 @@ fn app() -> App {
     app.terminal_notifier.configure(true, true);
     app.terminal_notifier.set_focus(false);
     app.set_status(Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     });
     app
 }

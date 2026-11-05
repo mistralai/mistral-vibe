@@ -180,3 +180,48 @@ def test_projects_store_ignores_corrupt_toml(tmp_path: Path) -> None:
     path.write_text("{not-toml", encoding="utf-8")
 
     assert VibeProjectsStore(path).list_remote_projects() == []
+
+
+def test_projects_store_reads_every_link_of_a_whole_file(tmp_path: Path) -> None:
+    path = tmp_path / "projects.toml"
+    store = VibeProjectsStore(path)
+    link = _local_link(directory_path=tmp_path.resolve())
+
+    assert store.read_project_links() == ([], True)
+    store.upsert_project_link(link)
+    assert store.read_project_links() == ([link], True)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param("{not-toml", id="corrupt"),
+        pytest.param("", id="mid-write"),
+        pytest.param(
+            'version = 1\n[[projects]]\nkind = "future"\n', id="unknown-entry"
+        ),
+    ],
+)
+def test_projects_store_reports_a_partly_read_file(
+    tmp_path: Path, content: str
+) -> None:
+    path = tmp_path / "projects.toml"
+    path.write_text(content, encoding="utf-8")
+
+    assert VibeProjectsStore(path).read_project_links() == ([], False)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+def test_projects_store_writes_through_a_symlinked_registry(tmp_path: Path) -> None:
+    target = tmp_path / "dotfiles" / "projects.toml"
+    target.parent.mkdir()
+    target.write_text("version = 1\nprojects = []\n", encoding="utf-8")
+    path = tmp_path / "projects.toml"
+    path.symlink_to(target)
+    link = _local_link(directory_path=tmp_path.resolve())
+
+    VibeProjectsStore(path).upsert_project_link(link)
+
+    assert path.is_symlink()
+    assert VibeProjectsStore(target).list_project_links() == [link]
+    assert list(target.parent.iterdir()) == [target]

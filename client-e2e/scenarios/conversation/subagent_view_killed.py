@@ -45,7 +45,6 @@ handshake = {
 
 request_methods = frozenset({"session/read"})
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 
 screen_contains = (
     "Viewing Explore 1 · read-only · Esc to return",

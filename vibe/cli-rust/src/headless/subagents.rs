@@ -164,7 +164,7 @@ pub fn subagent_report(run: SubagentRun) -> SubagentReport {
 
 fn millis_until(ends: Instant, margin: Duration) -> u64 {
     let left = ends
-        .saturating_duration_since(Instant::now())
+        .saturating_duration_since(Instant::from_std(crate::clock::real_now()))
         .saturating_sub(margin);
     u64::try_from(left.as_millis()).unwrap_or(u64::MAX)
 }

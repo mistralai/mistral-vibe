@@ -4,7 +4,9 @@ pub mod failure;
 mod hint;
 mod snake;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::UiInstant;
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -37,7 +39,7 @@ pub struct LoadingAnim {
     /// Elapsed time already accumulated before the current pause.
     paused_total: Duration,
     /// When the elapsed counter was paused, or `None` while it runs.
-    pause_start: Option<Instant>,
+    pause_start: Option<UiInstant>,
     /// Index into `theme::LOADING_GRADIENT` of the current base color.
     color_index: usize,
     /// Wipe direction through the palette: +1 up, -1 down. Ping-pongs at the ends.
@@ -83,7 +85,7 @@ impl LoadingAnim {
     pub fn begin_action_required(&mut self, label: &str) {
         if self.action_required.is_none() {
             self.label_before_action_required = Some(self.label.clone());
-            self.pause_start = Some(Instant::now());
+            self.pause_start = Some(crate::clock::now());
         }
         self.action_required = Some(label.to_owned());
         self.label = label.to_owned();
@@ -95,7 +97,7 @@ impl LoadingAnim {
             return;
         }
         if let Some(pause_start) = self.pause_start.take() {
-            self.paused_total += pause_start.elapsed();
+            self.paused_total += crate::clock::since(pause_start);
         }
         self.label = self
             .label_before_action_required
@@ -104,10 +106,10 @@ impl LoadingAnim {
     }
 
     /// Turn elapsed time, excluding whatever a blocking callback froze.
-    fn elapsed(&self, since: Instant) -> Duration {
+    fn elapsed(&self, since: UiInstant) -> Duration {
         let running = match self.pause_start {
             Some(pause_start) => pause_start.duration_since(since),
-            None => since.elapsed(),
+            None => crate::clock::since(since),
         };
         running.saturating_sub(self.paused_total)
     }

@@ -23,6 +23,8 @@ from vibe.app_server.protocol import (
     ArtifactsListParams,
     ArtifactsListResponse,
     ArtifactsMarkViewedParams,
+    ArtifactsSyncParams,
+    ArtifactUpdatedParams,
     CallbackResultError,
     CallbackResultParams,
     CallbackResultResponse,
@@ -177,6 +179,8 @@ class ResolvedConnectorTool:
     raw_name: str
     description: str | None
     input_schema: Mapping[str, JsonValue]
+    # The MCP App (`ui://` resource) that renders this tool's result.
+    ui_resource_uri: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +273,8 @@ class ConnectorConnectRequest:
 @runtime_checkable
 class SessionConnectorControl(Protocol):
     async def read_connectors(self) -> SessionConnectorState: ...
+
+    def accepted_connector_catalog(self) -> ResolvedConnectorCatalog | None: ...
 
     async def reconfigure_connectors(
         self,
@@ -607,6 +613,13 @@ class SessionBackendOpenCallbacks(Protocol):
 
 
 @runtime_checkable
+class SessionBackendRunningTurnAnnouncement(Protocol):
+    """Optional re-announcement of a running turn to a newly attached client."""
+
+    async def announce_running_turn(self) -> None: ...
+
+
+@runtime_checkable
 class SessionBackendChildSessionIndex(Protocol):
     """Optional child-session index used to reject deletion of live children."""
 
@@ -689,6 +702,12 @@ class SessionBackendHostArtifacts(Protocol):
     async def mark_artifacts_viewed(
         self, params: ArtifactsMarkViewedParams
     ) -> EmptyResponse: ...
+
+    async def sync_artifacts(self, params: ArtifactsSyncParams) -> EmptyResponse: ...
+
+    def subscribe_artifacts(
+        self, notify: Callable[[str, ArtifactUpdatedParams], None]
+    ) -> Callable[[], None]: ...
 
 
 @runtime_checkable

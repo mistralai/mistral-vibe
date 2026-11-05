@@ -16,7 +16,7 @@ pub mod submit;
 pub use self::provider_choice::ProviderChoice;
 pub use self::sign_in::{BrowserSignInState, SignInStep, SignInVariant};
 
-use std::time::Instant;
+use crate::clock::UiInstant;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
@@ -99,7 +99,7 @@ pub struct OnboardingState {
     pub browser_sign_in: BrowserSignInState,
     pub welcome_char_index: usize,
     pub welcome_done: bool,
-    pub welcome_timer: Option<Instant>,
+    pub welcome_timer: Option<UiInstant>,
     /// The app-server boot is still converging: the welcome screen says so
     /// instead of inviting an Enter the gate holds (the boot can take a
     /// first-run venv sync).
@@ -233,7 +233,7 @@ pub fn open(state: &mut OnboardingState) {
     state.screen = Screen::Welcome;
     state.welcome_char_index = 0;
     state.welcome_done = false;
-    state.welcome_timer = Some(Instant::now());
+    state.welcome_timer = Some(crate::clock::now());
     // Replay captures settle mid-animation otherwise; show the full text.
     if crate::utils::is_replaying() {
         settle_welcome_typing(state);

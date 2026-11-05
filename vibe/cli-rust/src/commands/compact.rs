@@ -46,7 +46,7 @@ pub fn start_compact(app: &mut App, client: &Arc<Client>, value: &str) {
     let status_id = new_message_id();
     local::add_compact_status(&mut app.view.transcript, &status_id);
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let params = json!({
             "sessionId": session_id,
             "extraInstructions": extra,

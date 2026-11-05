@@ -17,6 +17,7 @@ from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import (
     ConfigOrchestrator,
+    FieldMutation,
     _changed_keys_between,
     _sparse_override_model_aliases,
 )
@@ -158,16 +159,18 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         default: Any = None,
         target_layer: str | None = None,
         preflight: Callable[[C], Awaitable[None]] | None = None,
-    ) -> list[BaseException]:
+    ) -> FieldMutation:
         raw = (await self.load_persistence_layer()).model_dump()
         current = JsonPointer(path).resolve(raw, default=copy.deepcopy(default))
-        return await self.set_field(
-            path,
-            mutate(copy.deepcopy(current)),
-            reason,
-            target_layer=target_layer,
-            preflight=preflight,
+        value = mutate(copy.deepcopy(current))
+        if value == current:
+            if preflight is not None:
+                await preflight(self.config)
+            return FieldMutation(previous=current, failures=[])
+        failures = await self.set_field(
+            path, value, reason, target_layer=target_layer, preflight=preflight
         )
+        return FieldMutation(previous=current, failures=failures)
 
     async def preview_patch(
         self, operations: list[PatchOp], *, without: Collection[str] = ()

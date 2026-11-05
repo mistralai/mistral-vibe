@@ -60,17 +60,20 @@ pub fn shape(app: &App) -> Shape {
         return Shape::Default;
     };
     if target == crate::mouse::MouseTarget::Composer {
-        return if selection::in_input(app, at) {
+        return if crate::ui::composer_title::model_at(app, at) {
+            Shape::Pointer
+        } else if selection::in_input(app, at) {
             Shape::Text
         } else {
             Shape::Default
         };
     }
-    if target == crate::mouse::MouseTarget::Toast {
-        return Shape::Text;
+    if target == crate::mouse::MouseTarget::JumpToBottom {
+        return Shape::Pointer;
     }
     if target == crate::mouse::MouseTarget::BottomBar {
-        return if crate::ui::bottom_bar::model_at(app, at) {
+        let clickable = crate::ui::bottom_bar::link_at(app, at).is_some();
+        return if clickable {
             Shape::Pointer
         } else {
             Shape::Default

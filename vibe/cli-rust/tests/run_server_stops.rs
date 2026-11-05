@@ -1,4 +1,5 @@
 //! `vibe run-server`'s backstops: a run past its hard stop, a close never acknowledged, a dead app-server.
+#![allow(clippy::disallowed_methods)] // Tests drive tasks and real time directly; replay acks never run here.
 
 mod run_server_common;
 

@@ -17,6 +17,7 @@ from vibe.core.model_catalog.wait import (
     model_catalog_failed,
     model_catalog_wait_needed,
 )
+import vibe.core.platform_auth._mistral as platform_mistral
 
 
 async def _orchestrator(**fields: Any) -> Any:
@@ -92,10 +93,9 @@ async def test_a_fetch_slower_than_the_cap_is_given_up_on(
 async def test_no_mistral_credential_means_no_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import vibe.core.telemetry.send as telemetry_send
 
     monkeypatch.setattr(
-        telemetry_send, "get_mistral_provider_and_api_key", lambda _config: None
+        platform_mistral, "mistral_credentials", lambda _config, _credentials=None: None
     )
 
     assert model_catalog_wait_needed(await _orchestrator(active_model="")) is False

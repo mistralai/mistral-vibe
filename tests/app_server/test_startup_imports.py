@@ -32,3 +32,23 @@ def test_session_start_modules_do_not_import_the_mcp_sdk() -> None:
     assert result.returncode == 0, (
         f"{result.stderr}\nIf harness sources changed, run `uv sync` to restage them."
     )
+
+
+@pytest.mark.timeout(60)
+def test_session_start_modules_do_not_import_the_session_api() -> None:
+    imports = "; ".join(f"import {module}" for module in _SESSION_START_MODULES)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            f"import sys; {imports}; "
+            "loaded = sorted(m for m in sys.modules if 'session_api' in m); "
+            "assert not loaded, f'Session API modules imported at startup: {loaded}'",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, (
+        f"{result.stderr}\nIf harness sources changed, run `uv sync` to restage them."
+    )

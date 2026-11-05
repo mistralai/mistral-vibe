@@ -12,14 +12,11 @@ use vibe_rs::paste_image::{
     write_clipboard_image, Event, MAX_IMAGE_BYTES, MAX_IN_FLIGHT, PNG_MAGIC,
 };
 
+use crate::feedback_support::notice_text;
 use crate::support::{ctrl, with_status};
 
-fn toasts(app: &App) -> Vec<&str> {
-    app.overlays
-        .toasts
-        .iter()
-        .map(|toast| toast.text.as_str())
-        .collect()
+fn notices(app: &App) -> Vec<&str> {
+    notice_text(app).into_iter().collect()
 }
 
 #[test]
@@ -164,7 +161,7 @@ fn only_an_empty_paste_reads_an_image_and_only_where_supported() {
     handle_paste(&mut app, String::new());
     assert_eq!(app.paste_image.in_flight, usize::from(is_supported()));
     assert_eq!(app.chat_input.input, "hello world");
-    assert!(toasts(&app).is_empty());
+    assert!(notices(&app).is_empty());
 }
 
 #[test]
@@ -173,11 +170,11 @@ fn an_empty_clipboard_only_warns_when_asked_explicitly() {
     app.paste_image.in_flight = 2;
 
     apply_event(&mut app, Event::Empty { notify: false });
-    assert!(toasts(&app).is_empty());
+    assert!(notices(&app).is_empty());
     assert!(app.chat_input.input.is_empty());
 
     apply_event(&mut app, Event::Empty { notify: true });
-    assert_eq!(toasts(&app), ["No image found on the clipboard."]);
+    assert_eq!(notices(&app), ["No image found on the clipboard."]);
     assert!(app.chat_input.input.is_empty());
     assert_eq!(app.paste_image.in_flight, 0);
 }
@@ -192,7 +189,7 @@ fn an_oversized_clipboard_image_is_rejected_with_both_sizes() {
     );
 
     assert_eq!(
-        toasts(&app),
+        notices(&app),
         ["Clipboard image is 15.0 MiB; max is 10.0 MiB."]
     );
     assert!(app.chat_input.input.is_empty());

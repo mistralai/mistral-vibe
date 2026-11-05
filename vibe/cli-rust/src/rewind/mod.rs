@@ -3,11 +3,13 @@
 mod request;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::UiInstant;
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use crate::app::{App, Status, ToastSeverity};
+use crate::app::{App, Severity, Status};
 use crate::collapsed_pastes::Collapsed;
 use crate::commands::submission::new_message_id;
 use crate::input_modes::ClassifiedInput;
@@ -19,12 +21,9 @@ use request::{confirm, select};
 pub const DOUBLE_ESC_DELAY: Duration = Duration::from_millis(500);
 
 /// Whether an Escape at `now` completes a double Escape armed at `last`.
-pub fn is_double_escape(last: Option<Instant>, now: Instant) -> bool {
+pub fn is_double_escape(last: Option<UiInstant>, now: UiInstant) -> bool {
     last.is_some_and(|at| now.duration_since(at) < DOUBLE_ESC_DELAY)
 }
-
-/// Seconds a rewind toast stays up.
-const TOAST_SECS: u64 = 5;
 
 /// The two option sets the panel walks through.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -183,7 +182,7 @@ fn current_index(app: &App, messages: &[(usize, String, Collapsed)]) -> Option<u
     messages.iter().position(|(_, id, _)| id == entry_id)
 }
 
-/// Apply a server answer on the main thread and release the commit it held.
+/// Apply a server answer on the main thread.
 pub fn apply_event(app: &mut App, event: Event) {
     match event {
         Event::Selected {
@@ -215,9 +214,12 @@ pub fn apply_event(app: &mut App, event: Event) {
             *state,
         ),
         Event::Failed(message) => {
-            app.show_toast(message, ToastSeverity::Error, TOAST_SECS);
+            crate::notices::failed(app, &message);
             if app.rewind.entry_id.is_none() {
                 quit(app);
+            } else {
+                // The panel keeps the conversation scrolled to the selection, off the new row.
+                crate::ui::notice::show_sticky(app, Severity::Error, &message);
             }
         }
     }
@@ -231,9 +233,6 @@ fn apply_done(
     inplace: bool,
     state: PublicSessionState,
 ) {
-    for error in restore_errors {
-        app.show_toast(error, ToastSeverity::Warning, TOAST_SECS);
-    }
     // Read before the transcript is rebuilt: the rewound message's collapsed
     // pastes and attached images.
     let rewound = app
@@ -259,7 +258,7 @@ fn apply_done(
     app.queue.clear();
     app.view.expanded.clear();
     app.view.transcript.load_snapshot(&state);
-    crate::worktree::track_state(app, &state);
+    crate::worktree::adopt_state(app, &state);
     app.expand_rebuilt_tools();
     if !inplace {
         local::add_rewind_fork(
@@ -268,6 +267,10 @@ fn apply_done(
             &old_session_id,
             &new_session_id,
         );
+    }
+    // After the rebuild, which would otherwise drop them.
+    for error in restore_errors {
+        crate::notices::refused(app, &error);
     }
     // The rewound message goes back into the composer, caret at the end, ready to be edited.
     // A skill invocation reloads in `/` mode as typed; any other message is a prompt.

@@ -60,9 +60,6 @@ pub async fn run_sign_in(
     let _ = tx
         .send(SignInEvent::StatusChanged(SignInStatus::Completed))
         .await;
-    // The Finished step shows "Sign-in
-    // complete" for two seconds before the wizard moves on.
-    tokio::time::sleep(Duration::from_secs(2)).await;
     let _ = tx.send(SignInEvent::Completed { api_key }).await;
     Ok(())
 }
@@ -111,7 +108,7 @@ async fn poll_for_completion(
                 failures = 0;
                 match result.status.as_str() {
                     "pending" => {
-                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        crate::clock::sleep_real(Duration::from_secs(3)).await;
                     }
                     "completed" => {
                         return result.exchange_token.ok_or(SignInError {
@@ -150,7 +147,7 @@ async fn poll_for_completion(
                 if failures >= 3 {
                     return Err(e);
                 }
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                crate::clock::sleep_real(Duration::from_secs(3)).await;
             }
             Err(e) => return Err(e),
         }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use crate::app::{App, ToastSeverity};
+use crate::app::App;
 use crate::clipboard;
 use crate::external_url;
 use crate::hints::{self, action};
@@ -20,8 +20,6 @@ const HELP: &[hints::Hint] = &[
 ];
 /// Indent of the three action options.
 const OPTION_PADDING: &str = "  ";
-/// Seconds the copy toast stays up.
-const COPY_TOAST_SECS: u64 = 2;
 
 /// The answer of one `mcp/login` round-trip, applied on the main thread.
 pub struct Event {
@@ -104,9 +102,6 @@ fn start_login(app: &mut App, client: &Arc<Client>) {
         return;
     };
     let client = client.clone();
-    // The login answer repaints the bottom app, so hold the replay marker with a
-    // commit until it lands (mirrors `connector_auth`), else the capture races
-    // the "Preparing authentication..." placeholder.
     crate::ui_event::spawn(app, async move {
         let error = client
             .request(
@@ -183,15 +178,13 @@ fn copy_url(app: &mut App) {
     let Some(url) = app.mcp_oauth.auth_url.clone() else {
         return;
     };
-    let message = if clipboard::copy_to_clipboard(&url) {
-        "Auth URL copied to clipboard".to_owned()
-    } else {
-        format!(
-            "Auth URL copied to clipboard · {}",
-            clipboard::unverified_hint()
-        )
-    };
-    app.show_toast(message, ToastSeverity::Information, COPY_TOAST_SECS);
+    let verified = clipboard::copy_to_clipboard(&url);
+    crate::ui::notice::copied_as(
+        app,
+        "Auth URL copied to clipboard",
+        "Auth URL copied",
+        verified,
+    );
 }
 
 fn toggle_url(app: &mut App) {

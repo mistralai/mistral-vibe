@@ -121,11 +121,12 @@ impl RuntimeBuiltinToolName {
     /// `None` keeps the schema's text.
     pub(crate) fn explain_schema_error(
         self,
+        schema: &Value,
         error: &jsonschema::ValidationError<'_>,
     ) -> Option<String> {
         match self {
             Self::SubagentSpawn => {
-                crate::core::features::subagents::explain_spawn_schema_error(error)
+                crate::core::features::subagents::explain_spawn_schema_error(schema, error)
             }
             Self::ProcessWrite => {
                 crate::core::features::background_processes::explain_write_schema_error(error)
@@ -348,6 +349,10 @@ pub(crate) enum ExternalTool {
     Provided {
         group_name: String,
         tool_name: String,
+        /// The name the model called. A direct tool can have a function name that
+        /// differs from its tool name.
+        #[serde(skip)]
+        invocation_name: String,
         arguments: Value,
     },
 }
@@ -426,6 +431,7 @@ impl ExternalTool {
             } => Self::Provided {
                 group_name,
                 tool_name,
+                invocation_name: invocation_name.into(),
                 arguments,
             },
         }
@@ -451,10 +457,12 @@ impl ExternalTool {
             Self::Provided {
                 group_name,
                 tool_name,
+                invocation_name,
                 ..
             } => Self::Provided {
                 group_name: group_name.clone(),
                 tool_name: tool_name.clone(),
+                invocation_name: invocation_name.clone(),
                 arguments,
             },
         }
@@ -467,7 +475,9 @@ impl ExternalTool {
                 invocation_name,
                 ..
             } => name.direct_model_name(invocation_name),
-            Self::Provided { tool_name, .. } => Some(tool_name.clone()),
+            Self::Provided {
+                invocation_name, ..
+            } => Some(invocation_name.clone()),
         }
     }
 
@@ -523,6 +533,7 @@ impl ExternalTool {
             group_name,
             tool_name,
             arguments,
+            ..
         } = self
         else {
             return None;

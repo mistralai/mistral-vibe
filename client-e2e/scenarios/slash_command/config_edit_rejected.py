@@ -1,4 +1,4 @@
-"""A `/config` edit the server rejects shows an error toast naming the field and layer."""
+"""A `/config` edit the server rejects shows an error naming the field and layer on its status line."""
 
 from __future__ import annotations
 

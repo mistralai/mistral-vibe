@@ -36,6 +36,8 @@ if TYPE_CHECKING:
         OAuthToken,
     )
 
+    from vibe.core.auth._mcp_oauth_provider import RefreshAwareOAuthClientProvider
+
 _USERNAME_PREFIX: Final = "mcp-oauth"
 _CLIENT_NAME: Final = "Mistral Vibe"
 _LOGIN_TIMEOUT_SECONDS: Final = 300.0
@@ -618,7 +620,7 @@ def build_oauth_provider(
     *,
     redirect_handler: Callable[[str], Awaitable[None]],
     callback_handler: Callable[[], Awaitable[AuthorizationCodeResult]],
-) -> OAuthClientProvider:
+) -> RefreshAwareOAuthClientProvider:
     auth = server.auth
     if not isinstance(auth, MCPOAuth):
         raise TypeError(

@@ -12,6 +12,7 @@ use super::browser_sign_in::SignInHandle;
 use super::rpc::{call, SetupError};
 use super::sign_in_flow::{SignInEvent, SignInStatus};
 use crate::server::Client;
+use crate::work::Work;
 
 pub const SETUP_OIDC_START: &str = "setup/oidc-start";
 pub const SETUP_OIDC_POLL: &str = "setup/oidc-poll";
@@ -56,10 +57,14 @@ pub async fn poll(client: &Client, attempt_id: &str) -> Result<OidcPoll, SetupEr
 pub fn spawn(client: Arc<Client>) -> SignInHandle {
     let (tx, rx) = mpsc::channel(16);
     let (cancel_tx, cancel_rx) = oneshot::channel();
-    tokio::spawn(async move {
-        if let Err(message) = run(client, &tx, cancel_rx).await {
+    // Busy from the spawn until the flow first parks on a poll or ends.
+    let mut busy = Some(Work::start());
+    crate::work::spawn_daemon(async move {
+        if let Err(message) = run(client, &tx, cancel_rx, &mut busy).await {
             let _ = tx.send(SignInEvent::Failed { message }).await;
         }
+        // Outlives `run`: a failure's event and the attempt's cancel are sent before it drops.
+        drop(busy);
     });
     SignInHandle::oidc(rx, cancel_tx)
 }
@@ -67,9 +72,10 @@ pub fn spawn(client: Arc<Client>) -> SignInHandle {
 async fn run(
     client: Arc<Client>,
     tx: &mpsc::Sender<SignInEvent>,
-    mut cancel: oneshot::Receiver<()>,
+    mut cancel: oneshot::Receiver<Work>,
+    busy: &mut Option<Work>,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + FLOW_TIMEOUT;
+    let deadline = Instant::from_std(crate::clock::real_now()) + FLOW_TIMEOUT;
     // Learn the attempt ID even when cancellation is queued during start.
     let response = timeout_at(deadline, start(&client))
         .await
@@ -79,21 +85,23 @@ async fn run(
         client,
         id: Some(response.attempt_id),
     };
-    tokio::select! {
+    let stopping = tokio::select! {
         biased;
-        _ = &mut cancel => return Ok(()),
-        result = timeout_at(deadline, authenticate(&mut attempt, tx)) => {
+        work = &mut cancel => work.ok(),
+        result = timeout_at(deadline, authenticate(&mut attempt, tx, busy)) => {
             result.map_err(|_| "Browser sign-in expired.".to_owned())??;
+            return emit(tx, SignInEvent::OidcCompleted).await;
         }
-    }
-    tokio::select! {
-        biased;
-        _ = &mut cancel => Ok(()),
-        _ = tokio::time::sleep(Duration::from_secs(2)) => emit(tx, SignInEvent::OidcCompleted).await,
-    }
+    };
+    *busy = stopping;
+    Ok(())
 }
 
-async fn authenticate(attempt: &mut Attempt, tx: &mpsc::Sender<SignInEvent>) -> Result<(), String> {
+async fn authenticate(
+    attempt: &mut Attempt,
+    tx: &mpsc::Sender<SignInEvent>,
+    busy: &mut Option<Work>,
+) -> Result<(), String> {
     let mut opened = false;
     loop {
         let result = poll(
@@ -127,7 +135,8 @@ async fn authenticate(attempt: &mut Attempt, tx: &mpsc::Sender<SignInEvent>) -> 
                 return Ok(());
             }
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        busy.take();
+        crate::clock::sleep_real(POLL_INTERVAL).await;
     }
 }
 
@@ -161,7 +170,7 @@ impl Drop for Attempt {
                 .client
                 .send_now(SETUP_OIDC_CANCEL, json!({"attemptId": id}))
             {
-                tokio::spawn(async move {
+                crate::work::spawn(async move {
                     let _ = timeout(CLEANUP_TIMEOUT, reply).await;
                 });
             }

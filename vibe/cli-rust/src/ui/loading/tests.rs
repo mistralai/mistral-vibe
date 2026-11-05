@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use serde_json::json;
 
 use super::SHELL_LOADING_STATUS;
@@ -27,7 +25,7 @@ fn active_id(app: &App) -> Option<&str> {
 fn answering_one_of_two_approvals_keeps_the_loader_paused_on_approval_status() {
     let mut app = App::default();
     app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: crate::clock::now(),
     };
     app.view.loading.set_label(SHELL_LOADING_STATUS);
     app.approval

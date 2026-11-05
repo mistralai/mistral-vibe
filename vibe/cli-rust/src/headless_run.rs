@@ -44,7 +44,7 @@ impl StopRequests {
     pub fn new(limits: RunLimits) -> Self {
         let deadline = limits
             .time_limit_s
-            .map(|s| Instant::now() + Duration::from_secs_f64(s));
+            .map(|s| crate::clock::real_now() + Duration::from_secs_f64(s));
         Self {
             limits,
             deadline,
@@ -103,11 +103,11 @@ impl StopRequests {
 
         let deadline_wait = async {
             if let Some(deadline) = self.deadline {
-                let now = Instant::now();
+                let now = crate::clock::real_now();
                 if deadline <= now {
                     self.request(RunOutcome::Deadline);
                 } else {
-                    tokio::time::sleep(deadline - now).await;
+                    crate::clock::sleep_real(deadline - now).await;
                     self.request(RunOutcome::Deadline);
                 }
             } else {

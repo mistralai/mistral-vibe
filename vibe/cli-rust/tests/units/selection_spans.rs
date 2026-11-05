@@ -28,10 +28,6 @@ fn selected_with_endpoint(
     selected_owner(row, from, to, granularity, RegionId::Main, end_exclusive)
 }
 
-fn selected_toast(row: &str, from: u16, to: u16) -> Vec<(u16, u16, u16)> {
-    selected_owner(row, from, to, Granularity::Char, RegionId::Toast(1), false)
-}
-
 fn selected_owner(
     row: &str,
     from: u16,
@@ -46,7 +42,6 @@ fn selected_owner(
     let mut app = App::default();
     let region = match owner {
         RegionId::Main => &mut app.view.selection_region,
-        RegionId::Toast(_) => &mut app.view.toast_selection_region,
         RegionId::Loading => &mut app.view.loading_selection_region,
         RegionId::BottomApp => &mut app.view.bottom_app_selection_region,
     };
@@ -206,65 +201,6 @@ fn copy_skips_decorative_rules() {
         extracted(&["  before", "────────", "  after"]),
         "before\nafter"
     );
-}
-
-#[test]
-fn toast_copy_keeps_leading_chrome_glyphs() {
-    assert_eq!(selected_toast("> /path failed", 0, 19), vec![(0, 0, 13)]);
-}
-
-#[test]
-fn toast_copy_keeps_content_indentation() {
-    assert_eq!(selected_toast("  indented", 0, 19), vec![(0, 0, 9)]);
-}
-
-#[test]
-fn toast_copy_keeps_a_dash_only_row() {
-    assert_eq!(selected_toast("────────", 0, 19), vec![(0, 0, 7)]);
-}
-
-#[test]
-fn toast_copy_ignores_transcript_selection_chrome() {
-    let chat = Rect::new(0, 0, 20, 1);
-    let mut buf = Buffer::empty(chat);
-    buf.set_string(0, 0, "hello world", Style::default());
-    let mut app = App::default();
-    app.view.toast_selection_region.area = chat;
-    app.view.selection_chrome.push((0, 0, 4));
-    app.selection.region = Some(Selection {
-        owner: RegionId::Toast(1),
-        anchor: (0, 0),
-        head: (chat.right() - 1, 0),
-        pending_copy: false,
-        edge_scroll: 0,
-        scroll_target: ScrollTarget::None,
-        table_cell: None,
-        text: String::new(),
-    });
-
-    assert_eq!(region::spans(&app, &buf, chat), vec![(0, 0, 10)]);
-}
-
-#[test]
-fn toast_copy_ignores_diff_gutters() {
-    let chat = Rect::new(0, 0, 24, 1);
-    let mut buf = Buffer::empty(chat);
-    buf.set_string(0, 0, ">  line failed", Style::default());
-    let mut app = App::default();
-    app.view.toast_selection_region.area = chat;
-    app.view.diff_hitmap.push((0, 1, 7));
-    app.selection.region = Some(Selection {
-        owner: RegionId::Toast(1),
-        anchor: (0, 0),
-        head: (chat.right() - 1, 0),
-        pending_copy: false,
-        edge_scroll: 0,
-        scroll_target: ScrollTarget::None,
-        table_cell: None,
-        text: String::new(),
-    });
-
-    assert_eq!(region::spans(&app, &buf, chat), vec![(0, 0, 13)]);
 }
 
 #[test]

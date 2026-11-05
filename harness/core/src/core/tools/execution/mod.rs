@@ -65,14 +65,36 @@ impl ToolBatch {
             .collect()
     }
 
+    /// Names the `run_typescript` call as the parent of a tool call Action that
+    /// its program made. Every other Action is unchanged.
+    pub(crate) fn with_program_parent(&self, action: Action) -> Action {
+        let program_call_id = self
+            .executions
+            .iter()
+            .find_map(|execution| match &execution.state {
+                ToolExecutionState::ProgramPending { execution: program }
+                    if program.handles_tool_action(action.action_id()) =>
+                {
+                    Some(execution.call.id.as_str())
+                }
+                _ => None,
+            });
+        match program_call_id {
+            Some(program_call_id) => action.issued_by_program(program_call_id),
+            None => action,
+        }
+    }
+
     pub(crate) fn pending_actions(&self, turn_id: &str) -> Vec<Action> {
         self.executions
             .iter()
             .flat_map(|execution| match &execution.state {
                 ToolExecutionState::Direct(pending) => vec![pending.action(turn_id)],
-                ToolExecutionState::ProgramPending { execution } => {
-                    execution.pending_actions(turn_id)
-                }
+                ToolExecutionState::ProgramPending { execution: program } => program
+                    .pending_actions(turn_id)
+                    .into_iter()
+                    .map(|action| action.issued_by_program(&execution.call.id))
+                    .collect(),
                 ToolExecutionState::AwaitingLargeOutputWrite {
                     action_id, pending, ..
                 } => vec![Action::filesystem_write(
@@ -422,6 +444,7 @@ mod tests {
                     input_schema: json!({"type": "object"}),
                     output_schema: None,
                     exposure: ProvidedToolExposure::Programmatic,
+                    direct_name: None,
                 },
                 ProvidedToolDefinition {
                     name: "direct_only".to_string(),
@@ -429,6 +452,7 @@ mod tests {
                     input_schema: json!({"type": "object"}),
                     output_schema: None,
                     exposure: ProvidedToolExposure::Direct,
+                    direct_name: None,
                 },
                 ProvidedToolDefinition {
                     name: "both".to_string(),
@@ -436,6 +460,7 @@ mod tests {
                     input_schema: json!({"type": "object"}),
                     output_schema: None,
                     exposure: ProvidedToolExposure::DirectAndProgrammatic,
+                    direct_name: None,
                 },
             ],
         });
@@ -505,6 +530,7 @@ mod tests {
                     input_schema: json!({"type": "object"}),
                     output_schema: None,
                     exposure: ProvidedToolExposure::Direct,
+                    direct_name: None,
                 },
                 ProvidedToolDefinition {
                     name: "both".to_string(),
@@ -512,6 +538,7 @@ mod tests {
                     input_schema: json!({"type": "object"}),
                     output_schema: None,
                     exposure: ProvidedToolExposure::DirectAndProgrammatic,
+                    direct_name: None,
                 },
             ],
         });
@@ -569,6 +596,7 @@ mod tests {
                 input_schema: json!({"type": "object"}),
                 output_schema: None,
                 exposure: ProvidedToolExposure::Programmatic,
+                direct_name: None,
             }],
         });
         config.capabilities.skills.push(SkillDefinition {

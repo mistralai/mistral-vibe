@@ -9,7 +9,7 @@ use serde_json::Value;
 use super::event::{dispatch, reload_result, CommandEvent};
 use super::provider_auth::{self, literal};
 use super::submission::{new_message_id, NOTICE_TIMEOUT_SECS};
-use crate::app::App;
+use crate::app::{App, Severity};
 use crate::post_ready::{self, AccountReads};
 use crate::transcript::local;
 use crate::ui;
@@ -29,6 +29,8 @@ pub fn help_text() -> String {
         "- `Ctrl+C` Quit (or clear input if text present)".to_owned(),
         "- `Ctrl+G` Edit input in external editor".to_owned(),
         "- `Ctrl+O` Toggle tool output view".to_owned(),
+        "- `Ctrl+R` Search prompt history".to_owned(),
+        "- `Ctrl+T` Start or stop voice recording (voice mode)".to_owned(),
         "- `Shift+Tab` Cycle through agents (ask, accept-edits, ...)".to_owned(),
         "- `Esc Esc` Rewind to a previous message (when input is empty)".to_owned(),
         String::new(),
@@ -56,6 +58,7 @@ pub(super) fn copy_last_agent_message(app: &mut App) {
     let Some(text) = app.view.transcript.last_assistant_message() else {
         ui::notice::show(
             app,
+            Severity::Information,
             "No agent message available to copy",
             NOTICE_TIMEOUT_SECS,
         );
@@ -65,6 +68,7 @@ pub(super) fn copy_last_agent_message(app: &mut App) {
     crate::telemetry::user_copied_text(app, &text);
     ui::notice::show(
         app,
+        Severity::Information,
         "Last agent message copied to clipboard",
         NOTICE_TIMEOUT_SECS,
     );
@@ -104,7 +108,7 @@ pub(super) fn read_log(app: &mut App, client: &Arc<Client>) {
         return;
     };
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let result = client
             .request(
                 method::SESSION_LOG_READ,
@@ -135,7 +139,6 @@ pub(super) fn rename_session(app: &mut App, client: &Arc<Client>, value: &str) {
         .unwrap_or("");
     if title.is_empty() {
         if let Some(tx) = app.command_tx.clone() {
-            app.commit_started();
             let _ = tx.try_send(CommandEvent::Error("Usage: /rename <title>".to_owned()));
         }
         return;
@@ -145,7 +148,7 @@ pub(super) fn rename_session(app: &mut App, client: &Arc<Client>, value: &str) {
         return;
     };
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let result = client
             .request(
                 method::SESSION_RENAME,
@@ -171,7 +174,7 @@ pub(super) fn reload_config(app: &mut App, client: &Arc<Client>) {
         return;
     };
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let result = client
             .request(
                 method::CONFIG_RELOAD,
@@ -194,10 +197,8 @@ pub(super) fn whoami(app: &mut App, client: &Arc<Client>) {
     // The post-ready fetch already read identity and account, so only a model
     // switch (a different credential) re-reads them; the credential source is
     // always read fresh, like `/status`.
-    let cached = app
-        .whoami
-        .hit(&app.session.startup_config.active_model)
-        .cloned();
+    let model = crate::usage_gauge::account_model(app).to_owned();
+    let cached = app.whoami.hit(&model).cloned();
     let Some((session_id, tx)) = dispatch(app) else {
         if let Some(reads) = &cached {
             add_text(app, &whoami_text(reads, None));
@@ -206,15 +207,16 @@ pub(super) fn whoami(app: &mut App, client: &Arc<Client>) {
     };
     if cached.is_none() {
         app.begin_command_loading();
+        app.whoami.ask(model.clone());
     }
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let auth = provider_auth::read(&client, &session_id);
         let (reads, auth) = match cached {
             Some(reads) => (Some(reads), auth.await),
             None => tokio::join!(post_ready::read(&client, &session_id), auth),
         };
-        let _ = tx.try_send(CommandEvent::Whoami { reads, auth });
+        let _ = tx.try_send(CommandEvent::Whoami { model, reads, auth });
     });
 }
 

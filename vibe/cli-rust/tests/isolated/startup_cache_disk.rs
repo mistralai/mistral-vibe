@@ -222,3 +222,18 @@ fn update_cache_rewrites_a_stale_disk_copy() {
         assert_eq!(StartupConfig::load().unwrap(), fresh);
     });
 }
+
+#[test]
+fn file_autocomplete_flags_round_trip_through_the_cache() {
+    with_isolated_home("file-autocomplete", |_home| {
+        let mut runtime = runtime();
+        runtime["runtime"]["config"]["enableFileAutocomplete"] = false.into();
+        runtime["runtime"]["config"]["fileWatcherForAutocomplete"] = false.into();
+        let config = StartupConfig::from_runtime(CLIENT_VERSION, &runtime).unwrap();
+        assert!(config.update_cache().unwrap());
+
+        let loaded = StartupConfig::load().unwrap();
+        assert!(!loaded.enable_file_autocomplete);
+        assert!(!loaded.file_watcher_for_autocomplete);
+    });
+}

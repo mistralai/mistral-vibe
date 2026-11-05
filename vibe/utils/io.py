@@ -172,6 +172,18 @@ def encode_safe(text: str, *, encoding: str = "utf-8", newline: str = "\n") -> b
         return body.encode("utf-8")
 
 
+type FileSignature = tuple[int, int, int, int, int] | None
+
+
+def file_signature(path: Path) -> FileSignature:
+    """Identifies a file's bytes only if it is replaced by rename, never edited."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_mode, stat.st_mtime_ns, stat.st_size)
+
+
 def read_safe(path: Path, *, raise_on_error: bool = False) -> ReadSafeResult:
     """Read ``path`` and decode with :func:`decode_safe`."""
     return decode_safe(path.read_bytes(), raise_on_error=raise_on_error)

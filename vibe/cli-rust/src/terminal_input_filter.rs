@@ -21,7 +21,7 @@ impl TerminalInputFilter {
             if is_osc_start(&event) {
                 self.pending.push(event);
                 self.payload.push(']');
-                self.started = Some(Instant::now());
+                self.started = Some(crate::clock::real_now());
                 return Vec::new();
             }
             return vec![event];

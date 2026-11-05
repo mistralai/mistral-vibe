@@ -79,7 +79,12 @@ class ClaudeImportService(ImportHarnessPort):
                     skipped_session_count += 1
                     continue
                 payload = self._session_source.translate(transcript)
-                payload = replace(payload, cwd=project.cwd, source_cwd=transcript.cwd)
+                payload = replace(
+                    payload,
+                    cwd=project.cwd,
+                    source_cwd=transcript.cwd,
+                    project_id=project.project_id,
+                )
                 await writer.write(payload)
             except (ClaudeTranscriptError, ValueError, OverflowError) as exc:
                 invalid_session_count += 1

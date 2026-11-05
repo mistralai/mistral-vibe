@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from vibe.core.config.orchestrator import ConfigOrchestrator
     from vibe.core.config.vibe_schema import VibeConfigSchema
     from vibe.core.model_catalog.models import ModelCatalogEntry, ModelCatalogResponse
+    from vibe.core.platform_auth import PlatformCredentialFactory
 
 # Always defined: providers union-merge by name, so no layer can remove it.
 _CATALOG_PROVIDER = "mistral"
@@ -147,6 +148,7 @@ def _thinking_levels(model_id: str, reasoning: list[str]) -> list[ThinkingLevel]
 
 async def apply_cached_model_catalog(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    credentials: PlatformCredentialFactory | None = None,
 ) -> None:
     """Apply the last cached catalog to config before first render.
 
@@ -158,7 +160,7 @@ async def apply_cached_model_catalog(
     # Imported here for the same reason as the type-only imports above.
     from vibe.core.model_catalog import load_cached_model_catalog
 
-    cached = load_cached_model_catalog(config)
+    cached = load_cached_model_catalog(config, credentials)
     if cached is None:
         return
     try:

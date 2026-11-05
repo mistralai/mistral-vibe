@@ -1,4 +1,5 @@
 //! `vibe run-server`'s requests, refusals and protocol errors.
+#![allow(clippy::disallowed_methods)] // Tests drive tasks and real time directly; replay acks never run here.
 
 mod run_server_common;
 

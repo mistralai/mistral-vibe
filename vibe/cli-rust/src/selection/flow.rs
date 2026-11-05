@@ -2,6 +2,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
 
 use crate::selection::cells::{is_blank, skip_blanks_right, word_end, word_start};
 use crate::selection::region::RowSpan;
@@ -132,6 +133,8 @@ fn body(
     let Some((&(first_x, first_symbol), &(last_x, _))) = visible.first().zip(visible.last()) else {
         return blank_row(y, content_start, x0, x1, copy_blank_rows);
     };
+    let boxed = warning_boxed(buf, &visible, y);
+    let fence_glyph = |buf: &Buffer, x: u16, y: u16| fence_glyph(buf, x, y, boxed);
     // A fence's blank content rows paint only their two rails: layout, not
     // text. The rails bracket the row, so content — even rails-colored —
     // makes the row wider and keeps it.
@@ -190,7 +193,7 @@ fn body(
     }
     // The fence's closing rail ends the row: content quoting a rail, in
     // whatever color, never does.
-    if x1 == last_x && x1 > x0 && closing_rail(buf, x1, y) {
+    if x1 == last_x && x1 > x0 && closing_rail(buf, x1, y, boxed) {
         x1 -= 1;
         while x1 > x0 && is_blank(buf, x1, y) {
             x1 -= 1;
@@ -202,7 +205,7 @@ fn body(
     (x0 <= x1).then_some(Row {
         y,
         lo: lo.min(last_x),
-        hi: content_end(buf, first_x, last_x, y),
+        hi: content_end(buf, first_x, last_x, y, boxed),
         x0,
         x1,
     })
@@ -223,27 +226,43 @@ fn blank_row(y: u16, content_start: u16, x0: u16, x1: u16, copy_blank_rows: bool
     })
 }
 
-/// A fence box glyph: the fence border paints it, code quoting the glyph does not.
-fn fence_glyph(buf: &Buffer, x: u16, y: u16) -> bool {
+/// A box glyph: a frame border paints it, code quoting the glyph does not.
+fn fence_glyph(buf: &Buffer, x: u16, y: u16, boxed: bool) -> bool {
     buf.cell((x, y)).is_some_and(|cell| {
         (EDGE.contains(&cell.symbol()) || cell.symbol() == RAIL)
-            && cell.style().fg == Some(theme::md_fence_border())
+            && frame_color(cell.style().fg, boxed)
     })
 }
 
+/// The fence color always frames; the warning color only on a row its box glyphs bracket.
+fn frame_color(fg: Option<Color>, boxed: bool) -> bool {
+    fg == Some(theme::md_fence_border()) || (boxed && fg == Some(theme::warning()))
+}
+
+/// A row of the startup Warnings box: it opens and closes on a warning-colored box glyph.
+fn warning_boxed(buf: &Buffer, visible: &[(u16, &str)], y: u16) -> bool {
+    let warning_box = |&(x, symbol): &(u16, &str)| {
+        (EDGE.contains(&symbol) || symbol == RAIL)
+            && buf
+                .cell((x, y))
+                .is_some_and(|cell| cell.style().fg == Some(theme::warning()))
+    };
+    visible.first().is_some_and(warning_box) && visible.last().is_some_and(warning_box)
+}
+
 /// The rail glyph at `x` closes its row: preceded by a blank column.
-fn closing_rail(buf: &Buffer, x: u16, y: u16) -> bool {
+fn closing_rail(buf: &Buffer, x: u16, y: u16, boxed: bool) -> bool {
     buf.cell((x, y)).is_some_and(|cell| {
         cell.symbol() == RAIL
-            && cell.style().fg == Some(theme::md_fence_border())
+            && frame_color(cell.style().fg, boxed)
             && is_blank(buf, x.saturating_sub(1), y)
     })
 }
 
 /// The row's last content column: past the blank and rail that close it.
-fn content_end(buf: &Buffer, first_x: u16, last_x: u16, y: u16) -> u16 {
+fn content_end(buf: &Buffer, first_x: u16, last_x: u16, y: u16, boxed: bool) -> u16 {
     let mut end = last_x;
-    if closing_rail(buf, end, y) {
+    if closing_rail(buf, end, y, boxed) {
         end -= 1;
         while end > first_x && is_blank(buf, end, y) {
             end -= 1;

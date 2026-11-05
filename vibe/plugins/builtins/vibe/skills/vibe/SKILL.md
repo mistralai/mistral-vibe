@@ -84,6 +84,14 @@ is present. Set `ask_confirmation_on_exit = false` to make `Ctrl+D` quit on the
 first press (also toggleable in `/config`); `Ctrl+C` always requires a second
 press. `Ctrl+Z` suspends on POSIX (resume with `fg`).
 
+### Prompt History
+
+`Up`/`Down` recall previous prompts (stored in `~/.vibe/vibehistory`, newest 100
+kept). `Ctrl+R` opens a `reverse-i-search:` field in the bottom bar: the input
+previews the newest prompt containing the query (case-insensitive), `Up`/`Ctrl+R`
+move to older matches and `Down`/`Ctrl+S` to newer ones, `Enter` keeps the match
+in the input without sending it (`Ctrl+Z` undoes), `Esc`/`Ctrl+C` restore the draft.
+
 ### Update
 
 Vibe never updates silently. With `enable_update_checks = true` (default), it
@@ -200,6 +208,7 @@ disable_welcome_banner_animation = false
 cursor_blink = true  # Blink the input cursor; false keeps it steady
 autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
 enable_mouse_capture = true  # Capture the mouse for scrolling, clicks and selection; false keeps the terminal's native selection
+enable_file_autocomplete = true  # Offer @ file completion; off skips the file index entirely
 file_watcher_for_autocomplete = true  # Refresh @ suggestions and pick up skill changes after workspace changes
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
 show_greeting = true  # Show "Hello {name}" greeting below the banner at startup (Mistral providers, once per 24h)
@@ -213,14 +222,20 @@ edit `config.toml` and run `/reload`; no restart is needed.
 
 - **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically, as does a drag that ends without a release (the terminal losing focus, or a key other than `Esc`, which aborts the drag without copying). Each successful copy flashes a brief inline "Copied to clipboard" notice.
 - **Multi-click selection**: Double-click selects a word, triple-click selects the current paragraph; dragging extends the selection at the same granularity. Clicking a collapsible transcript entry (tool group, tool call, reasoning) toggles it on every click; drag to select its text.
-- **Terminal-native selection**: `enable_mouse_capture = false` (or `VIBE_ENABLE_MOUSE_CAPTURE=false`) turns mouse capture off, so the terminal's own selection and copy work instead of in-app selection; depending on the terminal, some other mouse interactions such as clicks are disabled too. It applies live from `/config` or `/reload`. Native selection only covers the visible screen; `Shift+Up/Down` always scrolls the transcript. In some terminals the mouse wheel then sends Up/Down keys, which recall prompt history in the input box.
-- **Clipboard tools**: Copies use `pbcopy` on macOS and `clip` on Windows; on Linux they try `wl-copy`, then `xclip`, then `xsel`. Vibe always also sends the text through OSC 52, and over SSH it relies on OSC 52 alone. When no native copy succeeds, the notice reads `Copied · <hint>` instead (auth URL toasts read `Auth URL copied to clipboard · <hint>`). On local Linux the hint is `if paste fails, Shift+select or install xclip`; elsewhere, including over SSH, it is `if paste fails, Shift+select (Option in iTerm2, Fn in Terminal.app)`. Shift+select uses the terminal's native selection.
+- **Terminal-native selection**: `enable_mouse_capture = false` (or `VIBE_ENABLE_MOUSE_CAPTURE=false`) turns mouse capture off, so the terminal's own selection and copy work instead of in-app selection; depending on the terminal, some other mouse interactions such as clicks are disabled too. It applies live from `/config` or `/reload`. Inside a tmux session whose `mouse` option is off (the default before tmux 3.8), Vibe behaves as if this setting were `false`, re-reading the option at startup and when resuming from suspend or an external editor. Native selection only covers the visible screen; `Shift+Up/Down` always scrolls the transcript. In some terminals the mouse wheel then sends Up/Down keys, which recall prompt history in the input box.
+- **Warnings**: Config issues, config validation warnings, and the warnings the
+  app server reports before the first turn (an MCP server or connector that
+  failed to load, a model catalogue problem) are listed together in one
+  `Warnings` box at the top of a new conversation (below the history of a
+  resumed one). Once a turn has started, each new warning appears as its own
+  `⚠` line in the conversation. Errors always appear as their own `✗` line.
+- **Clipboard tools**: Copies use `pbcopy` on macOS and `clip` on Windows; on Linux they try `wl-copy`, then `xclip`, then `xsel`. Vibe always also sends the text through OSC 52, and over SSH it relies on OSC 52 alone. Inside tmux, it instead runs `tmux load-buffer -w` to fill a tmux paste buffer and forward the text to the attached terminal's clipboard. If tmux's `set-clipboard` is `off`, or the terminal lacks the `Ms` capability, it falls back to OSC 52 passthrough. When no native copy succeeds, the notice reads `Copied · <hint>` instead (auth URL copies read `Auth URL copied · <hint>`). On local Linux the hint is `if paste fails, Shift+select or install xclip`; elsewhere, including over SSH, it is `if paste fails, Shift+select (Option in iTerm2, Fn in Terminal.app)`. Shift+select uses the terminal's native selection.
 
 ```toml
 # Behavior
 bypass_tool_permissions = false    # Skip tool approval prompts
 outside_workdir = "ask"            # Outside-workdir file/shell access: "ask" prompts, "deny" refuses with a tool error
-experimental_worktree_copy_on_write = false  # macOS: clone new worktrees of a trusted repo from a template checkout; sets extensions.worktreeConfig in the repo
+worktree_copy_on_write = true      # macOS: clone new worktrees of a trusted repo from a template checkout; sets extensions.worktreeConfig in the repo
 system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
 compaction_prompt_id = "compact"  # Compaction prompt: built-in "compact" or custom .md filename
 enable_telemetry = true
@@ -365,8 +380,8 @@ permission = "ask"
 shell = "powershell.exe"
 ```
 
-Two tool settings have no effect, and Vibe reports each as a config issue (a
-toast in the TUI, a warning in the `-p` export):
+Two tool settings have no effect, and Vibe reports each as a config issue (in
+the startup Warnings box in the TUI, a warning in the `-p` export):
 
 - `[tools.grep]` (for example `exclude_patterns`): there is no `grep` tool. The
   agent searches through the shell, so `rg` and `grep` commands follow the shell
@@ -984,8 +999,8 @@ names) are limited to 65,536 characters; the primary agent's prompt has no such
 limit. An agent file that cannot be used (invalid TOML, an unknown `safety` or
 `agent_type`, an invalid setting, a missing prompt, instructions over the limit,
 no `description`) is not offered to the model. Vibe reports it as a config issue
-naming the file and the failing field: a toast in the TUI, a stderr line and an
-export warning with `-p`. Spawning that type fails with
+naming the file and the failing field: in the startup Warnings box in the TUI,
+a stderr line and an export warning with `-p`. Spawning that type fails with
 `subagent_type_rejected` and the same reason.
 
 A custom subagent runs on the session's model unless its file sets
@@ -1002,9 +1017,9 @@ session's model.
 
 - `/help` - Show help message
 - `/config` - Full-screen settings browser. Fields show their value and origin layer (default / TOML / env / override). Type to filter, arrows to move, Enter to edit; booleans toggle, closed-set fields (theme, models) pick from a list, scalars edit inline, complex fields open a JSON editor. The edit modal shows an inspector of the layers setting the field; edits persist to the user config (`~/.vibe/config.toml`) by default, `Tab` cycles the save target through the project config (`.vibe/config.toml`, when the project layer is active) and the ephemeral session override (until restart), and `Ctrl+R` clears the field one writable layer at a time toward the default. The `tools` field opens a grouped tool list with a per-tool config editor (permission, allow/deny lists, `Ctrl+E` for raw JSON). Enabling/disabling whole MCP servers or connectors stays in `/mcp`.
-- `/model` - Select active model. The footer shows the active model and its thinking level (`Name[level]`) before the token counter; clicking it opens `/model` and keeps the prompt being typed (only while idle, like the typed command). On narrow terminals the model is shortened first, then the working directory, and the model is hidden before the working directory gets very short.
+- `/model` - Select active model. The footer shows the active model and its thinking level (`Name[level]`) before the context gauge; clicking it opens `/model` and keeps the prompt being typed (only while idle, like the typed command).
 - `/thinking` - Select thinking level
-- `/theme` - Select UI theme; `auto` follows terminal/OS appearance (persisted in config)
+- `/theme` - Select UI theme; `auto` follows terminal/OS appearance, `mistral-dark` and `mistral-light` use the Mistral brand palette (persisted in config)
 - `/reload` - Reload configuration, agent instructions, and skills from disk (skills added or edited on disk are also picked up on their own while `file_watcher_for_autocomplete` is on, except in sandboxed sessions)
 - `/clear`, `/new` - Start a new conversation. Optionally pass a prompt to seed it
 - `/log` - Show path to current interaction log file
@@ -1020,16 +1035,28 @@ session's model.
 - `/rename <title>` - Set a manual session title. Persists to `meta.json`
   (`title_source=manual`), updates the terminal tab title, and is never
   overwritten by automatic title generation.
-- `/retry [additional instructions]` - Continue a model response interrupted by
-  a backend error without repeating text already shown. Optional instructions
-  are passed to the model for the continuation. Relevant error messages also
-  hint at this command.
+- `/retry [additional instructions]` - Run again a model response that failed
+  with a backend error or was interrupted with Esc. The new reply replaces the
+  unfinished one and its error or interrupt row. Optional instructions are
+  passed to the model for the retry. Relevant error messages also hint at this
+  command; with nothing to retry, it says so.
 - `/status` - Display agent statistics
+- `/context` - Show what fills the context window: a full-width gauge of the
+  window split by category (system prompt, tool definitions including MCP and
+  connector tools, skills, conversation), then free space and the
+  auto-compaction buffer (marked where compaction triggers), with a legend of
+  each category's share and estimated tokens.
+  The total comes from the model API's last call; the repartition is estimated
+  from each category's share of the characters that call actually sent. The
+  footer's token counter opens the same view when clicked (also while a turn
+  runs); a subagent shows its own window. Estimates appear only once the
+  conversation has started (at least one model call); a resumed session shows
+  its total alone until its next model call.
 - `/whoami` - Display the Mistral signed-in user, workspace, and plan
 - `/copy` - Copy the last agent message to the clipboard
 - `/paste-image` - Paste an image from the OS clipboard into the prompt.
   **macOS only** — the command is not registered on Linux or Windows.
-- `/voice` - Configure voice settings
+- `/voice` - Configure voice settings. With voice mode on, `Ctrl+T` starts or stops recording
 - `/mcp` (or `/connectors`) - Display MCP servers and connector status. The
   browser opens on the first item; press Up or Left to move into the fuzzy-search
   bar, and Up again to wrap to the last item. Pass a server or connector name to
@@ -1163,6 +1190,19 @@ Image attachments:
   per image, linking each attachment to its snapshot. Clicking opens the
   file with the OS default image viewer.
 
+## Footer
+
+The bottom row of the CLI reads, left to right:
+
+- The working directory, elided from the start (`…/vibe/cli-rust`) so the project name stays visible, then `⧉`: clicking it copies the whole path.
+- The session's PR/MR: `● PR #123 mergeable`. The dot's color gives its state (green mergeable, red action needed or closed, accent merged, grey draft or waiting). Clicking opens it in the browser; several PRs/MRs show `PRs (2)`, which opens a list.
+- On the right, with a Vibe key (chat plan) and a Mistral model, the monthly Vibe Code usage gauge `usage ██▍    40%`: the organization's spend against its allowance, re-read after each turn (at most once a minute), right after a rate limit and when the model changes. Without pay-as-you-go its fill turns yellow from 75% and red from 90% (Vibe Code stops at 100%); with pay-as-you-go it keeps its color and reads `· PAYG`, since usage past the allowance is billed. It is absent for API and Codestral keys, non-Mistral models, members without permission to see the organization's usage, and platforms without the billing API.
+- Then the context gauge `ctx ▍      23k/600k`.
+
+On narrow terminals the footer first turns the context then usage gauges into one-cell levels (`ctx ▁ 4%`), then drops the PR status, then shortens the working directory to its last folder (`…/cli-rust`), then drops the gauges' numbers and shortens the PR link (`● #123`), and finally hides the link. The working directory, its copy icon and the gauges stay.
+
+The input box's top border names the active model with its thinking level (`mistral-medium-3.5[medium]`, the level muted) before the mode label, which is colored by the agent's safety; the borders themselves are neutral. Clicking the model opens `/model` while the session is idle. On narrow terminals the border drops the thinking level, then elides and hides the model; the mode stays whole.
+
 ## Input Queue
 
 Prompts submitted while the agent is running are accepted by the app server
@@ -1171,8 +1211,8 @@ generation is delivered to the agent together (not one turn per prompt) once
 it finishes. Each queued prompt keeps its own message so it stays individually
 editable and removable. This includes plain prompts, `/skill ...`
 prompts, and prompts with `@` mentions. `!bash`, non-side-channel slash
-commands, and `&teleport` require an idle session and are rejected with a toast
-while busy. **Ctrl+C** removes the newest queued prompt (LIFO); **Esc**
+commands, and `&teleport` require an idle session and are rejected while busy
+with a notice above the input that stays until the next key. **Ctrl+C** removes the newest queued prompt (LIFO); **Esc**
 interrupts the active turn and pauses the remaining queue; pressing Enter
 (empty or not) on a paused queue resumes it.
 

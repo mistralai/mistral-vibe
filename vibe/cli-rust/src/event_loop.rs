@@ -23,20 +23,8 @@ pub mod notifications;
 mod steady;
 mod suspend;
 
-/// Re-exported for the pre-TUI update prompt, which shares the replay harness's
-/// idle-marker protocol.
-pub use helpers::emit_idle_marker;
-
 const NOTIF_DRAIN_CAP: u32 = 512;
 pub(crate) const REDRAW_INTERVAL: Duration = Duration::from_micros(16_667);
-const IDLE_MARKER: &[u8] = b"\x1b]5379;vibe-idle\x07";
-// The replay harness's batch-marker keys, shared with the wizard flow:
-// the harness brackets a batched input step in them so a step's keys produce
-// one marker instead of one per key. They ride the input stream, so they are
-// ordered against the keys they bracket without any timing assumption.
-// `pub`, not `pub(crate)`: the pre-TUI update prompt shares the protocol.
-pub const HOLD_KEY: u8 = 23;
-pub const RELEASE_KEY: u8 = 24;
 /// Bounded command-result channel; slash-command results are sparse, drop on full.
 pub const COMMAND_CHANNEL_CAP: usize = 16;
 /// Bounded voice-event channel; transcription deltas burst, drop on full.
@@ -107,7 +95,20 @@ pub struct EventSources {
     pub commands: mpsc::Receiver<CommandEvent>,
     pub voice: mpsc::Receiver<VoiceEvent>,
     pub telemetry: mpsc::Receiver<crate::telemetry::TelemetryEvent>,
-    pub files: watch::Receiver<u64>,
+}
+
+impl EventSources {
+    /// Whether every queued event has been applied (the file index feed is checked beside it).
+    /// A deferred notification parks the stream on the user, so it is not waited for.
+    fn is_drained(&self, notifications_parked: bool) -> bool {
+        (notifications_parked || self.notifications.is_empty())
+            && self.ready.is_empty()
+            && self.config.is_empty()
+            && self.events.is_empty()
+            && self.commands.is_empty()
+            && self.voice.is_empty()
+            && self.telemetry.is_empty()
+    }
 }
 
 impl EventLoop {
@@ -190,7 +191,7 @@ impl EventLoop {
             let stop = stop_session(&self.client, &sid, &mut self.sources.telemetry);
             tokio::select! {
                 _ = stop => {}
-                _ = tokio::time::sleep(SHUTDOWN_GRACE) => {}
+                _ = crate::clock::sleep_real(SHUTDOWN_GRACE) => {}
                 _ = self.shutdown.wait() => {}
             }
         }

@@ -1,7 +1,6 @@
 //! Status survives session transitions and either shell event order.
 
 use serde_json::json;
-use std::time::Instant;
 use vibe_rs::app::{App, Status};
 use vibe_rs::program_status::{self, encode_report, BlockedKind, ProgramState};
 use vibe_rs::server::notification;
@@ -94,7 +93,7 @@ fn status_transitions_preserve_open_dialogs_and_their_messages() {
         for status in [
             Status::Ready,
             Status::Generating {
-                since: Instant::now(),
+                since: vibe_rs::clock::now(),
             },
             Status::Ready,
         ] {
@@ -136,7 +135,7 @@ fn shell_completion_waits_for_its_final_effect_in_either_event_order() {
         for rpc_first in [false, true] {
             let mut app = app();
             app.session.shell_operation_id = Some("shell-1".into());
-            app.session.shell_started_at = Some(Instant::now());
+            app.session.shell_started_at = Some(vibe_rs::clock::now());
             app.view.command_loading = true;
             report(&mut app, ProgramState::Working, "");
             if rpc_first {
@@ -213,7 +212,7 @@ fn session_handoff_abandons_the_old_shell_and_ignores_its_late_reply() {
     for rpc_completed in [false, true] {
         let mut app = app();
         app.session.shell_operation_id = Some("old-shell".into());
-        app.session.shell_started_at = Some(Instant::now());
+        app.session.shell_started_at = Some(vibe_rs::clock::now());
         app.session.shell_request_started = true;
         app.session.shell_rpc_completed = rpc_completed;
         app.session.shell_interrupt_requested = true;

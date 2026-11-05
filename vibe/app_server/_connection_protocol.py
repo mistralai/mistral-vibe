@@ -33,9 +33,12 @@ class ClientToolMethod(StrEnum):
     TERMINAL_RELEASE = "clientTool/terminal/release"
 
 
+type PlatformCredentialsKind = Literal["oauth_access_token", "oidc_id_token"]
+
+
 class PlatformCredentialsCapability(ProtocolModel):
     version: Literal[1]
-    kind: Literal["oauth_access_token"]
+    kind: PlatformCredentialsKind
 
 
 class ClientCapabilities(ProtocolModel):
@@ -47,6 +50,7 @@ class ClientCapabilities(ProtocolModel):
     client_tools: list[ClientToolCapability] = Field(default_factory=list)
     session_spawn: bool = False
     session_peers: bool = False
+    session_peer_restore: bool = False
     disabled_notifications: list[str] = Field(default_factory=list)
     platform_credentials: PlatformCredentialsCapability | None = None
 
@@ -120,7 +124,7 @@ class PlatformCredentialsResolveParams(ProtocolModel):
 
 class PlatformCredentialsSnapshot(ProtocolModel):
     status: Literal["ready"]
-    kind: Literal["oauth_access_token"]
+    kind: PlatformCredentialsKind
     token: Annotated[str, Field(min_length=1, repr=False)]
     audience: Annotated[str, Field(min_length=1)]
     expires_at: Annotated[StrictInt, Field(gt=0, le=253_402_300_799_999)]

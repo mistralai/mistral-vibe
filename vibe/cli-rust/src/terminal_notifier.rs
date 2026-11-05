@@ -1,6 +1,8 @@
 //! Session titles and focus-aware terminal notifications.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::clock::UiInstant;
 
 use crate::program_status::{encode_report, ProgramState};
 
@@ -44,7 +46,7 @@ pub struct TerminalNotifier {
     enabled: bool,
     title_enabled: bool,
     bell_context: Option<NotificationContext>,
-    last_notification_time: Option<Instant>,
+    last_notification_time: Option<UiInstant>,
     bell_pending: bool,
     dirty: bool,
 }
@@ -163,7 +165,7 @@ impl TerminalNotifier {
             .map(|_| encode_report(ProgramState::Idle, ""))
     }
 
-    pub fn notify(&mut self, context: NotificationContext, now: Instant) {
+    pub fn notify(&mut self, context: NotificationContext, now: UiInstant) {
         if !matches!(context, NotificationContext::ActionRequired) {
             self.remember_completion(context.program_state());
         }

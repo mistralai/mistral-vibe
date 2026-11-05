@@ -32,12 +32,12 @@ pub struct ReadAloudTracking {
 impl ReadAloudTracking {
     pub fn reset(&mut self) {
         self.session_id = uuid::Uuid::new_v4().to_string();
-        self.requested_at = Some(Instant::now());
+        self.requested_at = Some(crate::clock::real_now());
         self.play_started_at = None;
     }
 
     pub fn mark_play_started(&mut self) {
-        self.play_started_at = Some(Instant::now());
+        self.play_started_at = Some(crate::clock::real_now());
     }
 
     pub fn time_to_first_read_s(&self) -> f64 {
@@ -48,8 +48,11 @@ impl ReadAloudTracking {
     }
 
     pub fn elapsed_since_play_s(&self) -> f64 {
-        self.play_started_at
-            .map_or(0.0, |started| started.elapsed().as_secs_f64())
+        self.play_started_at.map_or(0.0, |started| {
+            crate::clock::real_now()
+                .duration_since(started)
+                .as_secs_f64()
+        })
     }
 }
 
@@ -102,7 +105,7 @@ pub fn speak(app: &mut App, text: String) {
     let stop = Arc::new(AtomicBool::new(false));
     let task_stop = stop.clone();
     let credential_client = app.credential_client.clone();
-    let task = tokio::spawn(async move {
+    let task = crate::work::spawn_daemon(async move {
         let event = match speak_summary(
             &cfg,
             credential_client.as_deref(),
@@ -143,7 +146,7 @@ async fn speak_summary(
     id: u64,
 ) -> Result<(), AudioError> {
     let env_var = cfg.api_key_env_var.clone();
-    let (available, api_key) = tokio::task::spawn_blocking(move || {
+    let (available, api_key) = crate::work::spawn_blocking(move || {
         (audio_player::check_available(), resolve_api_key(&env_var))
     })
     .await

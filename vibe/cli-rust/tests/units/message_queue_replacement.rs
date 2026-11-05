@@ -1,9 +1,10 @@
 //! Revisioned prompt-queue replacement and copy-on-write behavior.
 
 use serde_json::json;
-use vibe_rs::app::{App, ToastSeverity};
+use vibe_rs::app::App;
 use vibe_rs::message_queue::{self, QueueEvent, QueueItem, ReplacementOutcome};
 
+use crate::feedback_support::errors;
 use crate::support::{message, stub};
 
 fn queued(message_id: &str, text: &str) -> QueueItem {
@@ -193,10 +194,7 @@ fn failed_replacement_keeps_the_prompt_and_surfaces_the_error() {
     assert_eq!(app.queue.items[0].text, "edited");
     assert!(!app.queue.items[0].sent);
     assert!(!app.queue.items[0].replacing);
-    assert!(matches!(
-        app.overlays.toasts.back().map(|toast| toast.severity),
-        Some(ToastSeverity::Error)
-    ));
+    assert_eq!(errors(&app).len(), 1);
 }
 
 #[test]

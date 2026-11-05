@@ -5,6 +5,7 @@ from typing import Any
 
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._defaults import SHELL_TOOLS
+from vibe.core.config._retry import retry_on_conflict
 from vibe.core.config.layer import (
     ConfigLayer,
     EmptyLayerError,
@@ -15,6 +16,7 @@ from vibe.core.config.layer import (
 from vibe.core.config.layers._base import BaseTomlConfigLayer
 from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLayer
 from vibe.core.config.patch import ConfigPatch, ReplaceOperationPatch
+from vibe.core.config.types import ConcurrencyConflictError
 from vibe.core.utils import name_matches
 
 # One-shot id: syncs an existing bash allowlist up to the current default
@@ -74,28 +76,50 @@ async def migrate_config_layers(layers: Iterable[ConfigLayer[RawConfig]]) -> Non
         if _sets_shell_maximum(data, name)
     }
 
-    for layer, data in loaded:
+    for layer, _ in loaded:
         seeded_shells = (
             frozenset[str](SHELL_TOOLS) - shells_with_max
             if isinstance(layer, (UserConfigLayer, SuppliedUserConfigLayer))
             else frozenset()
         )
+        await _migrate_layer(
+            layer, complete_aliases=complete_aliases, seeded_shells=seeded_shells
+        )
+
+
+async def _migrate_layer(
+    layer: BaseTomlConfigLayer | SuppliedUserConfigLayer,
+    *,
+    complete_aliases: AbstractSet[str],
+    seeded_shells: AbstractSet[str],
+) -> None:
+    async def write() -> list[BaseException]:
+        try:
+            data = (await layer.load()).model_dump()
+        except (EmptyLayerError, UntrustedLayerError):
+            return []
         if not migrate_config(
             data, complete_aliases=complete_aliases, seeded_shells=seeded_shells
         ):
-            continue
-
+            return []
         fingerprint = layer.fingerprint
         if fingerprint is None:
             raise LayerNotLoadedError(layer.name)
-
-        await layer.apply(
-            ConfigPatch(
-                ReplaceOperationPatch(path="", value=data),
-                fingerprint=fingerprint,
-                reason="config migration",
+        try:
+            await layer.apply(
+                ConfigPatch(
+                    ReplaceOperationPatch(path="", value=data),
+                    fingerprint=fingerprint,
+                    reason="config migration",
+                )
             )
-        )
+        except ConcurrencyConflictError as exc:
+            # Another session saved since the load: the next attempt migrates what it wrote.
+            await layer.refresh()
+            return [exc]
+        return []
+
+    await retry_on_conflict(write, description=f"migrating {layer.name}")
 
 
 def migrate_config(
@@ -124,6 +148,7 @@ def migrate_config(
     changed |= _migrate_seeded_shell_default_timeout(data, seeded_shells)
     changed |= _migrate_unset_auto_compact_threshold(data)
     changed |= _migrate_removed_tool_paths(data)
+    changed |= _migrate_renamed_worktree_copy_on_write(data)
     return changed
 
 
@@ -341,6 +366,18 @@ def _migrate_removed_tool_paths(data: dict[str, Any]) -> bool:
     disk, so their tools can still be migrated to skills.
     """
     return data.pop("tool_paths", None) is not None
+
+
+def _migrate_renamed_worktree_copy_on_write(data: dict[str, Any]) -> bool:
+    """Rename ``experimental_worktree_copy_on_write`` and keep its value.
+
+    The setting is now on by default, so an old ``false`` is kept as an opt-out.
+    """
+    if "experimental_worktree_copy_on_write" not in data:
+        return False
+    value = data.pop("experimental_worktree_copy_on_write")
+    data.setdefault("worktree_copy_on_write", value)
+    return True
 
 
 def _migrate_renamed_tools(data: dict[str, Any]) -> bool:

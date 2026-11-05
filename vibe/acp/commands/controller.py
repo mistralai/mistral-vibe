@@ -35,18 +35,40 @@ from vibe.acp.utils import (
     get_proxy_help_text,
 )
 from vibe.app_server.models import (
+    PublicTurn,
+    PublicTurnStatus,
     TeleportComplete,
     TeleportFailed,
     TeleportPushRequired,
+    TurnErrorCode,
 )
 from vibe.app_server.protocol import AppServerResponseError
 from vibe.utils.data_retention import DATA_RETENTION_MESSAGE
 from vibe.utils.retry_prompt import build_retry_prompt
 
 _TELEPORT_NO_HISTORY_MESSAGE = "No conversation history to teleport."
-_RETRY_NO_HISTORY_MESSAGE = "No interrupted response to continue."
+_NOTHING_TO_RETRY_MESSAGE = "No failed or interrupted response to retry."
+# Matches the CLI's `RETRYABLE_ERROR_CODES`: other failures would fail the same way again.
+_RETRYABLE_ERROR_CODES = frozenset({
+    TurnErrorCode.BACKEND_ERROR,
+    TurnErrorCode.RATE_LIMIT,
+    TurnErrorCode.RESPONSE_TOO_LONG,
+    TurnErrorCode.INCOMPLETE_STREAM,
+})
 
 type SendConfigOptions = Callable[[AcpSession], Awaitable[None]]
+
+
+def _can_retry(turn: PublicTurn | None) -> bool:
+    if turn is None:
+        return False
+    if turn.status is PublicTurnStatus.INTERRUPTED:
+        return True
+    return (
+        turn.status is PublicTurnStatus.FAILED
+        and turn.error is not None
+        and turn.error.code in _RETRYABLE_ERROR_CODES
+    )
 
 
 @dataclass(frozen=True)
@@ -382,8 +404,8 @@ class AcpCommandController:
     async def _retry(
         self, session: AcpSession, instructions: str
     ) -> PromptResponse | InjectedPrompt:
-        if not session.app_server.history:
-            return await self._reply(session, _RETRY_NO_HISTORY_MESSAGE)
+        if not _can_retry(session.app_server.state.latest_turn):
+            return await self._reply(session, _NOTHING_TO_RETRY_MESSAGE)
         return InjectedPrompt(build_retry_prompt(instructions))
 
     async def _set_lean(

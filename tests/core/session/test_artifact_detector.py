@@ -12,7 +12,6 @@ from vibe.core.session.artifact_detector import (
     cli_binary_source,
     extract_draft_from_command,
     extract_pr_from_output,
-    extract_title_from_command,
     find_cli_binary,
     is_pr_creation_command,
     resolve_gitlab_repo_id,
@@ -91,6 +90,44 @@ class TestIsPrCreationCommand:
         assert is_pr_creation_command("/usr/bin/glab mr create") == "gitlab"
         assert is_pr_creation_command("echo /usr/local/bin/gh pr create") is None
         assert is_pr_creation_command("notgh pr create") is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "perl -e 'alarm 90; exec @ARGV' gh pr create --draft --title 'T' 2>&1 | tail -3",
+            "cd ~/dev/other && perl -e 'alarm 90; exec @ARGV' gh pr create --fill",
+            "timeout 90 gh pr create --fill",
+            "env GH_HOST=github.com gh pr create --fill",
+            "GH_TOKEN=x gh pr create --fill",
+            "nohup gh pr create --fill",
+            "command gh pr create --fill",
+            "exec gh pr create --fill",
+            "sudo -u me /usr/local/bin/gh pr create --fill",
+            "timeout 60 glab mr create -t 'Fix'",
+            "timeout 60 gh pr reopen 5",
+        ],
+    )
+    def test_wrapped_creation_matches(self, command: str):
+        """A creation run through a wrapper (``perl -e 'alarm'``, ``timeout``,
+        ``env``...) is still one.
+        """
+        assert is_pr_creation_command(command) is not None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "echo gh pr create",
+            "printf '%s' gh pr create",
+            "git commit -m 'use gh pr create'",
+            "foo-gh pr create",
+            "my_gh pr create",
+            "gh.sh pr create",
+            "ssh pr create",
+            "echo done # gh pr create",
+        ],
+    )
+    def test_text_mentioning_a_creation_does_not_match(self, command: str):
+        assert is_pr_creation_command(command) is None
 
 
 class TestExtractPrFromOutput:
@@ -227,61 +264,6 @@ class TestExtractPrFromOutput:
         assert detected is not None
         assert detected.provider == "gitlab"
         assert detected.iid == 7
-
-
-class TestExtractTitleFromCommand:
-    def test_long_flag_quoted(self):
-        assert (
-            extract_title_from_command("gh pr create --title 'Fix login'")
-            == "Fix login"
-        )
-
-    def test_long_flag_unquoted(self):
-        assert extract_title_from_command("gh pr create --title Fix") == "Fix"
-
-    def test_long_flag_equals(self):
-        assert extract_title_from_command("gh pr create --title=Fix") == "Fix"
-
-    def test_short_flag(self):
-        assert extract_title_from_command("glab mr create -t 'My MR'") == "My MR"
-
-    def test_no_title(self):
-        assert extract_title_from_command("gh pr create --fill") is None
-
-    def test_unquoted_title_stops_at_next_flag(self):
-        """An unquoted title is one shell token; later flags are not swallowed."""
-        assert (
-            extract_title_from_command("gh pr create --title Fix login --body x")
-            == "Fix"
-        )
-        assert extract_title_from_command("gh pr create --title Fix --draft") == "Fix"
-
-    def test_quoted_title_with_equals(self):
-        assert (
-            extract_title_from_command('gh pr create --title="Fix login"')
-            == "Fix login"
-        )
-
-    def test_short_flag_unquoted(self):
-        assert extract_title_from_command("glab mr create -t Fix --draft") == "Fix"
-
-    def test_short_flag_must_start_a_token(self):
-        """``-t`` inside a longer flag is not the title flag."""
-        assert extract_title_from_command("gh pr create --not-t x") is None
-
-    def test_quoted_args_do_not_poison_title(self):
-        """A ``--title`` inside a quoted body is text; the real flag still wins."""
-        assert (
-            extract_title_from_command(
-                "gh pr create --body 'set --title fake' --title Real"
-            )
-            == "Real"
-        )
-        assert extract_title_from_command("gh pr create --body 'use -t here'") is None
-        assert (
-            extract_title_from_command("gh pr create --title 'Add --draft support'")
-            == "Add --draft support"
-        )
 
 
 class TestExtractDraftFromCommand:

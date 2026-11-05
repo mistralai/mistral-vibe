@@ -1,7 +1,10 @@
+"""A retryable failure offers /retry; the retried reply replaces the unfinished answer and the error."""
+
 from __future__ import annotations
 
 from e2e.app_server.events import (
     assistant_msg,
+    discard_entry,
     turn_completed,
     turn_failed,
     turn_started,
@@ -9,16 +12,13 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-# The retry scenario: a turn fails with a retryable backend_error, then /retry
-# continues it. The failed turn arms can_retry; the /retry command fires.
-# The retried turn's first assistant entry removes the transient error row and
-# /retry echo, and continues the interrupted answer's row (Python
-# `_resolve_retry_presentation`).
+# The server settles the cut-off answer as discarded before it fails the turn.
 timeline: Timeline = [
     "hello\r",
     turn_started(),
     user_msg("hello"),
-    assistant_msg("Hi the", generation_status="in_progress"),
+    assistant_msg("Hi the", entry_id="partial", generation_status="in_progress"),
+    discard_entry("partial"),
     turn_failed(code="backend_error", message="Upstream 502"),
     "/retry\r",
     turn_started(),

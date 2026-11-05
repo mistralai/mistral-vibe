@@ -8,8 +8,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
-use crate::app::{App, Status, ToastSeverity};
-use crate::event_handler::SERVER_TOAST_SECS;
+use crate::app::{App, Status};
 use crate::option_list::Click;
 use crate::server::request_error::SESSION_BUSY_MESSAGE;
 use crate::server::{Client, PublicSessionState};
@@ -257,7 +256,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             app.todo_tracker.seed_from_history(state.history.as_ref());
             crate::startup::banners::dismiss_whats_new(app);
             load_history(app, &state);
-            crate::worktree::track_state(app, &state);
+            crate::worktree::adopt_state(app, &state);
             app.set_status(Status::Ready);
             notice::result(app, &format!("Resumed session `{}`", short_id(&id)));
             crate::message_queue::flush_pending(app, client);
@@ -266,13 +265,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
         Event::Deleted { id, error } => {
             app.resume_picker.deleting = None;
             if let Some(error) = error {
-                // A delete failure is feedback about the picker's row, not
-                // transcript history: toast it instead of mounting a notice.
-                app.show_toast(
-                    format!("Failed to delete session: {error}"),
-                    ToastSeverity::Error,
-                    SERVER_TOAST_SECS,
-                );
+                crate::notices::failed(app, &format!("Failed to delete session: {error}"));
                 return;
             }
             app.resume_picker
@@ -370,20 +363,15 @@ fn resume(app: &mut App, client: &Arc<Client>) {
         return;
     }
     // The lease already names another process; resume would only bounce the
-    // conflict back. Toast the same refusal the delete path does, locally.
+    // conflict back. Say the same refusal the delete path does, locally.
     if app.resume_picker.locked.contains(&session.id) {
-        app.show_toast(
-            SESSION_BUSY_MESSAGE.to_owned(),
-            ToastSeverity::Error,
-            SERVER_TOAST_SECS,
-        );
+        crate::notices::refused(app, SESSION_BUSY_MESSAGE);
         return;
     }
     let id = session.id.clone();
     // Busy without a spinner: the
     // status stays as it is, so Esc can still cancel and notifications flow.
     app.resume_picker.resuming = true;
-    app.commit_started();
     // A picker resume resends the session's agent config too.
     let params = crate::startup::resume_params(&id, &app.session.agent_config);
     request::resume(app, client, id, params);
@@ -402,13 +390,9 @@ fn delete(app: &mut App, client: &Arc<Client>) {
         return;
     }
     // The lease already names another process, so the delete would only
-    // bounce the conflict back; toast the same refusal locally.
+    // bounce the conflict back; say the same refusal locally.
     if app.resume_picker.locked.contains(&session.id) {
-        app.show_toast(
-            SESSION_BUSY_MESSAGE.to_owned(),
-            ToastSeverity::Error,
-            SERVER_TOAST_SECS,
-        );
+        crate::notices::refused(app, SESSION_BUSY_MESSAGE);
         return;
     }
     let id = session.id.clone();

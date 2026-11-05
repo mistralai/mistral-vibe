@@ -119,8 +119,11 @@ class _FakeVibeCodeSession:
         self.remote_project_outcomes: list[str] = []
         self.cwd = tmp_path
         self.session_id = "session"
+        self.credentials = None
         self.config = SimpleNamespace(
-            resolve_mistral_api_key=lambda: "key",
+            get_mistral_provider=lambda: SimpleNamespace(
+                api_key_env_var="MISTRAL_API_KEY", api_base="https://api.example"
+            ),
             vibe_code_sessions_base_url="https://vibe.example",
             api_timeout=1.0,
             is_active_model_mistral=lambda: True,

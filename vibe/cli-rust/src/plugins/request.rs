@@ -25,11 +25,10 @@ where
         return false;
     };
     let tx = app.command_tx.clone();
-    let pending = app.commit_started();
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let event = task(client, session_id).await;
-        deliver(tx, CommandEvent::Plugins(Box::new(event)), &pending).await;
+        deliver(tx, CommandEvent::Plugins(Box::new(event))).await;
     });
     true
 }

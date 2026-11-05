@@ -1,4 +1,5 @@
 //! Pure logic tests share one integration-test binary.
+#![allow(clippy::disallowed_methods)] // Tests drive tasks directly; replay acks never run here.
 
 /// Keep the units binary off the host clipboard: install the null sink.
 #[ctor::ctor]
@@ -18,12 +19,16 @@ mod approval_keys;
 mod argument_hint;
 #[path = "units/artifacts.rs"]
 mod artifacts;
+#[path = "units/artifacts_checks.rs"]
+mod artifacts_checks;
+#[path = "units/artifacts_modal.rs"]
+mod artifacts_modal;
 #[path = "units/banner.rs"]
 mod banner;
-#[path = "units/bottom_bar_model.rs"]
-mod bottom_bar_model;
-#[path = "units/bottom_bar_model_click.rs"]
-mod bottom_bar_model_click;
+#[path = "units/bottom_bar_copy_path.rs"]
+mod bottom_bar_copy_path;
+#[path = "units/bottom_bar_layout.rs"]
+mod bottom_bar_layout;
 #[path = "units/bottom_bar_overflow.rs"]
 mod bottom_bar_overflow;
 #[path = "units/bottom_bar_selection.rs"]
@@ -68,18 +73,24 @@ mod composer_blur;
 mod composer_clicks;
 #[path = "units/composer_mentions.rs"]
 mod composer_mentions;
+#[path = "units/composer_model_click.rs"]
+mod composer_model_click;
 #[path = "units/composer_pastes.rs"]
 mod composer_pastes;
 #[path = "units/config_filter.rs"]
 mod config_filter;
-#[path = "units/config_issues.rs"]
-mod config_issues;
 #[path = "units/config_selection.rs"]
 mod config_selection;
 #[path = "units/config_write.rs"]
 mod config_write;
 #[path = "units/connector_web.rs"]
 mod connector_web;
+#[path = "units/context_app.rs"]
+mod context_app;
+#[path = "units/context_bar.rs"]
+mod context_bar;
+#[path = "units/context_footer_click.rs"]
+mod context_footer_click;
 #[path = "units/count_format.rs"]
 mod count_format;
 #[path = "units/credentials.rs"]
@@ -96,8 +107,14 @@ mod effect_entry;
 mod effect_output;
 #[path = "units/external_editor.rs"]
 mod external_editor;
+#[path = "units/feedback_echo.rs"]
+mod feedback_echo;
+#[path = "units/feedback_support.rs"]
+mod feedback_support;
 #[path = "units/fence_copy.rs"]
 mod fence_copy;
+#[path = "units/file_autocomplete_gate.rs"]
+mod file_autocomplete_gate;
 #[path = "units/file_index_metrics.rs"]
 mod file_index_metrics;
 #[path = "units/file_index_rescan_ignore.rs"]
@@ -108,6 +125,8 @@ mod file_mention_matching;
 mod focus;
 #[path = "units/fold_clicks.rs"]
 mod fold_clicks;
+#[path = "units/footer_gauge.rs"]
+mod footer_gauge;
 #[path = "units/foreign_session.rs"]
 mod foreign_session;
 #[path = "units/frames_oversized.rs"]
@@ -150,6 +169,8 @@ mod input_mode_edges;
 mod input_modes;
 #[path = "units/interactive_agent_config.rs"]
 mod interactive_agent_config;
+#[path = "units/jump_to_bottom.rs"]
+mod jump_to_bottom;
 #[path = "units/key_burst.rs"]
 mod key_burst;
 #[path = "units/launch.rs"]
@@ -214,6 +235,8 @@ mod narrator_audio;
 mod narrator_status;
 #[path = "units/notice_state.rs"]
 mod notice_state;
+#[path = "units/notices.rs"]
+mod notices;
 #[path = "units/observability_memory.rs"]
 mod observability_memory;
 #[path = "units/observability_rotating.rs"]
@@ -332,8 +355,8 @@ mod resume_picker_list;
 mod resume_picker_outcomes;
 #[path = "units/retry_presentation.rs"]
 mod retry_presentation;
-#[path = "units/retry_snapshot_merge.rs"]
-mod retry_snapshot_merge;
+#[path = "units/reverse_search.rs"]
+mod reverse_search;
 #[path = "units/rewind.rs"]
 mod rewind;
 #[path = "units/rpc_contract.rs"]
@@ -366,6 +389,8 @@ mod selection_lost_release;
 mod selection_prompt_marker;
 #[path = "units/selection_spans.rs"]
 mod selection_spans;
+#[path = "units/settle.rs"]
+mod settle;
 #[path = "units/setup_entrypoint.rs"]
 mod setup_entrypoint;
 #[path = "units/setup_probe.rs"]
@@ -423,10 +448,6 @@ mod terminal_read;
 mod theme_detection;
 #[path = "units/thinking_picker.rs"]
 mod thinking_picker;
-#[path = "units/toast_anchor.rs"]
-mod toast_anchor;
-#[path = "units/toast_selection.rs"]
-mod toast_selection;
 #[path = "units/todo_sidebar_close.rs"]
 mod todo_sidebar_close;
 #[path = "units/toggle_scroll.rs"]
@@ -447,8 +468,6 @@ mod tts_request;
 mod turn_counter;
 #[path = "units/turn_error_message.rs"]
 mod turn_error_message;
-#[path = "units/ui_event.rs"]
-mod ui_event;
 #[path = "units/unsolicited_turn.rs"]
 mod unsolicited_turn;
 #[path = "units/update_brew_oracle.rs"]
@@ -470,6 +489,8 @@ mod terminal_lifecycle;
 mod update_uv_oracle;
 #[path = "units/update_version.rs"]
 mod update_version;
+#[path = "units/usage_gauge_reads.rs"]
+mod usage_gauge_reads;
 #[path = "units/version_flag.rs"]
 mod version_flag;
 #[path = "units/voice_errors.rs"]

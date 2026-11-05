@@ -18,7 +18,6 @@ _STEERED = user_msg("second")
 _STEERED["params"]["entry"]["id"] = "queued-2"
 _STEERED["params"]["entry"]["source"] = "turn_steer"
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
 handshake = {
     "session/start": {"state": {"session": {"harness": "unified"}}},
     "session/turn/queue/steer": {
@@ -35,7 +34,6 @@ on_request = {
     ]
 }
 
-settle_per_key = True
 # Step 1 matches queue/steer_queued_prompt; only the order after the steer is new.
 capture_steps = {2}
 screen_excludes = ("Queued",)

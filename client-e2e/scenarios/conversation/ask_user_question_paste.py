@@ -11,13 +11,11 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-# The turn stays open: the tool blocks on the callback until the user answers,
-# so every frame settles while the client is still busy. The typing grace period
-# is zeroed so the app takes the input box in the frame it is delivered in.
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1", "VIBE_TYPING_GRACE_PERIOD_MS": "0"}
+# The typing grace period is zeroed so the app takes the input box in the frame
+# it is delivered in.
+env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-# The prompt frame races the handshake under `SETTLE_BUSY`; capture from the
-# released callback onward.
+# Capture from the released callback onward.
 capture_startup = False
 capture_steps = {1, 2, 3, 4, 5}
 screen_contains = ("SQLite Enterprise", "with WAL")
@@ -49,6 +47,3 @@ timeline: Timeline = [
     # Every pasted line lands, and only in the free-text row.
     paste("SQLite Enterprise\nwith WAL"),
 ]
-
-# Each key must land on a settled UI: batching changes the outcome here.
-settle_per_key = True

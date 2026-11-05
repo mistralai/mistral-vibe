@@ -1317,7 +1317,9 @@ class VibeAcpAgent(AcpAgent):
     async def _project_links_extension(
         self, method: str, params: dict
     ) -> dict[str, Any]:
-        controller = ProjectLinksController()
+        from vibe.app_server._credential_selection import cli_process_credentials
+
+        controller = ProjectLinksController(cli_process_credentials)
         try:
             match method:
                 case "projectLinks/list":

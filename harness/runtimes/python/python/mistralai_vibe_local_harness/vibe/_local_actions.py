@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -834,6 +835,7 @@ class _LocalActionState:
                     "filesystem write path must resolve under tool-results"
                 )
             # The record stays with the Session, and an export copies it.
+            destination = _content_addressed(destination, action.operation.content)
             await asyncio.to_thread(
                 _replace_text_file, destination, action.operation.content
             )
@@ -1522,7 +1524,8 @@ class _LocalActionState:
             "tool_name": tool_name,
             "verdict": verdict,
             "tier": tier.value,
-            "reason": reason[:200],
+            # An error's reason quotes the provider; analytics takes error_type only.
+            "reason": "" if verdict == ClassificationVerdict.ERROR else reason[:200],
             "outcome": outcome,
             "escalated": outcome.startswith("escalated"),
             "latency_ms": latency_ms,
@@ -1716,6 +1719,18 @@ def _unsupported_action(action: RustAction) -> RustEvent:
     if isinstance(action, RustFilesystemAction):
         return RustFilesystemFailedEvent(action_id=action.action_id, error=error)
     raise TypeError(f"Unsupported action type: {type(action).__name__}")
+
+
+def _content_addressed(path: Path, content: str) -> Path:
+    """``path`` with a digest of ``content`` in its name.
+
+    Core names a saved output after the tool and the model's call ID, which a
+    provider can reuse in a later turn while the earlier turn still points the
+    model at its file. A digest keeps a different output out of that file, and
+    a retried write of the same output lands on the same one.
+    """
+    digest = hashlib.sha256(content.encode()).hexdigest()[:16]
+    return path.with_name(f"{path.stem}-{digest}{path.suffix}")
 
 
 def _replace_text_file(path: Path, content: str) -> None:

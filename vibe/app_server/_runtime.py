@@ -50,6 +50,7 @@ from vibe.app_server._client_provided_tools import (
     ClientToolDeclarationError,
     ClientTools,
 )
+from vibe.app_server._connection_credentials import ConnectionCredentials
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._ignored_tool_settings import ignored_tool_settings
 from vibe.app_server._imports import build_local_imports_service
@@ -106,7 +107,6 @@ from vibe.core.config import (
     UtilityFeature,
     VibeConfigSchema,
     build_default_orchestrator,
-    resolve_api_key,
 )
 from vibe.core.config.admin_config import AdminConfigApplyResult, AdminConfigOutcome
 from vibe.core.config.builder import InvalidConfigError
@@ -130,6 +130,7 @@ from vibe.core.llm.utility_completion import (
     select_utility_model,
 )
 from vibe.core.paths import VIBE_HOME
+from vibe.core.platform_auth import CachedPrincipal
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.session.session_permissions import start_restrict_session_log_permissions
 from vibe.core.skills.models import SkillInfo
@@ -144,6 +145,7 @@ from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.models import ToolPermission
 from vibe.core.tools.permissions import PermissionStore
 from vibe.core.tracing import setup_tracing
+from vibe.core.types import Backend
 from vibe.core.utils import get_windows_bash_path, is_windows
 from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
@@ -422,13 +424,31 @@ def _named_provider(name: str) -> Callable[[VibeConfigSchema], ProviderConfig]:
     return select
 
 
-def _output_room(window: int, threshold: int) -> int | None:
-    # What a request at the compaction threshold leaves for output: servers that
-    # check input plus max_tokens against the window refuse more. A window with
-    # no room (a compaction model smaller than the agent's threshold) overflows
-    # on input alone, so it bounds nothing.
-    room = window - threshold
-    return room if room > 0 else None
+def _require_active_provider_credential(
+    config: VibeConfigSchema,
+    platform_credentials: PlatformCredentialFactory,
+    run_keys: Mapping[str, str] | None,
+) -> None:
+    """Raise ``MissingAPIKeyError`` when the active provider has no credential.
+
+    A Mistral provider's model calls send the connection's credential, so it
+    is that credential that must exist: a Desktop sign-in, the CLI's own OIDC
+    session, or the API key. Any other provider, and a run that brings its own
+    key, is checked for its key as before.
+    """
+    try:
+        provider = config.get_active_provider()
+    except ValueError:
+        return
+    if (
+        provider.backend == Backend.MISTRAL
+        and not provider.uses_vertex
+        and not (run_keys and run_keys.get(provider.api_key_env_var))
+    ):
+        selected = platform_credentials(provider.api_key_env_var)
+        if not isinstance(selected, CachedPrincipal) or selected.has_credential():
+            return
+    config.require_active_provider_api_key()
 
 
 def _utility_provider_route(
@@ -511,6 +531,7 @@ if TYPE_CHECKING:
     from vibe.app_server._unified_import_writer import UnifiedSessionImportWriter
     from vibe.app_server.server import AppServer
     from vibe.core.config import ProviderConfig
+    from vibe.core.platform_auth import PlatformCredentialFactory
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
 
 
@@ -853,7 +874,11 @@ class HarnessProcess:
             # The project lives in the sandbox; its config, skills and hooks
             # would be read from the host's disk at the same path.
             raise HeadlessUsageError("A sandboxed session cannot load project files")
-        self.imports = build_local_imports_service(self.build_import_writer)
+        # The connection's credential selection, bound by create_harness_server.
+        self.credentials = ConnectionCredentials()
+        self.imports = build_local_imports_service(
+            self.build_import_writer, self.credentials
+        )
         self.harness_files = harness_files or HarnessFilesManager(
             sources=("user",) if sandbox is not None else ("user", "project")
         )
@@ -912,6 +937,7 @@ class HarnessProcess:
         self.host_handler = HostRequestHandler(
             self.harness_files,
             org_config=services.org_config,
+            credentials=self.credentials,
             image_fallback=self._experimental_harness_host is not None,
             builtin_plugin_roots=self._builtin_plugin_roots,
         )
@@ -921,8 +947,10 @@ class HarnessProcess:
             sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
         )
         self.connector_catalog = ConnectorCatalogService(
+            services.connector_catalog,
             implicit_source_enabled=self._experimental_harness_host is not None,
             sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
+            credentials=self.credentials,
         )
         self.plugin_catalog = PluginCatalogService()
         self._connector_warm_up: asyncio.Task[None] | None = None
@@ -931,9 +959,10 @@ class HarnessProcess:
         """Fetch the connector catalog now, before any session needs it.
 
         A session's first turn waits for the catalog when nothing is cached,
-        and every session joins this fetch rather than starting its own. Its
-        failure is not memoized, so a session's own load retries at once and
-        reports it.
+        and every session joins this fetch rather than starting its own. It
+        fetches whatever the age of the copy on disk: a connector connected
+        while no app server ran reaches every session at its next turn
+        boundary.
 
         Only the stdio servers start it; the process is left to end with them.
         """
@@ -945,9 +974,7 @@ class HarnessProcess:
     async def _warm_connector_catalog(self) -> None:
         try:
             orchestrator = await self.build_sessionless_mcp_catalog()
-            await self.connector_catalog.resolve_catalog(
-                orchestrator, remember_failure=False
-            )
+            await self.connector_catalog.warm_up(orchestrator)
         except Exception as exc:
             logger.info("Connector catalog warm-up failed: %s", exc)
 
@@ -1033,11 +1060,14 @@ class HarnessProcess:
         return session_config.config_orchestrator
 
     async def build_import_writer(self) -> UnifiedSessionImportWriter:
+        from vibe.app_server._local_projects import LocalProjectStore
         from vibe.app_server._unified_import_writer import UnifiedSessionImportWriter
 
         session_config = await self._build_session_config(SessionOptions())
+        config = session_config.config_orchestrator.config
         return UnifiedSessionImportWriter(
-            session_config.config_orchestrator.config.session_logging
+            config.session_logging,
+            LocalProjectStore() if config.experimental_enable_local_projects else None,
         )
 
     async def build_unified_read_context(
@@ -1177,12 +1207,14 @@ class HarnessProcess:
             RustUnixCommandEnvironment,
         )
         from mistralai_vibe_local_harness.vibe import (
+            FILE_SYSTEM,
             HelperCrashCount,
             LocalModelRoute,
             LocalRuntimeAdapterConfig,
             OtelTracingHooks,
             SessionWorkspace,
             compile_foreign_hooks,
+            output_room,
             rust_model_facts,
             sandbox_path,
             tool_catalog_for_config,
@@ -1193,14 +1225,15 @@ class HarnessProcess:
             SavedCatalogue,
             compile_session_model_facts,
         )
+
+        # Import the provider service after loading the bundled Harness package.
+        from vibe.app_server._context_breakdown import ModelRequestLog
         from vibe.app_server._plugins import (
             core_plugins,
             plugin_agent_names,
             plugin_issues,
             requested_plugin_definitions,
         )
-
-        # Import the provider service after loading the bundled Harness package.
         from vibe.app_server._provider_credentials import ProviderCredentialService
         from vibe.app_server._subagent_permissions import SubagentPermissions
         from vibe.app_server._subagent_runs import SubagentSteps
@@ -1381,7 +1414,7 @@ class HarnessProcess:
                     thinking=facts.agent_thinking,
                     top_p=model.top_p,
                     max_output_tokens=facts.agent.max_output_tokens,
-                    output_room=_output_room(
+                    output_room=output_room(
                         facts.agent.context_window, facts.agent.compaction_threshold
                     ),
                     reasoning=facts.agent_reasoning,
@@ -1452,7 +1485,9 @@ class HarnessProcess:
         # set of revisions a provider has refused, and a service rebuilt on
         # every derivation would forget them and re-send a rejected key.
         credentials = ProviderCredentialService(
-            config_orchestrator, credentials=self._credentials
+            config_orchestrator,
+            credentials=self._credentials,
+            platform_credentials=self.credentials,
         )
 
         # A route's endpoint is fixed at derivation, so its key is pinned to the
@@ -1466,6 +1501,7 @@ class HarnessProcess:
                     config_orchestrator,
                     select_provider=_named_provider(provider_name),
                     credentials=self._credentials,
+                    platform_credentials=self.credentials,
                 )
             return utility_credentials[provider_name]
 
@@ -1484,9 +1520,14 @@ class HarnessProcess:
         # The root and its subagents share the sink: it counts each subagent's
         # agent model calls for ``session/subagents/read``.
         subagent_steps = SubagentSteps()
+        # Shared the same way: the sizes of each session's newest model input,
+        # which ``session/context/read`` splits the measured usage by.
+        model_requests = ModelRequestLog()
 
         if require_api_key:
-            config_orchestrator.config.require_active_provider_api_key()
+            _require_active_provider_credential(
+                config_orchestrator.config, self.credentials, self._credentials
+            )
         # Read once per session, like the host's own git snapshot: the context
         # describes the workspace as the session found it.
         sandbox_workspace = None
@@ -1537,7 +1578,7 @@ class HarnessProcess:
         # Discover the user's hooks once. The raw parse -- including any parse/duplicate
         # diagnostics on result.issues -- is settings-independent, so load it before the
         # derivation closure and surface those diagnostics as session notices, matching
-        # legacy (which projects hook_config_issues) and the design's failure table.
+        # legacy (which projects hook_config_issues).
         hook_result = await asyncio.to_thread(
             load_hooks_from_fs, harness_files=session_config.harness_files
         )
@@ -1569,13 +1610,8 @@ class HarnessProcess:
             config_orchestrator, connector_catalog
         )
         connector_provider = config.get_mistral_provider()
-        connector_api_key = ""
         connector_base_url = "https://api.mistral.ai"
         if connector_provider is not None:
-            connector_api_key = (
-                resolve_api_key(connector_provider.api_key_env_var or "MISTRAL_API_KEY")
-                or ""
-            )
             connector_base_url = (
                 get_server_url_from_api_base(connector_provider.api_base)
                 or connector_base_url
@@ -1779,6 +1815,7 @@ class HarnessProcess:
                                 if config.enable_background_processes
                                 else RustDisabledRuntimeToolFeature()
                             ),
+                            file_system=FILE_SYSTEM,
                             command_environment=command_environment,
                             large_output=RustFilesystemLargeOutputPolicy(
                                 max_output_tokens=_LARGE_OUTPUT_MAX_TOKENS,
@@ -1821,6 +1858,10 @@ class HarnessProcess:
                                     else None
                                 ),
                                 session_peers=session_peers is not None,
+                                session_peer_restore=(
+                                    session_peers is not None
+                                    and session_peers.client_capabilities().session_peer_restore
+                                ),
                             ),
                             # The client chose these; the tool filters are for
                             # Vibe's own.
@@ -1849,7 +1890,7 @@ class HarnessProcess:
                         thinking=model_facts.agent_thinking,
                         top_p=active_model.top_p,
                         max_output_tokens=model_facts.agent.max_output_tokens,
-                        output_room=_output_room(
+                        output_room=output_room(
                             model_facts.agent.context_window,
                             model_facts.agent.compaction_threshold,
                         ),
@@ -1864,7 +1905,7 @@ class HarnessProcess:
                         max_output_tokens=model_facts.compaction.max_output_tokens,
                         # Compaction input is the agent's context, which reaches
                         # the agent's threshold.
-                        output_room=_output_room(
+                        output_room=output_room(
                             model_facts.compaction.context_window,
                             model_facts.agent.compaction_threshold,
                         ),
@@ -1898,6 +1939,11 @@ class HarnessProcess:
                     ),
                     subagent_max_children=config.max_subagents,
                     subagent_max_concurrent_turns=config.max_concurrent_subagents,
+                    session_api=(
+                        config.experimental_local_runtime_session_api
+                        if settings.session_api is None
+                        else settings.session_api
+                    ),
                     thinking=model_facts.agent_thinking,
                     reasoning_field_name=provider.reasoning_field_name,
                     emits_finish_reason=provider.emits_finish_reason,
@@ -1960,6 +2006,7 @@ class HarnessProcess:
                     correlation_id_sink=correlation.record,
                     request_sent_sink=subagent_steps.counting(request_sent.record),
                     malformed_tool_calls_sink=malformed_tool_calls.record,
+                    model_request_sink=model_requests.record,
                     sandbox=sandbox,
                     helper_crashes=helper_crashes,
                 ),
@@ -2050,7 +2097,9 @@ class HarnessProcess:
             connector_selection=connector_selection,
             connector_catalog_service=self.connector_catalog,
             connector_base_url=connector_base_url,
-            connector_api_key=connector_api_key,
+            # The gateway resolves the connection's credential per call.
+            platform_credentials=self.credentials,
+            provider_credentials=credentials_for,
             preflight=preflight,
             # Built here rather than defaulted on the context: the default
             # ``ExperimentManager`` has no eval URL, so every resolution would
@@ -2065,6 +2114,7 @@ class HarnessProcess:
             request_sent=request_sent,
             malformed_tool_calls=malformed_tool_calls,
             subagent_steps=subagent_steps,
+            model_requests=model_requests,
             saved_catalogue=saved_catalogue,
         )
 
@@ -2134,15 +2184,19 @@ class HarnessProcess:
             )
             pre_org_config = config_orchestrator.config
             if org_config is OrgConfigSource.ENSURED:
-                ensured_key = await org_config_key(config_orchestrator)
+                ensured_key = await org_config_key(
+                    config_orchestrator, self.credentials
+                )
                 fetch_outcome = (
                     OIDC_TENANT_UNRESOLVED
                     if ensured_key is None
-                    and oidc_tenant_unresolved(config_orchestrator.config)
+                    and oidc_tenant_unresolved(
+                        config_orchestrator.config, self.credentials
+                    )
                     else await self.services.org_config.ensure(ensured_key)
                 )
             org_key, tried, saved_failure = await apply_cached_layers(
-                config_orchestrator, org_service
+                config_orchestrator, org_service, self.credentials
             )
             return BuiltSessionConfig(
                 config_orchestrator,
@@ -2165,6 +2219,7 @@ class HarnessProcess:
                     harness_files,
                     org_service,
                     build,
+                    self.credentials,
                 )
             )
         except ValidationError as exc:
@@ -2299,22 +2354,16 @@ class HarnessProcess:
     async def _build_connector_registry(
         self, orchestrator: ConfigOrchestrator[VibeConfigSchema]
     ) -> ConnectorRegistry | None:
+        from vibe.core.platform_auth._mistral import mistral_credentials
         from vibe.core.tools.connectors.connector_registry import (
             ConnectorAuthAction,
             ConnectorCatalogEntry,
             ConnectorRegistry,
             ConnectorToolDefinition,
         )
-        from vibe.utils.http import get_server_url_from_api_base
 
-        provider = orchestrator.config.get_mistral_provider()
-        if provider is None:
+        if mistral_credentials(orchestrator.config, self.credentials) is None:
             return None
-        api_key_env = provider.api_key_env_var or "MISTRAL_API_KEY"
-        api_key = resolve_api_key(api_key_env)
-        if not api_key:
-            return None
-        server_url = get_server_url_from_api_base(provider.api_base)
         # The cache only: opening a session never waits on the connector
         # service. With nothing cached, plugin connectors resolve as unavailable,
         # as an unreachable service does.
@@ -2346,9 +2395,7 @@ class HarnessProcess:
             if catalog is not None
             else ()
         )
-        return ConnectorRegistry(
-            api_key=api_key, server_url=server_url, catalog_entries=entries
-        )
+        return ConnectorRegistry(entries)
 
 
 async def create_harness_server(
@@ -2368,19 +2415,24 @@ async def create_harness_server(
     """
     from vibe.app_server.server import AppServer
 
+    server = AppServer(
+        transport,
+        transport_kind=transport_kind,
+        host_handler=process.host_handler,
+        session_backend_host_factory=process.create_session_backend_host,
+        mcp_catalog_service=process.mcp_catalog,
+        connector_catalog_service=process.connector_catalog,
+        plugin_catalog_service=process.plugin_catalog,
+        imports_service=process.imports,
+        account_gateway=account_gateway,
+        identity_gateway=identity_gateway,
+        oidc_tenants=process.services.oidc_tenants,
+    )
+    # One process per channel, except the in-process host, which every
+    # connection of one entry point shares: the selection is the same for all.
+    process.credentials.bind(server.platform_credentials)
     return HarnessServer(
-        _server=AppServer(
-            transport,
-            transport_kind=transport_kind,
-            host_handler=process.host_handler,
-            session_backend_host_factory=process.create_session_backend_host,
-            mcp_catalog_service=process.mcp_catalog,
-            connector_catalog_service=process.connector_catalog,
-            plugin_catalog_service=process.plugin_catalog,
-            imports_service=process.imports,
-            account_gateway=account_gateway,
-            identity_gateway=identity_gateway,
-        ),
+        _server=server,
         _transport=transport,
         _reconnectable=transport_kind == "in_process",
     )
@@ -2391,8 +2443,7 @@ def _hook_config_issues(result: HookConfigResult) -> list[ConfigIssue]:
 
     ``load_hooks_from_fs`` skips an invalid or conflicting file's hooks and records why
     on ``result.issues``. Surfacing them as session notices (rather than dropping them
-    silently) matches the legacy loop, which projects ``hook_config_issues``, and the
-    design's failure table ("CLI logs a diagnostic; that file's hooks are skipped").
+    silently) matches the legacy loop, which projects ``hook_config_issues``.
     """
     return [
         ConfigIssue(file=str(issue.file), message=issue.message)

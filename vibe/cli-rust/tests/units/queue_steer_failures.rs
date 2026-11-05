@@ -1,7 +1,6 @@
 //! A queue steer that fails or lands after the turn ended keeps the queued prompts.
 
 use std::sync::Arc;
-use std::time::Instant;
 
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -18,7 +17,7 @@ fn busy_app_with_merged_queue() -> App {
     app.session.session_id = Some("sess".into());
     app.session.active_turn_id = Some("turn".into());
     app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     for (id, text) in [("first", "first queued"), ("second", "second queued")] {
         app.view.transcript.add(&json!({
@@ -72,7 +71,7 @@ async fn a_steer_rejected_because_the_turn_ended_keeps_the_queue_for_the_next_tu
     assert_still_queued_and_removable(&app);
     assert!(mq::can_steer(&app), "a later Enter may steer again");
     assert_eq!(app.view.transcript.lines().count(), entries, "no error row");
-    assert!(app.overlays.toasts.is_empty(), "no error toast");
+    assert!(app.overlays.notice.is_none(), "no error notice");
 
     assert!(mq::turn_started(&mut app, &client, "q-1"));
     assert!(app.queue.is_empty(), "the block runs as the next turn");

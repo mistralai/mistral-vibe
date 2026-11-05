@@ -8,26 +8,30 @@ use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use super::composer_layout::{ComposerLayout, Row};
+use super::composer_title;
 use super::tab_cells::{cells, cells_width};
 use super::theme;
 use crate::agents;
 use crate::app::{App, Status};
 use crate::mentions::Mention;
-use crate::server::AgentSafety;
-
-/// Border and border-title colors per agent safety.
-fn safety_colors(safety: AgentSafety) -> (Color, Color) {
-    match safety {
-        AgentSafety::Safe => (theme::success(), theme::success()),
-        AgentSafety::Neutral => (theme::popup_border(), theme::muted()),
-        AgentSafety::Destructive => (theme::warning(), theme::warning()),
-        AgentSafety::Smart => (theme::warning(), theme::warning()),
-        AgentSafety::Yolo => (theme::error(), theme::error()),
-    }
-}
 
 /// Draw the chat input, returning the caret's screen cell while it is in view and takes keys.
-pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<Position> {
+pub fn draw(app: &mut App, f: &mut Frame, area: Rect) -> Option<Position> {
+    let title = composer_title::title(app, area.width);
+    composer_title::place_model(app, area, &title);
+    let caret = draw_box(app, f, area, title.line);
+    if app
+        .view
+        .mouse_position
+        .is_some_and(|at| composer_title::model_at(app, at))
+    {
+        f.buffer_mut()
+            .set_style(app.view.model_area, theme::link_hover_style());
+    }
+    caret
+}
+
+fn draw_box(app: &App, f: &mut Frame, area: Rect, title: Line<'static>) -> Option<Position> {
     // The chat input is usable as soon as the cached startup config is shown; it
     // buffers input locally while the app server is still loading (`Starting`),
     // so the caret and normal text show throughout. Only a failed start stays inert.
@@ -35,23 +39,14 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<Position> {
     // Queue selection locks the input read-only and hides the caret (ADR 0013),
     // but leaves the draft it holds styled like ordinary input.
     let selecting = app.queue.selected.is_some() && !app.queue.editing;
-    let profile = agents::displayed(app);
-    let bypass = agents::bypass_tool_permissions(app);
-    let (border, title_color) = safety_colors(agents::indicator_safety(profile, bypass));
-    let title = Line::from(vec![
-        Span::styled(
-            format!(" {} ", agents::indicator_agent_name(profile, bypass)),
-            Style::default().fg(title_color),
-        ),
-        Span::styled("─", Style::default().fg(border)),
-    ]);
+    let border = theme::border_style();
     // Reserve one column on the right for the chat input content: a 1-cell
     // scrollbar gutter (bar hidden), so text wraps and ends one column before
     // the edge. The top/bottom borders still
     // span the full width; only the inner content is inset.
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
-        .border_style(Style::default().fg(border))
+        .border_style(border)
         .padding(Padding::right(1))
         .title(title)
         .title_alignment(Alignment::Right);
@@ -71,7 +66,9 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<Position> {
     } else {
         theme::muted_style()
     };
-    let owns_keys = editable && !selecting && !app.subagents.list.focused;
+    // While searching, the bottom bar owns the caret and the composer previews the match.
+    let owns_keys =
+        editable && !selecting && !app.subagents.list.focused && app.reverse_search.is_none();
     let caret = (owns_keys && app.main_input_cursor_on()).then_some(body_off);
     let sel =
         crate::chat_input::selection_range(&app.chat_input.input, cursor, app.chat_input.anchor);
@@ -82,6 +79,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<Position> {
     } else {
         input_style
     };
+    let found = super::reverse_search::found(app);
 
     // A pasted block keeps its line breaks: the marker leads the first row and
     // continuation rows align under the text with a two-space gutter.
@@ -107,6 +105,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) -> Option<Position> {
                 input: input_style,
                 mention: mention_style,
                 mentions: row_mentions(mentions, row),
+                found: row_mentions(&found, row),
             };
             let row_hint = hint.filter(|_| row.end() == body.len());
             render_body_line(gutter, row, line_sel, caret_col, &styles, row_hint)
@@ -200,18 +199,14 @@ struct BodyStyles {
     input: Style,
     mention: Style,
     mentions: Vec<(usize, usize)>,
+    found: Vec<(usize, usize)>,
 }
 
 impl BodyStyles {
     fn at(&self, byte: usize) -> Style {
-        match self
-            .mentions
-            .iter()
-            .any(|&(lo, hi)| lo <= byte && byte < hi)
-        {
-            true => self.mention,
-            false => self.input,
-        }
+        let inside = |ranges: &[_]| ranges.iter().any(|&(lo, hi)| lo <= byte && byte < hi);
+        let base = [self.input, self.mention][usize::from(inside(&self.mentions))];
+        super::reverse_search::style(base, inside(&self.found))
     }
 }
 

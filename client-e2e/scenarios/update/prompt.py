@@ -35,8 +35,8 @@ env = {
 }
 
 # The harness's startup settle lands on the dialog's first frame. Right moves
-# to Continue, Enter dismisses the dialog (the settle then lands on the TUI's
-# own first marker), and "x" proves the session input is live.
+# to Continue, Enter dismisses the dialog (the TUI acks its fence once
+# settled), and "x" proves the session input is live.
 capture_startup = False
 timeline: Timeline = ["\x1b[C", "\r", "x"]
 

@@ -43,6 +43,7 @@ from vibe.app_server._session_peers import (
 )
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.vibe_schema import stored_tool_allowlist_patterns
 from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import BaseTool, BaseToolConfig
 from vibe.core.tools.builtins._shell_permission_analysis import redirect_writes
@@ -896,16 +897,20 @@ class UnifiedPermissionResolver:
             )
         if not patterns:
             return
-        update = self._config.config.build_tool_allowlist_update(
-            name,
-            patterns,
-            current_allowlist=self._tools.get_tool_config(name).allowlist,
+        stored = stored_tool_allowlist_patterns(name, patterns)
+        path = f"/tools/{name}/allowlist"
+        # Merge into the file's list, not this session's copy; unset means the default.
+        mutation = await self._config.mutate_field(
+            path,
+            lambda persisted: (
+                persisted
+                if set(stored) <= set(persisted)
+                else sorted({*persisted, *stored})
+            ),
+            default=type(self._tools.get_tool_config(name))().allowlist,
         )
-        if update is None:
-            return
-        await self._config.set_field_or_warn(
-            f"/tools/{name}/allowlist", update["tools"][name]["allowlist"]
-        )
+        if mutation.failures:
+            logger.warning("Failed to persist %s: %s", path, mutation.failures[0])
 
 
 __all__ = [

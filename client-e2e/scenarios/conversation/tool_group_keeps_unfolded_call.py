@@ -11,9 +11,6 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-settle_per_key = True
-
 _PROMPT = "run two commands"
 # The lone call's header row while the turn is still running.
 _UNFOLD = "\x1b[<0;1;11M\x1b[<0;1;11m"

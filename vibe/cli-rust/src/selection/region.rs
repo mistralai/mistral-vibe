@@ -17,13 +17,10 @@ pub enum ScrollTarget {
     Trust,
 }
 
-/// Stable identity for each concurrently painted selectable region. A toast
-/// carries its own id, so a selection stays with that toast while the rack
-/// shifts it and dies with it.
+/// Stable identity for each concurrently painted selectable region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegionId {
     Main,
-    Toast(u64),
     Loading,
     BottomApp,
 }
@@ -93,7 +90,6 @@ impl Region {
 pub fn get(app: &App, id: RegionId) -> Region {
     match id {
         RegionId::Main => app.view.selection_region,
-        RegionId::Toast(_) => app.view.toast_selection_region,
         RegionId::Loading => app.view.loading_selection_region,
         RegionId::BottomApp => app.view.bottom_app_selection_region,
     }
@@ -201,7 +197,7 @@ pub fn extract_document(app: &App) -> Option<String> {
 /// True when a press at `at` anchors a selection: inside the region and on a
 /// cell some widget owns, since bare padding anchors nothing. The
 /// chrome map belongs to its region: the transcript's padding and the
-/// bottom-app box's prefixes and scrollbars; a toast publishes only its text rows.
+/// bottom-app box's prefixes and scrollbars.
 pub fn selectable(app: &App, at: (u16, u16), owner: RegionId) -> bool {
     if !get(app, owner).contains(at) {
         return false;
@@ -249,13 +245,6 @@ pub fn extract(buf: &Buffer, spans: &[RowSpan]) -> String {
 pub fn folds(app: &App, id: RegionId) -> Folds {
     match id {
         RegionId::BottomApp => app.view.bottom_app_selection_folds.clone(),
-        RegionId::Toast(toast) => app
-            .view
-            .toast_folds
-            .iter()
-            .find(|(painted, _)| *painted == toast)
-            .map(|(_, folds)| folds.clone())
-            .unwrap_or_default(),
         RegionId::Main | RegionId::Loading => Folds::default(),
     }
 }

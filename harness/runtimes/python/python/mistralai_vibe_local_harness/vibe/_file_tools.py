@@ -9,8 +9,13 @@ from typing import Annotated, cast
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 from mistralai_vibe_local_harness.protocol import (
+    RustContentBlock,
+    RustEnabledFileSystem,
+    RustImageContentBlock,
     RustProtocolError,
+    RustReadFileSupport,
     RustRuntimeBuiltinToolCallAction,
+    RustTextContentBlock,
     RustToolFailedEvent,
     RustToolFailureResult,
     RustToolSucceededEvent,
@@ -25,6 +30,9 @@ from mistralai_vibe_local_harness.vibe._sandbox import (
 )
 from mistralai_vibe_local_harness.vibe._sandbox_helper import FileToolName
 
+FILE_SYSTEM = RustEnabledFileSystem(read_file=RustReadFileSupport(images="native"))
+"""The file system tools of a Vibe Session: ``read_file`` returns an image file
+as the image itself, which Core shows to a model that reads images."""
 DEFAULT_LINE_LIMIT = _sandbox_helper.DEFAULT_LINE_LIMIT
 MAX_READ_BYTES = _sandbox_helper.MAX_READ_BYTES
 MAX_WRITE_BYTES = _sandbox_helper.MAX_WRITE_BYTES
@@ -109,12 +117,27 @@ class EditAnnotations(BaseModel):
     previous_content: str | None = None
 
 
+class ReadFileImage(BaseModel):
+    data: str
+    mime_type: str
+
+
 class ReadFileResponse(BaseModel):
     result: ReadFileResult
     annotations: None = None
+    image: ReadFileImage | None = None
 
     def meta(self) -> dict[str, JsonValue] | None:
         return None
+
+    def content(self) -> list[RustContentBlock]:
+        """What the model reads: the image a read returned, after the result."""
+        if self.image is None:
+            return []
+        return [
+            RustTextContentBlock(text=self.result.model_dump_json()),
+            RustImageContentBlock(data=self.image.data, mime_type=self.image.mime_type),
+        ]
 
 
 class WriteFileResponse(BaseModel):
@@ -127,6 +150,9 @@ class WriteFileResponse(BaseModel):
         previous = WriteFileAnnotations(previous_content=self.annotations)
         return {WRITE_FILE_ANNOTATION_KEY: previous.model_dump(mode="json")}
 
+    def content(self) -> list[RustContentBlock]:
+        return []
+
 
 class EditResponse(BaseModel):
     result: EditResult
@@ -138,6 +164,9 @@ class EditResponse(BaseModel):
             blocks=self.annotations, previous_content=self.previous_content
         )
         return {SEARCH_REPLACE_ANNOTATION_KEY: previews.model_dump(mode="json")}
+
+    def content(self) -> list[RustContentBlock]:
+        return []
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,7 +218,10 @@ async def execute_file_tool(
     except (OSError, UnicodeError, ValueError) as exc:
         return _failed(action, str(exc))
     return _succeeded(
-        action, response.result.model_dump(mode="json"), meta=response.meta()
+        action,
+        response.result.model_dump(mode="json"),
+        content=response.content(),
+        meta=response.meta(),
     )
 
 
@@ -341,10 +373,12 @@ def _succeeded(
     action: RustRuntimeBuiltinToolCallAction,
     structured_content: dict[str, JsonValue],
     *,
+    content: list[RustContentBlock],
     meta: dict[str, JsonValue] | None = None,
 ) -> RustToolSucceededEvent:
     result: dict[str, JsonValue] = {
-        "structured_content": cast(JsonValue, structured_content)
+        "content": [block.model_dump(mode="json") for block in content],
+        "structured_content": cast(JsonValue, structured_content),
     }
     if meta is not None:
         result["_meta"] = cast(JsonValue, meta)
@@ -369,4 +403,4 @@ def _failed(
     )
 
 
-__all__ = ["execute_file_tool"]
+__all__ = ["FILE_SYSTEM", "execute_file_tool"]

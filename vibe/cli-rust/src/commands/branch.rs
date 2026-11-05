@@ -12,7 +12,7 @@ pub(super) fn branch_session(app: &mut App, client: &Arc<Client>) {
         return;
     };
     let client = client.clone();
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let params = SessionForkParams {
             source_session_id: session_id.clone(),
             entry_id: None,

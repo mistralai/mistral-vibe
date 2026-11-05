@@ -1,6 +1,6 @@
 //! Approval keys: j/k wrap like the arrows, and the mount grace period swallows decisions only.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::KeyCode;
 use serde_json::json;
@@ -49,7 +49,7 @@ async fn j_and_k_move_like_the_arrows_and_wrap() {
 #[tokio::test]
 async fn decisions_are_swallowed_within_the_grace_period_but_navigation_works() {
     let (mut app, mut answers) = open_approval();
-    app.approval.mount_time = Some(Instant::now());
+    app.approval.mount_time = Some(vibe_rs::clock::now());
 
     for code in [
         KeyCode::Char('y'),

@@ -21,6 +21,8 @@ from vibe.core.git.errors import (
 )
 from vibe.core.git.remote import to_https_url
 from vibe.core.git.repo import GitRepo
+from vibe.core.platform_auth import PlatformCredentialFactory
+from vibe.core.platform_auth._mistral import mistral_credentials
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.vibe_code_project.client import VibeCodeProjectApiError
 from vibe.core.vibe_code_project.picker_service import (
@@ -222,6 +224,10 @@ def _report_store_delete_failure(exc: Exception, boundary_method: str) -> None:
 
 class ProjectLinksController:
     """Stateless projectLinks operations, resolved per absolute `root_path`."""
+
+    def __init__(self, credentials: PlatformCredentialFactory | None = None) -> None:
+        # The connection's selection; the API key outside an app server.
+        self._credentials = credentials
 
     async def list_links(self) -> dict[str, Any]:
         # Local-link metadata is local state, so listing it does not depend on a
@@ -558,12 +564,14 @@ class ProjectLinksController:
 
     async def _build_service(self, repo_root: Path) -> VibeCodeProjectPickerService:
         config = await self._load_config()
-        api_key = config.resolve_mistral_api_key()
-        if not api_key:
+        mistral = await asyncio.to_thread(
+            mistral_credentials, config, self._credentials
+        )
+        if mistral is None:
             raise ProjectLinksAuthError("Mistral API key not set.")
         return VibeCodeProjectPickerService(
             base_url=config.vibe_code_sessions_base_url,
-            api_key=api_key,
+            credentials=mistral.credentials,
             repo_root=repo_root,
             project_store=VibeProjectsStore(),
             timeout=config.api_timeout,

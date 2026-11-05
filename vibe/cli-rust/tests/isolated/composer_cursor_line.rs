@@ -11,7 +11,7 @@ const WIDTH: u16 = 40;
 /// A cell on the caret's row, past the typed text and the caret block.
 const TAIL: (u16, u16) = (WIDTH - 3, 1);
 
-fn tail_bg(app: &App) -> Color {
+fn tail_bg(app: &mut App) -> Color {
     let mut terminal = Terminal::new(TestBackend::new(WIDTH, 3)).expect("terminal");
     terminal
         .draw(|f| {
@@ -32,9 +32,9 @@ fn the_cursor_line_background_does_not_blink_with_the_caret() {
 
     for phase in [true, false, true] {
         app.view.cursor_on = phase;
-        assert_eq!(tail_bg(&app), line_bg, "blink phase {phase}");
+        assert_eq!(tail_bg(&mut app), line_bg, "blink phase {phase}");
     }
 
     app.set_app_focus(false);
-    assert_ne!(tail_bg(&app), line_bg);
+    assert_ne!(tail_bg(&mut app), line_bg);
 }

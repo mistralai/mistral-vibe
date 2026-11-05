@@ -1,7 +1,6 @@
 //! A digit picks the numbered question row it names.
 
 use std::collections::BTreeSet;
-use std::time::Instant;
 
 use crossterm::event::KeyCode;
 use vibe_rs::app::App;
@@ -114,7 +113,7 @@ fn the_submit_row_has_no_digit() {
 #[test]
 fn a_digit_is_consumed_without_acting_within_the_grace_period() {
     let mut app = open(false);
-    app.question_app.mount_time = Some(Instant::now());
+    app.question_app.mount_time = Some(vibe_rs::clock::now());
 
     press(&mut app, KeyCode::Char('2'));
 

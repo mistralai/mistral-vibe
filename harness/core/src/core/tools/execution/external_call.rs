@@ -1,8 +1,8 @@
 use crate::core::action_id;
 use crate::core::features::permissions::GrantKey;
 use crate::core::features::programmatic_tool_calling::ProgrammaticName;
-use crate::core::hooks::{HookCall, HookPoint, hook_action_id};
-use crate::core::step_protocol::Action;
+use crate::core::hooks::{HookCall, HookPoint, hook_action_id, post_tool_call_warning};
+use crate::core::step_protocol::{Action, Observation};
 use crate::core::tools::external::ExternalToolCall;
 use crate::core::wire::tool::ToolResult;
 
@@ -159,6 +159,24 @@ impl PendingExternalCall {
             ExternalCallStage::AwaitingPostHook { .. } => Some(HookSide::Post),
             _ => None,
         }
+    }
+
+    /// The warning for the result that the awaited post-tool-call hook
+    /// returned, if that hook left the result's two views disagreeing.
+    pub(crate) fn post_hook_warning(
+        &self,
+        hooked: &ToolResult,
+        turn_id: &str,
+    ) -> Option<Observation> {
+        let ExternalCallStage::AwaitingPostHook {
+            hook_binding_ids,
+            result,
+            ..
+        } = &self.stage
+        else {
+            return None;
+        };
+        post_tool_call_warning(turn_id, &self.call, hook_binding_ids, result, hooked)
     }
 
     pub(crate) fn awaits_tool(&self, action_id: &str) -> bool {

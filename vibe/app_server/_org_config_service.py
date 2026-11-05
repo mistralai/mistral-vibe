@@ -26,11 +26,15 @@ from vibe.core.config.admin_config import (
 from vibe.core.config.managed_config_cache import (
     MANAGED_CONFIG_CACHE_TTL_SECONDS,
     load_cached_managed_config_record,
-    managed_config_cache_key,
     store_cached_managed_config,
 )
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.telemetry.send import credential_cache_key_is_current
+from vibe.core.platform_auth import (
+    CachedPrincipal,
+    PlatformCredentialFactory,
+    PlatformCredentialProvider,
+)
+from vibe.core.platform_auth._mistral import is_user_principal, mistral_credentials
 from vibe.core.utils.remote_cache import (
     Cached,
     CacheStore,
@@ -39,7 +43,6 @@ from vibe.core.utils.remote_cache import (
     RemoteCache,
     RemoteFetchFailedError,
 )
-from vibe.utils.api_keys import resolve_api_key
 
 ORG_CONFIG_REFRESH_AFTER_S: Final = 10 * 60
 
@@ -51,22 +54,24 @@ ORG_CONFIG_POLICY: Final = RefreshPolicy(
     fetch_timeout_s=MANAGED_CONFIG_FETCH_BUDGET,
 )
 
-FetchManagedConfig = Callable[[str, str], Awaitable[ManagedConfigResult]]
+FetchManagedConfig = Callable[
+    [str, PlatformCredentialProvider], Awaitable[ManagedConfigResult]
+]
 
 
 @dataclass(frozen=True, slots=True)
 class OrgConfigKey:
-    """One user's org config: the hashed API key it is cached under, on the
-    endpoint it is fetched from.
+    """One user's org config: the credential's principal it is cached under,
+    on the endpoint it is fetched from.
 
     The endpoint is part of the key: account reconciliation can move it
     mid-process, and the policy held for the old one is not the new one's.
-    The raw API key is carried for the fetch, never compared.
+    The credential is carried for the fetch, never compared.
     """
 
     cache_key: str
     base_url: str
-    api_key: str = field(compare=False, repr=False)
+    credentials: PlatformCredentialProvider = field(compare=False, repr=False)
 
 
 class OrgConfigFetchError(Exception):
@@ -86,7 +91,11 @@ class DiskOrgConfigStore:
         return Cached(toml_text, stored_at=stored_at)
 
     def save(self, key: OrgConfigKey, entry: Cached[str]) -> None:
-        if not credential_cache_key_is_current(key.cache_key):
+        if is_user_principal(key.cache_key) and (
+            not isinstance(key.credentials, CachedPrincipal)
+            or key.credentials.cached_principal() != key.cache_key
+        ):
+            # A sign-in during the fetch makes it another account's.
             return
         store_cached_managed_config(
             _disk_key(key), entry.value, stored_at=int(entry.stored_at)
@@ -124,24 +133,26 @@ class OrgConfigService:
     @staticmethod
     def key_for(
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
+        credentials: PlatformCredentialFactory | None = None,
     ) -> OrgConfigKey | None:
         """The key this config's org config is held under.
 
         Read it before any org config applies: the org config can change the
         provider and endpoint it is made of.
         """
-        return OrgConfigService.key_for_config(orchestrator.config)
+        return OrgConfigService.key_for_config(orchestrator.config, credentials)
 
     @staticmethod
-    def key_for_config(config: VibeConfigSchema) -> OrgConfigKey | None:
-        cache_key = managed_config_cache_key(config)
-        if cache_key is None:
+    def key_for_config(
+        config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+    ) -> OrgConfigKey | None:
+        mistral = mistral_credentials(config, credentials)
+        cache_key = mistral.cached_principal() if mistral is not None else None
+        if mistral is None or cache_key is None:
             return None
-        provider = config.get_mistral_provider()
-        api_key = resolve_api_key(provider.api_key_env_var) if provider else None
-        if not api_key:
-            return None
-        return OrgConfigKey(cache_key, base_url=config.vibe_base_url, api_key=api_key)
+        return OrgConfigKey(
+            cache_key, base_url=config.vibe_base_url, credentials=mistral.credentials
+        )
 
     async def ensure(self, key: OrgConfigKey | None) -> AdminConfigApplyResult | None:
         """Make sure a copy is held before a session is built from it.
@@ -195,7 +206,7 @@ class OrgConfigService:
         await self._cache.close()
 
     async def _fetch(self, key: OrgConfigKey) -> str:
-        fetched = await self._fetch_managed_config(key.base_url, key.api_key)
+        fetched = await self._fetch_managed_config(key.base_url, key.credentials)
         if fetched.error is not None:
             raise OrgConfigFetchError(AdminConfigOutcome.FETCH_FAILED, fetched.error)
         managed = fetched.config

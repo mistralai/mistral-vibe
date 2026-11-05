@@ -116,7 +116,7 @@ expression: reviewable(snapshot)
           "",
           "### Available tool functions",
           "",
-          "Tool functions are available under `tools.<group>.<function>`; no imports needed.",
+          "Tool functions are available under `tools.<group>.<function>`; no imports needed. A tool that declares no group lives in the `client` group, so it is called as `tools.client.<function>`.",
           "",
           "Before calling an unfamiliar tool function, use `search_tool_functions` to load details for the exact function name. Use only documented function paths and argument shapes.",
           "",
@@ -517,7 +517,7 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "list_configs"
       },
-      "description": "List available named agent configurations, sorted by name. Omit config_name when spawning a generic child that inherits your own configuration.",
+      "description": "List available named agent configurations, sorted by name. Omit config_name to spawn a generic child: it has your configuration but not your instructions, so give it instructions.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
@@ -668,32 +668,63 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "spawn"
       },
-      "description": "Create an independent child with fresh conversation and send its first message. This does not block or wait for the agent to complete its instruction. name is a single path segment unique for the lifetime of this Session.",
+      "description": "Create an independent child with fresh conversation and send its first message. This does not block or wait for the agent to complete its instruction. name is a single path segment unique for the lifetime of this Session. A child without config_name does not get your instructions: give it instructions written for its task.",
       "input_schema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "name": {
-            "type": "string",
-            "description": "The child's name: one path segment, without `/`, other than `.` or `..`. The child's agent path is your path followed by `/name`.",
-            "minLength": 1,
-            "pattern": "^(?!\\.{1,2}$)[^/]+$"
-          },
-          "message": {
-            "type": "string",
-            "minLength": 1
-          },
-          "config_name": {
-            "type": [
-              "string",
-              "null"
+        "description": "A generic child, which needs `instructions`, or a child from `config_name`, which has its own.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "The child's name: one path segment, without `/`, other than `.` or `..`. The child's agent path is your path followed by `/name`.",
+                "minLength": 1,
+                "pattern": "^(?!\\.{1,2}$)[^/]+$"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "instructions": {
+                "type": "string",
+                "description": "The child's instructions, written for its task: it does not get yours.",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "name",
+              "message",
+              "instructions"
             ],
-            "minLength": 1
+            "description": "A generic child: it has your configuration but not your instructions."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "The child's name: one path segment, without `/`, other than `.` or `..`. The child's agent path is your path followed by `/name`.",
+                "minLength": 1,
+                "pattern": "^(?!\\.{1,2}$)[^/]+$"
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1
+              },
+              "config_name": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "name",
+              "message",
+              "config_name"
+            ],
+            "description": "A child from a named configuration: it has that configuration's instructions."
           }
-        },
-        "required": [
-          "name",
-          "message"
         ]
       },
       "output_schema": {
@@ -719,7 +750,7 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "send_message"
       },
-      "description": "Send a message to another agent by agent_path: absolute, such as /root/researcher, or relative to you, such as researcher for a direct child.",
+      "description": "Send a message to another agent by agent_path: absolute, such as /root/researcher, or relative to you, such as researcher for a direct child. A message to an agent whose Turn has ended starts a new Turn only when you may wake it: by default, only when you are its parent. Otherwise the result is `queued`: the agent reads the message only in its next Turn, so do not wait for its reply.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
@@ -751,7 +782,26 @@ expression: reviewable(snapshot)
             "required": [
               "type"
             ],
-            "additionalProperties": false
+            "additionalProperties": false,
+            "description": "The recipient received the message: it starts or joins the recipient's Turn."
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "type": "string",
+                "description": "Why the message started no Turn."
+              },
+              "type": {
+                "const": "queued"
+              }
+            },
+            "required": [
+              "type",
+              "reason"
+            ],
+            "description": "The recipient is idle and this message cannot start its Turn. The message waits in its history until something else starts its next Turn, so no reply comes from it."
           }
         ]
       }

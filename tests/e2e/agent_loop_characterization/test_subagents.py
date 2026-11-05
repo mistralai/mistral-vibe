@@ -32,14 +32,15 @@ PARENT_ANSWER = "Parent used the subagent result."
 # The unified runtime exposes subagents as the programmatic ``tools.agents``
 # namespace, called from ``run_typescript``. There is no direct ``task`` tool
 # and no declared builtin agent types: a bare spawn inherits the parent's
-# prompt and tools (see ``workspace_agent_types``). Spawn admits the child's
-# first message and returns at once; the child's result is pushed to the
-# parent as a notification. ``wait`` is a direct tool, not a programmatic one,
+# tools and runs the instructions it gives (see ``workspace_agent_types``).
+# Spawn admits the child's first message and returns at once; the child's
+# result is pushed to the parent as a notification. ``wait`` is a direct tool, not a programmatic one,
 # so this program lists its children until this one is done, which keeps the
 # parent's Turn open for that notification. The ``wait`` variant is below.
 SPAWN_CODE = (
     "async function main() {\n"
     f"  await tools.agents.spawn({{ name: '{SUBAGENT_NAME}', "
+    "instructions: 'Follow the message.', "
     f"message: '{SUBAGENT_SPAWN_MESSAGE}' }});\n"
     "  let child;\n"
     "  for (let attempt = 0; attempt < 100; attempt++) {\n"
@@ -154,6 +155,7 @@ CHILD_PAUSE_CALL_ID = "call_child_pause"
 SPAWN_ONLY_CODE = (
     "async function main() {\n"
     f"  return await tools.agents.spawn({{ name: '{SUBAGENT_NAME}', "
+    "instructions: 'Follow the message.', "
     f"message: '{SUBAGENT_SPAWN_MESSAGE}' }});\n"
     "}"
 )

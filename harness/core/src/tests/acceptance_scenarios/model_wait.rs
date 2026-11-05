@@ -37,7 +37,7 @@ fn programmatic_wait_cannot_start_a_waiting_effect() {
         run_typescript_completion(action_id(&completion), "program", source),
         running("programmatic-wait")
             .dispatch(llm_call(1))
-            .observe(tool_execution_started("programmatic-wait", "program"))
+            .observe(core_tool_execution_started("programmatic-wait", "program"))
             .observe_tool_execution_finished(
                 "program",
                 run_typescript_success(json!("not programmatic")),

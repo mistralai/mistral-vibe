@@ -7,6 +7,11 @@ import types
 import httpx2
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from vibe.core.platform_auth import (
+    PlatformCredentialProvider,
+    PlatformCredentialUnavailable,
+)
+from vibe.core.platform_auth._mistral import credential_request
 from vibe.core.vibe_code_project.selection import ProjectRepository, VibeCodeProject
 from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
@@ -69,13 +74,13 @@ class VibeCodeProjectClient:
     def __init__(
         self,
         base_url: str,
-        api_key: str,
+        credentials: PlatformCredentialProvider,
         *,
         client: httpx2.AsyncClient | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
+        self._credentials = credentials
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
@@ -106,11 +111,29 @@ class VibeCodeProjectClient:
             self._owns_client = True
         return self._client
 
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str | int] | None = None,
+        json: object = None,
+    ) -> httpx2.Response:
+        try:
+            return await credential_request(
+                self._credentials,
+                method,
+                f"{self._base_url}{path}",
+                client=self._http_client,
+                headers={"Content-Type": "application/json"},
+                params=params,
+                json=json,
+            )
+        except PlatformCredentialUnavailable as e:
+            # "API key" keeps it an auth failure for the projectLinks boundary.
+            raise VibeCodeProjectApiError(
+                f"Vibe Code Web API key or sign-in is {e.required.reason}."
+            ) from e
 
     async def list_projects(
         self, cursor: str | None = None, limit: int | None = None
@@ -121,10 +144,8 @@ class VibeCodeProjectClient:
         if limit is not None:
             params["limit"] = limit
         try:
-            response = await self._http_client.get(
-                f"{self._base_url}/api/v1/code/projects",
-                headers=self._headers(),
-                params=params or None,
+            response = await self._request(
+                "GET", "/api/v1/code/projects", params=params or None
             )
         except httpx2.RequestError as e:
             raise VibeCodeProjectApiError(
@@ -163,9 +184,9 @@ class VibeCodeProjectClient:
             else []
         )
         try:
-            response = await self._http_client.post(
-                f"{self._base_url}/api/v1/code/projects",
-                headers=self._headers(),
+            response = await self._request(
+                "POST",
+                "/api/v1/code/projects",
                 json={"name": name, "repositories": repositories},
             )
         except httpx2.RequestError as e:

@@ -6,7 +6,6 @@ from e2e.app_server.scenario import Timeline
 
 capture_startup = False
 capture_steps = {1, 2, 4}
-settle_per_key = True
 expected_clipboard = "@data/fixture.json ready"
 
 timeline: Timeline = ["@data", "\t", "fixture.j", "\r", "ready\x1b[18~\x19"]

@@ -192,8 +192,7 @@ async fn browser_sign_in_walks_every_step_to_completion() {
         rx.recv().await,
         Some(SignInEvent::StatusChanged(SignInStatus::Exchanging))
     ));
-    // The success delay shows "Sign-in complete" before the final
-    // event: the status first, then the completed key.
+    // The status first, then the completed key (the wizard owns the success dwell).
     assert!(matches!(
         rx.recv().await,
         Some(SignInEvent::StatusChanged(SignInStatus::Completed))

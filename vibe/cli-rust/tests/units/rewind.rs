@@ -1,8 +1,7 @@
 //! Rewind prompt navigation edges: the last prompt, local command rows and a running turn.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crossterm::event::KeyCode;
 use serde_json::{json, Value};
@@ -74,10 +73,6 @@ impl Harness {
         rewind::handle_key(&mut self.app, &self.client, key(code));
     }
 
-    fn pending(&self) -> u32 {
-        self.app.pending_commits.load(Ordering::Relaxed)
-    }
-
     /// Receive the `session/rewind/read` the last key sent and apply its answer;
     /// returns the requested entry id.
     async fn answer_read(&mut self) -> String {
@@ -116,7 +111,6 @@ async fn left_and_right_step_through_the_user_prompts() {
     assert_eq!(h.answer_read().await, "u1");
     assert_eq!(h.app.rewind.entry_id.as_deref(), Some("u1"));
     h.rewind_key(KeyCode::Right);
-    assert_eq!(h.pending(), 0, "Right on the last prompt reads nothing");
     assert_eq!(h.app.rewind.entry_id.as_deref(), Some("u1"));
 }
 
@@ -141,10 +135,9 @@ async fn rewind_skips_local_command_rows() {
 async fn rewind_does_not_open_while_a_turn_is_running() {
     let mut h = harness(false);
     h.app.session.status = Status::Generating {
-        since: Instant::now(),
+        since: vibe_rs::clock::now(),
     };
     rewind::start(&mut h.app, &h.client);
-    assert_eq!(h.pending(), 0, "no rewind read is started");
     assert!(!h.app.rewind.open);
     assert_eq!(h.app.focus(), Focus::Composer);
 }

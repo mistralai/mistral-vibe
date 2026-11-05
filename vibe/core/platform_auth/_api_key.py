@@ -12,14 +12,17 @@ from vibe.core.platform_auth._credentials_port import (
     PlatformCredentialTarget,
 )
 from vibe.utils.api_keys import resolve_api_key_with_origin
-from vibe.utils.oidc_marker import is_oidc_authorization
+from vibe.utils.oidc_marker import is_oidc_authorization, is_oidc_marker
 
 
 class ApiKeyPlatformCredentialProvider:
     """Resolve the current platform API key without freezing it into a client."""
 
-    def __init__(self, env_var: str) -> None:
+    def __init__(self, env_var: str, *, cli_oidc: bool = True) -> None:
         self._env_var = env_var
+        # Whether the CLI OIDC marker may stand for the CLI user's session. A
+        # non-CLI connection never borrows it, even when the flag is set.
+        self._cli_oidc = cli_oidc
         self._fixed_api_key: str | None = None
         self._rejected: dict[PlatformCredentialTarget, PlatformCredentialIdentity] = {}
         self._lock = asyncio.Lock()
@@ -29,6 +32,18 @@ class ApiKeyPlatformCredentialProvider:
         provider = cls("")
         provider._fixed_api_key = api_key
         return provider
+
+    def pinned(self) -> ApiKeyPlatformCredentialProvider:
+        """This provider fixed to the key it resolves now: for a caller that
+        keys state on the key and must fetch with that same key later, whatever
+        the environment holds by then.
+        """
+        if self._fixed_api_key is not None:
+            return self
+        resolved = resolve_api_key_with_origin(self._env_var)
+        return ApiKeyPlatformCredentialProvider.from_api_key(
+            resolved[0] if resolved is not None else ""
+        )
 
     async def resolve(
         self, target: PlatformCredentialTarget
@@ -82,12 +97,26 @@ class ApiKeyPlatformCredentialProvider:
             return PlatformCredentialRequired(reason="reauthentication_required")
         revision = sha256(repr(sorted(headers.items())).encode()).hexdigest()
         return PlatformCredentialSnapshot(
-            kind=snapshot.kind,
+            kind="oidc_id_token",
             headers=headers,
             cache_namespace="cli-oidc",
             revision=revision,
             source="the CLI OIDC session",
+            principal=await asyncio.to_thread(_marker_principal),
         )
+
+    def has_credential(self) -> bool:
+        return self._resolve_snapshot() is not None
+
+    def cached_principal(self) -> str | None:
+        snapshot = self._resolve_snapshot()
+        if snapshot is None:
+            return None
+        if snapshot.principal is None and is_oidc_authorization(
+            snapshot.headers.get("Authorization")
+        ):
+            return _marker_principal()
+        return snapshot.principal
 
     def _resolve_snapshot(self) -> PlatformCredentialSnapshot | None:
         if self._fixed_api_key is not None:
@@ -98,7 +127,14 @@ class ApiKeyPlatformCredentialProvider:
                 cache_namespace="api_key:fixed",
                 source="the provided credential",
             )
-        return _resolve_api_key_snapshot(self._env_var)
+        snapshot = _resolve_api_key_snapshot(self._env_var)
+        if (
+            snapshot is not None
+            and not self._cli_oidc
+            and is_oidc_authorization(snapshot.headers.get("Authorization"))
+        ):
+            return None
+        return snapshot
 
 
 def _resolve_api_key_snapshot(env_var: str) -> PlatformCredentialSnapshot | None:
@@ -120,7 +156,23 @@ def _snapshot(
         cache_namespace=cache_namespace,
         revision=f"api_key:{sha256(api_key.encode()).hexdigest()}",
         source=source,
+        # The CLI OIDC marker is shared by every account: it names nobody.
+        principal=None if is_oidc_marker(api_key) else api_key_principal(api_key),
     )
 
 
-__all__ = ["ApiKeyPlatformCredentialProvider"]
+def _marker_principal() -> str | None:
+    # Transitional: the marker resolves the stored CLI session per request.
+    from vibe.setup.auth._oidc_runtime import stored_oidc_cache_key
+
+    return stored_oidc_cache_key()
+
+
+def api_key_principal(api_key: str) -> str:
+    """The anonymous per-key cache identity the on-disk caches already use
+    (``vibe.core.experiments.manager.hash_api_key``).
+    """
+    return sha256(api_key.encode("utf-8")).hexdigest()[:32]
+
+
+__all__ = ["ApiKeyPlatformCredentialProvider", "api_key_principal"]

@@ -34,7 +34,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from typing import Any
 
-    from mistralai_vibe_local_harness.vibe import UtilityReply
+    from mistralai_vibe_local_harness.vibe import (
+        ProviderCredentialProvider,
+        UtilityReply,
+    )
     from vibe.app_server.models import (
         ContentBlock,
         ImageAttachment,
@@ -64,11 +67,14 @@ class SessionImageDescriber:
         notice: Callable[[str], None],
         session_id: Callable[[], str | None],
         record_event: Callable[[str, dict[str, Any]], None],
+        credentials: Callable[[str], ProviderCredentialProvider] | None = None,
     ) -> None:
         self._config = config
         self._notice = notice
         self._session_id = session_id
         self._record_event = record_event
+        # The session's credential for a provider by name; None reads the key.
+        self._credentials = credentials
         self._describer = ImageDescriber(self._complete)
 
     async def described_blocks(self, blocks: list[ContentBlock]) -> list[ContentBlock]:
@@ -172,12 +178,14 @@ class SessionImageDescriber:
         self, *, model: ModelConfig, messages: Sequence[LLMMessage]
     ) -> UtilityReply:
         config = self._config()
+        provider = config.get_provider_for_model(model)
         return await complete_vision(
             model=model,
-            provider=config.get_provider_for_model(model),
+            provider=provider,
             messages=messages,
             transport=CompletionTransport.from_config(config),
             session_id=self._session_id(),
+            credentials=self._credentials(provider.name) if self._credentials else None,
         )
 
 

@@ -10,7 +10,7 @@ use crate::server::Client;
 use crate::{
     agents, approval, connector_auth, debug_console, feedback, log_level_picker, mcp, mcp_oauth,
     message_queue, model_picker, older_history, paste_image, question_app, resume_picker, rewind,
-    subagents, theme_picker, thinking_picker, turn_summary,
+    subagents, theme_picker, thinking_picker, turn_summary, usage_gauge,
 };
 
 /// Room for every answer in flight at once; senders await rather than drop.
@@ -51,6 +51,7 @@ ui_events! {
     Subagents(subagents::Event),
     OlderHistory(older_history::Event),
     DebugConsole(debug_console::Event),
+    Account(usage_gauge::AccountRead),
 }
 
 /// Run `task` off the main thread and hand its answer back, holding the app busy until it lands.
@@ -59,15 +60,11 @@ where
     E: Into<UiEvent> + Send + 'static,
 {
     let tx = app.events.clone();
-    let pending = app.commit_started();
-    tokio::spawn(async move { crate::input::deliver(tx, task.await, &pending).await });
+    crate::work::spawn(async move { crate::input::deliver(tx, task.await).await });
 }
 
-/// Apply one answer on the main thread, first releasing the commit its sender claimed.
+/// Apply one answer on the main thread.
 pub fn apply(app: &mut App, client: &Arc<Client>, event: UiEvent) {
-    if claims_commit(&event) {
-        app.commit_finished();
-    }
     match event {
         UiEvent::Theme(event) => theme_picker::apply_event(app, event),
         UiEvent::Model(event) => model_picker::apply_event(app, event),
@@ -92,13 +89,6 @@ pub fn apply(app: &mut App, client: &Arc<Client>, event: UiEvent) {
         UiEvent::Subagents(event) => subagents::apply_event(app, event),
         UiEvent::OlderHistory(event) => older_history::apply_event(app, event),
         UiEvent::DebugConsole(event) => debug_console::apply_event(app, client, event),
+        UiEvent::Account(read) => usage_gauge::apply(app, read),
     }
-}
-
-/// Narration and debug-console polls are the only answers sent without claiming a commit.
-fn claims_commit(event: &UiEvent) -> bool {
-    !matches!(
-        event,
-        UiEvent::Narrator(_) | UiEvent::DebugConsole(debug_console::Event::Polled(..))
-    )
 }

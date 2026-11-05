@@ -7,7 +7,6 @@ from e2e.app_server.scenario import Timeline
 
 capture_startup = False
 capture_steps = {2, 3, 4}
-settle_per_key = True
 expected_clipboard = "read @README.md and [Image #1] "
 
 timeline: Timeline = [

@@ -40,6 +40,7 @@ from vibe.app_server.transport import memory_transport_pair
 from vibe.utils.tool_presentation import ToolEffectKind
 
 
+@pytest.mark.both_paths
 @pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
 @pytest.mark.asyncio
 async def test_manual_shell_command_streams_one_effect_entry_to_the_timeline(
@@ -68,6 +69,7 @@ async def test_manual_shell_command_streams_one_effect_entry_to_the_timeline(
     assert any(entry.id == final.id for entry in backend_contract_session.history)
 
 
+@pytest.mark.both_paths
 @pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
 @pytest.mark.asyncio
 async def test_manual_shell_command_injects_its_output_as_model_context(
@@ -94,6 +96,7 @@ async def test_manual_shell_command_injects_its_output_as_model_context(
     assert "hello from the shell" in sent
 
 
+@pytest.mark.one_path
 @pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
 @pytest.mark.asyncio
 async def test_manual_shell_command_reports_the_exit_code_of_a_failure(
@@ -223,6 +226,7 @@ async def _resume_on_a_new_host(
     return session, connection
 
 
+@pytest.mark.both_paths
 @pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
 @pytest.mark.asyncio
 async def test_manual_shell_command_survives_a_new_host(

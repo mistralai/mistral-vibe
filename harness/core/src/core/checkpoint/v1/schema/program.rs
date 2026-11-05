@@ -149,6 +149,7 @@ impl CheckpointExternalTool {
                 group_name,
                 tool_name,
                 arguments,
+                ..
             } => Self::Provided {
                 group_name: group_name.clone(),
                 tool_name: tool_name.clone(),
@@ -171,6 +172,7 @@ impl CheckpointExternalTool {
             } => ExternalTool::Provided {
                 group_name,
                 tool_name,
+                invocation_name,
                 arguments,
             },
         }

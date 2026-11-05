@@ -24,4 +24,4 @@ screen_contains = (
     "Narrator (experimental): Off",
 )
 screen_excludes = ("Voice capture is not available",)
-timeline: Timeline = ["/voice\r", "\rj ", "\x1b", "\x12", "/voice\r"]
+timeline: Timeline = ["/voice\r", "\rj ", "\x1b", "\x14", "/voice\r"]

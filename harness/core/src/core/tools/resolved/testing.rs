@@ -35,6 +35,7 @@ where
                     "additionalProperties": false
                 })),
                 exposure: crate::core::config::ProvidedToolExposure::Programmatic,
+                direct_name: None,
             })
             .collect(),
     }

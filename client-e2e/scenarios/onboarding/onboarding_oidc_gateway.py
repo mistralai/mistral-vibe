@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Action, Timeline
+from e2e.app_server.scenario import Action, Timeline, advance
 
 client_args = ("--setup",)
 capture_startup = False
@@ -40,4 +40,4 @@ handshake = {
 expected_actions = [Action("open_url", _AUTHORIZATION_URL)]
 screen_excludes = ("Paste API key",)
 
-timeline: Timeline = ["\r", "\x1b[B", "\r", "\r", "\r"]
+timeline: Timeline = ["\r", "\x1b[B", "\r", "\r", "\r", advance(2000)]

@@ -9,6 +9,7 @@ use vibe_rs::app::App;
 use vibe_rs::resume_picker::{self, Event, Session};
 use vibe_rs::server::{request_error, Client, Incoming, RequestFailure};
 
+use crate::feedback_support::errors;
 use crate::support::{message, messages, settle};
 
 const CURRENT: &str = "11111111-current";
@@ -72,7 +73,7 @@ fn row(role: &str, text: &str) -> (String, String) {
 }
 
 #[tokio::test]
-async fn a_failed_delete_keeps_the_row_and_toasts_the_error() {
+async fn a_failed_delete_keeps_the_row_and_reports_the_error() {
     let mut picker = Picker::open(&[SAVED, CURRENT]);
     picker.press(KeyCode::Up);
     picker.press(KeyCode::Char('d'));
@@ -86,14 +87,10 @@ async fn a_failed_delete_keeps_the_row_and_toasts_the_error() {
 
     assert!(picker.app.resume_picker.open);
     assert!(picker.app.resume_picker.deleting.is_none());
-    let toasts: Vec<&str> = picker
-        .app
-        .overlays
-        .toasts
-        .iter()
-        .map(|toast| toast.text.as_str())
-        .collect();
-    assert!(toasts.contains(&"Failed to delete session: Session store unavailable"));
+    assert_eq!(
+        errors(&picker.app),
+        ["Failed to delete session: Session store unavailable"]
+    );
     let ids: Vec<&str> = picker
         .app
         .resume_picker
@@ -165,7 +162,7 @@ async fn the_current_session_is_never_deleted() {
 }
 
 /// `Client::request` wraps failures as `"{method} failed"` context over the
-/// `RequestFailure`; the delete toast must carry the server's own message.
+/// `RequestFailure`; the delete error must carry the server's own message.
 #[test]
 fn a_delete_failure_carries_the_servers_message() {
     let frame = r#"{"jsonrpc":"2.0","id":1,"error":{"code":"conflict","message":"Session is already open: 22222222-saved","data":{"harnessCode":"session_busy","details":{"session_id":"22222222-saved"}}}}"#;

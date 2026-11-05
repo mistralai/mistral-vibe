@@ -1,4 +1,4 @@
-"""A startup validation warning surfaces as a toast at readiness (VIBE-5122)."""
+"""A startup validation warning lands in the startup warnings box (VIBE-5122, VIBE-4099)."""
 
 from __future__ import annotations
 
@@ -19,5 +19,4 @@ handshake = {
 
 timeline: Timeline = []
 
-# The toast box wraps at 56 cells; assert fragments that each fit on one wrapped row.
-screen_contains = ("Model 'toto' is not available", "3.5'.")
+screen_contains = ("Warnings", "Model 'toto' is not available")

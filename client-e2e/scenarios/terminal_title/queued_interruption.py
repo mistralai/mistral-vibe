@@ -12,8 +12,6 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-settle_per_key = True
 capture_startup = False
 capture_steps = {1, 2, 3, 4, 5}
 expected_titles = (">> Vibe", ">> Vibe", ">> Vibe", ">> Vibe", "Vibe")

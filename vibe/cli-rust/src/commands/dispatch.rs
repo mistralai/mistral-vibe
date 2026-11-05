@@ -10,8 +10,8 @@ use super::simple::{
     DATA_RETENTION_MESSAGE,
 };
 use super::stress;
-use super::submission::{clear_and_remember, NOTICE_TIMEOUT_SECS};
-use crate::app::App;
+use super::submission::clear_and_remember;
+use crate::app::{App, Severity};
 use crate::server::Client;
 use crate::{
     config, log_level_picker, mcp, model_picker, paste_image, resume_picker, rewind, theme_picker,
@@ -45,6 +45,7 @@ pub(super) fn run_command(
         "/branch" | "/fork" => super::branch::branch_session(app, client),
         "/mcp" | "/connectors" => mcp::show(app, client, value),
         "/plugins" => crate::plugins::show(app, client),
+        "/context" => crate::context_app::open(app, client),
         "/reload-plugins" => crate::plugins::reload(app, client),
         "/leanstall" => super::leanstall::install_lean(app, client),
         "/unleanstall" => super::leanstall::uninstall_lean(app, client),
@@ -67,10 +68,10 @@ pub(super) fn run_command(
             let args = command_args(value);
             stress::toggle(app, client, args);
         }
-        _ => ui::notice::show(
+        _ => ui::notice::show_sticky(
             app,
+            Severity::Warning,
             &format!("Command {command} is not implemented"),
-            NOTICE_TIMEOUT_SECS,
         ),
     }
     false

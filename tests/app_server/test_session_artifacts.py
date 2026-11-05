@@ -23,7 +23,6 @@ from vibe.app_server._plugin_mcp import PluginMCPCatalog
 from vibe.app_server._session_artifacts import (
     ArtifactRequestHandler,
     SessionArtifactService,
-    SyncTrigger,
     to_public_artifact,
 )
 from vibe.app_server._session_backend_port import (
@@ -42,6 +41,7 @@ from vibe.app_server.protocol import (
     ArtifactsListParams,
     ArtifactsListResponse,
     ArtifactsMarkViewedParams,
+    ArtifactsSyncParams,
     ArtifactUpdatedParams,
     EmptyResponse,
     Notification,
@@ -107,26 +107,65 @@ def service(session_dir: Path) -> SessionArtifactService:
     return SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
 
 
-@pytest.fixture(autouse=True)
-def _no_provider_fetch(monkeypatch: pytest.MonkeyPatch):
-    """Keep real provider fetches out of the service tests.
+class _GitHub:
+    """GitHub as the pull request cache reads it: every PR answers
+    ``snapshot``, or fails when it is ``None`` (as when the CLI is missing).
 
-    Phase 4 enriches every new artifact from the provider; the default stub
-    fails the fetch (the artifact stands with its partial data, as when the
-    CLI is missing). Sync and enrichment tests override with canned
-    snapshots.
+    Every check answers a new fingerprint, so each read is a full read.
     """
-    from vibe.core.git.forge_sync import ForgeSyncError
 
-    def _raise(*args: object, **kwargs: object) -> None:
-        raise ForgeSyncError("stubbed: no provider fetch in service tests")
+    def __init__(self) -> None:
+        from vibe.core.git.forge_sync import PullRequestSnapshot
 
-    monkeypatch.setattr(
-        "vibe.app_server._session_artifacts.fetch_pull_request_snapshot", _raise
-    )
+        self.snapshot: PullRequestSnapshot | None = None
+        self.reads = 0
+        self._fingerprints = iter(range(1_000_000))
+
+    def checks(self, gh_path, host, refs):
+        return {ref: f"fingerprint-{next(self._fingerprints)}" for ref in refs}, None
+
+    def full(self, gh_path, host, refs, checked_at):
+        from vibe.core.git.forge_sync import ForgeSyncError
+
+        self.reads += len(refs)
+        snapshot = self.snapshot
+        return {
+            ref: ForgeSyncError("stubbed: no provider read")
+            if snapshot is None
+            else snapshot
+            for ref in refs
+        }, None
+
+
+@pytest.fixture(autouse=True)
+def github(monkeypatch: pytest.MonkeyPatch) -> _GitHub:
+    """Keep real provider reads out of the tests: every new artifact is read
+    from its provider, and the default answer is a failed read (the artifact
+    stands with its partial data). Tests that need a status set
+    ``github.snapshot``.
+    """
+    from vibe.app_server import _pull_request_cache as cache_module
+
+    fake = _GitHub()
+    monkeypatch.setattr(cache_module, "read_github_checks", fake.checks)
+    monkeypatch.setattr(cache_module, "read_github_pull_requests", fake.full)
+    monkeypatch.setattr(cache_module, "find_cli_binary", lambda name: name)
+    return fake
 
 
 class TestCreatesArtifact:
+    @pytest.mark.asyncio
+    async def test_the_title_comes_from_the_provider(
+        self, service: SessionArtifactService, github: _GitHub
+    ):
+        # The command passes the title through a heredoc: only the provider
+        # knows it.
+        github.snapshot = _snapshot(title="feat: heredoc title")
+        command = "gh pr create --title \"$(cat <<'EOF'\nfeat: heredoc title\nEOF\n)\""
+        artifact = await service.on_shell_effect(command, GH_STDOUT, "", "completed")
+        assert artifact is not None
+        assert to_public_artifact(artifact).display_title == "feat: heredoc title"
+
     @pytest.mark.asyncio
     async def test_github_pr(self, service: SessionArtifactService):
         artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
@@ -135,7 +174,8 @@ class TestCreatesArtifact:
         assert artifact.session_id == SESSION_ID
         assert artifact.external_key == "github.com/mistralai/vibe/pull/123"
         assert artifact.external_url == "https://github.com/mistralai/vibe/pull/123"
-        assert artifact.display_title == "Fix login"
+        # The provider read fails in these tests: no title until it succeeds.
+        assert artifact.display_title is None
         assert artifact.viewed_at is None
         assert artifact.details is not None
         assert artifact.details.repo_host == "github.com"
@@ -181,7 +221,7 @@ class TestCreatesArtifact:
         assert isinstance(artifact, GitLabMergeRequestArtifact)
         assert artifact.provider == "gitlab"
         assert artifact.external_key == "gitlab.com/4242/merge_requests/7"
-        assert artifact.display_title == "Add feature"
+        assert artifact.display_title is None
         assert artifact.details is not None
         assert artifact.details.repo_host == "gitlab.com"
         assert artifact.details.repo_id == 4242
@@ -377,7 +417,7 @@ class TestDedup:
 
     @pytest.mark.asyncio
     async def test_enriched_new_artifact_is_not_its_own_duplicate(
-        self, service: SessionArtifactService, monkeypatch: pytest.MonkeyPatch
+        self, service: SessionArtifactService, github: _GitHub
     ):
         """Enrich-from-birth must not defeat the dedup check.
 
@@ -386,15 +426,13 @@ class TestDedup:
         effect, so the check found the artifact itself and skipped the
         recording — no persist, no created notification.
         """
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot",
-            lambda details, checked_at: _snapshot(),
-        )
+        github.snapshot = _snapshot()
         artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
         assert artifact is not None
-        # The enrichment fetch succeeded, so the snapshot really applied.
-        assert artifact.details is not None
-        assert artifact.details.source_branch == "fix/login"
+        # The enrichment fetch succeeded, so the snapshot really applies.
+        details = to_public_artifact(artifact).details
+        assert details is not None
+        assert details.source_branch == "fix/login"
         assert len(service.list_artifacts()) == 1
         # A genuine duplicate is still deduplicated.
         second = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
@@ -549,7 +587,7 @@ class TestPersistence:
         assert entry["session_id"] == SESSION_ID
         assert entry["external_key"] == "github.com/mistralai/vibe/pull/123"
         assert entry["external_url"] == "https://github.com/mistralai/vibe/pull/123"
-        assert entry["display_title"] == "Fix login"
+        assert entry["display_title"] is None
         assert entry["viewed_at"] is None
         details = entry["details"]
         assert details["kind"] == "pull_request"
@@ -580,7 +618,7 @@ class TestToPublicArtifact:
         assert public.provider == "github"
         assert public.external_key == "github.com/mistralai/vibe/pull/123"
         assert public.external_url == "https://github.com/mistralai/vibe/pull/123"
-        assert public.display_title == "Fix login"
+        assert public.display_title is None
         assert public.viewed_at is None
         assert isinstance(public.details, PublicGitHubPullRequestDetails)
         assert public.details.repo_host == "github.com"
@@ -615,7 +653,7 @@ class TestToPublicArtifact:
         assert wire["sessionId"] == SESSION_ID
         assert wire["externalKey"] == "github.com/mistralai/vibe/pull/123"
         assert wire["externalUrl"] == "https://github.com/mistralai/vibe/pull/123"
-        assert wire["displayTitle"] == "Fix login"
+        assert wire["displayTitle"] is None
         assert wire["discoveredAt"] == artifact.discovered_at
         assert wire["viewedAt"] is None
         details = wire["details"]
@@ -627,30 +665,29 @@ class TestToPublicArtifact:
 
     @pytest.mark.asyncio
     async def test_raw_status_fields_reach_the_wire(
-        self, service: SessionArtifactService, monkeypatch: pytest.MonkeyPatch
+        self, service: SessionArtifactService, github: _GitHub
     ):
         """The raw provider-neutral statuses ride the wire projection."""
+        github.snapshot = _snapshot(
+            state="open",
+            checks=ChecksSummary(state="fail"),
+            review_decision="APPROVED",
+            merge_status="blocked",
+            optional_checks_state="pass",
+        )
         artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
         assert artifact is not None
-        checks = ChecksSummary(state="fail")
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot",
-            lambda details, checked_at: _snapshot(
-                state="open",
-                checks=checks,
-                review_decision="APPROVED",
-                merge_status="blocked",
-            ),
-        )
 
-        changed = await service.sync_artifacts(trigger="turn_end")
-        assert changed
-        artifact = changed[0]
         wire = to_public_artifact(artifact).model_dump(mode="json", by_alias=True)
         assert wire["details"]["prStatus"] == "action_needed"
         assert wire["details"]["checksStatus"] == "failing"
+        assert wire["details"]["optionalChecksStatus"] == "passing"
         assert wire["details"]["reviewDecision"] == "approved"
         assert wire["details"]["mergeStatus"] == "blocked"
+        assert wire["details"]["providerUpdatedAt"] is not None
+        # The status is a read of the provider, not session state.
+        stored = json.loads((service._session_dir / "meta.json").read_text())
+        assert stored["artifacts"][0]["details"]["checks_status"] is None
 
     @pytest.mark.asyncio
     async def test_details_none(self, service: SessionArtifactService):
@@ -932,7 +969,7 @@ def _pending_effect(
     )
 
 
-def _github_artifact() -> GitHubPullRequestArtifact:
+def _github_artifact(*, source_branch: str = "") -> GitHubPullRequestArtifact:
     return GitHubPullRequestArtifact(
         id="01929a3b-7c4d-7e5f-8a9b-0c1d2e3f4a5c",
         session_id=SESSION_ID,
@@ -946,7 +983,7 @@ def _github_artifact() -> GitHubPullRequestArtifact:
             repo_name="vibe",
             pull_request_number=123,
             state="open",
-            source_branch="",
+            source_branch=source_branch,
             target_branch="",
             author="",
             provider_created_at=None,
@@ -1676,7 +1713,7 @@ class TestAdapterDispatchArtifacts:
         assert listed.response.artifacts[0].viewed_at is not None
 
 
-def _artifact_host(tmp_path: Path) -> Any:
+def _artifact_host(tmp_path: Path, *, pr_monitoring: bool = False) -> Any:
     """A real host adapter over an inert harness, rooted at ``tmp_path``.
 
     The cold artifact path reads ``<storage_root>/unified/<session_id>/
@@ -1692,7 +1729,9 @@ def _artifact_host(tmp_path: Path) -> Any:
     async def build_read_context(options: Any) -> UnifiedReadContext:
         return UnifiedReadContext(
             storage_root=str(tmp_path),
-            config_orchestrator=FakeConfigOrchestrator(build_test_vibe_config()),
+            config_orchestrator=FakeConfigOrchestrator(
+                build_test_vibe_config(experimental_enable_pr_monitoring=pr_monitoring)
+            ),
             harness_files=HarnessFilesManager(
                 sources=(), trust_store=TrustedFoldersManager()
             ).for_session(tmp_path),
@@ -1800,6 +1839,92 @@ class TestHostArtifactsColdPath:
         assert viewed[second.id] is not None
 
     @pytest.mark.asyncio
+    async def test_a_listed_session_is_kept_fresh_and_announced(
+        self, tmp_path: Path, github: _GitHub
+    ) -> None:
+        # The sidebar lists the sessions it shows, open or not: their PRs
+        # refresh, and the reads reach the catalogue channel's subscription.
+        session_dir = tmp_path / "unified" / SESSION_ID
+        session_dir.mkdir(parents=True)
+        _write_metadata(session_dir, artifacts=[_github_artifact()])
+        before = (session_dir / "meta.json").read_text(encoding="utf-8")
+        github.snapshot = _snapshot(state="merged")
+        host = _artifact_host(tmp_path, pr_monitoring=True)
+        updates: asyncio.Queue[ArtifactUpdatedParams] = asyncio.Queue()
+        unsubscribe = host.subscribe_artifacts(
+            lambda method, params: updates.put_nowait(params)
+        )
+        try:
+            await host.list_artifacts(ArtifactsListParams(session_id=SESSION_ID))
+            update = await asyncio.wait_for(updates.get(), timeout=5)
+        finally:
+            unsubscribe()
+            await _close_cache()
+
+        assert update.session_id == SESSION_ID
+        assert update.artifact.details is not None
+        assert update.artifact.details.state == "merged"
+        listed = await host.list_artifacts(ArtifactsListParams(session_id=SESSION_ID))
+        assert listed.artifacts[0].details is not None
+        assert listed.artifacts[0].details.state == "merged"
+        # The read is the cache's, not the session's: meta.json is untouched.
+        assert (session_dir / "meta.json").read_text(encoding="utf-8") == before
+
+    @pytest.mark.asyncio
+    async def test_an_announcement_carries_the_view_marked_since_the_listing(
+        self, tmp_path: Path, github: _GitHub
+    ) -> None:
+        # The client replaces its artifact with the announced one: an old
+        # copy would show the PR as unread again.
+        session_dir = tmp_path / "unified" / SESSION_ID
+        session_dir.mkdir(parents=True)
+        artifact = _github_artifact()
+        _write_metadata(session_dir, artifacts=[artifact])
+        host = _artifact_host(tmp_path, pr_monitoring=True)
+        updates: asyncio.Queue[ArtifactUpdatedParams] = asyncio.Queue()
+        unsubscribe = host.subscribe_artifacts(
+            lambda method, params: updates.put_nowait(params)
+        )
+        try:
+            await host.list_artifacts(ArtifactsListParams(session_id=SESSION_ID))
+            await host.mark_artifacts_viewed(
+                ArtifactsMarkViewedParams(
+                    session_id=SESSION_ID, artifact_ids=[artifact.id]
+                )
+            )
+            # The next background refresh, not a new listing.
+            github.snapshot = _snapshot(state="merged")
+            from vibe.app_server._pull_request_cache import pull_request_cache
+
+            pull_request_cache().refresh([artifact.external_key], full=True)
+            update = await asyncio.wait_for(updates.get(), timeout=5)
+        finally:
+            unsubscribe()
+            await _close_cache()
+
+        assert update.artifact.viewed_at is not None
+        assert update.artifact.details is not None
+        assert update.artifact.details.state == "merged"
+
+    @pytest.mark.asyncio
+    async def test_nothing_is_read_with_pr_monitoring_off(
+        self, tmp_path: Path, github: _GitHub
+    ) -> None:
+        session_dir = tmp_path / "unified" / SESSION_ID
+        session_dir.mkdir(parents=True)
+        _write_metadata(session_dir, artifacts=[_github_artifact()])
+        github.snapshot = _snapshot(state="merged")
+        host = _artifact_host(tmp_path)
+        unsubscribe = host.subscribe_artifacts(lambda method, params: None)
+
+        await host.list_artifacts(ArtifactsListParams(session_id=SESSION_ID))
+        await host.sync_artifacts(ArtifactsSyncParams(session_id=SESSION_ID))
+        unsubscribe()
+        await _close_cache()
+
+        assert github.reads == 0
+
+    @pytest.mark.asyncio
     async def test_attached_session_delegates_to_the_live_service(
         self, tmp_path: Path
     ) -> None:
@@ -1835,9 +1960,24 @@ class TestHostArtifactsColdPath:
         assert emitted == [artifact.id]
         assert service.list_artifacts()[0].viewed_at is not None
 
+    @pytest.mark.asyncio
+    async def test_sync_of_an_attached_session_refreshes_its_pull_requests(
+        self, tmp_path: Path
+    ) -> None:
+        # The attached session announces the reads on its own event stream.
+        adapter = Mock()
+        adapter._closed = False
+        host = _artifact_host(tmp_path, pr_monitoring=True)
+        host._adapters[SESSION_ID] = cast(Any, adapter)
+
+        await host.sync_artifacts(ArtifactsSyncParams(session_id=SESSION_ID))
+
+        # A client asked: the cheap check first, not a full read.
+        adapter.refresh_pull_requests.assert_called_once_with(full=False)
+
 
 # ---------------------------------------------------------------------------
-# Telemetry: vibe.artifact_* emission (design doc section 12).
+# Telemetry: vibe.artifact_* emission.
 # ---------------------------------------------------------------------------
 
 
@@ -1898,7 +2038,8 @@ class TestServiceTelemetry:
         assert props["is_draft"] is False
         assert props["host_type"] == "github_com"
         assert props["repo_id_resolved"] is False
-        assert props["has_title"] is True
+        # The provider read fails in these tests: no title yet.
+        assert props["has_title"] is False
         assert props["message_id"] == "msg-1"
         assert props["source"] == "detected"
 
@@ -1941,7 +2082,7 @@ class TestServiceTelemetry:
         self, session_dir: Path, telemetry_events: list[dict[str, Any]]
     ) -> None:
         """detected counts interceptions, created counts artifacts — the gap
-        is the duplicate rate (design doc section 12.2.3 note).
+        is the duplicate rate.
         """
         service = _telemetry_service(session_dir)
 
@@ -2008,7 +2149,8 @@ class TestServiceTelemetry:
         assert props["is_draft"] is True
         assert props["host_type"] == "enterprise"
         assert props["repo_id_resolved"] is True
-        assert props["has_title"] is True
+        # The provider read fails in these tests: no title yet.
+        assert props["has_title"] is False
 
     @pytest.mark.asyncio
     async def test_created_payload_gitlab_repo_id_unresolved(
@@ -2297,7 +2439,9 @@ class TestDiscoverAndCreate:
         service = SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
         phase1 = _gitlab_artifact(repo_id=42)
 
-        def racing_discovery(_path: Path) -> list[DiscoveredPullRequest]:
+        def racing_discovery(
+            _path: Path, **_kwargs: Any
+        ) -> list[DiscoveredPullRequest]:
             service._artifacts[phase1.external_key] = phase1
             return [_discovered_gitlab(7)]
 
@@ -2325,7 +2469,9 @@ class TestDiscoverAndCreate:
         service = SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
         phase1 = _gitlab_artifact(repo_id=None)
 
-        def racing_discovery(_path: Path) -> list[DiscoveredPullRequest]:
+        def racing_discovery(
+            _path: Path, **_kwargs: Any
+        ) -> list[DiscoveredPullRequest]:
             service._artifacts[phase1.external_key] = phase1
             return [_discovered_gitlab(7)]
 
@@ -2382,23 +2528,114 @@ class TestDiscoverAndCreate:
         assert restored.display_title == "Fix login"
 
     @pytest.mark.asyncio
-    async def test_skips_when_pr_artifacts_already_exist(
+    async def test_skips_branches_the_session_already_has_a_pr_for(
         self, session_dir: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """Option A: no discovery when the session already has a PR artifact."""
-        _write_metadata(session_dir, artifacts=[_github_artifact()])
+        _write_metadata(
+            session_dir, artifacts=[_github_artifact(source_branch="branch-123")]
+        )
         service = SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
         service.load(SessionLoader.load_metadata(session_dir))
-        discover = MagicMock(return_value=[_discovered_github(999)])
+        discover = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "vibe.app_server._session_artifacts.discover_pull_requests", discover
+        )
+
+        await service.discover_and_create(Path("/repo"))
+
+        discover.assert_called_once_with(
+            Path("/repo"), skip_heads={("github.com", "mistralai/vibe", "branch-123")}
+        )
+
+    @pytest.mark.parametrize("state", ["merged", "closed"])
+    @pytest.mark.asyncio
+    async def test_finds_a_new_pr_on_a_branch_whose_pr_is_finished(
+        self, session_dir: Path, monkeypatch: pytest.MonkeyPatch, state: str
+    ):
+        """A branch whose PR was merged or closed can get a new one, e.g. after
+        a squash-merge the agent keeps working on the branch.
+        """
+        finished = _github_artifact(source_branch="branch-123")
+        assert finished.details is not None
+        finished = finished.model_copy(
+            update={"details": finished.details.model_copy(update={"state": state})}
+        )
+        _write_metadata(session_dir, artifacts=[finished])
+        service = SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
+        service.load(SessionLoader.load_metadata(session_dir))
+        discover = MagicMock(return_value=[_discovered_github(456)])
+        _patch_discovery(monkeypatch, [])
         monkeypatch.setattr(
             "vibe.app_server._session_artifacts.discover_pull_requests", discover
         )
 
         created = await service.discover_and_create(Path("/repo"))
 
-        assert created == []
-        discover.assert_not_called()
-        assert len(service.list_artifacts()) == 1
+        discover.assert_called_once_with(Path("/repo"), skip_heads=set())
+        assert [a.external_key for a in created] == [
+            "github.com/mistralai/vibe/pull/456"
+        ]
+        assert [a.external_key for a in service.list_artifacts()] == [
+            "github.com/mistralai/vibe/pull/123",
+            "github.com/mistralai/vibe/pull/456",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_finds_a_new_pr_when_the_cache_read_the_old_one_merged(
+        self, session_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The stored artifact keeps the state it was created with; a merge
+        is only in the pull request cache's read.
+        """
+        from vibe.app_server import _pull_request_cache as cache_module
+
+        stored = _github_artifact(source_branch="branch-123")
+        _write_metadata(session_dir, artifacts=[stored])
+        service = SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
+        service.load(SessionLoader.load_metadata(session_dir))
+        now = cache_module._now_iso()
+        cache_module._write_entry(
+            cache_module.pull_request_cache()._directory,
+            cache_module.CachedPullRequest(
+                external_key=stored.external_key,
+                snapshot=_snapshot(state="merged"),
+                read_at=now,
+                full_read_at=now,
+            ),
+        )
+        _patch_discovery(monkeypatch, [])
+        discover = MagicMock(return_value=[])
+        monkeypatch.setattr(
+            "vibe.app_server._session_artifacts.discover_pull_requests", discover
+        )
+
+        await service.discover_and_create(Path("/repo"))
+
+        discover.assert_called_once_with(Path("/repo"), skip_heads=set())
+
+    @pytest.mark.asyncio
+    async def test_adds_the_new_branch_pr_and_keeps_the_old_one(
+        self, session_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A session moved to another branch keeps the PRs it had and gains
+        the new branch's PR.
+        """
+        _write_metadata(
+            session_dir, artifacts=[_github_artifact(source_branch="release/x")]
+        )
+        service = SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
+        service.load(SessionLoader.load_metadata(session_dir))
+        _patch_discovery(monkeypatch, [_discovered_github(456)])
+
+        created = await service.discover_and_create(Path("/worktree"))
+
+        assert [a.external_key for a in created] == [
+            "github.com/mistralai/vibe/pull/456"
+        ]
+        assert [a.external_key for a in service.list_artifacts()] == [
+            "github.com/mistralai/vibe/pull/123",
+            "github.com/mistralai/vibe/pull/456",
+        ]
 
     @pytest.mark.asyncio
     async def test_dedupes_within_discovery_result(
@@ -2504,66 +2741,6 @@ class TestDiscoverAndCreate:
         assert telemetry_events == []
 
 
-class TestScheduleArtifactSync:
-    """Phase 4 provider sync scheduling: single-flight, with a rerun for a
-    trigger that arrives while a pass is in flight.
-    """
-
-    @pytest.mark.asyncio
-    async def test_trigger_during_pass_reruns_once(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/repo")
-        service = adapter._artifact_service
-        calls: list[SyncTrigger] = []
-        release = asyncio.Event()
-
-        async def slow_sync(*, trigger: SyncTrigger) -> list[SessionArtifact]:
-            calls.append(trigger)
-            if len(calls) == 1:
-                # The first pass is in flight when the second trigger arrives:
-                # it started before that event, so it cannot have observed it.
-                await release.wait()
-            return []
-
-        monkeypatch.setattr(service, "sync_artifacts", slow_sync)
-
-        adapter.schedule_artifact_sync(trigger="client_request")
-        task = adapter._artifact_sync_task
-        assert task is not None
-        await asyncio.sleep(0)
-
-        adapter.schedule_artifact_sync(trigger="turn_end")
-        # Single-flight: no second task, the trigger waits for the pass.
-        assert adapter._artifact_sync_task is task
-
-        release.set()
-        await task
-
-        # The rerun carries the mid-pass trigger, so a turn end that raced an
-        # in-flight pass still refetches past the freshness window.
-        assert calls == ["client_request", "turn_end"]
-
-    @pytest.mark.asyncio
-    async def test_quiet_pass_does_not_rerun(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/repo")
-        calls: list[SyncTrigger] = []
-
-        async def sync(*, trigger: SyncTrigger) -> list[SessionArtifact]:
-            calls.append(trigger)
-            return []
-
-        monkeypatch.setattr(adapter._artifact_service, "sync_artifacts", sync)
-
-        adapter.schedule_artifact_sync(trigger="session_start")
-        assert adapter._artifact_sync_task is not None
-        await adapter._artifact_sync_task
-
-        assert calls == ["session_start"]
-
-
 class TestSchedulePrDiscovery:
     """The adapter gating: flag, sandbox, cwd — before any task is spawned."""
 
@@ -2654,7 +2831,7 @@ class TestAdapterPrDiscovery:
         """
         release = __import__("threading").Event()
 
-        def slow_discovery(_path: Path) -> list[DiscoveredPullRequest]:
+        def slow_discovery(_path: Path, **_kwargs: Any) -> list[DiscoveredPullRequest]:
             release.wait(timeout=10)
             return [_discovered_github(123)]
 
@@ -2702,19 +2879,86 @@ class TestAdapterPrDiscovery:
         ]
 
     @pytest.mark.asyncio
-    async def test_discovery_skipped_when_artifacts_persisted(
+    async def test_discovery_waits_for_the_worktree_the_session_starts_in(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A resumed session whose meta.json already carries PR artifacts
-        does not re-discover (and does not notify again).
+        """Regression: a session started with a worktree opens in the origin
+        checkout, whose branch is unrelated, and moves once the worktree is
+        ready. Discovering at open recorded the origin branch's PR.
         """
-        session_dir = tmp_path / "unified" / SESSION_ID
-        session_dir.mkdir(parents=True)
-        _write_metadata(session_dir, artifacts=[_github_artifact()])
-        discover = MagicMock(return_value=[_discovered_github(999)])
+        discover = MagicMock(return_value=[_discovered_github(123)])
         monkeypatch.setattr(
             "vibe.app_server._session_artifacts.discover_pull_requests", discover
         )
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/origin")
+        moved = asyncio.Event()
+
+        async def setup() -> None:
+            await moved.wait()
+            adapter._session.cwd = "/worktree"
+
+        adapter.defer_turns(setup())
+        adapter.schedule_pr_discovery()
+        discovery_during_setup = adapter._pr_discovery_task
+
+        moved.set()
+        await adapter._deferred_setup_task
+        task = adapter._pr_discovery_task
+        assert task is not None
+        await task
+
+        assert discovery_during_setup is None
+
+        discover.assert_called_once_with(Path("/worktree"), skip_heads=set())
+
+    @pytest.mark.asyncio
+    async def test_abandoned_worktree_setup_discovers_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        discover = MagicMock(return_value=[_discovered_github(123)])
+        monkeypatch.setattr(
+            "vibe.app_server._session_artifacts.discover_pull_requests", discover
+        )
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/origin")
+
+        async def setup() -> None:
+            raise RuntimeError("checkout failed")
+
+        adapter.defer_turns(setup())
+        adapter.schedule_pr_discovery()
+        await adapter._deferred_setup_task
+
+        assert adapter._pr_discovery_task is None
+        discover.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_setup_abandoned_before_open_discovers_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        discover = MagicMock(return_value=[_discovered_github(123)])
+        monkeypatch.setattr(
+            "vibe.app_server._session_artifacts.discover_pull_requests", discover
+        )
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/origin")
+
+        async def setup() -> None:
+            raise RuntimeError("checkout failed")
+
+        adapter.defer_turns(setup())
+        await adapter._deferred_setup_task
+        adapter.schedule_pr_discovery()
+
+        assert adapter._pr_discovery_task is None
+        discover.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_discovery_does_not_reannounce_persisted_artifacts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session_dir = tmp_path / "unified" / SESSION_ID
+        session_dir.mkdir(parents=True)
+        _write_metadata(session_dir, artifacts=[_github_artifact()])
+        _patch_discovery(monkeypatch, [_discovered_github(123)])
         services = FakeSessionBackendServices()
         adapter = _artifact_adapter(
             tmp_path, pr_monitoring=True, cwd="/repo", services=services
@@ -2722,9 +2966,56 @@ class TestAdapterPrDiscovery:
 
         await adapter._discover_pull_requests()
 
-        discover.assert_not_called()
         assert len(adapter._artifact_service.list_artifacts()) == 1
         assert services.notifications == []
+
+    @pytest.mark.asyncio
+    async def test_every_discovery_pass_watches_the_session_pull_requests(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A pass after a move may add the new checkout's PRs: the cache must
+        # watch them too, not only the ones of the load pass.
+        _patch_discovery(monkeypatch, [])
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/repo")
+        watches: list[None] = []
+        monkeypatch.setattr(
+            adapter, "_watch_pull_requests", lambda: watches.append(None)
+        )
+
+        await adapter._discover_pull_requests()
+        await adapter._discover_pull_requests()
+
+        assert len(watches) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_move_during_discovery_discovers_the_new_checkout_too(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import threading
+
+        release = threading.Event()
+        seen: list[Path] = []
+
+        def discovery(path: Path, **_kwargs: Any) -> list[DiscoveredPullRequest]:
+            seen.append(path)
+            release.wait(timeout=10)
+            return []
+
+        monkeypatch.setattr(
+            "vibe.app_server._session_artifacts.discover_pull_requests", discovery
+        )
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/origin")
+        adapter.schedule_pr_discovery()
+        task = adapter._pr_discovery_task
+        assert task is not None
+        await asyncio.sleep(0.05)
+
+        adapter._session.cwd = "/worktree"
+        adapter.schedule_pr_discovery()
+        release.set()
+        await task
+
+        assert seen == [Path("/origin"), Path("/worktree")]
 
     @pytest.mark.asyncio
     async def test_service_failure_is_swallowed(
@@ -2770,7 +3061,9 @@ class TestAdapterPrDiscovery:
 
         release = threading.Event()
 
-        def blocking_discovery(_path: Path) -> list[DiscoveredPullRequest]:
+        def blocking_discovery(
+            _path: Path, **_kwargs: Any
+        ) -> list[DiscoveredPullRequest]:
             release.wait(timeout=10)
             return [_discovered_github(123)]
 
@@ -2883,15 +3176,205 @@ class TestAdapterPrDiscovery:
         assert len(adapter._artifact_service.list_artifacts()) == 2
 
 
+def _complete_turn(adapter: Any) -> None:
+    from vibe.app_server.events import TurnCompleted
+    from vibe.app_server.models import PublicTurn, PublicTurnStatus
+
+    turn = PublicTurn(
+        id="turn-1",
+        session_id=SESSION_ID,
+        status=PublicTurnStatus.COMPLETED,
+        started_at=1,
+    )
+    adapter._interleave_stats(
+        [TurnCompleted(turn=turn)], _projection().state, cast(Any, None), updated=False
+    )
+
+
+class TestTurnEndPrDiscovery:
+    """A PR created while the session stays open is found when the turn ends,
+    however the command that created it was spelled.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_pr_created_by_a_script_is_found_when_the_turn_ends(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A command that does not spell out ``gh pr create`` (a script, a
+        Makefile target) is not recognised as a creation, and discovery only
+        ran at session load.
+        """
+        _patch_discovery(monkeypatch, [_discovered_github(123)])
+        services = FakeSessionBackendServices()
+        adapter = _artifact_adapter(
+            tmp_path, pr_monitoring=True, cwd="/repo", services=services
+        )
+        adapter._collect_pending_shell_effects(
+            _state_with_entries(
+                _shell_effect_entry(
+                    "e-1", "./scripts/open-pr.sh --draft", stdout=GH_STDOUT
+                )
+            )
+        )
+        await adapter._drain_pending_shell_effects()
+        assert adapter._artifact_service.list_artifacts() == []
+
+        _complete_turn(adapter)
+        assert adapter._pr_discovery_task is not None
+        await adapter._pr_discovery_task
+
+        assert [a.external_key for a in adapter._artifact_service.list_artifacts()] == [
+            "github.com/mistralai/vibe/pull/123"
+        ]
+        assert "artifacts/created" in [m for m, _ in services.notifications]
+
+    @pytest.mark.asyncio
+    async def test_a_read_finding_the_pr_merged_discovers_the_branch_again(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The turn-end read that finds a squash-merged PR lands after the
+        turn-end discovery, which still saw it open: the read itself reruns
+        discovery, so a new PR on the branch is found.
+        """
+        from vibe.app_server import _pull_request_cache as cache_module
+
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/repo")
+        service = adapter._artifact_service
+        stored = _github_artifact(source_branch="branch-123")
+        service._artifacts[stored.external_key] = stored
+        _patch_discovery(monkeypatch, [])
+        discover = MagicMock(return_value=[_discovered_github(456)])
+        monkeypatch.setattr(
+            "vibe.app_server._session_artifacts.discover_pull_requests", discover
+        )
+        now = cache_module._now_iso()
+        merged = cache_module.CachedPullRequest(
+            external_key=stored.external_key,
+            snapshot=_snapshot(state="merged"),
+            read_at=now,
+            full_read_at=now,
+        )
+        cache_module._write_entry(cache_module.pull_request_cache()._directory, merged)
+
+        adapter._pull_request_read(
+            cache_module.Read(SESSION_ID, merged, changed=True, local=True)
+        )
+        assert adapter._pr_discovery_task is not None
+        await adapter._pr_discovery_task
+
+        discover.assert_called_once_with(Path("/repo"), skip_heads=set())
+        assert "github.com/mistralai/vibe/pull/456" in [
+            a.external_key for a in service.list_artifacts()
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_read_finding_the_pr_still_open_discovers_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from vibe.app_server import _pull_request_cache as cache_module
+
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/repo")
+        stored = _github_artifact(source_branch="branch-123")
+        adapter._artifact_service._artifacts[stored.external_key] = stored
+        now = cache_module._now_iso()
+        read = cache_module.CachedPullRequest(
+            external_key=stored.external_key,
+            snapshot=_snapshot(state="open"),
+            read_at=now,
+            full_read_at=now,
+        )
+
+        adapter._pull_request_read(
+            cache_module.Read(SESSION_ID, read, changed=True, local=True)
+        )
+
+        assert adapter._pr_discovery_task is None
+
+    @pytest.mark.asyncio
+    async def test_a_turn_without_shell_commands_discovers_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_discovery(monkeypatch, [_discovered_github(123)])
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/repo")
+
+        _complete_turn(adapter)
+
+        assert adapter._pr_discovery_task is None
+
+    @pytest.mark.asyncio
+    async def test_turns_ending_close_together_discover_once_then_after_the_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "vibe.app_server._unified_harness_backend_adapter"
+            "._TURN_END_PR_DISCOVERY_INTERVAL_S",
+            0.05,
+        )
+        _patch_discovery(monkeypatch, [])
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/repo")
+        calls: list[Path] = []
+
+        async def discover(path: Path) -> list[SessionArtifact]:
+            calls.append(path)
+            return []
+
+        monkeypatch.setattr(adapter._artifact_service, "discover_and_create", discover)
+
+        adapter._collect_pending_shell_effects(
+            _state_with_entries(_shell_effect_entry("e-1", "git push"))
+        )
+        _complete_turn(adapter)
+        assert adapter._pr_discovery_task is not None
+        await adapter._pr_discovery_task
+
+        adapter._collect_pending_shell_effects(
+            _state_with_entries(_shell_effect_entry("e-2", "gh pr create"))
+        )
+        _complete_turn(adapter)
+        assert len(calls) == 1
+
+        # The last turn's command is not lost: it runs once the window ends.
+        await asyncio.sleep(0.15)
+        assert adapter._pr_discovery_task is not None
+        await adapter._pr_discovery_task
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_the_pending_turn_end_discovery(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "vibe.app_server._unified_harness_backend_adapter"
+            "._TURN_END_PR_DISCOVERY_INTERVAL_S",
+            0.05,
+        )
+        _patch_discovery(monkeypatch, [])
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd="/repo")
+        for effect_id in ("e-1", "e-2"):
+            adapter._collect_pending_shell_effects(
+                _state_with_entries(_shell_effect_entry(effect_id, "git push"))
+            )
+            _complete_turn(adapter)
+            if adapter._pr_discovery_task is not None:
+                await adapter._pr_discovery_task
+        first = adapter._pr_discovery_task
+
+        adapter._cancel_turn_end_pr_discovery()
+        await asyncio.sleep(0.15)
+
+        assert adapter._pr_discovery_task is first
+
+
 def _snapshot(
     *,
     state: str = "open",
     title: str = "Fix login",
-    pr_status: str | None = "mergeable",
     checks: ChecksSummary | None = None,
     review_decision: Literal["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"]
     | None = None,
-    merge_status: str | None = None,
+    merge_status: Literal["unknown", "mergeable", "blocked", "conflicting"]
+    | None = None,
+    optional_checks_state: Literal["pass", "fail", "pending", "none"] | None = None,
 ):
     """A provider snapshot matching the default test artifact."""
     from vibe.core.git.forge_sync import PullRequestSnapshot
@@ -2907,9 +3390,16 @@ def _snapshot(
         merged_at=None,
         merge_commit_sha=None,
         checks=checks,
+        optional_checks_state=optional_checks_state,
         review_decision=review_decision,
         merge_status=merge_status,
     )
+
+
+async def _close_cache() -> None:
+    from vibe.app_server._pull_request_cache import pull_request_cache
+
+    await pull_request_cache().aclose()
 
 
 def _seed_service_with_artifact(service: SessionArtifactService) -> SessionArtifact:
@@ -2918,257 +3408,6 @@ def _seed_service_with_artifact(service: SessionArtifactService) -> SessionArtif
     metadata = _write_metadata(service._session_dir, artifacts=[artifact])
     service.load(metadata)
     return artifact
-
-
-class TestSyncArtifacts:
-    """Provider sync (Phase 4): change-detecting, budget-aware, stale-while-error."""
-
-    @pytest.mark.asyncio
-    async def test_changed_snapshot_updates_and_persists(
-        self, service: SessionArtifactService, monkeypatch: pytest.MonkeyPatch
-    ):
-        _seed_service_with_artifact(service)
-        merged_snapshot = _snapshot(
-            state="merged", title="Fix login (renamed)", pr_status=None
-        )
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot",
-            lambda details, checked_at: merged_snapshot,
-        )
-
-        changed = await service.sync_artifacts(trigger="turn_end")
-
-        assert len(changed) == 1
-        updated = service.list_artifacts()[0]
-        assert updated.details is not None
-        assert updated.details.state == "merged"
-        assert updated.details.pr_status is None
-        assert updated.details.provider_merged_at is None
-        assert updated.details.provider_updated_at is not None
-        assert updated.display_title == "Fix login (renamed)"
-        # Persisted to meta.json.
-        raw = json.loads((service._session_dir / "meta.json").read_text())
-        assert raw["artifacts"][0]["details"]["state"] == "merged"
-
-    @pytest.mark.asyncio
-    async def test_raw_status_fields_are_filled_from_the_snapshot(
-        self, service: SessionArtifactService, monkeypatch: pytest.MonkeyPatch
-    ):
-        _seed_service_with_artifact(service)
-        from vibe.core.session.artifacts import ChecksSummary
-
-        checks = ChecksSummary(state="fail")
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot",
-            lambda details, checked_at: _snapshot(
-                state="open",
-                checks=checks,
-                review_decision="CHANGES_REQUESTED",
-                merge_status="conflicting",
-            ),
-        )
-
-        await service.sync_artifacts(trigger="turn_end")
-
-        updated = service.list_artifacts()[0]
-        assert updated.details is not None
-        assert updated.details.checks_status == "failing"
-        assert updated.details.review_decision == "changes_requested"
-        assert updated.details.merge_status == "conflicting"
-
-    @pytest.mark.asyncio
-    async def test_unchanged_artifact_produces_no_change(
-        self, service: SessionArtifactService, monkeypatch: pytest.MonkeyPatch
-    ):
-        # Seed an artifact whose enrichment already matches the snapshot the
-        # provider will return.
-        artifact = _github_artifact()
-        assert artifact.details is not None
-        enriched = artifact.model_copy(
-            update={
-                "details": artifact.details.model_copy(
-                    update={
-                        "source_branch": "fix/login",
-                        "target_branch": "main",
-                        "author": "pierre",
-                        "provider_created_at": "2026-10-20T10:00:00+00:00",
-                        # Matches derive_pr_status on the snapshot below
-                        # (no review decision, no checks, mergeability
-                        # unknown -> mergeable).
-                        "pr_status": "mergeable",
-                    }
-                )
-            }
-        )
-        metadata = _write_metadata(service._session_dir, artifacts=[enriched])
-        service.load(metadata)
-        # A snapshot identical to the stored enrichment: no change at all.
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot",
-            lambda details, checked_at: _snapshot(pr_status=None),
-        )
-
-        changed = await service.sync_artifacts(trigger="turn_end")
-
-        assert changed == []
-        raw_before = (service._session_dir / "meta.json").read_text()
-
-        # A second turn-end pass refetches (no freshness window on turn end)
-        # but the unchanged snapshot still produces no write.
-        changed = await service.sync_artifacts(trigger="turn_end")
-        assert changed == []
-        assert (service._session_dir / "meta.json").read_text() == raw_before
-
-    @pytest.mark.asyncio
-    async def test_freshness_window_applies_off_turn_end(
-        self, service: SessionArtifactService, monkeypatch: pytest.MonkeyPatch
-    ):
-        # The freshness window is a rate-limit budget for the passes that
-        # cannot observe a state change (session start, client request); a
-        # turn end always refetches, even moments after a previous sync.
-        _seed_service_with_artifact(service)
-        calls: list[object] = []
-
-        def record(details, checked_at):
-            calls.append(details)
-            return _snapshot()
-
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot", record
-        )
-
-        await service.sync_artifacts(trigger="client_request")
-        assert len(calls) == 1
-
-        # Within the freshness window the non-turn pass is skipped...
-        await service.sync_artifacts(trigger="client_request")
-        assert len(calls) == 1
-
-        # ...but a turn end refetches the same artifact immediately.
-        changed = await service.sync_artifacts(trigger="turn_end")
-        assert changed == []
-        assert len(calls) == 2
-
-    @pytest.mark.asyncio
-    async def test_merged_artifacts_are_skipped(
-        self, service: SessionArtifactService, monkeypatch: pytest.MonkeyPatch
-    ):
-        artifact = _seed_service_with_artifact(service)
-        assert artifact.details is not None
-        merged = artifact.model_copy(
-            update={"details": artifact.details.model_copy(update={"state": "merged"})}
-        )
-        metadata = _write_metadata(service._session_dir, artifacts=[merged])
-        service.load(metadata)
-
-        calls: list[object] = []
-
-        def record(details, checked_at):
-            calls.append(details)
-            return _snapshot()
-
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot", record
-        )
-
-        changed = await service.sync_artifacts(trigger="turn_end")
-
-        assert calls == []
-        assert changed == []
-
-    @pytest.mark.asyncio
-    async def test_failure_keeps_stored_state_and_reports(
-        self,
-        service: SessionArtifactService,
-        monkeypatch: pytest.MonkeyPatch,
-        telemetry_events: list[dict[str, Any]],
-    ):
-        telemetry_service = SessionArtifactService(
-            session_id=SESSION_ID,
-            session_dir=service._session_dir,
-            telemetry=SessionTelemetry(
-                TelemetryClient(
-                    config_getter=lambda: build_test_vibe_config(enable_telemetry=True),
-                    harness_backend=ExperimentSurface.UNIFIED,
-                ),
-                model="m1",
-            ),
-        )
-        _seed_service_with_artifact(telemetry_service)
-        stored = telemetry_service.list_artifacts()[0]
-
-        def boom(details, checked_at):
-            raise ForgeError("gh CLI not found")
-
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot", boom
-        )
-
-        changed = await telemetry_service.sync_artifacts(trigger="turn_end")
-
-        assert changed == []
-        assert telemetry_service.list_artifacts()[0] == stored
-        (failed,) = _artifact_events(telemetry_events, "vibe.artifact_sync_failed")
-        assert failed["properties"]["provider"] == "github"
-        assert failed["properties"]["trigger"] == "turn_end"
-        assert failed["properties"]["error_type"] == "ForgeError"
-
-    @pytest.mark.asyncio
-    async def test_rate_limit_backs_off(
-        self, service: SessionArtifactService, monkeypatch: pytest.MonkeyPatch
-    ):
-        _seed_service_with_artifact(service)
-        calls: list[object] = []
-
-        def rate_limited(details, checked_at):
-            calls.append(details)
-            from vibe.core.git.forge_sync import RateLimitedSyncError
-
-            raise RateLimitedSyncError("secondary rate limit")
-
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot",
-            rate_limited,
-        )
-
-        await service.sync_artifacts(trigger="turn_end")
-        assert len(calls) == 1
-
-        # Inside the backoff window (base 5s) the artifact is skipped.
-        await service.sync_artifacts(trigger="turn_end")
-        assert len(calls) == 1
-
-    @pytest.mark.asyncio
-    async def test_synced_telemetry_only_for_changed(
-        self,
-        service: SessionArtifactService,
-        monkeypatch: pytest.MonkeyPatch,
-        telemetry_events: list[dict[str, Any]],
-    ):
-        telemetry_service = SessionArtifactService(
-            session_id=SESSION_ID,
-            session_dir=service._session_dir,
-            telemetry=SessionTelemetry(
-                TelemetryClient(
-                    config_getter=lambda: build_test_vibe_config(enable_telemetry=True),
-                    harness_backend=ExperimentSurface.UNIFIED,
-                ),
-                model="m1",
-            ),
-        )
-        _seed_service_with_artifact(telemetry_service)
-        monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.fetch_pull_request_snapshot",
-            lambda details, checked_at: _snapshot(title="Renamed PR"),
-        )
-
-        changed = await telemetry_service.sync_artifacts(trigger="session_start")
-
-        assert len(changed) == 1
-        (synced,) = _artifact_events(telemetry_events, "vibe.artifact_synced")
-        assert synced["properties"]["provider"] == "github"
-        assert synced["properties"]["trigger"] == "session_start"
-        assert synced["properties"]["changed"] is True
 
 
 class TestReopenDetection:

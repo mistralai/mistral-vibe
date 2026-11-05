@@ -107,6 +107,7 @@ async def test_a_server_closing_itself_mid_read_ends_its_serving_cleanly(
     _, transport = memory_transport_pair()
     server = AppServer(
         InputEndingTransport(transport),
+        oidc_tenants=process_services.oidc_tenants,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, Host()),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),

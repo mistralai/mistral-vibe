@@ -14,7 +14,6 @@ pub(crate) fn cancel_capture(app: &mut App, keep_selection: bool) {
         if matches!(
             target,
             MouseTarget::Transcript
-                | MouseTarget::Toast
                 | MouseTarget::Composer
                 | MouseTarget::Trust
                 | MouseTarget::RemoteProject

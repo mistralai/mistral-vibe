@@ -14,10 +14,16 @@ pub fn guttered(text: &str, width: u16, color: Color) -> LinkedLines {
     body
 }
 
-/// A markdown body in the fenced-code box titled `title`; `accent` lines are `$primary`.
-pub fn framed(text: &str, width: u16, title: &str, accent: impl Fn(&Line) -> bool) -> LinkedLines {
+/// A markdown body in a `color` box titled `title`; `accent` lines are `$primary`.
+pub fn framed(
+    text: &str,
+    width: u16,
+    title: &str,
+    color: Color,
+    accent: impl Fn(&Line) -> bool,
+) -> LinkedLines {
     let inner = width.saturating_sub(4) as usize;
-    let border = Style::default().fg(theme::md_fence_border());
+    let border = Style::default().fg(color);
     let mut body = body(text, inner as u16 + 2, false);
     for line in body.lines_mut().iter_mut().filter(|line| accent(line)) {
         let primary = |span: &mut Span| span.style = span.style.fg(theme::primary());

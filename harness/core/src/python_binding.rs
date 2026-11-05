@@ -153,9 +153,14 @@ impl Drop for PyHarnessSession {
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyHarnessSession>()?;
     module.add_function(wrap_pyfunction!(hook_tool_catalog, module)?)?;
+    module.add_function(wrap_pyfunction!(direct_tool_key, module)?)?;
     module.add_function(wrap_pyfunction!(process_tools_timeout_advice, module)?)?;
     module.add_function(wrap_pyfunction!(process_tools_shell_guidance, module)?)?;
     module.add_function(wrap_pyfunction!(restored_bash_call, module)?)?;
+    module.add_function(wrap_pyfunction!(
+        unmatched_permission_tool_patterns,
+        module
+    )?)?;
     module.add_function(wrap_pyfunction!(validate_permission_pattern, module)?)
 }
 
@@ -163,6 +168,26 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
 #[pyo3(signature = (pattern, *, arguments = false))]
 fn validate_permission_pattern(pattern: &str, arguments: bool) -> PyResult<()> {
     crate::core::validate_permission_pattern(pattern, arguments).map_err(PyValueError::new_err)
+}
+
+/// The `tools` patterns of a permission policy that name a namespace of
+/// `tool_ids` but match none of its tools; see `unmatched_tool_patterns` on
+/// Core's permission policy. `policy_json` holds a Core permission policy.
+#[pyfunction]
+#[pyo3(signature = (policy_json, *, tool_ids, open_namespaces))]
+fn unmatched_permission_tool_patterns(
+    policy_json: &str,
+    tool_ids: Vec<String>,
+    open_namespaces: Vec<String>,
+) -> PyResult<String> {
+    let policy: crate::core::PermissionPolicy =
+        decode_json(policy_json, "permission policy").map_err(PyValueError::new_err)?;
+    encode_json(&crate::core::unmatched_permission_tool_patterns(
+        &policy,
+        &tool_ids,
+        &open_namespaces,
+    ))
+    .map_err(PyValueError::new_err)
 }
 
 /// A bash call a restored Session saved, held to the Host's current timeouts
@@ -204,6 +229,17 @@ fn restored_bash_call(
 fn hook_tool_catalog(config_json: &str) -> PyResult<String> {
     let config = decode_json(config_json, "harness config").map_err(PyValueError::new_err)?;
     encode_json(&crate::core::hook_tool_catalog(&config)).map_err(PyValueError::new_err)
+}
+
+/// The key of the tool a top-level model call named `name` reaches under the
+/// config, as JSON, or `None` when no top-level tool has that name. A Runtime
+/// uses it to name a call that Core refused itself.
+#[pyfunction]
+fn direct_tool_key(config_json: &str, name: &str) -> PyResult<Option<String>> {
+    let config = decode_json(config_json, "harness config").map_err(PyValueError::new_err)?;
+    crate::core::direct_tool_key(&config, name)
+        .map(|key| encode_json(&key).map_err(PyValueError::new_err))
+        .transpose()
 }
 
 /// What ends the note on a bash command stopped at its timeout, or `None`

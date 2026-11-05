@@ -593,3 +593,68 @@ class TestDiscoverPullRequests:
         ):
             assert discover_pull_requests(tmp_path) == []
         run_mock.assert_not_called()
+
+    def test_skipped_branch_returns_empty_without_calling_cli(self, tmp_path: Path):
+        with (
+            patch(
+                "vibe.core.git.forge.WorktreeRepository",
+                _fake_repo_cls(
+                    "https://github.com/mistralai/vibe.git", branch="vibe/known"
+                ),
+            ),
+            patch("vibe.core.git.forge.find_cli_binary", return_value="/usr/bin/gh"),
+            patch("vibe.core.git.forge.subprocess.run") as run_mock,
+        ):
+            assert (
+                discover_pull_requests(
+                    tmp_path,
+                    skip_heads={("github.com", "mistralai/vibe", "vibe/known")},
+                )
+                == []
+            )
+        run_mock.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "head",
+        [
+            ("github.com", "mistralai/other", "vibe/known"),
+            ("github.example.com", "mistralai/vibe", "vibe/known"),
+        ],
+    )
+    def test_same_branch_in_another_repo_is_still_discovered(
+        self, tmp_path: Path, head: tuple[str, str, str]
+    ):
+        with (
+            patch(
+                "vibe.core.git.forge.WorktreeRepository",
+                _fake_repo_cls(
+                    "https://github.com/mistralai/vibe.git", branch="vibe/known"
+                ),
+            ),
+            patch("vibe.core.git.forge.find_cli_binary", return_value="/usr/bin/gh"),
+            patch(
+                "vibe.core.git.forge.subprocess.run", return_value=_completed(GH_JSON)
+            ) as run_mock,
+        ):
+            discover_pull_requests(tmp_path, skip_heads={head})
+        run_mock.assert_called_once()
+
+    def test_skipped_gitlab_head_matches_the_full_project_path(self, tmp_path: Path):
+        with (
+            patch(
+                "vibe.core.git.forge.WorktreeRepository",
+                _fake_repo_cls(
+                    "https://gitlab.com/team/subgroup/project.git", branch="feature"
+                ),
+            ),
+            patch("vibe.core.git.forge.find_cli_binary", return_value="/usr/bin/glab"),
+            patch("vibe.core.git.forge.subprocess.run") as run_mock,
+        ):
+            assert (
+                discover_pull_requests(
+                    tmp_path,
+                    skip_heads={("gitlab.com", "team/subgroup/project", "feature")},
+                )
+                == []
+            )
+        run_mock.assert_not_called()

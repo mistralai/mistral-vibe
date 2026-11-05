@@ -35,6 +35,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustHarnessHookBinding,
     RustHarnessSettings,
     RustImageContentBlock,
+    RustModelFacts,
     RustProgrammaticToolSettings,
     RustProvidedToolCallAction,
     RustProvidedToolDefinition,
@@ -90,11 +91,13 @@ from mistralai_vibe_local_harness.vibe._errors import (
     HarnessSessionNotFoundError,
     HarnessUnfinishedMigrationError,
 )
+from mistralai_vibe_local_harness.vibe._fact_recorder import NO_FACTS
 from mistralai_vibe_local_harness.vibe._file_images import (
     file_image_content_block,
     is_file_image,
     save_imported_image,
 )
+from mistralai_vibe_local_harness.vibe._file_tools import FILE_SYSTEM
 from mistralai_vibe_local_harness.vibe._fork import (
     SessionForkSnapshot,
     history_for_fork,
@@ -155,6 +158,7 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
 )
 from mistralai_vibe_local_harness.vibe._session import UnifiedHarnessSessionBackend
 from mistralai_vibe_local_harness.vibe._session_catalog import (
+    LiveStoredSession,
     SessionCatalogCache,
     SessionCatalogEntryV1,
     UnifiedSessionCatalog,
@@ -194,6 +198,7 @@ from mistralai_vibe_local_harness.vibe._subagents._configuration import (
     ResolvedSubagentConfiguration,
     advertise_bound_agent_types,
     child_config,
+    connector_policy_digest_of,
     resolve_declared_agent_types,
     resolve_subagent_configuration,
 )
@@ -300,6 +305,12 @@ class HarnessSessionListItem:
 
 
 @dataclass(frozen=True, slots=True)
+class _LiveListing:
+    session: PublicSession
+    runtime: DurableSessionRuntime | None
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessSessionListResult:
     items: tuple[HarnessSessionListItem, ...]
     continue_session_id: str | None
@@ -315,6 +326,7 @@ class HarnessSessionListResult:
 class HarnessSessionReadResult:
     snapshot: SessionSnapshot
     cwd: str | None
+    started_by_session_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -437,6 +449,32 @@ def _fork_live_session_config(
     )
 
 
+type _ListedRow = tuple[PublicSession, SessionMetadataV1, SessionIdentity]
+
+
+def _live_listed_rows(
+    live_sessions: Mapping[str, _LiveListing], session_ids: Sequence[str] | None
+) -> tuple[list[_ListedRow], dict[str, LiveStoredSession]]:
+    # A live session without a lease-held load is left to the catalogue.
+    rows: list[_ListedRow] = []
+    held: dict[str, LiveStoredSession] = {}
+    for session_id, live in live_sessions.items():
+        runtime = live.runtime
+        generation = runtime.held_generation() if runtime is not None else None
+        if runtime is None or generation is None:
+            continue
+        held[session_id] = runtime.held_generation
+        if session_ids is not None and session_id not in session_ids:
+            continue
+        stored = generation.session
+        rows.append((
+            live.session,
+            stored.runtime_state.session_metadata,
+            stored.runtime_state.identity,
+        ))
+    return rows, held
+
+
 class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-server host surface
     def __init__(self, storage_root: Path | None = None) -> None:
         self._storage_root = storage_root or _default_storage_root()
@@ -477,6 +515,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         self._connector_selection: ResolvedConnectorSelection | None = None
         self._connector_gateway_factory: Callable[[], ConnectorGateway] | None = None
         self._connector_gateway_authority_digest: str | None = None
+        self._connector_policy_digest: str | None = None
         self._subagent_configuration: ResolvedSubagentConfiguration | None = None
         # What each live controller was last pinned under, before plugin
         # extension. A plugin re-pin must extend exactly this: the session's
@@ -648,6 +687,13 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         self._connector_selection = selection
         self._connector_gateway_factory = gateway_factory
         self._connector_gateway_authority_digest = gateway_authority_digest
+        # Each turn boundary resolves the subagents again; digesting a large
+        # catalog every time would hold the event loop for tens of milliseconds.
+        self._connector_policy_digest = (
+            connector_policy_digest_of(catalog, selection, gateway_authority_digest)
+            if gateway_authority_digest is not None
+            else None
+        )
         self._refresh_subagent_configuration()
 
     @property
@@ -677,6 +723,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             connector_catalog=self._connector_catalog,
             connector_selection=self._connector_selection,
             connector_gateway_authority_digest=self._connector_gateway_authority_digest,
+            connector_policy_digest=self._connector_policy_digest,
         )
 
     def _refresh_subagent_configuration(self) -> None:
@@ -946,8 +993,9 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 # in-flight turn is running. Publish the capabilities once recovery
                 # leaves Core idle.
                 await self._initialize_integrations(session, push_to_core=False)
-                await session.recover()
-                await self._push_integration_capabilities(session)
+                await session.recover(
+                    once_idle=partial(self._push_integration_capabilities, session)
+                )
                 stored = await asyncio.to_thread(
                     session._runtime_for_host().stored_session
                 )
@@ -1457,14 +1505,18 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             root_session_id,
             parent_session_id,
             self._ephemeral_session_ids(),
-            self._live_listed_sessions(),
+            self._live_listings(),
             session_ids,
         )
 
     async def read(self, params: SessionReadParams) -> HarnessSessionReadResult:
         if session := self._live_session(params.session_id):
             result = await session.read(params)
-            return HarnessSessionReadResult(snapshot=result.snapshot, cwd=session.cwd)
+            return HarnessSessionReadResult(
+                snapshot=result.snapshot,
+                cwd=session.cwd,
+                started_by_session_id=session.started_by_session_id,
+            )
         store = self._read_store(params.session_id)
         if not store.exists:
             self._retire_read_stores((params.session_id,))
@@ -1477,11 +1529,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             tail.projection_state.snapshot.session.preview or tail.before is None
         ):
             projection = tail.projection_state
-            cwd = tail.session_metadata.cwd
+            metadata = tail.session_metadata
         else:
             stored = await asyncio.to_thread(store.load)
             projection = stored.projection_state
-            cwd = stored.runtime_state.session_metadata.cwd
+            metadata = stored.runtime_state.session_metadata
         if self._read_store_retirements == retirements:
             self._admit_read_store(store)
         # No live runtime here, and if no process holds the lease the session is
@@ -1495,7 +1547,9 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             )
         projection = projection.model_copy(update={"snapshot": snapshot})
         return HarnessSessionReadResult(
-            snapshot=_snapshot(projection, params.history_limit), cwd=cwd
+            snapshot=_snapshot(projection, params.history_limit),
+            cwd=metadata.cwd,
+            started_by_session_id=metadata.started_by_session_id,
         )
 
     async def relocate(
@@ -1536,22 +1590,28 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             if not stored.runtime_state.quiescent:
                 raise HarnessSessionBusyError(resolved)
             cwd = str(config.local.workspace.cwd)
-            if stored.runtime_state.session_metadata.cwd == cwd:
+            stored_metadata = stored.runtime_state.session_metadata
+            if stored_metadata.cwd == cwd:
                 return HarnessSessionReadResult(
-                    snapshot=_snapshot(stored.projection_state, history_limit), cwd=cwd
+                    snapshot=_snapshot(stored.projection_state, history_limit),
+                    cwd=cwd,
+                    started_by_session_id=stored_metadata.started_by_session_id,
                 )
             plugins, _, binder = await self._prepare_relocation_plugins(resolved)
             try:
-                projector = SessionProjector(stored.projection_state)
+                # The relocation record has no field for Session API facts. The
+                # checkpoint gets its position when the Session next opens,
+                # numbered in history order, as the last entry.
+                projector = SessionProjector(stored.projection_state, NO_FACTS)
                 update = projector.append_public_history_entries(
                     [checkpoint], observed_at=_now_milliseconds()
                 )
                 delta = compute_projection_delta(
                     stored.projection_state.snapshot, update.journaled_snapshot
                 )
-                metadata = stored.runtime_state.session_metadata.relocated_to(
-                    cwd
-                ).model_copy(update={"hook_bindings": list(hook_bindings)})
+                metadata = stored_metadata.relocated_to(cwd).model_copy(
+                    update={"hook_bindings": list(hook_bindings)}
+                )
                 record = await asyncio.to_thread(
                     store.relocate_session,
                     metadata,
@@ -1563,7 +1623,9 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                     update={"snapshot_sequence": record.sequence}
                 )
                 return HarnessSessionReadResult(
-                    snapshot=_snapshot(projection, history_limit), cwd=metadata.cwd
+                    snapshot=_snapshot(projection, history_limit),
+                    cwd=metadata.cwd,
+                    started_by_session_id=metadata.started_by_session_id,
                 )
             finally:
                 if binder is not None:
@@ -1588,7 +1650,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                     session_id=session.session_id, history_limit=history_limit
                 )
             )
-            return HarnessSessionReadResult(snapshot=snapshot.snapshot, cwd=session.cwd)
+            return HarnessSessionReadResult(
+                snapshot=snapshot.snapshot,
+                cwd=session.cwd,
+                started_by_session_id=session.started_by_session_id,
+            )
 
         previous_provider = session._bound_plugin_provider
         plugins, provider, binder = await self._prepare_relocation_plugins(
@@ -1631,7 +1697,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 previous_lock=previous_lock,
             )
             raise
-        return HarnessSessionReadResult(snapshot=snapshot, cwd=session.cwd)
+        return HarnessSessionReadResult(
+            snapshot=snapshot,
+            cwd=session.cwd,
+            started_by_session_id=session.started_by_session_id,
+        )
 
     async def _prepare_relocation_plugins(
         self, session_id: str
@@ -1742,6 +1812,14 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             for child in subagents.children.values()
         )
 
+    def live_child(
+        self, root_session_id: str, child_session_id: str
+    ) -> UnifiedHarnessSessionBackend | None:
+        """The open Session of one of the root's subagents, or None."""
+        if not self.references_child(root_session_id, child_session_id):
+            return None
+        return self._live_session(child_session_id)
+
     def child_session_records(
         self, root_session_id: str
     ) -> tuple[ChildSessionRecord, ...]:
@@ -1761,6 +1839,19 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         return tuple(
             record.model_copy(deep=True) for record in subagents.children.values()
         )
+
+    def session_model_facts(self, session_id: str) -> RustModelFacts | None:
+        """The model facts a live session's Core runs with, or None.
+
+        A subagent can run on another model than its root, with its own context
+        window and compaction threshold. None for a session that is not open or
+        has not been promoted yet.
+        """
+        session = self._live_session(session_id)
+        runtime = session._runtime if session is not None else None
+        if runtime is None:
+            return None
+        return runtime.config.settings.context.model_facts
 
     async def wait_for_children_settled(self, root_session_id: str) -> None:
         """Wait until none of a live root's children has a Turn running.
@@ -1878,10 +1969,18 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         spawn_key: str,
         start_new_actions: bool,
         require_existing: bool,
+        instructions: str | None = None,
     ) -> ChildSessionHandle:
-        """Bind one parent-owned child while retaining its exclusive store lease."""
+        """Bind one parent-owned child while retaining its exclusive store lease.
+
+        ``instructions``, a generic child's own, replace its binding's.
+        """
         self._guard_open()
         core_config, adapter_config = child_config(binding, identity.session_id)
+        if instructions is not None:
+            core_config = core_config.model_copy(
+                update={"system_instructions": instructions}
+            )
         if not isinstance(binding, LocalChildSessionBinding):
             raise TypeError("local child Host requires a local child binding")
         core_config, hook_handlers = self._inherit_parent_hooks(identity, core_config)
@@ -2071,6 +2170,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         )
         return ChildCommandAdmission(target=target, turn_id=target.command.turn_id)
 
+    async def wait_for_child_restore(self, child_session_id: str) -> None:
+        """Wait until a loaded child has recovered the Turn restore found cut."""
+        session = self._live_session(child_session_id)
+        if session is not None:
+            await session._wait_for_restored_turn()
+
     async def interrupt_child(
         self,
         child: ChildSessionHandle,
@@ -2105,17 +2210,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             state = await asyncio.wait_for(
                 session._wait_for_parent_turn(turn_id), timeout=timeout_ms / 1000
             )
-        return _child_turn_outcome(
-            state,
-            generation,
-            turn_id,
-            retryable_failure=_terminal_failure_retryability(
-                UnifiedSessionStore(self._storage_root, child.session_id)
-                .load()
-                .checkpoint,
-                turn_id,
-            ),
-        )
+        return _child_turn_outcome(state, generation, turn_id)
 
     async def acknowledge_child_command(
         self, child: ChildSessionHandle, *, operation_key: str
@@ -2212,28 +2307,6 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         finally:
             await asyncio.to_thread(lease.release)
         return True
-
-    async def child_is_quiescent(self, child_session_id: str) -> bool:
-        """Whether a child's own store holds no Turn in flight.
-
-        The parent record cannot say: a restore settles an interrupted child in
-        the parent only, and a child can admit a command before its parent
-        records it. A missing child is not quiescent.
-        """
-        session = self._live_session(child_session_id)
-        if session is not None:
-            runtime = session._runtime_for_host()
-            return runtime.runtime_state.quiescent and (
-                runtime.inspection.status not in {"running", "compacting"}
-            )
-        store = UnifiedSessionStore(self._storage_root, child_session_id)
-        if not store.exists:
-            return False
-        stored = await asyncio.to_thread(store.load)
-        turn = stored.projection_state.snapshot.latest_turn
-        return stored.runtime_state.quiescent and (
-            turn is None or turn.status != "in_progress"
-        )
 
     async def reconfigure_subagents(
         self, session_id: str, adapter_config: LocalRuntimeAdapterConfig
@@ -2881,21 +2954,21 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                     if action_adapter is not None
                     else None
                 ),
+                facts=session.facts,
             )
             runtime_holder.append(runtime)
             if mcp_runtime is not None:
 
                 async def accept_mcp_snapshot(snapshot: MCPRouteSnapshot) -> None:
-                    current_connector_snapshot = (
-                        connector_runtime.snapshot
-                        if connector_runtime is not None
-                        else None
-                    )
                     await runtime.reconfigure_capability_dimension(
                         _integration_capability_update(
                             base_capabilities,
-                            mcp_snapshot=snapshot,
-                            connector_snapshot=current_connector_snapshot,
+                            mcp_snapshot=lambda: snapshot,
+                            connector_snapshot=lambda: (
+                                connector_runtime.snapshot
+                                if connector_runtime is not None
+                                else None
+                            ),
                         )
                     )
 
@@ -2905,14 +2978,15 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 async def accept_connector_snapshot(
                     snapshot: ConnectorRouteSnapshot,
                 ) -> None:
-                    current_mcp_snapshot = (
-                        mcp_runtime.snapshot if mcp_runtime is not None else None
-                    )
                     await runtime.reconfigure_capability_dimension(
                         _integration_capability_update(
                             base_capabilities,
-                            mcp_snapshot=current_mcp_snapshot,
-                            connector_snapshot=snapshot,
+                            mcp_snapshot=lambda: (
+                                mcp_runtime.snapshot
+                                if mcp_runtime is not None
+                                else None
+                            ),
+                            connector_snapshot=lambda: snapshot,
                         )
                     )
 
@@ -3286,16 +3360,15 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         if mcp_runtime is not None:
 
             async def accept_mcp_snapshot(snapshot: MCPRouteSnapshot) -> None:
-                connector_snapshot = (
-                    connector_runtime.snapshot
-                    if connector_runtime is not None
-                    else None
-                )
                 await runtime.reconfigure_capability_dimension(
                     _integration_capability_update(
                         base_capabilities,
-                        mcp_snapshot=snapshot,
-                        connector_snapshot=connector_snapshot,
+                        mcp_snapshot=lambda: snapshot,
+                        connector_snapshot=lambda: (
+                            connector_runtime.snapshot
+                            if connector_runtime is not None
+                            else None
+                        ),
                     )
                 )
 
@@ -3305,12 +3378,13 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             async def accept_connector_snapshot(
                 snapshot: ConnectorRouteSnapshot,
             ) -> None:
-                mcp_snapshot = mcp_runtime.snapshot if mcp_runtime is not None else None
                 await runtime.reconfigure_capability_dimension(
                     _integration_capability_update(
                         base_capabilities,
-                        mcp_snapshot=mcp_snapshot,
-                        connector_snapshot=snapshot,
+                        mcp_snapshot=lambda: (
+                            mcp_runtime.snapshot if mcp_runtime is not None else None
+                        ),
+                        connector_snapshot=lambda: snapshot,
                     )
                 )
 
@@ -3987,7 +4061,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         root_session_id: str | None,
         parent_session_id: str | None,
         ephemeral_session_ids: frozenset[str],
-        live_sessions: Mapping[str, PublicSession],
+        live_sessions: Mapping[str, _LiveListing],
         session_ids: Sequence[str] | None = None,
     ) -> HarnessSessionListResult:
         if limit < 1:
@@ -3995,28 +4069,32 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         unified_root = self._storage_root / "unified"
         if not unified_root.exists():
             return HarnessSessionListResult(items=(), continue_session_id=None)
+        rows, held = _live_listed_rows(live_sessions, session_ids)
         catalog = self._session_catalog()
-        stored_sessions: list[tuple[int, str, PublicSession, SessionMetadataV1]] = []
         for entry in (
-            catalog.entries()
+            catalog.entries(held)
             if session_ids is None
-            else catalog.entries_for(session_ids)
+            else catalog.entries_for(session_ids, held)
         ):
             session_id = entry.session_id
             if session_id in ephemeral_session_ids:
                 continue
             # Prefer this process's live projection; otherwise settle a mid-turn
             # row only when no process holds the lease (``_list`` runs in a thread).
-            public = live_sessions.get(session_id)
-            if public is None:
+            live = live_sessions.get(session_id)
+            if live is not None:
+                public = live.session
+            else:
                 public = entry.session
                 if isinstance(
                     public.status, RunningSessionStatus | BlockedSessionStatus
                 ) and not session_is_live(self._storage_root, session_id):
                     public = public.model_copy(update={"status": IdleSessionStatus()})
-            metadata = entry.metadata
+            rows.append((public, entry.metadata, entry.identity))
+        stored_sessions: list[tuple[int, str, PublicSession, SessionMetadataV1]] = []
+        for public, metadata, identity in rows:
             if parent_session_id is None and isinstance(
-                entry.identity, SubagentSessionIdentity
+                identity, SubagentSessionIdentity
             ):
                 continue
             if cwd is not None and cwd not in {metadata.cwd, metadata.origin_cwd}:
@@ -4031,7 +4109,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 and metadata.parent_session_id != parent_session_id
             ):
                 continue
-            stored_sessions.append((public.updated_at, session_id, public, metadata))
+            stored_sessions.append((public.updated_at, public.id, public, metadata))
         stored_sessions.sort(key=lambda item: (item[0], item[1]), reverse=True)
         start = 0
         if cursor is not None:
@@ -4267,12 +4345,14 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             if entry.session.ephemeral
         )
 
-    def _live_listed_sessions(self) -> dict[str, PublicSession]:
-        return {
-            session_id: entry.session._state_for_host().session
-            for session_id, entry in self._sessions.items()
-            if entry.state == "open" and not entry.session.ephemeral
-        }
+    def _live_listings(self) -> dict[str, _LiveListing]:
+        listings: dict[str, _LiveListing] = {}
+        for session_id, entry in self._sessions.items():
+            if entry.state != "open" or entry.session.ephemeral:
+                continue
+            session, runtime = entry.session._listing_for_host()
+            listings[session_id] = _LiveListing(session=session, runtime=runtime)
+        return listings
 
     def _attachment(
         self, session: UnifiedHarnessSessionBackend
@@ -4713,20 +4793,22 @@ def _tree_deletion_plan(state: RuntimeStateV3) -> DeletingSessionTree | None:
 
 
 def _child_turn_outcome(
-    state: PublicSessionState,
-    generation: int,
-    turn_id: str,
-    *,
-    retryable_failure: bool | None = None,
+    state: PublicSessionState, generation: int, turn_id: str
 ) -> ChildTurnOutcome:
     turn = state.latest_turn
     if turn is None or turn.id != turn_id:
         raise RuntimeError("child Session does not retain the requested generation")
     if isinstance(turn, CompletedPublicTurn):
-        if turn.skip_reason is not None:
-            # A skipped Turn has no assistant entry; the hook's reason is its answer.
-            output: list[JsonValue] = [{"type": "text", "text": turn.skip_reason}]
-            final_answer = turn.skip_reason
+        hook_reason = (
+            turn.skip_reason if turn.skip_reason is not None else turn.reject_reason
+        )
+        if hook_reason is not None:
+            # A skipped or rejected Turn has no answer of its own; the hook's reason
+            # is its answer. A ``pre_llm_call`` skip may give no reason.
+            output: list[JsonValue] = (
+                [{"type": "text", "text": hook_reason}] if hook_reason else []
+            )
+            final_answer = hook_reason
         else:
             output, final_answer = _assistant_output(state, turn_id)
         return CompletedChildTurnOutcome(
@@ -4744,7 +4826,7 @@ def _child_turn_outcome(
             failure=SubagentFailure(
                 code=turn.error.code or "subagent_turn_failed",
                 message=turn.error.message,
-                retryable=retryable_failure or False,
+                retryable=False,
             ),
         )
     if isinstance(turn, InterruptedPublicTurn):
@@ -4757,24 +4839,6 @@ def _child_turn_outcome(
     raise RuntimeError("child Turn is still running")
 
 
-def _terminal_failure_retryability(
-    checkpoint: dict[str, JsonValue], turn_id: str
-) -> bool | None:
-    turn = checkpoint.get("turn")
-    if not isinstance(turn, dict):
-        return None
-    if turn.get("type") != "terminal" or turn.get("turn_id") != turn_id:
-        return None
-    outcome = turn.get("outcome")
-    if not isinstance(outcome, dict) or outcome.get("type") != "failed":
-        return None
-    error = outcome.get("error")
-    if not isinstance(error, dict):
-        return None
-    retryable = error.get("retryable")
-    return retryable if isinstance(retryable, bool) else None
-
-
 def _assistant_output(
     state: PublicSessionState, turn_id: str
 ) -> tuple[list[JsonValue], str]:
@@ -4782,6 +4846,9 @@ def _assistant_output(
         if entry.get("type") != "message":
             continue
         if entry.get("turnId") != turn_id or entry.get("role") != "assistant":
+            continue
+        if _is_discarded(entry):
+            # The Core never accepted this draft: it is not the Turn's answer.
             continue
         raw_content = entry.get("content")
         if not isinstance(raw_content, list):
@@ -4796,6 +4863,11 @@ def _assistant_output(
                 text_parts.append(text)
         return output, "".join(text_parts)
     return [], ""
+
+
+def _is_discarded(entry: JsonObject) -> bool:
+    outcome = entry.get("outcome")
+    return isinstance(outcome, dict) and outcome.get("type") == "discarded"
 
 
 def _public_state(
@@ -5158,14 +5230,25 @@ def _merge_integration_capabilities(
 def _integration_capability_update(
     base: RustHarnessCapabilitySet,
     *,
-    mcp_snapshot: MCPRouteSnapshot | None,
-    connector_snapshot: ConnectorRouteSnapshot | None,
+    mcp_snapshot: Callable[[], MCPRouteSnapshot | None],
+    connector_snapshot: Callable[[], ConnectorRouteSnapshot | None],
 ) -> Callable[[RustHarnessCapabilitySet], RustHarnessCapabilitySet]:
-    groups = _integration_tool_groups(
-        base, mcp_snapshot=mcp_snapshot, connector_snapshot=connector_snapshot
-    )
+    """The update landing one dimension's snapshot beside the other's.
+
+    The other dimension is read when the update runs, under the Runtime's
+    lock, not when it is queued: an MCP and a connector change landing
+    together at a turn boundary would otherwise each carry the other's
+    previous snapshot, and the one landing last would put it back.
+    """
 
     def update(live: RustHarnessCapabilitySet) -> RustHarnessCapabilitySet:
+        groups = _integration_tool_groups(
+            base, mcp_snapshot=mcp_snapshot(), connector_snapshot=connector_snapshot()
+        )
+        # Compared before copying: a turn boundary re-lands the same groups,
+        # and deep-copying hundreds of tools to find that out held the loop.
+        if live.tool_groups == groups:
+            return live
         return live.model_copy(update={"tool_groups": groups}, deep=True)
 
     return update
@@ -5236,6 +5319,7 @@ def _core_config(session_id: str) -> RustHarnessConfig:
                 ),
                 subagents=RustDisabledRuntimeToolFeature(),
                 background_processes=RustDisabledRuntimeToolFeature(),
+                file_system=FILE_SYSTEM,
                 command_environment=RustUnixCommandEnvironment(),
                 large_output=RustDisabledLargeOutputPolicy(),
                 bash_timeout=BASH_TIMEOUT,

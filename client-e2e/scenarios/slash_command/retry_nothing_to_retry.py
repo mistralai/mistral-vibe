@@ -1,10 +1,18 @@
-"""`/retry` with no interrupted response says so instead of doing nothing."""
+"""/retry after a completed answer warns that there is nothing to retry and sends nothing."""
 
 from __future__ import annotations
 
+from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-capture_startup = False
-screen_contains = ("⚠ No interrupted response to continue.",)
+screen_contains = ("Hi there.", "⚠ No failed or interrupted response to retry")
+screen_excludes = ("/retry",)
 
-timeline: Timeline = ["/retry\r"]
+timeline: Timeline = [
+    "hello\r",
+    turn_started(),
+    user_msg("hello"),
+    assistant_msg("Hi there."),
+    turn_completed(),
+    "/retry\r",
+]

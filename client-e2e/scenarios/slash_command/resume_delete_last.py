@@ -33,7 +33,6 @@ timeline: Timeline = ["/resume", "\r", "d", "d"]
 
 capture_startup = False
 capture_steps = {1, 3}
-settle_per_key = True
 screen_contains = (
     "Deleted session 00000000",
     "No saved sessions left for this directory.",

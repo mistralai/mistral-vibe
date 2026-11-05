@@ -173,14 +173,19 @@ async def persist_stdio_mcp_server(
 async def _append_persisted_mcp_server(
     orchestrator: ConfigOrchestrator[VibeConfigSchema], server: MCPServer
 ) -> None:
-    raw_servers = await _load_persisted_servers(orchestrator, MCPServerAddError)
-    failures = await orchestrator.set_field(
-        "/mcp_servers",
-        [*raw_servers, _serialize_mcp_server(server)],
-        reason=f"Add MCP server {server.name}",
+    def append(raw: object) -> list[dict[str, object]]:
+        raw_servers = _persisted_servers_list(raw, MCPServerAddError)
+        if _find_raw_server(raw_servers, server.name) is not None:
+            raise MCPServerAddError(
+                f"MCP server name `{server.name}` is already configured."
+            )
+        return [*raw_servers, _serialize_mcp_server(server)]
+
+    mutation = await orchestrator.mutate_field(
+        "/mcp_servers", append, reason=f"Add MCP server {server.name}", default=[]
     )
     _raise_persistence_failure(
-        failures, MCPServerAddError, "Failed to persist MCP server"
+        mutation.failures, MCPServerAddError, "Failed to persist MCP server"
     )
 
 
@@ -193,32 +198,43 @@ async def remove_mcp_server(
     if not normalized_name:
         raise MCPServerRemoveError("MCP server name must contain letters or numbers.")
 
-    raw_servers = await _load_persisted_servers(orchestrator, MCPServerRemoveError)
-    persisted = _find_raw_server(raw_servers, normalized_name)
+    def drop(raw: object) -> object:
+        raw_servers = _persisted_servers_list(raw, MCPServerRemoveError)
+        if _persisted_server(raw_servers, normalized_name) is None:
+            return raw
+        return [
+            server
+            for server in raw_servers
+            if _raw_server_name(server) != normalized_name
+        ]
+
+    mutation = await orchestrator.mutate_field(
+        "/mcp_servers", drop, reason=f"Remove MCP server {normalized_name}", default=[]
+    )
+    _raise_persistence_failure(
+        mutation.failures, MCPServerRemoveError, "Failed to remove MCP server"
+    )
+    removed = _persisted_server(
+        _persisted_servers_list(mutation.previous, MCPServerRemoveError),
+        normalized_name,
+    )
+    return RemovedMCPServerResult(
+        name=normalized_name, server=removed, removed=removed is not None
+    )
+
+
+def _persisted_server(
+    raw_servers: list[dict[str, object]], name: str
+) -> MCPServer | None:
+    persisted = _find_raw_server(raw_servers, name)
     if persisted is None:
-        return RemovedMCPServerResult(name=normalized_name, server=None, removed=False)
+        return None
     try:
-        removed_server = _parse_raw_mcp_server(persisted)
+        return _parse_raw_mcp_server(persisted)
     except ValidationError as exc:
         raise MCPServerRemoveError(
             "MCP server in the persistence layer is invalid."
         ) from exc
-
-    failures = await orchestrator.set_field(
-        "/mcp_servers",
-        [
-            server
-            for server in raw_servers
-            if _raw_server_name(server) != normalized_name
-        ],
-        reason=f"Remove MCP server {normalized_name}",
-    )
-    _raise_persistence_failure(
-        failures, MCPServerRemoveError, "Failed to remove MCP server"
-    )
-    return RemovedMCPServerResult(
-        name=normalized_name, server=removed_server, removed=True
-    )
 
 
 async def find_persisted_oauth_mcp_server(
@@ -265,6 +281,12 @@ async def _load_persisted_servers(
         .model_dump()
         .get("mcp_servers", [])
     )
+    return _persisted_servers_list(raw, error_type)
+
+
+def _persisted_servers_list(
+    raw: object, error_type: type[MCPServerAddError] | type[MCPServerRemoveError]
+) -> list[dict[str, object]]:
     if not isinstance(raw, list):
         raise error_type("Config field `mcp_servers` is not a list.")
     return [server for server in raw if isinstance(server, dict)]

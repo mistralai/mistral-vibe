@@ -85,6 +85,7 @@ fn tool_catalog_revision_overflow_rejects_without_committing_candidate() {
             input_schema: json!({ "type": "object" }),
             output_schema: None,
             exposure: ProvidedToolExposure::Direct,
+            direct_name: None,
         }],
     });
 

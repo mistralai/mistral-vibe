@@ -35,5 +35,5 @@ screen_contains = (
     "Session Total LLM Tokens: 1.28M (1,280,245)",
     "Last Turn Tokens: 98.8k (98,765)",
     "including 12.3k (12,345) cached",
-    "12.3k/600k tokens (2%)",
+    "ctx ▏      12.3k/600k",
 )

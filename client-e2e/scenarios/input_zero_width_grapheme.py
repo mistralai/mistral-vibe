@@ -9,5 +9,3 @@ _LEFT = "\x1b[D"
 _BACKSPACE = "\x7f"
 
 timeline: Timeline = [paste("ᠸᠠᠭᠢᠨᠳᠠᠷ\u180eᠠ ᠶᠢᠨ"), _LEFT * 5, _BACKSPACE]
-
-settle_per_key = True

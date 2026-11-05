@@ -60,16 +60,14 @@ class ChecksSummary(BaseModel):
 
 
 class _PullRequestSharedEnrichment(BaseModel):
-    """Enrichment fields populated by provider sync (Phase 4).
+    """The PR/MR's provider data, as the wire carries it.
 
-    Required keys since Phase 4: every artifact is enriched from birth (the
-    creation/discovery path fetches the PR/MR immediately), so the fields are
-    always written together. Fields that are genuinely absent for open PRs
-    stay nullable but required (present with value None). ``pr_status`` and
-    ``checks`` are the two agreed additions: the aggregated actionability
-    status (rendered by every surface) and the CI detail (rendered in the
-    CLI artifacts modal). The sync-time inputs (review decision, mergeable)
-    are deliberately not stored.
+    A session stores the values it was built with (creation or discovery);
+    the wire projection replaces them with the last read from the provider
+    (``vibe.app_server._pull_request_cache``), which is not session state.
+    Fields that are genuinely absent for open PRs stay nullable but required
+    (present with value None). ``pr_status`` is the CLI's label and
+    ``checks`` the CI detail of its artifacts modal.
     """
 
     source_branch: str
@@ -77,6 +75,8 @@ class _PullRequestSharedEnrichment(BaseModel):
     author: str
     state: PullRequestLifecycleState
     provider_created_at: str | None
+    # When the PR/MR was last read from its provider, successfully (the same
+    # meaning as cloud sessions'). A failed read keeps the previous value.
     provider_updated_at: str | None
     provider_closed_at: str | None
     provider_merged_at: str | None
@@ -84,11 +84,14 @@ class _PullRequestSharedEnrichment(BaseModel):
     pr_status: PrStatus | None = None
     checks: ChecksSummary | None = None
     # Raw provider-neutral statuses (the wire's derived-status source):
-    # checks_status none/pending/passing/failing, review_decision
-    # none/review_required/changes_requested/approved, merge_status
-    # unknown/mergeable/blocked/conflicting. Filled from the same snapshot
-    # as ``checks``; the client derives the actionability status from them.
+    # checks_status none/pending/passing/failing (the checks that gate the
+    # merge), optional_checks_status (the others: it never blocks),
+    # review_decision none/review_required/changes_requested/approved,
+    # merge_status unknown/mergeable/blocked/conflicting. Filled from the same
+    # snapshot as ``checks``; the client derives the actionability status
+    # from them.
     checks_status: str | None = None
+    optional_checks_status: str | None = None
     review_decision: str | None = None
     merge_status: str | None = None
 

@@ -116,6 +116,7 @@ async def test_skills_list_answers_with_the_same_catalogue(
     }
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_reload_picks_up_a_skill_written_after_the_session_opened(
     backend_contract_session: AppServerSession, tmp_path: Path

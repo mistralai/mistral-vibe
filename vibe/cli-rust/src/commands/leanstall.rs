@@ -52,13 +52,12 @@ fn set_installed(app: &mut App, client: &Arc<Client>, installed: bool) {
         return;
     };
     let tx = app.command_tx.clone();
-    let pending = app.commit_started();
     let client = client.clone();
     app.agents.installing = true;
-    tokio::spawn(async move {
+    crate::work::spawn(async move {
         let result = request(&client, session_id, installed).await;
         let event = Event { installed, result };
-        deliver(tx, CommandEvent::Leanstall(Box::new(event)), &pending).await;
+        deliver(tx, CommandEvent::Leanstall(Box::new(event))).await;
     });
 }
 

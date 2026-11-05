@@ -1,6 +1,5 @@
 //! `/leanstall` and `/unleanstall`: wire types, short-circuits, round-trips, and input gating.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -60,10 +59,6 @@ fn row(role: &str, text: &str) -> Vec<(String, String)> {
     vec![(role.to_owned(), text.to_owned())]
 }
 
-fn pending_commits(app: &App) -> u32 {
-    app.pending_commits.load(Ordering::Relaxed)
-}
-
 #[test]
 fn install_when_lean_is_present_answers_locally() {
     let mut app = app_with(&["default", "lean"]);
@@ -72,8 +67,7 @@ fn install_when_lean_is_present_answers_locally() {
         messages(&app),
         row("command_status", "Lean agent is already installed.")
     );
-    assert_eq!(pending_commits(&app), 0, "no request is started");
-    assert!(!app.agents.installing);
+    assert!(!app.agents.installing, "no request is started");
 }
 
 #[test]
@@ -84,8 +78,7 @@ fn uninstall_when_lean_is_absent_answers_locally() {
         messages(&app),
         row("command_status", "Lean agent is not installed.")
     );
-    assert_eq!(pending_commits(&app), 0, "no request is started");
-    assert!(!app.agents.installing);
+    assert!(!app.agents.installing, "no request is started");
 }
 
 #[tokio::test]
@@ -122,7 +115,6 @@ async fn install_and_uninstall_round_trip_their_method_for_lean() {
             event.result.is_err(),
             "the stub's null is not an agent list"
         );
-        assert_eq!(pending_commits(&app), 1, "the reducer releases the commit");
         leanstall::apply_event(&mut app, *event);
         assert!(!app.agents.installing);
         assert_eq!(app.agents.all.len(), present.len());
@@ -162,8 +154,7 @@ fn replay_after_startup_switch(command: &str) -> App {
 #[tokio::test]
 async fn a_deferred_leanstall_does_not_race_the_startup_switch() {
     let app = replay_after_startup_switch("/leanstall");
-    assert!(!app.agents.installing);
-    assert_eq!(pending_commits(&app), 0, "no request is started");
+    assert!(!app.agents.installing, "no request is started");
     assert_eq!(
         messages(&app).last(),
         Some(&("command_error".to_owned(), leanstall::SWITCHING.to_owned()))

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from abc import abstractmethod
 import asyncio
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -21,6 +23,10 @@ from vibe.core.config.models import (
     serialize_model_configs,
 )
 from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
+from vibe.core.paths._vibe_home import VIBE_HOME
+from vibe.core.utils.file_lock import async_file_lock
+
+_LOCK_TIMEOUT_SECONDS = 10.0
 
 
 class BaseTomlConfigLayer(ConfigLayer[RawConfig]):
@@ -29,6 +35,8 @@ class BaseTomlConfigLayer(ConfigLayer[RawConfig]):
     Subclasses only resolve ``_target_path``; this base reads the file into a
     snapshot and persists patches atomically.
     """
+
+    shared_store = True
 
     @property
     @abstractmethod
@@ -50,6 +58,30 @@ class BaseTomlConfigLayer(ConfigLayer[RawConfig]):
         except OSError as e:
             raise ConfigStorageError(self.name, self._target_path, "write") from e
 
+    def _store_lock(self) -> AbstractAsyncContextManager[object]:
+        return _file_lock(self.name, self._target_path)
+
+
+@asynccontextmanager
+async def _file_lock(layer_name: str, path: Path) -> AsyncIterator[None]:
+    lock_path = _lock_path(path)
+    stack = AsyncExitStack()
+    try:
+        await stack.enter_async_context(
+            async_file_lock(lock_path, timeout=_LOCK_TIMEOUT_SECONDS)
+        )
+    except OSError as e:
+        raise ConfigStorageError(layer_name, lock_path, "lock") from e
+    async with stack:
+        yield
+
+
+def _lock_path(path: Path) -> Path:
+    # Not beside the file: a project's .vibe/ sits in its git repository.
+    key = os.path.normcase(str(path.resolve()))
+    digest = hashlib.sha256(key.encode()).hexdigest()[:32]
+    return VIBE_HOME.path / "locks" / "config" / f"{digest}.lock"
+
 
 def _read_toml_snapshot(path: Path) -> LayerConfigSnapshot:
     """Load the file into a snapshot paired with the fingerprint of its bytes.
@@ -69,6 +101,8 @@ def _read_toml_snapshot(path: Path) -> LayerConfigSnapshot:
 
 
 def _write_toml_snapshot(path: Path, next_config: RawConfig) -> str:
+    # Replace a symlink's target, not the link, so dotfiles setups keep working.
+    path = path.resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     tmp_path: Path | None = None

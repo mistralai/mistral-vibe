@@ -22,6 +22,7 @@ from vibe.app_server.protocol import (
     ProtocolErrorCode,
     SessionPeerReadParams,
     SessionPeerReadResponse,
+    SessionPeerRestoreParams,
     SessionPeerSendParams,
     SessionSpawnNewWorktree,
     SessionSpawnParams,
@@ -52,6 +53,7 @@ def _attached_server(
     client_transport, server_transport = memory_transport_pair()
     server = AppServer(
         server_transport,
+        oidc_tenants=process_services.oidc_tenants,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
@@ -265,6 +267,19 @@ async def test_a_client_that_hosts_no_peers_is_never_asked(
 
     with pytest.raises(SessionPeerError, match="cannot reach other sessions"):
         await server.send_to_peer_session(_SEND)
+    assert server._client_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_hosts_peers_but_not_restore_is_never_asked_to_restore(
+    process_services: ProcessServices,
+) -> None:
+    server, _ = _attached_server(session_peers=True, process_services=process_services)
+
+    with pytest.raises(SessionPeerError, match="cannot restore sessions"):
+        await server.restore_peer_sessions(
+            SessionPeerRestoreParams(session_ids=["other"])
+        )
     assert server._client_requests == {}
 
 

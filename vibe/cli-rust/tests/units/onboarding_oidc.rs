@@ -6,7 +6,7 @@ use vibe_rs::setup::auth::oidc::{OidcPoll, OidcStart, OidcStatus};
 use vibe_rs::setup::auth::rpc::SetupStatus;
 use vibe_rs::setup::auth::sign_in_flow::{SignInEvent, SignInStatus};
 use vibe_rs::setup::wizard::context::OnboardingContext;
-use vibe_rs::setup::wizard::sign_in::sign_in_actions;
+use vibe_rs::setup::wizard::sign_in::{apply_sign_in_event, SUCCESS_DWELL};
 use vibe_rs::setup::wizard::{
     screens, submit, Action, BrowserSignInState, OnboardingState, Screen, SignInVariant,
 };
@@ -139,7 +139,7 @@ fn oidc_preserves_inference_config_through_retry_and_manual_entry() {
             Some(Action::StartBrowserSignIn)
         ));
         assert_eq!(state.context, state.config);
-        sign_in_actions(
+        apply_sign_in_event(
             &mut state.browser_sign_in,
             SignInEvent::Failed {
                 message: "Sign-in failed.".into(),
@@ -190,19 +190,20 @@ fn oidc_enabled_round_trips_and_seeds_context() {
 }
 
 #[test]
-fn oidc_completed_submits_choices_not_an_api_key() {
+fn oidc_completed_submits_choices_after_the_success_dwell() {
     let mut state = BrowserSignInState::default();
-    assert!(sign_in_actions(
+    apply_sign_in_event(
         &mut state,
-        SignInEvent::StatusChanged(SignInStatus::Completed)
-    )
-    .is_empty());
+        SignInEvent::StatusChanged(SignInStatus::Completed),
+    );
     assert_eq!(state.variant, SignInVariant::Success);
     assert_eq!(state.message, "Sign-in complete");
-    assert!(matches!(
-        sign_in_actions(&mut state, SignInEvent::OidcCompleted).as_slice(),
-        [Action::CompleteOidc]
-    ));
+    assert!(state.finished.is_none());
+    let before = vibe_rs::clock::now();
+    apply_sign_in_event(&mut state, SignInEvent::OidcCompleted);
+    let (at, action) = state.finished.as_ref().expect("armed");
+    assert!(matches!(action, Action::CompleteOidc));
+    assert!(*at >= before + SUCCESS_DWELL);
 }
 
 #[test]

@@ -25,6 +25,7 @@ async def test_runtime_and_history_extensions_are_available_from_a_public_sessio
     assert history.items == []
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_history_list_filters_entries_by_public_turn(
     backend_contract_mistral_api: respx.Route,
@@ -54,6 +55,7 @@ async def test_history_list_filters_entries_by_public_turn(
     )
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_history_list_paginates_in_both_directions(
     backend_contract_mistral_api: respx.Route,

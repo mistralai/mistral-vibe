@@ -77,7 +77,7 @@ fn read_terminal(
             continue;
         }
         let timeout = bursts.deadline().map_or(POLL_INTERVAL, |deadline| {
-            deadline.saturating_duration_since(Instant::now())
+            deadline.saturating_duration_since(crate::clock::real_now())
         });
         let mut pending = match crossterm::event::poll(timeout) {
             // Leave the event queued for whoever reads the terminal after the TUI.
@@ -96,7 +96,7 @@ fn read_terminal(
             }
         };
         detection.observe(&mut filter, deadline);
-        let now = Instant::now();
+        let now = crate::clock::real_now();
         pending.extend(filter.flush_expired(now));
         // Windows consoles never bracket pastes: they arrive as raw key presses.
         if cfg!(windows) {

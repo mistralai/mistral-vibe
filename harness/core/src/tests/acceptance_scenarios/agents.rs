@@ -182,10 +182,10 @@ fn operator_prompts_reach_model_guidance_and_tool_catalogs() {
             "operator",
             &first,
             "spawn",
-            "return await tools.agents.spawn({name: 'worker', message: 'inspect'});",
+            "return await tools.agents.spawn({name: 'worker', message: 'inspect', instructions: 'Work.'});",
             [runtime_tool(
                 "agents.spawn",
-                json!({"name":"worker", "message":"inspect"}),
+                json!({"name": "worker", "message": "inspect", "instructions": "Work."}),
             )],
         )
         .only_action();
@@ -354,7 +354,7 @@ fn forked_child_sees_the_running_spawn_call_closed_before_its_task() {
         .as_str()
         .unwrap();
     let request = "Spawn a helper to check the notes, then wait for it.";
-    let source = "async function main() { return tools.agents.spawn({ name: 'helper', message: 'Check the notes' }); }";
+    let source = "async function main() { return tools.agents.spawn({ name: 'helper', message: 'Check the notes', instructions: 'Work.' }); }";
     let mut parent = SynchronousRuntime::new(config());
     let first = parent.start_turn("parent", request);
     let spawn = parent
@@ -365,7 +365,7 @@ fn forked_child_sees_the_running_spawn_call_closed_before_its_task() {
             source,
             [runtime_tool(
                 "agents.spawn",
-                json!({"name":"helper", "message":"Check the notes"}),
+                json!({"name": "helper", "message": "Check the notes", "instructions": "Work."}),
             )],
         )
         .only_action();
@@ -1128,11 +1128,12 @@ fn agent_hooks_select_the_canonical_runtime_identity() {
             turn_id,
             &first,
             "program",
-            "async function main() { return tools.agents.spawn({name:'child', message:'work'}); }",
+            "async function main() { return tools.agents.spawn({name: 'child', message: 'work', instructions: 'Work.'}); }",
             [hook_call("pre_tool_call", &["spawn-pre"], Value::Null)],
         )
         .only_action();
-    let approved = json!({"name": "reviewer", "message": "review the patch"});
+    let approved =
+        json!({"name": "reviewer", "message": "review the patch", "instructions": "Work."});
 
     // Do
     runtime.restart_from_checkpoint();

@@ -16,11 +16,6 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import AppServerEvent, Timeline
 
-# The loading label only shows while a turn runs, so settle on busy frames.
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-# Each release must land on its own settled frame.
-settle_per_key = True
-
 
 def _snapshot(retrying: dict[str, Any] | None) -> AppServerEvent:
     """A live snapshot without history, so only its `retrying` field changes the UI."""

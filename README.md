@@ -269,8 +269,8 @@ Rust binary (`vibe-rs`) bundled with the package.
 - **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`). A bare `@` quickly lists immediate non-hidden entries; after a path character, Git workspaces suggest tracked and non-ignored files. Pasting a standalone existing absolute or home-relative file or folder also creates a mention.
 - **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
+- **History Search**: Press `Ctrl+R` to search your previous prompts. Type in the `reverse-i-search:` field of the bottom bar; the input previews the newest prompt containing your text. `↑`/`Ctrl+R` move to older matches, `↓`/`Ctrl+S` to newer ones, `Enter` keeps the match in the input for editing, and `Esc` or `Ctrl+C` restores your draft.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
-- **Todo View Toggle**: Press `Ctrl+T` to toggle the todo list view.
 - **Debug Console**: Press `Ctrl+\` to toggle the debug console.
 - **Agent Selection**: Press `Shift+Tab` to cycle through agents (ask, accept-edits, ...).
 - **Queueing**: Prompts submitted while the agent is working are queued by the app server. Empty `Enter` or `Ctrl+Enter` atomically consumes the stored queue item and steers it into the active turn. `Ctrl+C` removes the newest queued prompt. `Escape` interrupts the active turn and pauses remaining prompts, and `Enter` resumes a paused queue. Shell commands and non-side-channel slash commands require an idle session.
@@ -281,6 +281,7 @@ Rust binary (`vibe-rs`) bundled with the package.
 - **Copy**: Use `Ctrl+Y` or `Ctrl+Shift+C` to copy the current selection to clipboard. With autocopy enabled (default via `autocopy_to_clipboard = true`), mouse selection automatically copies on release and shows a brief confirmation.
 - **Multi-click selection**: Double-click selects a word, triple-click selects the paragraph. Dragging extends the selection at the same granularity. Clicking a collapsible transcript entry (tool group, tool call, reasoning) toggles it on every click; drag to select its text.
 - **Linux clipboard**: In a local Linux session, Vibe copies through `wl-copy`, `xclip`, or `xsel`. If pasting fails, install `xclip` (or `wl-clipboard`), or hold Shift while selecting to use your terminal's native selection. Over SSH, Vibe relies on OSC 52 alone, so your terminal must support it.
+- **tmux clipboard**: Inside tmux, Vibe copies with `tmux load-buffer -w`, so the text lands in a tmux paste buffer and reaches your terminal's clipboard without `allow-passthrough`. Keep tmux's `set-clipboard` option `on` or `external` (the default). When tmux's `mouse` option is off (the default before tmux 3.8), Vibe leaves the mouse to your terminal, so its native selection and copy work as with `enable_mouse_capture = false`. After `set -g mouse on` in tmux, restart Vibe (or press `Ctrl+Z` then run `fg`) to get its mouse features back.
 
 You can start Vibe with a prompt using the following command:
 
@@ -656,7 +657,7 @@ Toggle voice mode on or off with the `/voice` slash command:
 
 | Shortcut | Action           |
 | -------- | ---------------- |
-| `Ctrl+R` | Start recording  |
+| `Ctrl+T` | Start recording  |
 | Any key  | Stop recording   |
 | `Escape` | Cancel recording |
 | `Ctrl+C` | Cancel recording |
@@ -673,8 +674,9 @@ Vibe provides several built-in slash commands. Use slash commands by typing them
 > /help
 ```
 
-If a model response is interrupted by a backend error, use `/retry` to continue
-from the partial response. Add optional guidance after the command, for example
+If a model response fails with a backend error, or you interrupt it with Esc,
+use `/retry` to run it again. The new reply replaces the unfinished one. Add
+optional guidance after the command, for example
 `/retry keep the conclusion concise`.
 
 Use `/mcp` or `/connectors` to browse configured MCP servers and workspace
@@ -804,6 +806,8 @@ The default `auto` theme follows the terminal background when it can be detected
 ```toml
 theme = "dracula"
 ```
+
+The `mistral-dark` and `mistral-light` themes use the Mistral brand palette.
 
 ### API Key Configuration
 

@@ -265,6 +265,7 @@ class _CronResult(_SourceModel):
 class _ToolResultEnvelope(_SourceModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
+    content: list[dict[str, JsonValue]] = Field(default_factory=list)
     structured_content: dict[str, JsonValue]
     meta: dict[str, JsonValue] | None = Field(default=None, alias="_meta")
 
@@ -544,14 +545,16 @@ def _project_read(
             requested_limit=arguments.limit,
             was_truncated=result.was_truncated,
         )
-        word = "line" if result.lines_read == 1 else "lines"
+        path = _display_path(result.path, display_roots)
+        if any(block.get("type") == "image" for block in envelope.content):
+            message = f"the image {path}"
+        else:
+            word = "line" if result.lines_read == 1 else "lines"
+            message = f"{result.lines_read} {word} from {path}"
         display = EffectResultDisplay(
             success=True,
             verb="Read",
-            message=(
-                f"{result.lines_read} {word} from "
-                f"{_display_path(result.path, display_roots)}"
-            ),
+            message=message,
             suffix="(truncated)" if result.was_truncated else "",
         )
         return _completed_state(state, output, display)

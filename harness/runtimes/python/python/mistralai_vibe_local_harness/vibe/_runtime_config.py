@@ -8,7 +8,9 @@ from typing import Literal, Protocol
 
 from mistralai_vibe_local_harness.protocol import (
     RustHarnessConfig,
+    RustMessage,
     RustRuntimeBuiltinToolName,
+    RustToolDefinition,
 )
 from mistralai_vibe_local_harness.session_protocol import PublicRetryCategory
 from mistralai_vibe_local_harness.vibe._credentials import (
@@ -141,6 +143,29 @@ class RequestSentTelemetry:
 # Host sink for per-completion request telemetry, called once per LLM call.
 type RequestSentSink = Callable[[RequestSentTelemetry], None]
 
+
+@dataclass(frozen=True, slots=True)
+class ModelRequest:
+    """The model input of one agent completion, reported once the call succeeded.
+
+    ``messages`` and ``tools`` are exactly what the completion sent: the
+    assembled system prompt, the conversation, and the tool catalogue. A Host
+    can measure them to explain what fills the model's context window; as only
+    successful calls are reported, the newest input always pairs with the
+    newest usage reading. They are shared with the Runtime, so a sink must not
+    mutate them.
+    ``turn_id`` is the turn the call serves, which tells a Session's own calls
+    from its subagents' when they share one sink.
+    """
+
+    turn_id: str
+    messages: tuple[RustMessage, ...]
+    tools: tuple[RustToolDefinition, ...]
+
+
+# Host sink for each agent completion's model input, called once per agent call.
+type ModelRequestSink = Callable[[ModelRequest], None]
+
 # The ways a provider response can break the tool call contract Core enforces,
 # each named after the rejection it would cause.
 type MalformedToolCallReason = Literal[
@@ -248,6 +273,17 @@ class LocalModelRoute:
 _DEFAULT_LOCAL_MODEL_ROUTE = LocalModelRoute()
 
 
+def output_room(context_window: int, compaction_threshold: int) -> int | None:
+    """What a request at the compaction threshold leaves the model for output.
+
+    A server that checks input plus ``max_tokens`` against the window refuses
+    more. A window with no room left at the threshold overflows on input
+    alone, so it bounds nothing and the room is None.
+    """
+    room = context_window - compaction_threshold
+    return room if room > 0 else None
+
+
 @dataclass(frozen=True, slots=True)
 class LocalProviderRoute:
     """A provider destination for a completion: where to send it and how to auth.
@@ -333,6 +369,7 @@ class LocalRuntimeAdapterPorts:
     correlation_id_sink: CorrelationIdSink | None
     request_sent_sink: RequestSentSink | None
     malformed_tool_calls_sink: MalformedToolCallsSink | None = None
+    model_request_sink: ModelRequestSink | None = None
     sandbox: SandboxAdapter | None = None
     helper_crashes: HelperCrashCount = field(
         default_factory=HelperCrashCount, compare=False
@@ -446,6 +483,9 @@ class LocalRuntimeAdapterConfig:
     # keeps the Runtime default.
     subagent_max_children: int | None = None
     subagent_max_concurrent_turns: int | None = None
+    # Whether the Session API serves this session. Only then does the Runtime
+    # record the Session API facts and save them in the Session file.
+    session_api: bool = False
     # Host-bound per-call permission resolver: refines an ``ask`` call into allow/ask/deny
     # (main's Vibe rules — .env prompt, denylists, allowlist grants), named by a builtin's
     # name or a provided tool's full route. Under smart approve it runs first, and only
@@ -454,6 +494,7 @@ class LocalRuntimeAdapterConfig:
     correlation_id_sink: CorrelationIdSink | None = None
     request_sent_sink: RequestSentSink | None = None
     malformed_tool_calls_sink: MalformedToolCallsSink | None = None
+    model_request_sink: ModelRequestSink | None = None
     skills: Mapping[str, str] = field(default_factory=dict)
     # Where workspace file and shell tools run. None runs them on this host;
     # an adapter runs them in its Sandbox Environment, whose paths ``workspace``
@@ -601,6 +642,7 @@ class LocalRuntimeAdapterConfig:
             correlation_id_sink=self.correlation_id_sink,
             request_sent_sink=self.request_sent_sink,
             malformed_tool_calls_sink=self.malformed_tool_calls_sink,
+            model_request_sink=self.model_request_sink,
             sandbox=self.sandbox,
             helper_crashes=self.helper_crashes,
         )
@@ -622,6 +664,7 @@ class LocalRuntimeAdapterConfig:
             correlation_id_sink=ports.correlation_id_sink,
             request_sent_sink=ports.request_sent_sink,
             malformed_tool_calls_sink=ports.malformed_tool_calls_sink,
+            model_request_sink=ports.model_request_sink,
             sandbox=ports.sandbox,
             helper_crashes=ports.helper_crashes,
         )
@@ -665,6 +708,7 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "provided_tool_mode",
     "subagent_max_children",
     "subagent_max_concurrent_turns",
+    "session_api",
     "skills",
 })
 
@@ -705,6 +749,8 @@ __all__ = [
     "MalformedToolCallReason",
     "MalformedToolCallsSink",
     "MalformedToolCallsTelemetry",
+    "ModelRequest",
+    "ModelRequestSink",
     "ProcessAuthority",
     "ProviderDeltaObserver",
     "ProviderStreamDelta",

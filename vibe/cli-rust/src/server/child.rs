@@ -62,7 +62,7 @@ impl ChildHandle {
         let stdin = child.child.stdin.take().context("child stdin missing")?;
         let stdout = child.child.stdout.take().context("child stdout missing")?;
         if let Some(stderr) = child.child.stderr.take() {
-            tokio::spawn(super::stderr::drain(stderr));
+            crate::work::spawn_daemon(super::stderr::drain(stderr));
         }
         Ok((child, stdin, stdout))
     }

@@ -8,7 +8,7 @@ handshake = {
     "account/read": {
         "account": {
             "status": "ready",
-            "plan": {"kind": "chat", "name": "TEAM", "title": "[Subscription] Pro"},
+            "plan": {"kind": "chat", "name": "TEAM", "title": "Team"},
             "planOffer": None,
             "rateLimitAction": None,
             "teleportEligible": True,
@@ -16,6 +16,6 @@ handshake = {
         }
     }
 }
-screen_contains = ("mistral-medium-3.5[medium] · [Subscription] Pro",)
+screen_contains = ("mistral-medium-3.5[medium] · Team",)
 
 timeline: Timeline = [resize(24, 50)]

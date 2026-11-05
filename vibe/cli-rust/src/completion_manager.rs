@@ -1,7 +1,5 @@
 //! Shared slash-command, file-path, and skill-mention completion state.
 
-use tokio::sync::watch;
-
 use crate::app::App;
 use crate::commands;
 use crate::input_modes::InputMode;
@@ -64,12 +62,14 @@ pub fn refresh(app: &mut App) {
     app.completion.entries = entries;
 }
 
-/// Apply a file-index update not yet seen, so a frame never pairs a ready index with a stale `@` popup.
-pub fn sync_files(app: &mut App, files: &mut watch::Receiver<u64>) {
-    if files.has_changed().unwrap_or(false) {
-        files.borrow_and_update();
+/// Apply a file-index update not yet seen, so a frame never pairs a ready
+/// index with a stale `@` popup. Returns whether one landed.
+pub fn sync_files(app: &mut App) -> bool {
+    if app.completion.files.take_update() {
         refresh(app);
+        return true;
     }
+    false
 }
 
 pub fn is_open(app: &App) -> bool {
@@ -189,7 +189,10 @@ fn active(app: &App) -> Option<ActiveCompletion> {
     if query.contains(' ') {
         return None;
     }
-    Some(ActiveCompletion::File { start, end: caret })
+    app.session
+        .startup_config
+        .enable_file_autocomplete
+        .then_some(ActiveCompletion::File { start, end: caret })
 }
 
 /// Start of a `/skill` token ending at the caret: the whitespace-delimited
@@ -242,6 +245,7 @@ fn file_entries(app: &App, start: usize, end: usize) -> Vec<CompletionEntry> {
     let query = app.chat_input.input[start + 1..end].replace('\\', "/");
     app.completion
         .files
+        .index
         .matching(&query, FILE_MATCH_LIMIT)
         .into_iter()
         .map(|label| CompletionEntry {

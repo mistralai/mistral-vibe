@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import logging
 import os
 import signal
@@ -8,6 +9,10 @@ import signal
 from vibe.utils.platform import is_windows
 
 logger = logging.getLogger(__name__)
+
+# How long a killed process group gets to exit and close its pipes, once after
+# the first signal and once after the second.
+_GROUP_EXIT_GRACE_SECONDS = 0.25
 
 
 async def kill_async_subprocess(
@@ -27,8 +32,14 @@ async def kill_async_subprocess(
     With ``kill_process_group=False``, :meth:`asyncio.subprocess.Process.kill`
     is used on all platforms (typical for a single ``create_subprocess_exec``
     leaf such as ``grep``).
+
+    On Unix with ``kill_process_group=True``, waiting is bounded: a process that
+    left the group can keep the child's pipes open for as long as it runs, so
+    after two signals this returns without waiting for those pipes to close.
     """
-    if proc.returncode is not None:
+    # A group can outlive its leader: a killed shell leaves its children
+    # running and holding its pipes, so the group is killed even then.
+    if proc.returncode is not None and not (kill_process_group and not is_windows()):
         return
 
     try:
@@ -49,17 +60,33 @@ async def kill_async_subprocess(
             except (FileNotFoundError, OSError):
                 proc.terminate()
         else:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-            except Exception:
-                logger.debug(
-                    "Unexpected error killing process group for pid %s",
-                    proc.pid,
-                    exc_info=True,
-                )
+            await _kill_process_group(proc)
+            return
 
         await proc.wait()
     except (ProcessLookupError, PermissionError, OSError):
         pass
+
+
+async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    _signal_process_group(proc.pid)
+    with suppress(TimeoutError):
+        await asyncio.wait_for(proc.wait(), _GROUP_EXIT_GRACE_SECONDS)
+        return
+    # Something still holds the pipes. A process the shell was starting as the
+    # signal went out joins the group too late to receive it. The shell is dead
+    # by now and starts nothing new, so a second signal reaches that process.
+    _signal_process_group(proc.pid)
+    with suppress(TimeoutError):
+        await asyncio.wait_for(proc.wait(), _GROUP_EXIT_GRACE_SECONDS)
+
+
+def _signal_process_group(pgid: int) -> None:
+    try:
+        # The child leads its own group, so the group ID is its PID.
+        # os.getpgid() fails once the leader has exited.
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    except Exception:
+        logger.debug("Unexpected error killing process group %s", pgid, exc_info=True)

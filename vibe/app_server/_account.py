@@ -4,10 +4,17 @@ import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
+from vibe.app_server._billing import (
+    BillingGateway,
+    BillingRead,
+    SubscriptionResult,
+    default_billing_gateway,
+)
 from vibe.app_server.models import (
     AccountAction,
     AccountActionKind,
     AccountApiKeyView,
+    AccountBudgetView,
     AccountPlanKind,
     AccountPlanView,
     AccountStatus,
@@ -15,7 +22,16 @@ from vibe.app_server.models import (
 )
 from vibe.core.config import DEFAULT_VIBE_BASE_URL, VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.telemetry.send import get_mistral_provider_and_api_key
+from vibe.core.platform_auth import (
+    PlatformCredentialFactory,
+    PlatformCredentialProvider,
+    PlatformCredentialSnapshot,
+)
+from vibe.core.platform_auth._mistral import (
+    MistralCredentials,
+    mistral_credentials,
+    resolve_snapshot,
+)
 from vibe.core.types import Backend
 from vibe.observability.logging import logger
 from vibe.setup.auth.api_key_persistence import (
@@ -30,11 +46,11 @@ from vibe.setup.auth.whoami import (
     HttpAccountGateway,
     WhoAmIResult,
     _sanitize_tenant_url,
+    credential_principal,
     derive_user_plan,
     fetch_whoami,
     store_cached_whoami,
 )
-from vibe.utils.oidc_marker import is_oidc_marker
 
 # Re-exports for existing callers (server.py, _resources.py, tests) that used to
 # import these names from ``vibe.app_server._account``. Keeping the alias avoids
@@ -51,7 +67,15 @@ __all__ = [
     "reconcile_tenant_domains",
 ]
 
-_PAID_CHAT_PLANS = {"INDIVIDUAL", "EDU", "TEAM"}
+# How long an account read waits for billing once /whoami has answered.
+_BILLING_GRACE_SECONDS = 2.0
+# Vibe keys read the chat plan; billing names the same plans.
+_CHAT_PLAN_TITLES = {
+    "FREE": "Free",
+    "INDIVIDUAL": "Pro",
+    "EDU": "Student",
+    "TEAM": "Team",
+}
 _RECONCILE_REASON = "tenant-domain-reconcile"
 # /whoami answers the plan type from the key scope, so the mapping is one-to-one.
 _KEY_SCOPES = {
@@ -59,7 +83,9 @@ _KEY_SCOPES = {
     AccountPlanKind.CHAT: "vibe",
     AccountPlanKind.MISTRAL_CODE: "codestral",
 }
-_KEY_PREVIEW_CHARS = 10
+_KEY_PREVIEW_SUFFIX_CHARS = 4
+# Never reveal more than a quarter of the secret: no suffix on shorter keys.
+_KEY_PREVIEW_MIN_KEY_LEN = 4 * _KEY_PREVIEW_SUFFIX_CHARS
 _UPGRADE_PLANS_URL = (
     "https://admin.mistral.ai/subscriptions/upgrade/plans"
     "?return_to=https%3A%2F%2Fchat.mistral.ai"
@@ -152,14 +178,11 @@ class _Plan:
             )
         )
 
-    @property
-    def title(self) -> str | None:
+    def title(self, subscription: SubscriptionResult | None = None) -> str | None:
         name = self.normalized_name
         match self.kind:
             case AccountPlanKind.CHAT:
-                if name == "FREE":
-                    return "Free"
-                return "[Subscription] Pro" if name in _PAID_CHAT_PLANS else None
+                return _chat_title(name, subscription)
             case AccountPlanKind.API:
                 return "Free" if "FREE" in name else "[API] Scale plan"
             case AccountPlanKind.MISTRAL_CODE:
@@ -211,18 +234,25 @@ class AccountHost(Protocol):
     def set_user_plan(self, user_plan: str | None) -> None: ...
 
     async def apply_account_whoami(
-        self, *, console_base_url: str, api_key: str, whoami: WhoAmIResult
+        self, *, console_base_url: str, principal: str | None, whoami: WhoAmIResult
     ) -> None: ...
 
-    async def clear_account_whoami(self, *, api_key: str) -> None: ...
+    async def clear_account_whoami(self, *, principal: str | None) -> None: ...
 
 
 class AccountController:
     def __init__(
-        self, agent_loop: AccountHost, gateway: AccountGateway | None = None
+        self,
+        agent_loop: AccountHost,
+        gateway: AccountGateway | None = None,
+        *,
+        billing_gateway: BillingGateway | None = None,
+        credentials: PlatformCredentialFactory | None = None,
     ) -> None:
         self._agent_loop = agent_loop
         self._gateway = gateway or HttpAccountGateway()
+        self._billing_gateway = billing_gateway or default_billing_gateway()
+        self._credentials = credentials
         self._lock = asyncio.Lock()
 
     async def read(self) -> AccountView:
@@ -241,15 +271,14 @@ class AccountController:
     async def _read(self) -> tuple[_TenantDomainUpdate | None, AccountView]:
         runtime_config = self._agent_loop.config
         vibe_base_url = runtime_config.vibe_base_url
-        console_base_url = runtime_config.console_base_url
         upgrade = _account_action(AccountActionKind.UPGRADE_TO_PRO, vibe_base_url)
         # Resolve a Mistral credential (prefers the active provider, else the
         # first configured Mistral provider). Runs in a thread because key
         # resolution can touch the keyring / filesystem.
-        provider_and_key = await asyncio.to_thread(
-            get_mistral_provider_and_api_key, runtime_config
+        mistral = await asyncio.to_thread(
+            mistral_credentials, runtime_config, self._credentials
         )
-        if provider_and_key is None:
+        if mistral is None:
             if runtime_config.get_mistral_provider() is None:
                 # No Mistral provider at all — not our user. Expected absence:
                 # stamp NO_PLAN_DATA (distinct from the null "tried but failed"
@@ -276,16 +305,41 @@ class AccountController:
         # slow or failed account fetch here would clobber that value —
         # leaking null into telemetry for the rest of the session. Only the
         # success path below overwrites it.
-        provider, api_key = provider_and_key
+        console_base_url = runtime_config.console_base_url
+        principal = await credential_principal(mistral.credentials, console_base_url)
+        api_key = await _api_key(mistral.credentials, console_base_url)
+        # Billing runs beside /whoami so the plan title and budget add no round trip.
+        # The budget only counts usage on the Mistral key: skip it for other models.
+        with_budget = self._agent_loop.config.is_active_model_mistral()
+        billing = asyncio.create_task(
+            self._read_billing(
+                mistral.provider.api_base, mistral.credentials, with_budget=with_budget
+            )
+        )
+        try:
+            return await self._read_plan(mistral, principal, api_key, billing, upgrade)
+        finally:
+            billing.cancel()
+            await asyncio.gather(billing, return_exceptions=True)
 
+    async def _read_plan(
+        self,
+        mistral: MistralCredentials,
+        principal: str | None,
+        api_key: str | None,
+        billing: asyncio.Task[BillingRead],
+        upgrade: AccountAction,
+    ) -> tuple[_TenantDomainUpdate | None, AccountView]:
+        vibe_base_url = self._agent_loop.config.vibe_base_url
+        console_base_url = self._agent_loop.config.console_base_url
         try:
             result = await self._gateway.read(
-                base_url=console_base_url, api_key=api_key
+                base_url=console_base_url, credentials=mistral.credentials
             )
         except AccountGatewayUnauthorized:
             # The credential was rejected: drop any cached plan so telemetry
             # reports null ("lookup failed"), not a stale cached plan for the TTL.
-            await self._agent_loop.clear_account_whoami(api_key=api_key)
+            await self._agent_loop.clear_account_whoami(principal=principal)
             # Suppress the account UI entirely for a non-Mistral active model;
             # otherwise surface the usual upgrade prompts.
             return None, (
@@ -309,16 +363,25 @@ class AccountController:
         # Warm the cross-session cache, and reconcile telemetry's plan fields
         # with this live result so user_plan and experiment_attributes never
         # diverge (the experiments path may have used a stale disk-cache hit).
-        store_cached_whoami(api_key, result)
+        if principal is not None:
+            store_cached_whoami(principal, result)
         await self._agent_loop.apply_account_whoami(
-            console_base_url=console_base_url, api_key=api_key, whoami=result
+            console_base_url=console_base_url, principal=principal, whoami=result
         )
 
         plan = _Plan.from_result(result)
-        plan_view = AccountPlanView(kind=plan.kind, name=plan.name, title=plan.title)
+        # Only a Vibe key's chat plan is the one billing describes.
+        reads = (
+            await _settled(billing)
+            if plan.kind is AccountPlanKind.CHAT
+            else BillingRead()
+        )
+        plan_view = AccountPlanView(
+            kind=plan.kind, name=plan.name, title=plan.title(reads.subscription)
+        )
         api_key_view = (
             None
-            if is_oidc_marker(api_key)
+            if api_key is None
             else AccountApiKeyView(
                 preview=_key_preview(api_key),
                 scope=_KEY_SCOPES[plan.kind],
@@ -331,13 +394,13 @@ class AccountController:
                 else None,
             )
         )
-        # The CLI OIDC registration, not account-context, decides which hosts
-        # the ID token may reach: a dedicated api_base or vibe_base written to
+        # The OIDC registration, not account-context, decides which hosts a
+        # user token may reach: a dedicated api_base or vibe_base written to
         # config.toml would fail every request until the user edits it out.
         tenant_update = (
             None
-            if is_oidc_marker(api_key)
-            else _TenantDomainUpdate(provider_name=provider.name, whoami=result)
+            if api_key is None
+            else _TenantDomainUpdate(provider_name=mistral.provider.name, whoami=result)
         )
 
         if not self._agent_loop.config.is_active_model_mistral():
@@ -364,12 +427,75 @@ class AccountController:
             teleport_eligible=teleport_eligible,
             teleport_action=None if teleport_eligible else switch_key,
             api_key=api_key_view,
+            budget=_budget_view(reads),
         )
+
+    async def _read_billing(
+        self,
+        api_base: str,
+        credentials: PlatformCredentialProvider,
+        *,
+        with_budget: bool,
+    ) -> BillingRead:
+        if self._billing_gateway is None:
+            return BillingRead()
+        try:
+            return await self._billing_gateway.read(
+                api_base=api_base, credentials=credentials, with_budget=with_budget
+            )
+        except Exception as exc:
+            logger.warning("Billing read failed (%s)", type(exc).__name__, exc_info=exc)
+            return BillingRead()
+
+
+async def _settled(billing: asyncio.Task[BillingRead]) -> BillingRead:
+    """The billing reads, given a short grace once /whoami has answered."""
+    try:
+        return await asyncio.wait_for(asyncio.shield(billing), _BILLING_GRACE_SECONDS)
+    except TimeoutError:
+        logger.info("Billing reads still pending; the account read goes without them")
+        return BillingRead()
+
+
+def _chat_title(name: str, subscription: SubscriptionResult | None) -> str | None:
+    """The plan billing names, else the one /whoami names."""
+    billed = subscription.plan_name.strip().upper() if subscription else ""
+    return _CHAT_PLAN_TITLES.get(billed) or _CHAT_PLAN_TITLES.get(name)
+
+
+def _budget_view(reads: BillingRead) -> AccountBudgetView | None:
+    detail = reads.budget.vibe_budget if reads.budget else None
+    if detail is None or detail.initial_budget <= 0:
+        return None
+    payg = detail.payg_enabled
+    if payg is None and reads.subscription is not None:
+        payg = reads.subscription.vibe_payg_enabled
+    return AccountBudgetView(
+        usage_percentage=max(0.0, detail.usage_percentage),
+        reset_at=detail.reset_at,
+        payg_enabled=bool(payg),
+    )
+
+
+async def _api_key(credentials: PlatformCredentialProvider, url: str) -> str | None:
+    """The API key the account view previews; ``None`` for a user token."""
+    snapshot = await resolve_snapshot(credentials, url)
+    if not isinstance(snapshot, PlatformCredentialSnapshot):
+        return None
+    value = snapshot.headers.get("Authorization", "")
+    if snapshot.kind != "api_key" or not value.startswith("Bearer "):
+        return None
+    return value.removeprefix("Bearer ")
 
 
 def _key_preview(api_key: str) -> str:
-    # Never reveal more than a quarter of the secret.
-    return f"{api_key[: min(_KEY_PREVIEW_CHARS, len(api_key) // 4)]}****"
+    # Match Studio: mask everything but the last few characters.
+    suffix = (
+        api_key[-_KEY_PREVIEW_SUFFIX_CHARS:]
+        if len(api_key) >= _KEY_PREVIEW_MIN_KEY_LEN
+        else ""
+    )
+    return f"****{suffix}"
 
 
 def _account_action(kind: AccountActionKind, vibe_base_url: str) -> AccountAction:

@@ -1,6 +1,6 @@
 //! Compute terminal status from the current application facts.
 
-use super::{Instant, NotificationContext, Outcome};
+use super::{NotificationContext, Outcome};
 use crate::app::{App, Status};
 use crate::program_status::{BlockedKind, ProgramState};
 
@@ -43,7 +43,7 @@ pub fn program_state(app: &App) -> ProgramState {
 pub fn action_required(app: &mut App) {
     if blocked(app).is_some() {
         app.terminal_notifier
-            .notify(NotificationContext::ActionRequired, Instant::now());
+            .notify(NotificationContext::ActionRequired, crate::clock::now());
     }
 }
 

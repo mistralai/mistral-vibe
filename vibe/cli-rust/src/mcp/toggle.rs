@@ -6,8 +6,8 @@ use crate::server::{method, Client, MCPSourceKind, MCPSourceStatus, MCPSourceSum
 use serde_json::json;
 
 use super::rows::{self, Row};
-use super::{Event, TOAST_SECS};
-use crate::app::{App, ToastSeverity};
+use super::Event;
+use crate::app::App;
 
 /// One toggle request, kept to undo its paint on rejection.
 pub struct Toggle {
@@ -67,10 +67,9 @@ fn reject_plugin_toggle(app: &mut App, name: &str, kind: MCPSourceKind) -> bool 
     else {
         return false;
     };
-    app.show_toast(
-        format!("{name} is managed by the {plugin} plugin and cannot be toggled here."),
-        ToastSeverity::Warning,
-        TOAST_SECS,
+    crate::notices::refused(
+        app,
+        &format!("{name} is managed by the {plugin} plugin and cannot be toggled here."),
     );
     true
 }

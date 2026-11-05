@@ -26,6 +26,18 @@ def resize(rows: int, columns: int) -> Resize:
     return {"resize": (rows, columns)}
 
 
+# Kitty F23: the client advances its frozen replay clock 100 ms per press.
+_ADVANCE_KEY = "\x1b[57386u"
+_ADVANCE_STEP_MS = 100
+
+
+def advance(ms: int) -> str:
+    """Let ``ms`` of UI time pass (a multiple of 100); replay time never moves otherwise."""
+    if ms <= 0 or ms % _ADVANCE_STEP_MS:
+        raise ValueError("advance takes a positive multiple of 100 ms")
+    return _ADVANCE_KEY * (ms // _ADVANCE_STEP_MS)
+
+
 @dataclass(frozen=True)
 class Action:
     """One external action; a pattern ``url`` matches a generated path in full."""

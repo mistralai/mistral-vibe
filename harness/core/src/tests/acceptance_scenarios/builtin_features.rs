@@ -226,7 +226,7 @@ fn disabled_file_system_removes_file_tools_from_every_catalog() {
         run_typescript_completion(action_id(&next), "program", source),
         running("no-files")
             .dispatch(llm_call(2))
-            .observe(tool_execution_started("no-files", "program"))
+            .observe(core_tool_execution_started("no-files", "program"))
             .observe_tool_execution_finished(
                 "program",
                 run_typescript_success(json!("no file tools")),
@@ -407,7 +407,7 @@ fn disabled_sleep_removes_self_sleep() {
         run_typescript_completion(action_id(&completion), "program", source),
         running("no-sleep")
             .dispatch(llm_call(1))
-            .observe(tool_execution_started("no-sleep", "program"))
+            .observe(core_tool_execution_started("no-sleep", "program"))
             .observe_tool_execution_finished("program", run_typescript_success(json!("no sleep"))),
     );
 }

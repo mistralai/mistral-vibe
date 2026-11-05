@@ -11,8 +11,6 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-env = {"VIBE_REPLAY_SETTLE_BUSY": "1"}
-settle_per_key = True
 screen_contains = ("Generating",)
 screen_excludes = ("should not be pasted", "Voice Settings", "Voice settings closed")
 timeline: Timeline = [

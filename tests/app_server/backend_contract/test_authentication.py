@@ -228,7 +228,7 @@ async def test_account_read_reports_a_missing_key_after_the_key_disappears(
 
 @pytest.mark.parametrize(
     ("plan_name", "title", "teleport_eligible"),
-    [("TEAM", "[Subscription] Pro", True), ("FREE", "Free", True)],
+    [("TEAM", "Team", True), ("INDIVIDUAL", "Pro", True), ("FREE", "Free", True)],
 )
 @pytest.mark.asyncio
 async def test_account_read_projects_the_plan_and_teleport_eligibility(
@@ -454,6 +454,7 @@ async def test_identity_read_retries_a_key_rejected_by_an_earlier_read(
     assert gateway.calls == ["https://api.mistral.ai/v1"] * 2
 
 
+@pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_a_provider_401_mid_turn_yields_the_legacy_message(
     backend_contract_mistral_api: respx.Route,
