@@ -115,6 +115,8 @@ mod feedback_support;
 mod fence_copy;
 #[path = "units/file_autocomplete_gate.rs"]
 mod file_autocomplete_gate;
+#[path = "units/file_index_events.rs"]
+mod file_index_events;
 #[path = "units/file_index_metrics.rs"]
 mod file_index_metrics;
 #[path = "units/file_index_rescan_ignore.rs"]

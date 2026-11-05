@@ -7,12 +7,15 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use ignore::{IncrementalIgnore, WalkBuilder};
-use notify::{event::ModifyKind, Event, EventKind};
+use notify::{Event, EventKind};
 use tokio::sync::watch;
 
 use crate::utils::file_match;
 
+mod directory_scans;
 mod git;
+mod ignore_changes;
+mod incremental;
 mod lifecycle;
 mod metrics;
 
@@ -84,90 +87,38 @@ pub fn apply_events_tracked(
         replace_index(paths, replacement, version);
         return (still_git, stats);
     }
+    if events
+        .iter()
+        .filter(|event| tracks_files(event))
+        .any(|event| {
+            event
+                .paths
+                .iter()
+                .any(|path| ignore_changes::relevant(root, path, ignore))
+        })
+    {
+        *ignore = ignore_matcher(root);
+        let replacement = collect_files(root, root, stop);
+        if !stopped(stop) {
+            stats.rebuild(&replacement);
+            replace_index(paths, replacement, version);
+        }
+        return (git_backed, stats);
+    }
+    let mut scans = directory_scans::DirectoryScans::plan(root, &events, ignore, stop);
+    let updates = incremental::Updates {
+        root,
+        paths,
+        version,
+    };
     for event in events {
-        apply_event(root, paths, event, version, ignore, &mut stats, stop);
+        updates.apply(event, ignore, &mut stats, stop, &mut scans);
     }
     (git_backed, stats)
 }
 
 fn stopped(stop: Option<&AtomicBool>) -> bool {
     stop.is_some_and(|stop| stop.load(Ordering::Relaxed))
-}
-
-fn apply_event(
-    root: &Path,
-    paths: &RwLock<BTreeMap<String, bool>>,
-    event: Event,
-    version: &watch::Sender<u64>,
-    ignore: &mut IncrementalIgnore,
-    stats: &mut BatchStats,
-    stop: Option<&AtomicBool>,
-) {
-    if stopped(stop) {
-        return;
-    }
-    if !tracks_files(&event) {
-        return;
-    }
-    if event.paths.iter().any(|path| is_ignore_file(root, path)) {
-        *ignore = ignore_matcher(root);
-        let replacement = collect_files(root, root, stop);
-        stats.rebuild(&replacement);
-        replace_index(paths, replacement, version);
-        return;
-    }
-
-    let (mut additions, mut removals, kind) = (BTreeMap::new(), Vec::new(), event.kind);
-    for path in event.paths {
-        let Some(relative) = path.strip_prefix(root).ok().filter(|r| !is_git_path(r)) else {
-            continue;
-        };
-        if path.exists() {
-            let is_dir = path.is_dir();
-            if ignore.matched(relative, is_dir).is_ignore() {
-                continue;
-            }
-            if is_dir {
-                // A Modify on a directory means a child changed; children arrive per-path.
-                let created = matches!(kind, EventKind::Create(_));
-                let renamed = matches!(kind, EventKind::Modify(ModifyKind::Name(_)));
-                if created || renamed {
-                    let found = collect_files(&path, root, stop);
-                    stats.walk(&found);
-                    additions.extend(found);
-                }
-            } else if let Some(relative) = display_path(relative) {
-                additions.insert(relative, false);
-            }
-        } else if let Some(relative) = display_path(relative) {
-            removals.push(relative);
-        }
-    }
-    if additions.is_empty() && removals.is_empty() {
-        return;
-    }
-    let Ok(mut current) = paths.write() else {
-        return;
-    };
-    let mut changed = false;
-    for relative in removals {
-        let prefix = format!("{relative}/");
-        let stale: Vec<String> = current
-            .range(prefix.clone()..)
-            .take_while(|(key, _)| key.starts_with(&prefix))
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in stale.iter().chain([&relative]) {
-            changed |= current.remove(key).is_some();
-        }
-    }
-    for (path, is_dir) in additions {
-        changed |= current.insert(path, is_dir) != Some(is_dir);
-    }
-    drop(current);
-    if changed {
-        bump(version);
-    }
 }
 
 fn tracks_files(event: &Event) -> bool {
@@ -247,14 +198,6 @@ fn display_path(path: &Path) -> Option<String> {
 fn is_git_path(path: &Path) -> bool {
     path.components()
         .any(|component| component.as_os_str() == OsStr::new(".git"))
-}
-
-fn is_ignore_file(root: &Path, path: &Path) -> bool {
-    let Ok(relative) = path.strip_prefix(root) else {
-        return false;
-    };
-    matches!(relative.file_name(), Some(name) if name == OsStr::new(".gitignore") || name == OsStr::new(".ignore"))
-        || relative.ends_with(Path::new(".git").join("info").join("exclude"))
 }
 
 fn bump(version: &watch::Sender<u64>) {
