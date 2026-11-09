@@ -4,7 +4,7 @@ use clap::Parser;
 use serde_json::json;
 use vibe_rs::cli::{Cli, StartupResume};
 use vibe_rs::server::{AgentConfig, RequestFailure, RpcError, WorktreeInput, HISTORY_LIMIT};
-use vibe_rs::startup::{continue_params, nothing_to_continue, resume_params};
+use vibe_rs::startup::{continue_params, nothing_to_continue, resume_params, start_kind};
 
 #[test]
 fn no_flags_is_no_intent() {
@@ -34,6 +34,18 @@ fn resume_with_id_is_by_id_intent() {
 fn resume_without_id_is_picker_intent() {
     let cli = Cli::parse_from(["vibe-rs", "--resume"]);
     assert_eq!(cli.startup_resume(), StartupResume::Picker);
+}
+
+/// Only a session a resume replaces at once starts as a warm-up; the picker's is the user's own.
+#[test]
+fn only_a_resume_or_continue_starts_a_warm_up_session() {
+    assert_eq!(
+        start_kind(&StartupResume::ById("abc".into())),
+        Some("ephemeral")
+    );
+    assert_eq!(start_kind(&StartupResume::Continue), Some("ephemeral"));
+    assert_eq!(start_kind(&StartupResume::Picker), None);
+    assert_eq!(start_kind(&StartupResume::None), None);
 }
 
 fn terminal_config() -> AgentConfig {

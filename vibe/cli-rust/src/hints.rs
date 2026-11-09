@@ -60,7 +60,6 @@ pub mod action {
     pub const WHY_BLOCKED: &str = "why blocked";
     pub const PREVIEW: &str = "preview";
     pub const SWITCH_BADGE: &str = "switch badge";
-    pub const CREATE: &str = "create";
     pub const SAVE_EXIT: &str = "save & exit";
     pub const CHANGE_LAYER: &str = "change layer";
     pub const LAYER: &str = "layer";
@@ -84,6 +83,8 @@ pub mod action {
     pub const SUBMIT_AS_NEW: &str = "submit as new";
     pub const SHOW: &str = "show";
     pub const HIDE: &str = "hide";
+    pub const OPEN_CHECK: &str = "open check";
+    pub const FIX: &str = "ask agent to fix";
 }
 
 pub const NAVIGATE: Hint = (key::NAV, action::NAVIGATE);

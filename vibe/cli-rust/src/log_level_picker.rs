@@ -117,7 +117,8 @@ pub fn apply_event(app: &mut App, event: Event) {
         // Nothing else reconciles this tier -- `config/read` only runs at
         // startup -- so an unpersisted level must not stay in the chain.
         level::set_config_log_level(restore.as_deref());
-        crate::notices::failed(app, &format!("Failed to persist log level: {error}"));
+        let message = format!("Failed to persist log level: {error}");
+        crate::notices::inline(app, Severity::Error, &message);
     }
 }
 

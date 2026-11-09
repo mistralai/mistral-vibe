@@ -70,12 +70,19 @@ impl KeyBurst {
 }
 
 fn text_char(key: &KeyEvent) -> Option<char> {
-    if key.kind == KeyEventKind::Release || !(key.modifiers - KeyModifiers::SHIFT).is_empty() {
+    if key.kind == KeyEventKind::Release {
+        return None;
+    }
+    // ConPTY reads a pasted LF as Ctrl+Enter and a CR as Enter; pastes normalize both.
+    if key.code == KeyCode::Enter && key.modifiers == KeyModifiers::CONTROL {
+        return Some('\n');
+    }
+    if !(key.modifiers - KeyModifiers::SHIFT).is_empty() {
         return None;
     }
     match key.code {
         KeyCode::Char(character) => Some(character),
-        KeyCode::Enter => Some('\n'),
+        KeyCode::Enter => Some('\r'),
         KeyCode::Tab => Some('\t'),
         _ => None,
     }

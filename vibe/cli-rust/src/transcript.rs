@@ -19,7 +19,7 @@ pub use grouping::{effect_kind, groups_with_tools, Group};
 pub use older::HistoryCursor;
 use patch::appended_text;
 pub use patch::apply_json_patch;
-pub use scheduled_loop::FiredLoop;
+pub use scheduled_loop::{split_prompt as split_loop_prompt, FiredLoop};
 
 #[derive(Default)]
 pub struct Transcript {
@@ -670,7 +670,7 @@ impl Transcript {
             .is_some_and(|&index| self.entries[index].pending)
     }
 
-    /// Whether the entry `id` toggles on click: a tool row or a reasoning trace.
+    /// Whether the entry `id` toggles on click: a tool row, reasoning trace, or loop prompt.
     pub fn is_expandable(&self, id: &str) -> bool {
         if let Some(entry_id) = id.strip_prefix(grouping::KEY_PREFIX) {
             return self
@@ -696,6 +696,7 @@ impl Transcript {
                                 .is_some_and(|output| !output.is_empty()))
                 }
                 HistoryEntry::Reasoning(_) => true,
+                HistoryEntry::Message(_) => stored.fired_loop.is_some(),
                 _ => false,
             },
             _ => false,

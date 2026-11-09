@@ -8,26 +8,15 @@ from pathlib import Path
 import sys
 from typing import TYPE_CHECKING
 
-from vibe._experimental_harness import ExperimentalHarnessUnavailableError
-from vibe.app_server._process_services import ProcessServices
-from vibe.app_server._runtime import HarnessProcess, create_harness_server
-from vibe.app_server.multiplex import ChannelOpen, ChannelServer, serve_multiplexed
-from vibe.app_server.transport import (
-    BinaryLineReader,
-    BinaryLineWriter,
-    JsonRpcTransport,
-    StdioJsonRpcTransport,
-)
-from vibe.core.config.harness_files import (
-    HarnessFilesManager,
-    init_harness_files_manager,
-)
-from vibe.core.paths import LOG_FILE, bootstrap_vibe_home
-from vibe.core.trusted_folders import trusted_folders_manager
-from vibe.observability.logging import init_file_logging
-
 if TYPE_CHECKING:
     from vibe.app_server._agent_socket import AgentSocketMount
+    from vibe.app_server._process_services import ProcessServices
+    from vibe.app_server.multiplex import ChannelOpen, ChannelServer
+    from vibe.app_server.transport import (
+        BinaryLineReader,
+        BinaryLineWriter,
+        JsonRpcTransport,
+    )
 
 
 async def serve_stdio(
@@ -42,6 +31,8 @@ async def serve_stdio(
     """``end_on_sigterm``: SIGTERM ends the input as its end does; the process
     exits once serving has wound down. For the process's own server only.
     """
+    from vibe.app_server.transport import StdioJsonRpcTransport
+
     transport: JsonRpcTransport = (
         StdioJsonRpcTransport.from_standard_streams()
         if reader is None or writer is None
@@ -67,8 +58,14 @@ async def _serve(
     additional_builtin_plugin_roots: Sequence[Path],
     agent_socket: AgentSocketMount | None,
 ) -> None:
+    from vibe.app_server._process_services import ProcessServices
+    from vibe.app_server._worktree_housekeeping import has_managed_worktrees
+
     services = ProcessServices.create()
     try:
+        # Finish reaps left by earlier processes, in the background.
+        if await asyncio.to_thread(has_managed_worktrees):
+            services.worktrees.sweep()
         await _serve_with(
             transport,
             services,
@@ -88,6 +85,11 @@ async def _serve_with(
     additional_builtin_plugin_roots: Sequence[Path],
     agent_socket: AgentSocketMount | None,
 ) -> None:
+    from vibe.app_server._runtime import HarnessProcess, create_harness_server
+    from vibe.app_server.multiplex import serve_multiplexed
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.trusted_folders import trusted_folders_manager
+
     if multiplex:
 
         async def create_channel(
@@ -183,6 +185,16 @@ def _set_process_title() -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_arguments(argv)
+    from vibe.core.paths import bootstrap_vibe_home
+
+    # Run the private-home gate before loading the normal runtime dependencies.
+    bootstrap_vibe_home()
+    from vibe._experimental_harness import ExperimentalHarnessUnavailableError
+    from vibe.core.config.harness_files import init_harness_files_manager
+    from vibe.core.paths import LOG_FILE
+    from vibe.observability.logging import init_file_logging
+
     _set_process_title()
     from vibe.core.config import load_dotenv_values
     from vibe.core.utils.windows_asyncio import (
@@ -193,8 +205,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     # The gate must run before the harness files manager and file logging:
     # their mkdir(parents=True) calls are otherwise the first to materialize
     # ~/.vibe, at permissive modes.
-    bootstrap_vibe_home()
-    args = parse_arguments(argv)
     init_file_logging(LOG_FILE.path)
     load_dotenv_values()
     agent_socket = (
@@ -206,10 +216,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         # The project lives in the sandbox: its files on this host's disk at
         # the same path are not the project's.
         init_harness_files_manager("user")
-    # Finish reaps left by earlier processes, in the background.
-    from vibe.app_server import _worktree_cleanup
-
-    _worktree_cleanup.worktree_cleanup().sweep()
     # The Unified Harness is the required default runtime: a missing,
     # incompatible, or failed Runtime must abort startup with an actionable
     # error instead of serving on the legacy fallback. Stdout stays clean for

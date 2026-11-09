@@ -151,7 +151,8 @@ _MAX_TOOLS_PER_CONNECTOR = 128
 _MAX_INPUT_SCHEMA_BYTES = 64 * 1024
 _MAX_DIAGNOSTICS_PER_CONNECTOR = 3
 _MAX_DIAGNOSTIC_CHARACTERS = 512
-_MAX_CACHE_ENTRY_BYTES = 2 * 1024 * 1024
+# Bounds the disk cache only: a larger catalog still loads, it is just not cached.
+_MAX_CACHE_ENTRY_BYTES = 16 * 1024 * 1024
 _MAX_PUBLIC_NAME_CHARACTERS = 256
 # The dashboard names a no-auth connection this way; reusing it keeps one row.
 _DEFAULT_CONNECTION_NAME = "default"
@@ -449,28 +450,41 @@ class ConnectorCatalogCache:
         raw_entry = entries.get(provider_fingerprint)
         return _parse_cache_entry(provider_fingerprint, raw_entry, now=now)
 
-    def write(self, catalog: ResolvedConnectorCatalog, *, stored_at: int) -> None:
+    def write(self, catalog: ResolvedConnectorCatalog, *, stored_at: int) -> bool:
         raw_entry = _cache_entry(catalog, stored_at=stored_at)
-        if _json_size(raw_entry) > _MAX_CACHE_ENTRY_BYTES:
-            raise ConnectorCatalogValidationError(
-                "Connector bootstrap cache entry exceeds 2 MiB"
+        size = _json_size(raw_entry)
+        fits = size <= _MAX_CACHE_ENTRY_BYTES
+        if not fits:
+            logger.warning(
+                "Connector catalog not cached: it is too large for the disk cache",
+                extra={
+                    "connector_operation": "cache_write",
+                    "connector_outcome": "rejected",
+                    "connector_cache_bytes": size,
+                    "connector_cache_limit_bytes": _MAX_CACHE_ENTRY_BYTES,
+                },
             )
 
         with exclusive_file_lock(self._path):
             entries = self._read_entries()
+            # The account's previous entry goes even when this one does not fit,
+            # so an older catalog is never served in place of the fetched one.
             fresh_entries = {
                 fingerprint: entry
                 for fingerprint, entry in entries.items()
-                if _parse_cache_entry(fingerprint, entry, now=stored_at) is not None
+                if fingerprint != catalog.provider_fingerprint
+                and _parse_cache_entry(fingerprint, entry, now=stored_at) is not None
             }
-            fresh_entries[catalog.provider_fingerprint] = raw_entry
+            if fits:
+                fresh_entries[catalog.provider_fingerprint] = raw_entry
             self._write_entries(fresh_entries)
+        return fits
 
     def _read_entries(self) -> dict[str, object]:
         try:
             with self._path.open(encoding="utf-8") as file:
                 payload = json.load(file)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             return {}
         if not isinstance(payload, dict):
             return {}
@@ -511,11 +525,11 @@ class _DiskConnectorCatalogStore:
         del key
         started_at = time.perf_counter()
         try:
-            self._cache().write(entry.value, stored_at=int(entry.stored_at))
+            written = self._cache().write(entry.value, stored_at=int(entry.stored_at))
         except OSError:
             _record_cache_write(started_at, "failure")
             raise
-        _record_cache_write(started_at, "success")
+        _record_cache_write(started_at, "success" if written else "rejected")
 
     def _cache(self) -> ConnectorCatalogCache:
         # Resolved per call: VIBE_HOME is read when the file is used.
@@ -2092,16 +2106,11 @@ def _resolve_catalog(
 
     revision_payload = [_connector_revision_payload(item) for item in connectors]
     revision = hashlib.sha256(_canonical_json(revision_payload)).hexdigest()
-    catalog = ResolvedConnectorCatalog(
+    return ResolvedConnectorCatalog(
         provider_fingerprint=provider_fingerprint,
         revision=revision,
         connectors=tuple(connectors),
     )
-    if _json_size(_cache_entry(catalog, stored_at=0)) > _MAX_CACHE_ENTRY_BYTES:
-        raise ConnectorCatalogValidationError(
-            "Connector bootstrap cache projection exceeds 2 MiB"
-        )
-    return catalog
 
 
 def _prepare_bootstrap_connectors(

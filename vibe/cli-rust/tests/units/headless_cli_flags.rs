@@ -156,15 +156,15 @@ fn add_dir_comma_is_a_single_literal_path() {
 }
 
 #[test]
-fn teleport_is_rejected_until_headless_support_exists() {
-    assert!(Cli::try_parse_from(["vibe-rs", "-p", "hi", "--teleport"]).is_err());
-}
-
-#[test]
-fn teleport_takes_the_positional_prompt() {
-    let cli = Cli::try_parse_from(["vibe-rs", "--teleport", "fix the tests"]).unwrap();
-    assert!(cli.teleport);
-    assert_eq!(cli.initial_prompt.as_deref(), Some("fix the tests"));
+fn teleport_is_an_unknown_argument() {
+    for args in [
+        &["vibe-rs", "--teleport"][..],
+        &["vibe-rs", "--teleport", "fix the tests"],
+        &["vibe-rs", "-p", "hi", "--teleport"],
+    ] {
+        let error = Cli::try_parse_from(args).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
 }
 
 #[test]

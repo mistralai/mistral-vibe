@@ -1,4 +1,4 @@
-"""`/branch` forks a detached copy and names both sessions; unified records no client telemetry."""
+"""`/branch` forks a detached copy and shows its resume command in a bottom app; unified records no client telemetry."""
 
 from __future__ import annotations
 
@@ -10,8 +10,9 @@ request_methods = REQUEST_METHODS
 
 capture_startup = False
 screen_contains = (
-    "Branched to a new session.",
-    "session: 00000000 → 22222222",
-    "Resume the copy with: vibe --resume 22222222",
+    "Session forked",
+    "Copy and paste this command to resume it:",
+    "vibe --resume 22222222-0000-4000-8000-000000000002",
 )
+screen_excludes = ("Branched to a new session.",)
 timeline: Timeline = ["/branch\r"]

@@ -9,6 +9,7 @@ use crate::app::App;
 use crate::chat_input::Action;
 use crate::focus::Focus;
 use crate::server::Client;
+use crate::utils::text::first_line;
 
 pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -46,15 +47,6 @@ pub fn paste(app: &mut App, text: &str) {
     for c in first_line(text).chars() {
         field.edit(Action::Insert(c));
     }
-}
-
-/// The first line of pasted text, splitting on any line boundary.
-fn first_line(text: &str) -> &str {
-    const BREAKS: [char; 10] = [
-        '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
-        '\u{2029}',
-    ];
-    text.find(BREAKS).map_or(text, |end| &text[..end])
 }
 
 /// Ctrl+C copies the focused selection; true while the visible app owns the key.

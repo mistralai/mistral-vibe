@@ -81,6 +81,13 @@ APPROVAL_META_KEY = "approval"
 
 SMART_APPROVE_META_KEY = "smart_approve"
 
+# _meta keys a pre_agent hook leaves on the user message, so public history shows
+# what the user typed while the model reads the hook's version. A rewritten text
+# block keeps the user's text under the first key; a block the hook added for the
+# model carries the second. The Core strips _meta before the model sees a message.
+HOOK_ORIGINAL_TEXT_META_KEY = "vibe.hookOriginalText"
+HOOK_CONTEXT_META_KEY = "vibe.hookContext"
+
 
 @dataclass(frozen=True, slots=True)
 class ProjectionUpdate:
@@ -220,10 +227,6 @@ class SessionProjector:
         token_usage = state.session.token_usage
         context_usage = state.session.context_usage
         preview = state.session.preview or first_user_message_preview(entries)
-        # The Turn whose latest committed answer was cut off at the output cap.
-        # An answer that ends its Turn is committed in the same transition as
-        # the Turn's completion, so tracking it per transition is enough.
-        truncated_turn_id: str | None = None
         for observation in transition.observations:
             if isinstance(observation, RustTurnStartedObservation):
                 latest_turn = InProgressPublicTurn(
@@ -236,7 +239,9 @@ class SessionProjector:
                 )
                 if content_is_injected(observation.content):
                     continue
-                preview = preview or _content_preview(observation.content)
+                preview = preview or _content_preview(
+                    displayed_user_content(observation.content)
+                )
                 entry = _message_entry(
                     state.session.id,
                     observation.turn_id,
@@ -295,11 +300,6 @@ class SessionProjector:
                     update={"input_entry_id": input_entry_id}
                 )
             elif isinstance(observation, RustAssistantMessageCommittedObservation):
-                truncated_turn_id = (
-                    observation.turn_id
-                    if observation.candidate.finish_reason == "length"
-                    else None
-                )
                 input_entry_id = _active_input_entry_id(
                     latest_turn, observation.turn_id
                 )
@@ -479,6 +479,10 @@ class SessionProjector:
                     else entry
                     for entry in entries
                 ]
+                if observation.stop_reason == "skipped":
+                    entries = _with_skipped_user_message(
+                        entries, observation.turn_id, observed_at
+                    )
                 latest_turn = CompletedPublicTurn(
                     id=observation.turn_id,
                     session_id=state.session.id,
@@ -488,9 +492,7 @@ class SessionProjector:
                     ),
                     started_at=started_at,
                     completed_at=observed_at,
-                    stop_reason=_completed_stop_reason(
-                        observation, truncated=truncated_turn_id == observation.turn_id
-                    ),
+                    stop_reason=_completed_stop_reason(observation),
                     skip_reason=_skip_reason(observation),
                     reject_reason=_reject_reason(observation),
                 )
@@ -774,6 +776,36 @@ def public_message_entry(
     )
 
 
+def displayed_user_content(content: Sequence[Any]) -> list[Any]:
+    """The user message as the user sent it, before any pre_agent hook changed it.
+
+    A block a hook added is dropped, and a rewritten text block shows the user's
+    text again; a text a hook put where the user typed none shows nothing. A message
+    without hook marks comes back unchanged. What a hook wrote never shows as the
+    user's, even when it is all the message holds.
+    """
+    shown: list[Any] = []
+    for part in content:
+        meta = getattr(part, "meta", None)
+        if not isinstance(meta, dict):
+            shown.append(part)
+            continue
+        if meta.get(HOOK_CONTEXT_META_KEY) is True:
+            continue
+        original = meta.get(HOOK_ORIGINAL_TEXT_META_KEY)
+        if isinstance(part, RustTextContentBlock) and isinstance(original, str):
+            if not original:
+                continue
+            rest = {
+                key: value
+                for key, value in meta.items()
+                if key != HOOK_ORIGINAL_TEXT_META_KEY
+            }
+            part = part.model_copy(update={"text": original, "meta": rest or None})
+        shown.append(part)
+    return shown
+
+
 def content_is_injected(content: Sequence[Any]) -> bool:
     for part in content:
         meta = getattr(part, "meta", None)
@@ -922,6 +954,8 @@ def _message_entry(
         if role == "user"
         else None
     )
+    if role == "user":
+        content = displayed_user_content(content)
     return cast(
         JsonObject,
         {
@@ -1923,6 +1957,31 @@ def _is_open_effect(entry: JsonObject, turn_id: str) -> bool:
 
 type PublicDiscardCause = Literal["failure", "steer", "interrupt", "retry"]
 
+# The outcome of a user message whose Turn a pre_agent hook skipped: the Core keeps
+# no trace of it, so rewind and fork place it from the public history.
+SKIPPED_USER_MESSAGE_OUTCOME: JsonObject = {"type": "discarded", "cause": "skipped"}
+
+
+def _with_skipped_user_message(
+    entries: list[JsonObject], turn_id: str, observed_at: int
+) -> list[JsonObject]:
+    return [
+        cast(
+            JsonObject,
+            {
+                **entry,
+                "updatedAt": observed_at,
+                "outcome": dict(SKIPPED_USER_MESSAGE_OUTCOME),
+            },
+        )
+        if entry.get("type") == "message"
+        and entry.get("role") == "user"
+        and entry.get("turnId") == turn_id
+        and entry.get("source") == "turn_start"
+        else entry
+        for entry in entries
+    ]
+
 
 def _settled_provisional_entry(
     entry: JsonObject, observed_at: int, *, cause: PublicDiscardCause
@@ -2141,11 +2200,11 @@ def _settled_message(entry: JsonObject | None) -> str | None:
 
 
 def _completed_stop_reason(
-    observation: RustTurnCompletedObservation, *, truncated: bool
+    observation: RustTurnCompletedObservation,
 ) -> Literal["limit", "length"] | None:
     if observation.stop_reason == "iteration_limit":
         return "limit"
-    if truncated:
+    if observation.stop_reason == "output_limit":
         return "length"
     return None
 

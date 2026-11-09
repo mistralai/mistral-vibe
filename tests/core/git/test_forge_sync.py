@@ -461,16 +461,14 @@ def test_derive_pr_status_matches_the_clients(case: dict[str, Any]):
     if "state" not in status_input:
         # Stored artifacts always have a lifecycle state.
         assert case["cliStatus"] is None
+        assert case["cliReason"] is None
         return
-    assert (
-        derive_pr_status(
-            status_input["state"],
-            status_input.get("checksStatus"),
-            status_input.get("reviewDecision"),
-            status_input.get("mergeStatus"),
-        )
-        == case["cliStatus"]
-    )
+    assert derive_pr_status(
+        status_input["state"],
+        status_input.get("checksStatus"),
+        status_input.get("reviewDecision"),
+        status_input.get("mergeStatus"),
+    ) == (case["cliStatus"], case["cliReason"])
 
 
 def _gh_process(stdout: str = "", stderr: str = "", returncode: int = 0):

@@ -12,7 +12,7 @@ with ``UnsupportedSessionProcedureError``.
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 import hashlib
@@ -43,11 +43,14 @@ from mistralai_vibe_local_harness.session_api.app_server.session.models import (
     TextContentBlock,
     TransportStreamEnded,
     TransportStreamStarted,
+    TreeCallback,
     TurnState,
 )
 from mistralai_vibe_local_harness.session_api.app_server.session.procedures import (
     CallbackResultParams,
     CallbackResultResponse,
+    CallbacksTreeParams,
+    CallbacksTreeResponse,
     ConfigReadParams,
     ConfigReadResponse,
     ConfigWriteParams,
@@ -111,6 +114,7 @@ from mistralai_vibe_local_harness.vibe._session_api_extensions import (
 )
 from mistralai_vibe_local_harness.vibe._session_api_state import (
     SessionApiView,
+    active_callbacks,
     page,
     session_from_public,
 )
@@ -119,12 +123,14 @@ from mistralai_vibe_local_harness.vibe._subagents._models import ChildSessionRec
 logger = logging.getLogger(__name__)
 
 _BACKEND = "mistralai-vibe-local-harness"
+_CALLBACKS_TREE_PROCEDURE = "app_server/session/callbacks/tree"
 _CONFIG_READ_PROCEDURE = "app_server/session/config/read"
 _CONFIG_WRITE_PROCEDURE = "app_server/session/config/write"
 _EVENTS_READ_PROCEDURE = "app_server/session/events/read"
 _READ_PROCEDURE = "app_server/session/read"
 _FULL_HISTORY = 1_000_000
 """Read the whole public history: Session API positions cover every entry."""
+_ROOT_AGENT_PATH = "/root"
 _PUBLICATION_TIMEOUT_SECONDS = 5.0
 """How long a reply waits for its own events to be published.
 
@@ -305,6 +311,7 @@ class LocalSessionApiTransport:
         self._pump: asyncio.Task[None] | None = None
         self._observed_watermark = -1
         self._observed = asyncio.Condition()
+        self._publications = 0
         self._closed = False
 
     @property
@@ -362,6 +369,9 @@ class LocalSessionApiTransport:
                 cast(SubagentsListParams, params)
             )
             return result_type.model_validate(response.model_dump(by_alias=True))
+        if method == _CALLBACKS_TREE_PROCEDURE:
+            response = await self._callbacks_tree(cast(CallbacksTreeParams, params))
+            return result_type.model_validate(response.model_dump(by_alias=True))
         handler = self._handlers().get(method)
         if handler is None:
             raise UnsupportedSessionProcedureError(
@@ -377,6 +387,25 @@ class LocalSessionApiTransport:
             raise ChildSessionProcedureRefusedError(method=method, backend=_BACKEND)
         response = await handler(params)
         return result_type.model_validate(response.model_dump(by_alias=True))
+
+    async def watch_callbacks_tree(
+        self, params: CallbacksTreeParams
+    ) -> AsyncIterator[CallbacksTreeResponse]:
+        """Follow ``callbacks/tree``: the full list now, then again on each change.
+
+        The Runtime publishes the events of this Session's subagents on its
+        subscription too, so every change in the tree wakes the watch. It ends
+        when this transport closes or the Runtime's stream ends.
+        """
+        previous: CallbacksTreeResponse | None = None
+        while True:
+            seen = self._publications
+            current = await self._callbacks_tree(params)
+            if current != previous:
+                previous = current
+                yield current
+            if not await self._wait_for_publication(seen):
+                return
 
     async def read_events(
         self, params: EventsReadParams
@@ -525,6 +554,12 @@ class LocalSessionApiTransport:
         )
 
     async def _send_message(self, params: MessageSendParams) -> MessageSendResponse:
+        if params.message is None:
+            raise UnsupportedSessionProcedureError(
+                method="app_server/session/message/send",
+                backend=_BACKEND,
+                reason="this Runtime takes no context without a message",
+            )
         fingerprint = _fingerprint(params.message, params.message_entry_id)
         cached = _lookup_receipt(self.view, params.idempotency_key, fingerprint)
         if cached is not None:
@@ -540,7 +575,9 @@ class LocalSessionApiTransport:
             _turn_start_key(params.idempotency_key) in self.view.message_receipts
         )
         turn_id = (
-            None if start_saved else await self._steer_running_turn(params, entry_id)
+            None
+            if start_saved
+            else await self._steer_running_turn(params, params.message, entry_id)
         )
         if turn_id is None:
             started = await self._start_turn(
@@ -574,7 +611,7 @@ class LocalSessionApiTransport:
         await self._session.save_session_api_facts()
 
     async def _steer_running_turn(
-        self, params: MessageSendParams, entry_id: str
+        self, params: MessageSendParams, message: list[ContentBlock], entry_id: str
     ) -> str | None:
         """Steer the running Turn; return its ID, or None when no Turn runs.
 
@@ -591,7 +628,7 @@ class LocalSessionApiTransport:
                     session_id=params.session_id,
                     expected_turn_id=running,
                     message_entry_id=entry_id,
-                    message=params.message,
+                    message=message,
                 )
             )
         except SessionTurnConflictError:
@@ -770,6 +807,7 @@ class LocalSessionApiTransport:
         async with self._observed:
             if watermark is not None:
                 self._observed_watermark = max(self._observed_watermark, watermark)
+            self._publications += 1
             self._observed.notify_all()
 
     async def _settled_state(self) -> tuple[PublicSessionState, str]:
@@ -778,6 +816,20 @@ class LocalSessionApiTransport:
         if self._state is None:
             raise RuntimeError("The Session API transport was not opened")
         return self._state, self._log.last_event_id
+
+    async def _wait_for_publication(self, seen: int) -> bool:
+        """Wait until a Runtime event is published after the first ``seen`` ones.
+
+        Returns False instead when the transport closes or the Runtime's stream ends.
+        """
+        async with self._observed:
+            await self._observed.wait_for(
+                lambda: self._publications > seen or self._stopped()
+            )
+        return not self._stopped()
+
+    def _stopped(self) -> bool:
+        return self._closed or self._pump is None or self._pump.done()
 
     async def _wait_for_runtime_events(self) -> None:
         """Wait until every Runtime event published so far became an API event.
@@ -821,18 +873,7 @@ class LocalSessionApiTransport:
 
         ``method`` is the procedure the caller is serving, which a refusal names.
         """
-        children = self._children
-        if children is None or not children.references_child(
-            self.session_id, session_id
-        ):
-            raise UnsupportedSessionProcedureError(
-                method=method,
-                backend=_BACKEND,
-                reason=(
-                    f"this transport serves Session {self.session_id!r} "
-                    "and its subagents only"
-                ),
-            )
+        children = self._subagents_serving(session_id, method)
         existing = self._child_transports.get(session_id)
         if existing is not None:
             return existing
@@ -849,6 +890,73 @@ class LocalSessionApiTransport:
         await transport.open()
         self._child_transports[session_id] = transport
         return transport
+
+    def _subagents_serving(self, session_id: str, method: str) -> ChildSessions:
+        """The Host's subagents of this Session, which include ``session_id``.
+
+        Refuses ``method`` when ``session_id`` is not one of them.
+        """
+        children = self._children
+        if children is None or not children.references_child(
+            self.session_id, session_id
+        ):
+            raise UnsupportedSessionProcedureError(
+                method=method,
+                backend=_BACKEND,
+                reason=(
+                    f"this transport serves Session {self.session_id!r} "
+                    "and its subagents only"
+                ),
+            )
+        return children
+
+    async def _callbacks_tree(
+        self, params: CallbacksTreeParams
+    ) -> CallbacksTreeResponse:
+        """The open callbacks of the addressed Session and of its subagents.
+
+        The addressed Session comes first, then its subagents by agent path;
+        each keeps the order its callbacks opened in. Each Session's callbacks
+        are read from its Runtime, which holds a callback before its event is
+        published. A subagent that is not loaded cannot take an answer, so it
+        lists none.
+        """
+        callbacks: list[TreeCallback] = []
+        if params.session_id == self.session_id:
+            callbacks.extend(
+                await _open_callbacks(
+                    self._session, self.view.tool_calls, agent_path=_ROOT_AGENT_PATH
+                )
+            )
+            records = (
+                ()
+                if self._children is None
+                else self._children.child_session_records(self.session_id)
+            )
+        else:
+            children = self._subagents_serving(
+                params.session_id, _CALLBACKS_TREE_PROCEDURE
+            )
+            records = tuple(
+                record
+                for record in children.child_session_records(self.session_id)
+                if record.child_session_id == params.session_id
+            )
+        for record in sorted(records, key=_agent_path):
+            child = (
+                None
+                if self._children is None
+                else self._children.live_child(self.session_id, record.child_session_id)
+            )
+            if child is not None:
+                callbacks.extend(
+                    await _open_callbacks(
+                        child,
+                        session_api_view_of(child).tool_calls,
+                        agent_path=_agent_path(record),
+                    )
+                )
+        return CallbacksTreeResponse(session_id=params.session_id, callbacks=callbacks)
 
     async def _list_subagents(
         self, params: SubagentsListParams
@@ -869,11 +977,34 @@ class LocalSessionApiTransport:
                     session=session_from_public(read.snapshot.state),
                     name=record.agent_name,
                     config_name=record.agent_type,
-                    # Subagents are one level deep in this Runtime.
-                    agent_path=f"/root/{record.agent_name}",
+                    agent_path=_agent_path(record),
                 )
             )
         return SubagentsListResponse(items=items)
+
+
+async def _open_callbacks(
+    session: RuntimeSession, tool_calls: Mapping[str, JsonObject], *, agent_path: str
+) -> list[TreeCallback]:
+    """The callbacks ``session`` holds open, with the Session that owns them."""
+    read = await session.read(
+        RuntimeReadParams(session_id=session.session_id, history_limit=0)
+    )
+    state = read.snapshot.state
+    return [
+        TreeCallback(
+            session_id=session.session_id,
+            parent_session_id=state.session.parent_session_id,
+            agent_path=agent_path,
+            callback=callback,
+        )
+        for callback in active_callbacks(state, tool_calls)
+    ]
+
+
+def _agent_path(record: ChildSessionRecord) -> str:
+    # Subagents are one level deep in this Runtime.
+    return f"{_ROOT_AGENT_PATH}/{record.agent_name}"
 
 
 @dataclass(frozen=True, slots=True)

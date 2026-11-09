@@ -18,13 +18,12 @@ from vibe.core.vibe_code_project.selection import (
     VibeCodeProject,
     is_project_linked_to_repo,
 )
-from vibe.utils.repository import normalize_repo_url
 
 VIBE_CODE_PROJECT_PICKER_PAGE_LIMIT = 100
 
 if TYPE_CHECKING:
+    from vibe.core.git.repository import GitRepoInfo
     from vibe.core.platform_auth import PlatformCredentialProvider
-    from vibe.core.teleport.git import GitRepoInfo
 
 
 class VibeCodeProjectPageFetcher(Protocol):
@@ -47,10 +46,6 @@ class VibeCodeProjectPickerState:
     next_cursor: str | None
     repo_url: str = ""
 
-    @property
-    def has_more(self) -> bool:
-        return self.next_cursor is not None
-
 
 @dataclass(frozen=True)
 class VibeCodeProjectPickerInitialData:
@@ -63,28 +58,11 @@ class VibeCodeProjectLoadMoreResult:
     state: VibeCodeProjectPickerState
     focus_project_id: str | None
 
-    @property
-    def focus_option_id(self) -> str | None:
-        if self.focus_project_id is None:
-            return None
-        return f"project:{self.focus_project_id}"
-
 
 @dataclass(frozen=True)
 class VibeCodeProjectCreateResult:
     state: VibeCodeProjectPickerState
     project: VibeCodeProject
-
-    @property
-    def focus_option_id(self) -> str:
-        return f"project:{self.project.project_id}"
-
-
-@dataclass(frozen=True)
-class TeleportProjectResolution:
-    project_id: str | None
-    initial_data: VibeCodeProjectPickerInitialData
-    stale_link_cleared: bool
 
 
 class VibeCodeProjectResolverError(Exception):
@@ -115,29 +93,6 @@ class VibeCodeProjectPickerService:
         context, page = await asyncio.gather(
             self._context_from_git_async(git_info), self._fetch_page()
         )
-        return VibeCodeProjectPickerInitialData(
-            context=context,
-            state=VibeCodeProjectPickerState(
-                projects=page.projects,
-                next_cursor=page.next_cursor,
-                repo_url=git_info.remote_url,
-            ),
-        )
-
-    async def load_initial_for_teleport(
-        self, git_info: GitRepoInfo
-    ) -> VibeCodeProjectPickerInitialData:
-        context = await self._context_from_git_async(git_info)
-        if context.saved_link is not None and normalize_repo_url(
-            context.saved_link.repo_url
-        ) == normalize_repo_url(context.repo_url):
-            return VibeCodeProjectPickerInitialData(
-                context=context,
-                state=VibeCodeProjectPickerState(
-                    projects=[], next_cursor=None, repo_url=git_info.remote_url
-                ),
-            )
-        page = await self._fetch_page()
         return VibeCodeProjectPickerInitialData(
             context=context,
             state=VibeCodeProjectPickerState(
@@ -271,38 +226,6 @@ class VibeCodeProjectPickerService:
                 "The selected Vibe Code project is not available for this repository"
             )
         return project
-
-    def resolve_project_for_teleport(
-        self, initial_data: VibeCodeProjectPickerInitialData
-    ) -> TeleportProjectResolution:
-        saved_link = initial_data.context.saved_link
-        if saved_link is not None and normalize_repo_url(
-            saved_link.repo_url
-        ) == normalize_repo_url(initial_data.context.repo_url):
-            return TeleportProjectResolution(
-                project_id=saved_link.project_id,
-                initial_data=initial_data,
-                stale_link_cleared=False,
-            )
-
-        if saved_link is not None:
-            self.clear_project_link(initial_data.context)
-            initial_data = VibeCodeProjectPickerInitialData(
-                context=ProjectPickerContext(
-                    repo_root=initial_data.context.repo_root,
-                    repo_url=initial_data.context.repo_url,
-                    repo_name=initial_data.context.repo_name,
-                    saved_link=None,
-                ),
-                state=initial_data.state,
-            )
-            return TeleportProjectResolution(
-                project_id=None, initial_data=initial_data, stale_link_cleared=True
-            )
-
-        return TeleportProjectResolution(
-            project_id=None, initial_data=initial_data, stale_link_cleared=False
-        )
 
     async def _fetch_all_projects(self) -> list[VibeCodeProject]:
         projects: list[VibeCodeProject] = []

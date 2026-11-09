@@ -22,6 +22,7 @@ from vibe.core.model_catalog import cache as model_cache, session as model_sessi
 from vibe.core.model_catalog.models import ModelCatalogResponse
 from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.telemetry.send import mistral_credential_cache_key
+from vibe.core.utils.fetch_wait import FetchFailures
 from vibe.core.utils.remote_cache import Cached
 from vibe.setup.auth import _oidc_runtime
 from vibe.setup.auth._oidc_config import OidcConfig, OidcError
@@ -480,7 +481,6 @@ async def test_session_experiment_fetch_skips_cache_after_oidc_switch(
         "_fetch_plan_attributes",
         AsyncMock(return_value=(attributes, "PRO")),
     )
-    sink = experiment_session.NullExperimentSink()
     launch = LaunchContext(
         agent_entrypoint="cli",
         agent_version="test",
@@ -491,22 +491,30 @@ async def test_session_experiment_fetch_skips_cache_after_oidc_switch(
         await experiment_session.initialize_experiments(
             config=config,
             manager=manager,
-            session_logger=sink,
             launch_context=launch,
             harness=ExperimentSurface.UNIFIED,
+            failures=FetchFailures(),
         )
     else:
+        from vibe.app_server import _experiments_service
+        from vibe.app_server._experiments_service import (
+            ExperimentsEvalFailedError,
+            ExperimentsKey,
+            ExperimentsService,
+        )
+
         monkeypatch.setattr(
-            experiment_session, "ExperimentManager", lambda **kwargs: manager
+            _experiments_service, "ExperimentManager", lambda **kwargs: manager
         )
-        monkeypatch.setattr(
-            experiment_session.RemoteEvalClient,
-            "from_settings",
-            lambda **kwargs: MagicMock(),
-        )
-        await experiment_session.fetch_and_cache_experiments(
-            config, launch, harness=ExperimentSurface.UNIFIED
-        )
+        key = await ExperimentsKey.of(config, launch)
+        assert key is not None
+        service = ExperimentsService(client_factory=lambda _url: MagicMock())
+        try:
+            # Nor is it held for the sessions of the account it started under.
+            with pytest.raises(ExperimentsEvalFailedError):
+                await service.evaluate(key)
+        finally:
+            await service.close()
     assert eval_cache.load_cached_eval_response(config) is None
 
 
@@ -535,9 +543,9 @@ async def test_disabled_remote_features_do_not_discover_oidc_tenant(
     await experiment_session.initialize_experiments(
         config=config,
         manager=MagicMock(),
-        session_logger=experiment_session.NullExperimentSink(),
         launch_context=None,
         harness=ExperimentSurface.UNIFIED,
+        failures=FetchFailures(),
     )
     headers.assert_not_awaited()
 

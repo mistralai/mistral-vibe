@@ -31,8 +31,6 @@ handshake = {
             "plan": {"kind": "api", "name": "FREE", "title": None},
             "planOffer": {"kind": "switch_api_key", "url": _URL},
             "rateLimitAction": None,
-            "teleportEligible": True,
-            "teleportAction": None,
         }
     }
 }

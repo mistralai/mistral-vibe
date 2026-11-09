@@ -119,7 +119,8 @@ class BaseTool[
         # under trusted roots. for_session adds it back, so such a directory
         # stays writable without becoming a place config is read from.
         self.workspace = Workspace.for_session(
-            self.cwd, self.harness_files.project_roots
+            self.cwd,
+            [*self.harness_files.project_roots, *self.harness_files.writable_roots],
         )
         self.scratchpad_dir = scratchpad_dir
 

@@ -7,7 +7,6 @@ from vibe.core.vibe_code_project.client import (
 )
 from vibe.core.vibe_code_project.picker_service import (
     VIBE_CODE_PROJECT_PICKER_PAGE_LIMIT,
-    TeleportProjectResolution,
     VibeCodeProjectCreateResult,
     VibeCodeProjectLoadMoreResult,
     VibeCodeProjectPageFetcher,
@@ -28,13 +27,8 @@ from vibe.core.vibe_code_project.selection import (
     RemoteProjectLink,
     VibeCodeProject,
     is_project_linked_to_repo,
-    is_saved_project_stale_error,
     project_link_path,
     suggested_project_name,
-)
-from vibe.core.vibe_code_project.telemetry import (
-    build_project_picker_telemetry,
-    count_multi_repo_matches,
 )
 
 __all__ = [
@@ -45,7 +39,6 @@ __all__ = [
     "ProjectPickerContext",
     "ProjectRepository",
     "RemoteProjectLink",
-    "TeleportProjectResolution",
     "VibeCodeProject",
     "VibeCodeProjectApiError",
     "VibeCodeProjectClient",
@@ -58,10 +51,7 @@ __all__ = [
     "VibeCodeProjectPickerState",
     "VibeCodeProjectResolverError",
     "VibeProjectsStore",
-    "build_project_picker_telemetry",
-    "count_multi_repo_matches",
     "is_project_linked_to_repo",
-    "is_saved_project_stale_error",
     "project_link_path",
     "suggested_project_name",
 ]

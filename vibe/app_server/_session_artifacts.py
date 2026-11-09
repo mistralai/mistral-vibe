@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 import json
 from pathlib import Path
 from typing import Any, Literal
+from uuid import NAMESPACE_URL, uuid5
 
 from giturlparse import parse as parse_git_url
 from uuid_utils import uuid7
@@ -38,6 +39,7 @@ from vibe.app_server.protocol import (
     PublicGitLabMergeRequestDetails,
     PublicPullRequestArtifactDetails,
     PublicSessionArtifact,
+    PublicWorktreeArtifact,
 )
 from vibe.core.git.forge import (
     DiscoveredPullRequest,
@@ -56,8 +58,10 @@ from vibe.core.session.artifact_detector import (
     DetectedPullRequest,
     cli_binary_source,
     extract_draft_from_command,
-    extract_pr_from_output,
+    extract_prs_from_output,
     is_pr_creation_command,
+    pr_creation_limit,
+    pr_creation_output_first,
     resolve_gitlab_repo_id,
 )
 from vibe.core.session.artifacts import (
@@ -68,6 +72,7 @@ from vibe.core.session.artifacts import (
     GitLabMergeRequestDetails,
     PullRequestLifecycleState,
     SessionArtifact,
+    WorktreeArtifact,
 )
 from vibe.core.session.metadata import persist_metadata
 from vibe.core.session.session_index import METADATA_FILENAME
@@ -137,6 +142,9 @@ def with_cached_status(artifact: SessionArtifact) -> SessionArtifact:
         None if snapshot.checks is None else _CHECKS_WIRE_STATUS[snapshot.checks.state]
     )
     review_decision = _REVIEW_DECISION_WIRE.get(snapshot.review_decision or "")
+    pr_status, pr_status_reason = derive_pr_status(
+        snapshot.state, checks_status, review_decision, snapshot.merge_status
+    )
     return artifact.model_copy(
         update={
             "display_title": snapshot.title or artifact.display_title,
@@ -151,12 +159,8 @@ def with_cached_status(artifact: SessionArtifact) -> SessionArtifact:
                     "provider_closed_at": snapshot.closed_at,
                     "provider_merged_at": snapshot.merged_at,
                     "merge_commit_sha": snapshot.merge_commit_sha,
-                    "pr_status": derive_pr_status(
-                        snapshot.state,
-                        checks_status,
-                        review_decision,
-                        snapshot.merge_status,
-                    ),
+                    "pr_status": pr_status,
+                    "pr_status_reason": pr_status_reason,
                     "checks": snapshot.checks,
                     "checks_status": checks_status,
                     "optional_checks_status": (
@@ -172,9 +176,9 @@ def with_cached_status(artifact: SessionArtifact) -> SessionArtifact:
     )
 
 
-def _new_artifact_id() -> str:
-    """A UUID v7 (chronologically sortable) artifact id, via uuid-utils."""
-    return str(uuid7())
+def _artifact_id(session_id: str, external_key: str) -> str:
+    """One id per PR/MR per session, whichever service instance records it."""
+    return str(uuid5(NAMESPACE_URL, f"{session_id}/{external_key}"))
 
 
 def _github_external_key(host: str, owner: str, repo: str, number: int) -> str:
@@ -236,12 +240,16 @@ class SessionArtifactService:
         *,
         telemetry: SessionTelemetry | None = None,
         metadata_lock: asyncio.Lock | None = None,
-        on_artifacts_changed: Callable[[list[SessionArtifact]], None] | None = None,
+        on_artifacts_changed: Callable[
+            [list[SessionArtifact], list[WorktreeArtifact]], None
+        ]
+        | None = None,
     ) -> None:
         self._session_id = session_id
         self._session_dir = session_dir
         # Keyed by external_key — the stable dedupe key from the contract.
         self._artifacts: dict[str, SessionArtifact] = {}
+        self._worktrees: dict[str, WorktreeArtifact] = {}
         self._dirty = False
         # Emission surface for the vibe.artifact_* events; None when the
         # session telemetry is unavailable (unit tests, non-adapter callers).
@@ -259,11 +267,56 @@ class SessionArtifactService:
         """
         for artifact in metadata.artifacts:
             self._artifacts[artifact.external_key] = artifact
+        for worktree in metadata.worktrees:
+            self._worktrees[worktree.path] = worktree
         self._dirty = False
 
     def list_artifacts(self) -> list[SessionArtifact]:
         """All artifacts, ordered by observation time then id."""
         return sorted(self._artifacts.values(), key=lambda a: (a.discovered_at, a.id))
+
+    def list_worktrees(self) -> list[WorktreeArtifact]:
+        return sorted(self._worktrees.values(), key=lambda w: (w.discovered_at, w.id))
+
+    async def record_worktree(
+        self, *, path: Path, branch: str, repo_root: Path
+    ) -> WorktreeArtifact | None:
+        """Record a worktree the session created; None when already recorded."""
+        key = str(path)
+        if key in self._worktrees:
+            return None
+        worktree = WorktreeArtifact(
+            id=str(uuid7()),
+            session_id=self._session_id,
+            path=key,
+            branch=branch,
+            repo_root=str(repo_root),
+            discovered_at=_utcnow_iso(),
+        )
+        self._worktrees[key] = worktree
+        self._dirty = True
+        try:
+            await self._persist()
+        except Exception:
+            logger.warning(
+                "Failed to persist a session worktree; keeping in-memory copy",
+                extra={"session_id": self._session_id},
+                exc_info=True,
+            )
+        return worktree
+
+    async def forget_worktree(self, path: Path) -> None:
+        if self._worktrees.pop(str(path), None) is None:
+            return
+        self._dirty = True
+        try:
+            await self._persist()
+        except Exception:
+            logger.warning(
+                "Failed to persist a forgotten session worktree",
+                extra={"session_id": self._session_id},
+                exc_info=True,
+            )
 
     async def mark_viewed(self, artifact_ids: list[str]) -> list[SessionArtifact]:
         """Mark artifacts as viewed (Phase 3: the Desktop artifact panel).
@@ -409,7 +462,7 @@ class SessionArtifactService:
         discovered_at = _utcnow_iso()
         if pr.provider == "github":
             return GitHubPullRequestArtifact(
-                id=_new_artifact_id(),
+                id=_artifact_id(self._session_id, external_key),
                 session_id=self._session_id,
                 external_key=external_key,
                 external_url=pr.url,
@@ -434,7 +487,7 @@ class SessionArtifactService:
                 ),
             )
         return GitLabMergeRequestArtifact(
-            id=_new_artifact_id(),
+            id=_artifact_id(self._session_id, external_key),
             session_id=self._session_id,
             external_key=external_key,
             external_url=pr.url,
@@ -497,13 +550,14 @@ class SessionArtifactService:
         *,
         message_id: str | None = None,
         cwd: str | None = None,
-    ) -> SessionArtifact | None:
-        """Inspect a finished shell effect. Returns the created artifact, or None.
+    ) -> list[SessionArtifact]:
+        """Inspect a finished shell effect. Returns the created artifacts.
 
         Called by the adapter when a ``bash``/``shell`` tool effect reaches a
-        terminal state. Returns None when the effect is not a PR/MR creation
-        or reopen, carries no provider URL, or the artifact already exists
-        (dedup).
+        terminal state. One effect may create several PRs/MRs (a loop over
+        ``gh pr create``). Returns an empty list when the effect is not a
+        PR/MR creation or reopen, carries no provider URL, or every artifact
+        already exists (dedup).
 
         *cwd* is the session's checkout: a reopen confirmation carries no
         URL, so missing coordinates (host, owner/repo, project path) are
@@ -517,59 +571,63 @@ class SessionArtifactService:
         local so the in-memory artifact still stands and the caller notifies.
         """
         if status not in _PROCESSABLE_STATUSES:
-            return None
+            return []
         stage: _DetectionStage = "command_parse"
         provider: _DetectionProvider = "unknown"
         try:
             detected_provider = is_pr_creation_command(command)
             if detected_provider is None:
-                return None
+                return []
             provider = detected_provider
             self._record_detected(detected_provider, message_id=message_id)
             stage = "output_extract"
-            detected = extract_pr_from_output(
-                stdout, stderr, provider=detected_provider
-            )
-            if detected is None:
-                return None
-
-            # GitLab: resolve the numeric repo_id best-effort via glab api so
-            # the external key survives group/project renames.
-            if (
-                detected.provider == "gitlab"
-                and detected.repo_id is None
-                and detected.project_path is not None
+            created: list[SessionArtifact] = []
+            for detected in extract_prs_from_output(
+                stdout,
+                stderr,
+                provider=detected_provider,
+                limit=pr_creation_limit(command),
+                from_start=pr_creation_output_first(command),
             ):
-                stage = "repo_id_resolve"
-                repo_id = await resolve_gitlab_repo_id(
-                    detected.host, detected.project_path
-                )
-                if repo_id is not None:
-                    detected = dataclasses.replace(detected, repo_id=repo_id)
-
-            # A reopen confirmation carries no URL: resolve the missing
-            # coordinates (host, owner/repo, project path) from the
-            # session's checkout remote.
-            if detected.url == "" or not _has_complete_coordinates(detected):
-                stage = "coordinates_resolve"
-                resolved = await self._resolve_remote_coordinates(detected, cwd)
-                if resolved is None:
-                    logger.info(
-                        "PR coordinates could not be resolved from the checkout",
-                        extra={"session_id": self._session_id},
+                # GitLab: resolve the numeric repo_id best-effort via glab api
+                # so the external key survives group/project renames.
+                if (
+                    detected.provider == "gitlab"
+                    and detected.repo_id is None
+                    and detected.project_path is not None
+                ):
+                    stage = "repo_id_resolve"
+                    repo_id = await resolve_gitlab_repo_id(
+                        detected.host, detected.project_path
                     )
-                    return None
-                detected = resolved
+                    if repo_id is not None:
+                        detected = dataclasses.replace(detected, repo_id=repo_id)
 
-            # The URL regexes guarantee these; the guard keeps the builder type-safe.
-            if not _has_complete_coordinates(detected):
-                return None
+                # A reopen confirmation carries no URL: resolve the missing
+                # coordinates (host, owner/repo, project path) from the
+                # session's checkout remote.
+                if detected.url == "" or not _has_complete_coordinates(detected):
+                    stage = "coordinates_resolve"
+                    resolved = await self._resolve_remote_coordinates(detected, cwd)
+                    if resolved is None:
+                        logger.info(
+                            "PR coordinates could not be resolved from the checkout",
+                            extra={"session_id": self._session_id},
+                        )
+                        continue
+                    detected = resolved
 
-            stage = "persist"
-            artifact = await self._record_new_artifact(
-                detected, command, message_id=message_id
-            )
-            return artifact
+                # The URL regexes guarantee these; the guard keeps the builder type-safe.
+                if not _has_complete_coordinates(detected):
+                    continue
+
+                stage = "persist"
+                artifact = await self._record_new_artifact(
+                    detected, command, message_id=message_id
+                )
+                if artifact is not None:
+                    created.append(artifact)
+            return created
         except Exception as exc:
             self._record_detection_failed(exc, provider=provider, stage=stage)
             raise
@@ -647,11 +705,16 @@ class SessionArtifactService:
 
         GitLab ``external_key`` may use either ``repo_id`` or ``project_path``
         depending on whether ``glab api`` resolved; dedup by MR identity so the
-        same merge request is never stored twice under both forms.
+        same merge request is never stored twice under both forms. The URL
+        catches any other key form, as discovery's ``_holds`` does.
         """
         preferred = _compute_external_key(detected)
         if preferred in self._artifacts:
             return preferred
+        if detected.url:
+            for key, artifact in self._artifacts.items():
+                if artifact.external_url == detected.url:
+                    return key
         if detected.provider != "gitlab":
             return None
         assert detected.project_path is not None
@@ -771,7 +834,7 @@ class SessionArtifactService:
             assert detected.repo is not None
             assert detected.number is not None
             return GitHubPullRequestArtifact(
-                id=_new_artifact_id(),
+                id=_artifact_id(self._session_id, external_key),
                 session_id=self._session_id,
                 external_key=external_key,
                 external_url=detected.url,
@@ -802,7 +865,7 @@ class SessionArtifactService:
         assert detected.project_path is not None  # guarded by the caller
         assert detected.iid is not None
         return GitLabMergeRequestArtifact(
-            id=_new_artifact_id(),
+            id=_artifact_id(self._session_id, external_key),
             session_id=self._session_id,
             external_key=external_key,
             external_url=detected.url,
@@ -849,7 +912,7 @@ class SessionArtifactService:
         if not self._dirty:
             return
         if self._on_artifacts_changed is not None:
-            self._on_artifacts_changed(self.list_artifacts())
+            self._on_artifacts_changed(self.list_artifacts(), self.list_worktrees())
         metadata_path = self._session_dir / METADATA_FILENAME
         if not metadata_path.is_file():
             return
@@ -858,6 +921,9 @@ class SessionArtifactService:
             raise ValueError(f"Session metadata must be an object: {metadata_path}")
         raw["artifacts"] = [
             artifact.model_dump(mode="json") for artifact in self.list_artifacts()
+        ]
+        raw["worktrees"] = [
+            worktree.model_dump(mode="json") for worktree in self.list_worktrees()
         ]
         await persist_metadata(raw, self._session_dir)
         self._dirty = False
@@ -957,6 +1023,7 @@ def _enrichment_fields(
         "provider_merged_at": details.provider_merged_at,
         "merge_commit_sha": details.merge_commit_sha,
         "pr_status": details.pr_status,
+        "pr_status_reason": details.pr_status_reason,
         "checks": _to_public_checks(details.checks),
         "checks_status": details.checks_status,
         "optional_checks_status": details.optional_checks_status,
@@ -1008,6 +1075,12 @@ def to_public_artifact(artifact: SessionArtifact) -> PublicSessionArtifact:
     )
 
 
+def to_public_worktree(worktree: WorktreeArtifact) -> PublicWorktreeArtifact:
+    # Kept apart from the stored model like PRs are: the wire is camelCase and
+    # must not change when meta.json does.
+    return PublicWorktreeArtifact.model_validate(worktree.model_dump())
+
+
 class ArtifactRequestHandler:
     """Serves the ``artifacts/`` RPC namespace for one session.
 
@@ -1044,8 +1117,14 @@ class ArtifactRequestHandler:
                     if self._artifact_service is not None
                     else []
                 )
+                worktrees = (
+                    self._artifact_service.list_worktrees()
+                    if self._artifact_service is not None
+                    else []
+                )
                 response: ProtocolModel = ArtifactsListResponse(
-                    artifacts=[to_public_artifact(a) for a in artifacts]
+                    artifacts=[to_public_artifact(a) for a in artifacts],
+                    worktrees=[to_public_worktree(w) for w in worktrees],
                 )
             case "artifacts/markViewed":
                 params = validate_wire(ArtifactsMarkViewedParams, raw_params)

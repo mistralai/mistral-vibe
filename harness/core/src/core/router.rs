@@ -48,15 +48,16 @@ pub(crate) fn reduce(
                 turn_id,
                 content: crate::core::helpers::render_agent_message(
                     message,
-                    &state.config.settings.prompts.agent_messages,
+                    &state.config().settings.prompts.agent_messages,
                     state
-                        .config
+                        .config()
                         .settings
                         .tools
                         .subagents
                         .messages_resume_idle_children(),
                 )?,
                 mode,
+                output_type: None,
             },
             determinism,
         ),
@@ -64,12 +65,14 @@ pub(crate) fn reduce(
             turn_id,
             content,
             mode,
+            output_type,
         } => dispatch(
             state,
             TurnEvent::UserMessage {
                 turn_id,
                 content,
                 mode,
+                output_type,
             },
             determinism,
         ),
@@ -230,7 +233,7 @@ pub(crate) fn normalize_command(state: &HarnessState, command: &mut HarnessComma
         return;
     }
     let Err(error) = state
-        .resolved_tools
+        .resolved_tools()
         .validate_runtime_builtin_output(name, value)
     else {
         return;

@@ -1,12 +1,15 @@
 //! Session artifacts (PR/MR): list read per session, live upsert, bar label.
 
+use std::borrow::Borrow;
 use std::sync::Arc;
 
 use serde_json::json;
 
 use crate::app::App;
 use crate::commands::CommandEvent;
-use crate::server::{method, ArtifactsListResponse, Client, PublicSessionArtifact};
+use crate::server::{
+    method, ArtifactsListResponse, Client, PrState, PrStatus, PrStatusReason, PublicSessionArtifact,
+};
 
 /// Read the session's artifacts; the bottom bar link renders from the
 /// answer. A failed read is an empty list, never a notice.
@@ -54,18 +57,52 @@ pub fn apply_list(app: &mut App, session_id: &str, artifacts: Vec<PublicSessionA
     }
 }
 
-/// Insert or replace by id (an `artifacts/updated` carries the same id), then
+/// Apply an `artifacts/created` or `artifacts/updated` notification.
+pub fn on_notification(
+    app: &mut App,
+    client: &Arc<Client>,
+    method: &str,
+    artifact: PublicSessionArtifact,
+) {
+    // A PR/MR created while the user looks at the list is seen as it lands.
+    let seen = (method == crate::server::notification::ARTIFACTS_CREATED
+        && artifact.viewed_at.is_none()
+        && app.artifacts_modal.open)
+        .then(|| artifact.id.clone());
+    upsert(app, artifact);
+    if let Some(id) = seen {
+        crate::artifacts_modal::mark_viewed(app, client, vec![id]);
+    }
+}
+
+/// Insert or replace by PR identity (`externalKey`; the record id differs across sessions and records), then
 /// keep the list latest-first; both paths emit the same UTC ISO-8601 format,
 /// so a string compare orders them. An open modal keeps its highlighted artifact.
-pub fn upsert(app: &mut App, artifact: PublicSessionArtifact) {
-    let highlighted = crate::artifacts_modal::selected(app).map(|known| known.id.clone());
+pub fn upsert(app: &mut App, mut artifact: PublicSessionArtifact) {
+    let highlighted = crate::artifacts_modal::selected(app).map(|known| known.external_key.clone());
+    let seen = app.artifacts_modal.open;
     let list = &mut app.session.artifacts;
-    match list.iter().position(|known| known.id == artifact.id) {
-        Some(index) => list[index] = artifact,
+    let same = |known: &PublicSessionArtifact| {
+        known.id == artifact.id || known.external_key == artifact.external_key
+    };
+    match list.iter().position(same) {
+        Some(index) => {
+            // A status change the user has not looked at yet marks the link until the modal opens.
+            if !seen && labeled(&list[index]) != labeled(&artifact) {
+                app.session.artifacts_unseen.insert(artifact.id.clone());
+            }
+            // A read raced by `markViewed` must not unmark the PR/MR.
+            if artifact.viewed_at.is_none() {
+                artifact.viewed_at = list[index].viewed_at.take();
+            }
+            list[index] = artifact;
+        }
         None => list.push(artifact),
     }
     list.sort_by(|a, b| b.discovered_at.cmp(&a.discovered_at));
-    if let Some(index) = highlighted.and_then(|id| list.iter().position(|known| known.id == id)) {
+    if let Some(index) =
+        highlighted.and_then(|key| list.iter().position(|known| known.external_key == key))
+    {
         app.artifacts_modal.list.highlight(index);
     }
 }
@@ -73,6 +110,46 @@ pub fn upsert(app: &mut App, artifact: PublicSessionArtifact) {
 /// The latest artifact (the list is kept latest-first), shown as the bar link.
 pub fn latest(app: &App) -> Option<&PublicSessionArtifact> {
     app.session.artifacts.first()
+}
+
+/// Whether the PR/MR is still in play: neither merged nor closed.
+pub fn is_active(artifact: &PublicSessionArtifact) -> bool {
+    !matches!(state(artifact), Some(PrState::Merged | PrState::Closed))
+}
+
+/// The synced lifecycle state, `None` before the first sync.
+pub fn state(artifact: &PublicSessionArtifact) -> Option<PrState> {
+    artifact.details.as_ref()?.state
+}
+
+/// The server's actionability status, `None` for merged, closed and draft PRs or before a sync.
+pub fn pr_status(artifact: &PublicSessionArtifact) -> Option<PrStatus> {
+    artifact.details.as_ref()?.pr_status
+}
+
+/// Why the status is what it is, `None` when the server does not say.
+pub fn reason(artifact: &PublicSessionArtifact) -> Option<PrStatusReason> {
+    artifact.details.as_ref()?.pr_status_reason
+}
+
+/// The artifacts the bar shows: the active ones, or all of them once none is active.
+pub fn bar_artifacts(app: &App) -> Vec<&PublicSessionArtifact> {
+    let active: Vec<_> = app
+        .session
+        .artifacts
+        .iter()
+        .filter(|a| is_active(a))
+        .collect();
+    if active.is_empty() {
+        app.session.artifacts.iter().collect()
+    } else {
+        active
+    }
+}
+
+/// Never opened in the modal, or its status changed since the modal was last open.
+pub fn is_unseen(app: &App, artifact: &PublicSessionArtifact) -> bool {
+    artifact.viewed_at.is_none() || app.session.artifacts_unseen.contains(&artifact.id)
 }
 
 /// The bottom-bar label: `PR #123` on GitHub, `MR !7` on GitLab.
@@ -114,35 +191,39 @@ pub enum Standing {
 
 /// Read from the wire state and synced status, not the display label.
 pub fn standing(artifact: &PublicSessionArtifact) -> Standing {
-    let details = artifact.details.as_ref();
-    let state = details.and_then(|details| details.state.as_deref());
-    let status = details.and_then(|details| details.pr_status.as_deref());
-    match (state, status) {
-        (Some("merged"), _) => Standing::Merged,
-        (Some("closed"), _) | (Some("open") | None, Some("action_needed")) => Standing::Blocked,
-        (Some("open") | None, Some("mergeable")) => Standing::Ready,
+    match (state(artifact), pr_status(artifact)) {
+        (Some(PrState::Merged), _) => Standing::Merged,
+        (Some(PrState::Closed), _) | (Some(PrState::Open) | None, Some(PrStatus::ActionNeeded)) => {
+            Standing::Blocked
+        }
+        (Some(PrState::Open) | None, Some(PrStatus::Mergeable)) => Standing::Ready,
         _ => Standing::Pending,
     }
 }
 
-/// The actionability status label (Phase 4): the lifecycle state for merged,
-/// closed and draft PRs; the synced actionability status for open PRs.
-/// `None` when there is nothing to show (an open PR not synced yet, or no
-/// details) — the label stays bare, as before Phase 4.
+/// The status label: the lifecycle state for merged, closed and draft PRs;
+/// for open PRs the synced status, named by its cause when known (`CI failing`).
+/// `None` when there is nothing to show (an open PR not synced yet, or no details).
 pub fn status_label(artifact: &PublicSessionArtifact) -> Option<String> {
-    let details = artifact.details.as_ref()?;
-    match details.state.as_deref() {
-        Some("merged") => return Some("merged".to_owned()),
-        Some("closed") => return Some("closed".to_owned()),
-        Some("draft") => return Some("draft".to_owned()),
-        _ => {}
-    }
-    match details.pr_status.as_deref() {
-        Some("action_needed") => Some("action needed".to_owned()),
-        Some("waiting") => Some("waiting".to_owned()),
-        Some("mergeable") => Some("mergeable".to_owned()),
-        _ => None,
-    }
+    let label = match (state(artifact), pr_status(artifact)) {
+        (Some(PrState::Merged), _) => "merged",
+        (Some(PrState::Closed), _) => "closed",
+        (Some(PrState::Draft), _) => "draft",
+        (_, Some(PrStatus::ActionNeeded)) => match reason(artifact) {
+            Some(PrStatusReason::ChangesRequested) => "changes requested",
+            Some(PrStatusReason::ChecksFailing) => "CI failing",
+            Some(PrStatusReason::Conflicts) => "conflicts",
+            _ => "action needed",
+        },
+        (_, Some(PrStatus::Waiting)) => match reason(artifact) {
+            Some(PrStatusReason::ChecksPending) => "CI running",
+            Some(PrStatusReason::ReviewRequired) => "review required",
+            _ => "waiting",
+        },
+        (_, Some(PrStatus::Mergeable)) => "mergeable",
+        _ => return None,
+    };
+    Some(label.to_owned())
 }
 
 /// The bar/modal label with the status appended: `PR #123 (mergeable)`,
@@ -156,8 +237,11 @@ pub fn labeled(artifact: &PublicSessionArtifact) -> String {
 
 /// The bar label when several artifacts share the one link slot: `PRs (2)`,
 /// `MRs (3)`, or `PRs/MRs (2)` across providers.
-pub fn count_label(artifacts: &[PublicSessionArtifact]) -> String {
-    let mrs = artifacts.iter().filter(|a| a.provider == "gitlab").count();
+pub fn count_label<A: Borrow<PublicSessionArtifact>>(artifacts: &[A]) -> String {
+    let mrs = artifacts
+        .iter()
+        .filter(|a| Borrow::<PublicSessionArtifact>::borrow(*a).provider == "gitlab")
+        .count();
     let prs = artifacts.len() - mrs;
     let kinds = match (prs > 0, mrs > 0) {
         (true, true) => "PRs/MRs",

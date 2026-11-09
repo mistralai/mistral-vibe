@@ -19,8 +19,10 @@ mod approval_keys;
 mod argument_hint;
 #[path = "units/artifacts.rs"]
 mod artifacts;
-#[path = "units/artifacts_checks.rs"]
-mod artifacts_checks;
+#[path = "units/artifacts_actions.rs"]
+mod artifacts_actions;
+#[path = "units/artifacts_guards.rs"]
+mod artifacts_guards;
 #[path = "units/artifacts_modal.rs"]
 mod artifacts_modal;
 #[path = "units/banner.rs"]
@@ -33,6 +35,8 @@ mod bottom_bar_layout;
 mod bottom_bar_overflow;
 #[path = "units/bottom_bar_selection.rs"]
 mod bottom_bar_selection;
+#[path = "units/bounded_message.rs"]
+mod bounded_message;
 #[path = "units/builtin_skill_commands.rs"]
 mod builtin_skill_commands;
 #[path = "units/callback_kinds.rs"]
@@ -77,6 +81,8 @@ mod composer_mentions;
 mod composer_model_click;
 #[path = "units/composer_pastes.rs"]
 mod composer_pastes;
+#[path = "units/composer_yank.rs"]
+mod composer_yank;
 #[path = "units/config_filter.rs"]
 mod config_filter;
 #[path = "units/config_selection.rs"]
@@ -115,6 +121,8 @@ mod feedback_support;
 mod fence_copy;
 #[path = "units/file_autocomplete_gate.rs"]
 mod file_autocomplete_gate;
+#[path = "units/file_index_events.rs"]
+mod file_index_events;
 #[path = "units/file_index_metrics.rs"]
 mod file_index_metrics;
 #[path = "units/file_index_rescan_ignore.rs"]
@@ -195,6 +203,8 @@ mod markdown_cache;
 mod markdown_links;
 #[path = "units/markdown_parse.rs"]
 mod markdown_parse;
+#[path = "units/markdown_table_layout.rs"]
+mod markdown_table_layout;
 #[path = "units/mcp_add_args.rs"]
 mod mcp_add_args;
 #[path = "units/mcp_add_help.rs"]
@@ -237,6 +247,8 @@ mod narrator_status;
 mod notice_state;
 #[path = "units/notices.rs"]
 mod notices;
+#[path = "units/notices_inline.rs"]
+mod notices_inline;
 #[path = "units/observability_memory.rs"]
 mod observability_memory;
 #[path = "units/observability_rotating.rs"]
@@ -409,6 +421,10 @@ mod skill_mention_completion;
 mod slash_completion;
 #[path = "units/startup_resume_intent.rs"]
 mod startup_resume_intent;
+#[path = "units/sticky_prompt.rs"]
+mod sticky_prompt;
+#[path = "units/sticky_prompt_hover.rs"]
+mod sticky_prompt_hover;
 #[path = "units/stress_command.rs"]
 mod stress_command;
 #[path = "units/system_proxy.rs"]
@@ -428,14 +444,6 @@ mod subagent_view_keys;
 mod support;
 #[path = "units/telemetry_events.rs"]
 mod telemetry_events;
-#[path = "units/teleport_input.rs"]
-mod teleport_input;
-#[path = "units/teleport_lifecycle.rs"]
-mod teleport_lifecycle;
-#[path = "units/teleport_picker.rs"]
-mod teleport_picker;
-#[path = "units/teleport_support.rs"]
-mod teleport_support;
 #[path = "units/terminal_detect.rs"]
 mod terminal_detect;
 #[path = "units/terminal_input_filter.rs"]
@@ -493,6 +501,12 @@ mod update_version;
 mod usage_gauge_reads;
 #[path = "units/version_flag.rs"]
 mod version_flag;
+#[path = "units/vim.rs"]
+mod vim;
+#[path = "units/vim_edit.rs"]
+mod vim_edit;
+#[path = "units/vim_render.rs"]
+mod vim_render;
 #[path = "units/voice_errors.rs"]
 mod voice_errors;
 #[path = "units/voice_settings.rs"]

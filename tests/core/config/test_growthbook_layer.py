@@ -475,6 +475,73 @@ async def test_ignores_registry_skills_off_variant() -> None:
 
 
 @pytest.mark.asyncio
+async def test_selected_toml_disables_the_growthbook_model_catalog(
+    config_dir: Path,
+) -> None:
+    config_path = config_dir / "config.toml"
+    config_path.write_text(
+        "experimental_enable_model_catalog = false\n", encoding="utf-8"
+    )
+    orchestrator = await build_default_orchestrator()
+    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
+    layer.set_variants({ExperimentName.MODEL_CATALOG.value: True})
+
+    await orchestrator.reload()
+
+    assert orchestrator.config.experimental_enable_model_catalog is False
+
+
+@pytest.mark.asyncio
+async def test_growthbook_enables_the_model_catalog() -> None:
+    orchestrator = await build_default_orchestrator()
+    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
+    layer.set_variants({ExperimentName.MODEL_CATALOG.value: True})
+
+    await orchestrator.reload()
+
+    assert orchestrator.config.experimental_enable_model_catalog is True
+
+
+def _model_experiments(catalog_variant: object) -> dict[str, object]:
+    return {
+        ExperimentName.CLI_MODEL_ROUTING.value: json.dumps({"active_model": "glm-5-2"}),
+        ExperimentName.CLI_EXTRA_MODELS.value: json.dumps([
+            {"name": "glm-5-3", "provider": "mistral", "alias": "glm-5-3"}
+        ]),
+        ExperimentName.REGISTRY_SKILLS.value: True,
+        ExperimentName.MODEL_CATALOG.value: catalog_variant,
+    }
+
+
+@pytest.mark.parametrize("variant", [True, "on"])
+@pytest.mark.asyncio
+async def test_catalog_flag_drops_only_the_model_experiments(variant: object) -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(_model_experiments(variant))
+
+    data = await layer.load()
+
+    assert data.model_dump() == {
+        "experimental_enable_model_catalog": True,
+        "experimental_enable_registry_skills": True,
+    }
+
+
+@pytest.mark.parametrize("variant", [False, "off"])
+@pytest.mark.asyncio
+async def test_catalog_flag_off_keeps_the_model_experiments(variant: object) -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(_model_experiments(variant))
+
+    data = await layer.load()
+
+    dumped = data.model_dump()
+    assert dumped["routed_default_model"] == "glm-5-2"
+    assert "glm-5-3" in dumped["models"]
+    assert "experimental_enable_model_catalog" not in dumped
+
+
+@pytest.mark.asyncio
 async def test_smart_approve_off_variant_maps_nothing() -> None:
     layer = GrowthbookLayer()
     layer.set_variants({ExperimentName.SMART_APPROVE.value: "off"})

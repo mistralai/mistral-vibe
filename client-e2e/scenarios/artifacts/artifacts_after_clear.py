@@ -35,7 +35,7 @@ request_methods = {"artifacts/list", "session/history/clear"}
 screen_contains = ("New conversation started.", "PR #200")
 screen_excludes = ("PRs (2)", "PR #123", "PR #124")
 
-_LEFT = "/test/workdir ⧉  "
+_LEFT = "/test/workdir  "
 _LINK = "● PR #200"
 _RIGHT = "ctx        0/600k"
 screen_rows = {ROWS - 1: (_LEFT + _LINK).ljust(COLUMNS - len(_RIGHT)) + _RIGHT}

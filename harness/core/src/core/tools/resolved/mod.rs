@@ -548,6 +548,44 @@ mod tests {
         assert!(result.contains("<status>not_callable</status>"));
     }
 
+    ///
+    /// *Prepare*: A direct-only caller tool with a tool-list name, a caller tool that is also a
+    /// program function, the file system tools and `wait`.
+    /// *Do*: Compile the resolved tools.
+    /// *Assert*: The prompt names, in tool-list order, only the top-level tools that
+    /// `run_typescript` cannot call: the direct-only caller tool by its tool-list name, then
+    /// `wait`.
+    ///
+    #[test]
+    fn the_prompt_names_every_top_level_tool_that_programs_cannot_call() {
+        // Prepare
+        let mut config = config();
+        config.settings.tools.model_wait = crate::core::features::model_wait::Mode::Enabled {
+            external_input: true,
+        };
+        config.capabilities.tool_groups = vec![
+            direct_named_group(
+                "inventory",
+                ProvidedToolExposure::Direct,
+                Some("inventory_delete_item"),
+            ),
+            direct_named_group(
+                "archive",
+                ProvidedToolExposure::DirectAndProgrammatic,
+                Some("archive_delete_item"),
+            ),
+        ];
+
+        // Do
+        let tools = ResolvedTools::compile(&config).unwrap();
+
+        // Assert
+        assert!(tools.tool_group_inventory_prompt_section().ends_with(
+            "\n\nHere are tools that are NOT available in `run_typescript` and \
+             `search_tool_functions`, call them directly: `inventory_delete_item`, `wait`"
+        ));
+    }
+
     fn direct_named_group(
         group_name: &str,
         exposure: ProvidedToolExposure,

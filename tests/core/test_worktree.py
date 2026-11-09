@@ -3486,6 +3486,48 @@ def test_new_branch_starts_from_the_fetched_remote_default(tmp_path: Path) -> No
     assert worktree.base_commit == ahead
 
 
+def test_a_branch_only_the_remote_has_is_checked_out_from_it(tmp_path: Path) -> None:
+    """*Prepare*: A clone whose remote has a branch (a PR's, say) it never
+    checked out.
+    *Do*: Prepare a worktree for that branch.
+    *Assert*: The worktree starts at the remote branch's tip, on a local branch
+    of the same name, not on a fresh branch from the default.
+    """
+    clone, _ = _clone_behind_origin(tmp_path)
+    seed = Repo(tmp_path / "seed")
+    seed.git.checkout("-b", "feat/pr")
+    _commit_on_head(seed, "pr work")
+    seed.git.push("origin", "feat/pr")
+    pr_tip = seed.head.commit.hexsha
+
+    worktree = _prepare("pr-work", Path(clone.working_dir), branch="feat/pr")
+
+    assert worktree.branch == "feat/pr"
+    assert _track_repo(Repo(worktree.path)).head.commit.hexsha == pr_tip
+
+
+def test_a_remote_branch_is_continued_from_its_last_known_tip_when_the_fetch_fails(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A clone that fetched a PR's branch once, then lost its remote.
+    *Do*: Prepare a worktree for that branch.
+    *Assert*: The worktree continues the branch from the tip the clone last
+    fetched, not from a fresh branch off the default one.
+    """
+    clone, _ = _clone_behind_origin(tmp_path)
+    seed = Repo(tmp_path / "seed")
+    seed.git.checkout("-b", "feat/pr")
+    _commit_on_head(seed, "pr work")
+    seed.git.push("origin", "feat/pr")
+    pr_tip = seed.head.commit.hexsha
+    clone.git.fetch("origin", "feat/pr:refs/remotes/origin/feat/pr")
+    clone.remotes.origin.set_url(str(tmp_path / "gone.git"))
+
+    worktree = _prepare("pr-work", Path(clone.working_dir), branch="feat/pr")
+
+    assert _track_repo(Repo(worktree.path)).head.commit.hexsha == pr_tip
+
+
 def test_new_branch_from_the_remote_default_does_not_write_the_shared_config(
     tmp_path: Path,
 ) -> None:
@@ -3536,6 +3578,54 @@ def test_existing_branch_is_checked_out_rather_than_rebased(tmp_path: Path) -> N
     worktree = _prepare("feature", root, branch="existing")
 
     assert worktree.base_commit == existing.commit.hexsha
+
+
+def test_a_branch_checked_out_elsewhere_is_continued_on_a_branch_of_its_own(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A checkout on ``feat/x``, which git checks out only once.
+    *Do*: Prepare a worktree for ``feat/x``.
+    *Assert*: The worktree starts at ``feat/x``'s tip on a new branch, and
+    the checkout keeps ``feat/x``.
+    """
+    repo = _init_repo(tmp_path)
+    repo.git.checkout("-b", "feat/x")
+    (tmp_path / "work.txt").write_text("work\n")
+    repo.index.add(["work.txt"])
+    tip = repo.index.commit("work").hexsha
+
+    with WorktreeRepository.open(tmp_path) as repository:
+        worktree = repository.prepare(
+            "feat-x", branch="feat/x", branch_in_use="branch_off"
+        )
+
+    assert worktree.branch == "feat-x"
+    assert _track_repo(Repo(worktree.path)).head.commit.hexsha == tip
+    assert repo.active_branch.name == "feat/x"
+
+
+def test_a_branch_off_takes_a_free_name_when_the_worktree_name_is_a_branch(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A checkout on ``feat/x`` and an unrelated ``feat-x`` branch.
+    *Do*: Prepare a ``feat-x`` worktree for ``feat/x``.
+    *Assert*: It branches off ``feat/x`` on ``feat-x-2``, leaving ``feat-x``.
+    """
+    repo = _init_repo(tmp_path)
+    other = repo.create_head("feat-x").commit.hexsha
+    repo.git.checkout("-b", "feat/x")
+    (tmp_path / "work.txt").write_text("work\n")
+    repo.index.add(["work.txt"])
+    tip = repo.index.commit("work").hexsha
+
+    with WorktreeRepository.open(tmp_path) as repository:
+        worktree = repository.prepare(
+            "feat-x", branch="feat/x", branch_in_use="branch_off"
+        )
+
+    assert worktree.branch == "feat-x-2"
+    assert _track_repo(Repo(worktree.path)).head.commit.hexsha == tip
+    assert repo.heads["feat-x"].commit.hexsha == other
 
 
 class _StubProcess:

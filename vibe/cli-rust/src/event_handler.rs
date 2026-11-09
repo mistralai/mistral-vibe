@@ -17,6 +17,7 @@ use crate::commands::submission::new_message_id;
 use crate::startup::StartupEvent;
 use crate::transcript::local;
 use crate::utils::startup_cache;
+use crate::utils::text::bounded_message;
 use crate::{
     agents, approval, artifacts, completion_manager, config, feedback, mcp, message_queue,
     model_picker, notices, observability, post_ready, question_app, resume_picker, session_exit,
@@ -202,6 +203,8 @@ fn apply_ready(
         app.terminal_notifier.set_default_title(title);
     }
     app.subagents.status_list_enabled = startup::read_show_subagent_status_list(&runtime);
+    app.artifacts_modal.enabled = startup::read_pr_monitoring(&runtime);
+    app.view.sticky_prompt_enabled = startup::read_enable_sticky_prompt(&runtime);
     app.quit.ask_confirmation_on_exit = startup::read_ask_confirmation_on_exit(&runtime);
     // Later picker resumes resend this config, so it must keep naming the
     // settled worktree, not the checkout the run started in. Parking must land
@@ -213,6 +216,7 @@ fn apply_ready(
             app.completion.files.park(std::path::PathBuf::from(cwd));
         }
     }
+    crate::vim::apply_runtime(app, &runtime);
     apply_final_startup_config(app, startup_cache);
     app.view
         .transcript
@@ -291,9 +295,9 @@ fn apply_ready(
     submission::flush_pending(app, client, config_tx)
 }
 
-/// Startup telemetry, sent once. Fields this client has no surface for
-/// (teleport) are honestly `false`; `session_init_duration_ms` stays null since
-/// the server does not report it to this client.
+/// Startup telemetry, sent once. `teleport_on_start` stays in the event schema
+/// after the feature's removal and is always `false`; `session_init_duration_ms`
+/// stays null since the server does not report it to this client.
 fn record_startup(app: &mut App, attach: &startup::Attach, is_cold_start: bool) {
     let properties = crate::telemetry::bmap(serde_json::json!({
         "agent_ready_duration_ms": startup::agent_ready_duration_ms(),
@@ -305,6 +309,7 @@ fn record_startup(app: &mut App, attach: &startup::Attach, is_cold_start: bool) 
         "prompt_for_workspace_trust": app.session.trust_prompted,
         "is_cold_start": is_cold_start,
         "mouse_capture": app.session.startup_config.enable_mouse_capture,
+        "vim_keybindings": app.vim.enabled,
     }));
     app.session.startup_telemetry = Some(properties);
     flush_startup_telemetry(app);
@@ -323,20 +328,15 @@ pub fn flush_startup_telemetry(app: &mut App) {
     crate::telemetry::record(app, crate::telemetry::event::STARTUP, properties);
 }
 
-/// Send the positional `vibe <prompt>` argument into the session, once as a
-/// plain prompt, or teleport it under `--teleport`.
+/// Send the positional `vibe <prompt>` argument into the session once, as a plain prompt.
 pub fn process_initial_prompt(app: &mut App, client: &Arc<Client>) {
     // An empty prompt is dropped.
-    let prompt = app
+    if let Some(prompt) = app
         .session
         .initial_prompt
         .take()
-        .filter(|prompt| !prompt.is_empty());
-    if std::mem::take(&mut app.session.teleport_on_start)
-        && crate::commands::has_command("/teleport")
+        .filter(|prompt| !prompt.is_empty())
     {
-        crate::teleport::submit(app, client, prompt.unwrap_or_default());
-    } else if let Some(prompt) = prompt {
         message_queue::enqueue_prompt(app, client, prompt);
     }
 }
@@ -347,7 +347,10 @@ pub fn process_initial_prompt(app: &mut App, client: &Arc<Client>) {
 pub fn apply_runtime_value(app: &mut App, runtime: &Value) {
     crate::terminal_notifier::configure(app, runtime);
     app.subagents.status_list_enabled = startup::read_show_subagent_status_list(runtime);
+    app.artifacts_modal.enabled = startup::read_pr_monitoring(runtime);
+    app.view.sticky_prompt_enabled = startup::read_enable_sticky_prompt(runtime);
     app.quit.ask_confirmation_on_exit = startup::read_ask_confirmation_on_exit(runtime);
+    crate::vim::apply_runtime(app, runtime);
     let show_thinking = startup::read_show_thinking_nodes(runtime);
     app.view.transcript.set_show_reasoning(show_thinking);
     app.subagents.transcripts.set_show_reasoning(show_thinking);
@@ -406,17 +409,21 @@ fn show_startup_config(app: &mut App, config: startup_cache::StartupConfig) {
     completion_manager::refresh(app);
 }
 
-/// A live reasoning row starts with the bulk fold state; other live entries
-/// keep their default collapsed state.
-fn expand_live_reasoning(app: &mut App, entry: &EntryHead) {
+/// A live reasoning row or loop prompt starts with the bulk fold state.
+fn expand_live_foldable(app: &mut App, entry: &EntryHead) {
     if app.view.tools_collapsed {
         return;
     }
     let Some(id) = entry.id.as_deref() else {
         return;
     };
-    if app.view.transcript.is_reasoning(id) {
-        app.view.expanded.insert(id.to_owned());
+    let transcript = &app.view.transcript;
+    let unfolded = match transcript.is_reasoning(id) {
+        true => Some(id),
+        false => transcript.loop_prompt_of(id),
+    };
+    if let Some(unfolded) = unfolded.map(str::to_owned) {
+        app.view.expanded.insert(unfolded);
         app.view.transcript_cache.invalidate_layouts();
     }
 }
@@ -617,7 +624,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             crate::program_status::shell_history_updated(app);
             crate::worktree::track_entry(app, &event.params);
             record_todos(app, event.params.get("entry"));
-            expand_live_reasoning(app, entry);
+            expand_live_foldable(app, entry);
             sync_loading_label(app, &params);
             turn_summary::track_narrator_added(app, &event.params, entry);
             if let Some(entry) = event.params.get("entry") {
@@ -790,7 +797,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         notification::ARTIFACTS_CREATED | notification::ARTIFACTS_UPDATED => {
             if let Some(artifact) = event.params.get("artifact") {
                 if let Ok(artifact) = crate::server::PublicSessionArtifact::deserialize(artifact) {
-                    artifacts::upsert(app, artifact);
+                    artifacts::on_notification(app, client, &event.method, artifact);
                 }
             }
         }
@@ -845,7 +852,14 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 .pointer("/warning/message")
                 .and_then(Value::as_str)
             {
-                notices::warn(app, message);
+                match event
+                    .params
+                    .pointer("/warning/code")
+                    .and_then(Value::as_str)
+                {
+                    Some(notices::HOOK_MESSAGE_CODE) => notices::hook_message(app, message),
+                    _ => notices::warn(app, message),
+                }
             }
         }
         notification::ERROR => {
@@ -890,7 +904,6 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         // The catalog publishes it alongside the canonical one; swallowing it
         // keeps the URL from being handled twice.
         notification::MCP_AUTH_URL_LEGACY => {}
-        notification::TELEPORT_EVENT => crate::teleport::on_event(app, client, &event.params),
         _ => {}
     }
     true
@@ -922,7 +935,7 @@ fn turn_error_message(app: &App, turn: &PublicTurn, retryable: bool) -> Option<(
     }
     let message = match turn.error_code() {
         Some("rate_limit") => rate_limit_message(app.whoami.account()),
-        _ => turn.error_message().unwrap_or("Turn failed").to_owned(),
+        _ => bounded_message(turn.error_message().unwrap_or("Turn failed")).into_owned(),
     };
     let hint = if retryable {
         "\n\nRun /retry [additional instructions] to try again.".to_owned()

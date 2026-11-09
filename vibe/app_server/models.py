@@ -131,8 +131,6 @@ class AccountView(ProtocolModel):
     plan: AccountPlanView | None = None
     plan_offer: AccountAction | None = None
     rate_limit_action: AccountAction | None = None
-    teleport_eligible: bool = False
-    teleport_action: AccountAction | None = None
     api_key: AccountApiKeyView | None = None
     budget: AccountBudgetView | None = None
 
@@ -520,112 +518,6 @@ class DebugLogPage(ProtocolModel):
     entries: list[DebugLogEntry]
     has_more: bool
     cursor: int | None = None
-
-
-class VibeCodeRepository(ProtocolModel):
-    repo_url: str
-    default_branch: str | None = None
-
-
-class VibeCodeProject(ProtocolModel):
-    project_id: str
-    name: str
-    repositories: list[VibeCodeRepository] = Field(default_factory=list)
-    is_read_only: bool = False
-
-
-class RemoteProjectLink(ProtocolModel):
-    repo_root: str
-    repo_url: str
-    project_id: str
-    project_name: str
-
-
-class VibeCodePickerContext(ProtocolModel):
-    repo_root: str
-    repo_url: str
-    repo_name: str
-    saved_link: RemoteProjectLink | None = None
-
-
-class VibeCodeGitInfo(ProtocolModel):
-    remote_name: str
-    remote_url: str
-    repo: str
-    branch: str | None = None
-    default_branch: str | None = None
-
-
-class VibeCodePickerState(ProtocolModel):
-    projects: list[VibeCodeProject]
-    next_cursor: str | None = None
-    repo_url: str = ""
-
-    @property
-    def has_more(self) -> bool:
-        return self.next_cursor is not None
-
-
-class VibeCodePickerView(ProtocolModel):
-    context: VibeCodePickerContext
-    state: VibeCodePickerState
-    git: VibeCodeGitInfo
-    saved_project_link_cleared: bool = False
-    project_repo_remote_changed: bool = False
-
-
-type VibeCodePickerPurpose = Literal["configure", "teleport"]
-
-
-class TeleportSummarizingContext(ProtocolModel):
-    kind: Literal["summarizing_context"] = "summarizing_context"
-    operation_id: str
-
-
-class TeleportCheckingGit(ProtocolModel):
-    kind: Literal["checking_git"] = "checking_git"
-    operation_id: str
-
-
-class TeleportPushRequired(ProtocolModel):
-    kind: Literal["push_required"] = "push_required"
-    operation_id: str
-    unpushed_count: int
-    branch_not_pushed: bool = False
-
-
-class TeleportPushing(ProtocolModel):
-    kind: Literal["pushing"] = "pushing"
-    operation_id: str
-
-
-class TeleportStartingWorkflow(ProtocolModel):
-    kind: Literal["starting_workflow"] = "starting_workflow"
-    operation_id: str
-
-
-class TeleportComplete(ProtocolModel):
-    kind: Literal["complete"] = "complete"
-    operation_id: str
-    url: str
-
-
-class TeleportFailed(ProtocolModel):
-    kind: Literal["failed"] = "failed"
-    operation_id: str
-    error: PublicError
-
-
-type TeleportEvent = Annotated[
-    TeleportSummarizingContext
-    | TeleportCheckingGit
-    | TeleportPushRequired
-    | TeleportPushing
-    | TeleportStartingWorkflow
-    | TeleportComplete
-    | TeleportFailed,
-    Field(discriminator="kind"),
-]
 
 
 class AgentSummary(ProtocolModel):
@@ -1049,6 +941,7 @@ class HookScope(StrEnum):
     POST_AGENT = auto()
     PRE_TOOL = auto()
     POST_TOOL = auto()
+    PRE_AGENT = auto()
 
 
 class HookSeverity(StrEnum):
@@ -1200,6 +1093,13 @@ class PublicSessionWorktree(ProtocolModel):
     created: bool
 
 
+class PublicSessionProject(ProtocolModel):
+    """The project stamp in a session's metadata; ``id`` is None for ``none``."""
+
+    kind: Literal["local", "cloud", "none"]
+    id: str | None = None
+
+
 class PublicSession(ProtocolModel):
     id: str
     root_session_id: str | None = None
@@ -1231,6 +1131,9 @@ class PublicSession(ProtocolModel):
     # Scheduled loops persisted for this session. The additive default keeps
     # old clients and old servers working (ADR 0014).
     loops: list[ScheduledLoop] = Field(default_factory=list)
+    # None while unstamped. With local projects on, a listing stamps an unstamped
+    # session whose folder is a local project's.
+    project: PublicSessionProject | None = None
 
     @model_validator(mode="after")
     def _default_bumped_at(self) -> Self:

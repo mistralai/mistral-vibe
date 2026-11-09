@@ -19,7 +19,7 @@ from pydantic_core import ErrorDetails
 
 from .base import SessionModel
 from .callbacks import CallbackOutcome, SessionCallback
-from .common import CallbackId, EventId, HistoryEntryId, ProtocolError, SessionId, UnixMs
+from .common import CallbackId, EventId, HistoryEntryId, ProtocolError, SessionId, TurnId, UnixMs
 from .content import UNSUPPORTED_CONTENT_ERROR
 from .history import HistoryEntry
 from .state import Session, TurnState
@@ -149,7 +149,16 @@ class CallbackResolvedEvent(SessionModel):
         default=None,
         description=(
             "How the callback ended. Null only on resolutions recorded before this field "
-            "existed, which carry the id alone; every producer sets it now."
+            "existed, which carry the ID alone; every producer sets it now."
+        ),
+    )
+    turn_id: TurnId | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "The turn that opened the callback, as its callback_opened event names it. Absent "
+            "when the callback names no turn, and on resolutions recorded before this field "
+            "existed."
         ),
     )
 
@@ -282,7 +291,7 @@ class EventBatch(SessionModel):
 
 
 class UnknownEventPayload(SessionModel):
-    """A payload whose type this reader does not know, kept raw so it can be skipped.
+    """A payload of a type added after your SDK version, kept raw so it can be skipped.
 
     Serialized, it is the payload as it came, with its real type and no ``original_type``.
     """
@@ -336,13 +345,12 @@ type ClientEventPayload = Annotated[
 class ClientEvent(Event):
     """Client-side event parser that preserves unknown payload variants.
 
-    A newer Runtime can add payload types, and values to an enum-like field (a status,
-    a kind, an operation) or variants to a tagged union. A payload this reader cannot
-    model for those reasons reads as `UnknownEventPayload`, so the reader can skip it.
-    History entries and content blocks of a type this reader does not know are the
-    exception: they read as `UnknownHistoryEntry` and `UnknownContentBlock`, and the
-    event keeps its type. A payload that is malformed, a wrong JSON type, a missing field
-    or a missing tag, still fails.
+    A payload of a type added after your SDK version, or with a value or a union variant
+    added after it (a status, a kind, an operation), reads as `UnknownEventPayload`, so the
+    reader can skip it. History entries and content blocks of a type added after your SDK
+    version are the exception: they read as `UnknownHistoryEntry` and
+    `UnknownContentBlock`, and the event keeps its type. A payload that is malformed, a
+    wrong JSON type, a missing field or a missing tag, still fails.
     """
 
     payload: ClientEventPayload  # pyright: ignore[reportIncompatibleVariableOverride]

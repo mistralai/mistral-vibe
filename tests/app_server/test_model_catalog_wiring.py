@@ -242,3 +242,43 @@ async def test_a_cached_catalog_applies_a_sparse_override_from_the_first_build(
 
     assert effective.models["cached-model"].temperature == 0.5
     assert effective.validation_warnings == ()
+
+
+def _cached_eval(*, catalog_on: bool) -> Any:
+    from tests.stubs.experiment_responses import routing_eval_response
+    from vibe.core.experiments.models import EvalResponse
+
+    features = routing_eval_response("glm-5-3").model_dump()["features"]
+    features["vibe_cli_model_catalog"] = {"defaultValue": catalog_on, "rules": []}
+    return EvalResponse.model_validate({"features": features})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("catalog_on", [True, False])
+async def test_a_cached_flag_decides_the_cached_catalog(
+    catalog_on: bool,
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config.update({"active_model": "", "enable_telemetry": True})
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(
+        "vibe.app_server._cached_layers.load_cached_eval_response",
+        lambda _config, _credentials=None: _cached_eval(catalog_on=catalog_on),
+    )
+    monkeypatch.setattr(
+        "vibe.core.model_catalog.load_cached_model_catalog",
+        lambda _config, _credentials=None: _runnable_catalog("zai-glm-5-3"),
+    )
+
+    session_config = await runtime_module.HarnessProcess(
+        services=process_services
+    )._build_session_config(SessionOptions(cwd=str(tmp_path)))
+    effective = session_config.config_orchestrator.config
+
+    assert ("zai-glm-5-3" in effective.models) is catalog_on
+    assert ("glm-5-3" in effective.models) is not catalog_on

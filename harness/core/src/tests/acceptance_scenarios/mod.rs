@@ -15,6 +15,7 @@ mod hooks;
 mod image_input;
 mod large_output;
 mod model_wait;
+mod output_type;
 mod permissions;
 mod post_tool_results;
 mod program_timing;
@@ -311,6 +312,15 @@ fn turn_completed_at_iteration_limit(turn_id: &str, output: Vec<Value>) -> Value
     })
 }
 
+fn turn_completed_at_output_limit(turn_id: &str, text: &str) -> Value {
+    json!({
+        "type": "turn_completed",
+        "turn_id": turn_id,
+        "output": [{"type": "text", "text": text}],
+        "stop_reason": "output_limit",
+    })
+}
+
 fn turn_completed_skipped(turn_id: &str, reason: Vec<Value>) -> Value {
     json!({
         "type": "turn_completed",
@@ -324,6 +334,14 @@ fn model_user_text(text: &str) -> Value {
     json!({
         "role": "user",
         "content": [{"type": "text", "text": text}],
+    })
+}
+
+fn model_context_text(text: &str) -> Value {
+    json!({
+        "role": "user",
+        "content": [{"type": "text", "text": text}],
+        "context": true,
     })
 }
 

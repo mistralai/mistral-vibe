@@ -78,7 +78,7 @@ pub(crate) fn render(item: &Item, detail: Detail) -> String {
 pub(super) fn message_items(message: &Message) -> Vec<Item<'_>> {
     match message {
         Message::System { content } => vec![Item::SystemMessage { content }],
-        Message::User { content } => vec![Item::UserMessage { content }],
+        Message::User { content, .. } => vec![Item::UserMessage { content }],
         Message::Tool {
             outcome, content, ..
         } => vec![Item::ToolResult {

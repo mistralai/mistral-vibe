@@ -146,7 +146,7 @@
             </g>
         
     <g transform="translate(9, 41)" clip-path="url(#vibe-clip-terminal)">
-    <rect fill="#c5c8c6" x="24.4" y="318.7" width="73.2" height="24.65" shape-rendering="crispEdges" /><rect fill="#c5c8c6" x="24.4" y="343.1" width="12.2" height="24.65" shape-rendering="crispEdges" /><rect fill="#7f7f7f" x="341.6" y="709.1" width="12.2" height="24.65" shape-rendering="crispEdges" />
+    <rect fill="#c5c8c6" x="24.4" y="318.7" width="73.2" height="24.65" shape-rendering="crispEdges" /><rect fill="#c5c8c6" x="24.4" y="343.1" width="12.2" height="24.65" shape-rendering="crispEdges" /><rect fill="#7f7f7f" x="231.8" y="709.1" width="73.2" height="24.65" shape-rendering="crispEdges" />
     <g class="vibe-matrix">
     <text class="vibe-r1" x="1464" y="20" textLength="12.2" clip-path="url(#vibe-line-0)">
 </text><text class="vibe-r1" x="1464" y="44.4" textLength="12.2" clip-path="url(#vibe-line-1)">
@@ -177,7 +177,7 @@
 </text><text class="vibe-r1" x="1464" y="654.4" textLength="12.2" clip-path="url(#vibe-line-26)">
 </text><text class="vibe-r1" x="1464" y="678.8" textLength="12.2" clip-path="url(#vibe-line-27)">
 </text><text class="vibe-r4" x="0 12.2 24.4 36.6 48.8 61 73.2 85.4 97.6 109.8 122 134.2 146.4 158.6 170.8 183 195.2 207.4 219.6 231.8 244 256.2 268.4 280.6 292.8 305 317.2 329.4 341.6 353.8 366 378.2" y="703.2" clip-path="url(#vibe-line-28)" style="font-variant-ligatures:none;font-kerning:none">────────────────────────────────</text><text class="vibe-r1" x="1464" y="703.2" textLength="12.2" clip-path="url(#vibe-line-28)">
-</text><text class="vibe-r4" x="0 12.2 24.4 36.6 48.8 61 73.2 85.4 97.6 109.8 122 134.2 146.4" y="727.6" clip-path="url(#vibe-line-29)" style="font-variant-ligatures:none;font-kerning:none">/test/workdir</text><text class="vibe-r1" x="170.8" y="727.6" textLength="12.2" clip-path="url(#vibe-line-29)">⧉</text><text class="vibe-r4" x="292.8 305 317.2 329.4" y="727.6" clip-path="url(#vibe-line-29)" style="font-variant-ligatures:none;font-kerning:none">ctx </text><text class="vibe-r4" x="366 378.2" y="727.6" clip-path="url(#vibe-line-29)" style="font-variant-ligatures:none;font-kerning:none">0%</text><text class="vibe-r1" x="1464" y="727.6" textLength="12.2" clip-path="url(#vibe-line-29)">
+</text><text class="vibe-r4" x="0 12.2 24.4 36.6 48.8 61 73.2 85.4 97.6 109.8 122 134.2 146.4" y="727.6" clip-path="url(#vibe-line-29)" style="font-variant-ligatures:none;font-kerning:none">/test/workdir</text><text class="vibe-r4" x="183 195.2 207.4 219.6" y="727.6" clip-path="url(#vibe-line-29)" style="font-variant-ligatures:none;font-kerning:none">ctx </text><text class="vibe-r4" x="305 317.2 329.4 341.6 353.8 366 378.2" y="727.6" clip-path="url(#vibe-line-29)" style="font-variant-ligatures:none;font-kerning:none"> 0/600k</text><text class="vibe-r1" x="1464" y="727.6" textLength="12.2" clip-path="url(#vibe-line-29)">
 </text>
     </g>
     </g>

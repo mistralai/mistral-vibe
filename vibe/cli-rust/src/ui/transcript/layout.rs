@@ -23,7 +23,11 @@ pub(super) fn build<'a>(
         let mut top = 0u16;
         let mut entries = Vec::new();
         let mut queue_top = None;
+        let mut prompts = Vec::new();
         for entry in transcript.lines_from(cache.history_from()) {
+            if transcript.settled_prompt(entry.index).is_some() {
+                prompts.push(entries.len());
+            }
             if entry.pending && queue_top.is_none() {
                 queue_top = Some(top);
             }
@@ -71,7 +75,7 @@ pub(super) fn build<'a>(
             });
             top = top.saturating_add(geometry.height);
         }
-        cache.store_layout(revision, width, top, entries, queue_top);
+        cache.store_layout(revision, width, top, entries, queue_top, prompts);
     }
     cache.layout(revision, width).expect("layout was cached")
 }

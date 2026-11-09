@@ -1,14 +1,13 @@
-//! Resume attempts: a locked row's delete is refused with a `⚠` row, a failed
-//! delete leaves a `✕` row, and a successful resume drops the stale attempt notices.
+//! Picker resume attempts: failures go to the inline notice, and a successful resume drops the startup warnings.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use serde_json::json;
 
-use vibe_rs::app::App;
+use vibe_rs::app::{App, Severity};
 use vibe_rs::resume_picker::{self, Event};
 use vibe_rs::server::PublicSessionState;
 
-use crate::feedback_support::{errors, warnings};
+use crate::feedback_support::{errors, notice, warnings};
 use crate::support::{stub, with_picker};
 
 const BUSY: &str = "This session is open in another Vibe process. Close it there to continue here.";
@@ -20,11 +19,12 @@ fn deleting_a_locked_row_warns_with_the_busy_refusal() {
     resume_picker::handle_key(&mut app, &stub(), KeyEvent::from(KeyCode::Char('d')));
     assert!(app.resume_picker.delete_confirm.is_none());
     assert!(app.resume_picker.deleting.is_none());
-    assert_eq!(warnings(&app), [BUSY]);
+    assert_eq!(notice(&app), Some((Severity::Warning, BUSY)));
+    assert!(warnings(&app).is_empty());
 }
 
 #[test]
-fn a_failed_delete_mounts_an_error_row() {
+fn a_failed_delete_shows_an_error_notice() {
     let mut app = with_picker();
     app.resume_picker.deleting = Some("busy".into());
     resume_picker::apply_event(
@@ -37,26 +37,20 @@ fn a_failed_delete_mounts_an_error_row() {
     );
     assert!(app.resume_picker.deleting.is_none());
     assert_eq!(
-        errors(&app),
-        ["Failed to delete session: Session is already open"]
+        notice(&app),
+        Some((
+            Severity::Error,
+            "Failed to delete session: Session is already open"
+        ))
     );
+    assert!(errors(&app).is_empty());
 }
 
 #[test]
-fn a_successful_resume_drops_the_stale_attempt_error() {
+fn a_successful_resume_drops_the_startup_warnings() {
     let mut app = with_picker();
     let _channels = vibe_rs::channels::connect(&mut app);
-    // A previous attempt's refusal is still mounted on the live transcript.
-    app.view.transcript.add(&json!({
-        "entry": {
-            "id": "rs-resume-attempt-error",
-            "type": "message",
-            "role": "command_error",
-            "content": [{"type": "text", "text": BUSY}],
-            "generationStatus": "completed",
-            "local": true,
-        }
-    }));
+    vibe_rs::notices::warn(&mut app, "hooks.toml: Failed to parse");
     app.resume_picker.resuming = true;
     resume_picker::apply_event(
         &mut app,
@@ -66,7 +60,7 @@ fn a_successful_resume_drops_the_stale_attempt_error() {
             state: state(),
         },
     );
-    assert!(!screen_text(&app).contains(BUSY));
+    assert!(!screen_text(&app).contains("Failed to parse"));
     assert!(screen_text(&app).contains("Resumed session"));
 }
 

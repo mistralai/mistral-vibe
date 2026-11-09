@@ -568,6 +568,14 @@ fn agent_results_survive_restore_and_are_seen_once_before_new_input() {
             "Status: stopped, iteration limit reached before the agent finished\nTo let it continue with its history, send a message to /root/child.",
         ),
         (
+            json!({"outcome":"completed", "output":[{"type":"text", "text":"Two of five steps done."}], "stop_reason":"output_limit"}),
+            "Status: stopped, output limit reached before the agent finished its reply\nPartial output: [{\"type\":\"text\",\"text\":\"Two of five steps done.\"}]\nTo let it continue with its history, send a message to /root/child.",
+        ),
+        (
+            json!({"outcome":"completed", "output":[], "stop_reason":"output_limit"}),
+            "Status: stopped, output limit reached before the agent finished its reply\nTo let it continue with its history, send a message to /root/child.",
+        ),
+        (
             json!({"outcome":"completed", "output":[{"type":"text", "text":"Skipped by policy"}], "stop_reason":"skipped"}),
             "Status: completed\nOutput: [{\"type\":\"text\",\"text\":\"Skipped by policy\"}]",
         ),
@@ -704,7 +712,7 @@ fn agent_result_start_and_steering_share_turn_semantics_through_restore() {
 
 /// *Prepare*: The parent cannot resume an idle child with a message: its tree policy keeps such
 /// messages pending, or it has no `send_message`.
-/// *Do*: Deliver a cancelled and an iteration-limited child result.
+/// *Do*: Deliver a cancelled, an iteration-limited and an output-limited child result.
 /// *Assert*: The result keeps its status and partial output but has no continue hint.
 #[test]
 fn unfinished_agent_results_omit_the_continue_hint_when_a_message_cannot_resume_the_child() {
@@ -720,6 +728,10 @@ fn unfinished_agent_results_omit_the_continue_hint_when_a_message_cannot_resume_
             (
                 json!({"outcome":"completed", "output":[], "stop_reason":"iteration_limit"}),
                 "Status: stopped, iteration limit reached before the agent finished",
+            ),
+            (
+                json!({"outcome":"completed", "output":[{"type":"text", "text":"Two of five"}], "stop_reason":"output_limit"}),
+                "Status: stopped, output limit reached before the agent finished its reply\nPartial output: [{\"type\":\"text\",\"text\":\"Two of five\"}]",
             ),
         ] {
             // Prepare

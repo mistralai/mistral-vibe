@@ -12,6 +12,7 @@ _ANSWER = "• Paul Vezia — Senior AI Engineer at Publicis. [LinkedIn profile]
 # one-based terminal cell (50, 11) after this turn settles.
 _ROW, _COL = 11, 50
 _HOVER = f"\x1b[<35;{_COL};{_ROW}M"
+screen_hyperlinks = (("LinkedIn profile", "https://www.linkedin.com"),)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

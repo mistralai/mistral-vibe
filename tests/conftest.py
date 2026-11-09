@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import sys
 import time
+import tomllib
 from types import SimpleNamespace
 from typing import Any
 
@@ -32,7 +33,6 @@ from vibe.core.config.harness_files import (
     reset_harness_files_manager,
 )
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.experiments.wait import reset_experiments_eval_failed
 from vibe.core.model_catalog.wait import reset_model_catalog_failed
 from vibe.core.utils.concurrency import run_sync
 from vibe.setup.auth._oidc_credentials import clear_oidc_token_cache
@@ -154,11 +154,6 @@ def _no_billing_reads(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_experiments_eval_failed() -> None:
-    reset_experiments_eval_failed()
-
-
-@pytest.fixture(autouse=True)
 def _isolate_git_config(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the suite off the developer's git config.
 
@@ -223,6 +218,8 @@ def get_base_config() -> dict[str, Any]:
             }
         ],
         "enable_telemetry": False,
+        # Connectors fetch the real bootstrap endpoint; connector tests opt in.
+        "enable_connectors": False,
     }
 
 
@@ -259,6 +256,15 @@ def config_dir(
     monkeypatch.setattr("vibe.core.paths._agents_home._DEFAULT_AGENTS_HOME", agents_dir)
 
     return config_dir
+
+
+@pytest.fixture
+def connectors_enabled(config_dir: Path) -> None:
+    """Turn connectors on in the user config; the test mocks the bootstrap endpoint."""
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["enable_connectors"] = True
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -523,6 +529,12 @@ def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     # Telemetry gates the remote experiment fetch (experiments.mistral.services);
     # off by default so a leaked MISTRAL_API_KEY never triggers an unmocked call.
     kwargs.setdefault("enable_telemetry", False)
+    # PR monitoring runs gh/glab against the session's checkout in the
+    # background; off in the configs built here so a checkout with a forge
+    # remote never reaches the real CLI. Artifact tests pass
+    # enable_pr_monitoring=True. Sessions built from config files (api_host,
+    # HarnessProcess) keep the schema default, which is on.
+    kwargs.setdefault("enable_pr_monitoring", False)
     # Use the lightweight test system prompt unless a test asks for a real one.
     kwargs.setdefault("system_prompt_id", "tests")
     # Keep the test prompt minimal: skip project-context discovery unless a

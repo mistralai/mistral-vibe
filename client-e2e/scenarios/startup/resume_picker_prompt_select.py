@@ -17,4 +17,4 @@ timeline: Timeline = [
     turn_completed(session_id=_SAVED),
 ]
 
-screen_contains = ("Resumed session 00000000", "Continuing the saved work.")
+screen_contains = ("Resumed session 00000003", "Continuing the saved work.")

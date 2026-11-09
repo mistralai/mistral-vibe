@@ -9,6 +9,7 @@ adapter records.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 from pathlib import Path
 import sys
@@ -513,3 +514,42 @@ def _appended(result: RustPostToolCallHookResult) -> list[str]:
         for block in result.output.tool_result.content[1:]
         if isinstance(block, RustTextContentBlock)
     ]
+
+
+@pytest.mark.asyncio
+async def test_an_auto_approve_sandboxed_start_keeps_other_session_grants(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: Another session's trust grant on the sandbox's workspace.
+    *Do*: Start a sandboxed session there with auto-approve, which rebuilds its
+    context for the auto-approve agent.
+    *Assert*: It runs that agent and the other session's grant stays: a
+    sandboxed build grants no trust, so the rebuild has none to revoke.
+    """
+    # Prepare
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(project.parent / "state"))
+    monkeypatch.setattr(trusted_folders_manager, "_session_trusted", [])
+    trusted_folders_manager.trust_for_session(project)
+    options = _options(project, RecordingSandbox(project))
+    options = replace(
+        options,
+        session_options=options.session_options.model_copy(
+            update={"agent": None, "auto_approve": True, "trust_workspace": True}
+        ),
+    )
+    host = LocalHarnessHost()
+
+    # Do
+    session = await host.start(options)
+    try:
+        agent = session.resources.agents.active.name
+        grants = trusted_folders_manager._session_trusted.count(str(project.resolve()))
+    finally:
+        await session.close()
+        await host.close()
+
+    # Assert
+    assert agent == BuiltinAgentName.AUTO_APPROVE
+    assert grants == 1

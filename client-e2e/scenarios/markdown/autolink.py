@@ -12,6 +12,14 @@ _ANSWER = (
     "Trailing (https://example.org/x), then bare example.com and file config.toml.\n\n"
     "Code `ops@example.com` stays plain, and [a link](https://example.net) too."
 )
+# Every link the terminal can open itself; mailto links stay plain like their clicks.
+screen_hyperlinks = (
+    ("https://docs.mistral.ai/guides/", "https://docs.mistral.ai/guides/"),
+    ("www.mistral.ai/pricing", "http://www.mistral.ai/pricing"),
+    ("https://example.org/x", "https://example.org/x"),
+    ("example.com", "http://example.com"),
+    ("a link", "https://example.net"),
+)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

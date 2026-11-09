@@ -89,15 +89,11 @@ from vibe.app_server.models import (
     SkillSummary,
     SkillUpdateView,
     SkillVersionView,
-    TeleportEvent,
     ToolSummary,
     TurnContextInputEntry as TurnContextInputEntry,
     TurnInputEntry,
     TurnUserInputEntry,
     UserDisplayContent,
-    VibeCodePickerPurpose,
-    VibeCodePickerView,
-    VibeCodeProject,
     WorkspaceTrustDecision,
     WorkspaceTrustDetails,
     WorkspaceTrustStatus,
@@ -209,6 +205,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/list",
     "session/log/read",
     "session/markAsSeen",
+    "session/move",
     "session/pin",
     "session/archive",
     "session/read",
@@ -270,16 +267,6 @@ SERVER_METHODS: tuple[str, ...] = (
     "turn/interrupt",
     "turn/start",
     "turn/steer",
-    "vibeCode/projects/cancel",
-    "vibeCode/projects/create",
-    "vibeCode/projects/loadMore",
-    "vibeCode/projects/open",
-    "vibeCode/projects/recover",
-    "vibeCode/projects/select",
-    "vibeCode/projects/unlink",
-    "vibeCode/teleport/cancel",
-    "vibeCode/teleport/push/respond",
-    "vibeCode/teleport/start",
     "workspace/git/checkouts",
     "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
@@ -496,10 +483,12 @@ class SessionStartParams(SessionOpenParams):
     session_only: bool = False
     first_turn: SessionStartTurn | None = None
     # The session that started this one to hand it first_turn; saved with the
-    # session and listed by `session/list`. The new session
-    # cannot start sessions until the user writes to it, so started sessions
-    # cannot chain on their own.
+    # session and listed by `session/list`. A session another started cannot
+    # start sessions itself.
     started_by_session_id: str | None = None
+    # How many session messages and starts led to first_turn since a user
+    # wrote; see `SessionPeerSendParams.hops`.
+    hops: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
 
 
 class SessionStartResponse(EventWatermarkResponse):
@@ -760,18 +749,54 @@ class SessionArchiveParams(ProtocolModel):
     # working (a turn running or queued, or work a turn started), checked in one
     # step with the archive.
     require_idle: bool = Field(default=False, exclude_if=lambda value: not value)
+    # Archiving also archives the sessions this one started, down the chain,
+    # as `SessionArchiveResponse.started_sessions` reports. Ignored when
+    # unarchiving.
+    include_started_sessions: bool = Field(
+        default=False, exclude_if=lambda value: not value
+    )
 
 
 # `data.refusal` of a `conflict` the server decided over another session's
-# request: an archive requiring idle, or a message `sentBySession`.
+# request: an archive requiring idle, or a message another session sent.
 type PeerRefusal = Literal["archived", "busy", "paused"]
 PEER_REFUSAL_ARCHIVED: Final = "archived"
 PEER_REFUSAL_BUSY: Final = "busy"
 PEER_REFUSAL_PAUSED: Final = "paused"
 
+# `details.reason` of a `start_session` or `send_to_session` tool error a
+# session limit refused.
+type SessionLimitRefusal = Literal["session_depth", "started_sessions", "session_hops"]
+SESSION_LIMIT_DEPTH: Final = "session_depth"
+SESSION_LIMIT_STARTED_SESSIONS: Final = "started_sessions"
+SESSION_LIMIT_HOPS: Final = "session_hops"
+
+# Whether a message another session sends may start a turn on an idle session.
+type PeerDelivery = Literal["queue", "start_turn"]
+
+
+# Why archiving a session left one it started unarchived, with the sessions
+# that one started in turn: it is working, pinned, in another project, or its
+# archive failed.
+type StartedSessionSkipReason = Literal["busy", "pinned", "other_project", "failed"]
+
+
+class StartedSessionSkipped(ProtocolModel):
+    session_id: str
+    reason: StartedSessionSkipReason
+
+
+class StartedSessionsArchived(ProtocolModel):
+    archived: list[str] = Field(default_factory=list)
+    skipped: list[StartedSessionSkipped] = Field(default_factory=list)
+
 
 class SessionArchiveResponse(ProtocolModel):
     archived_at: int | None = None
+    # Only when archiving with `include_started_sessions`.
+    started_sessions: StartedSessionsArchived | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class SessionTitleUpdateParams(ProtocolModel):
@@ -1066,6 +1091,29 @@ class SessionRelocateResponse(ProtocolModel):
     state: PublicSessionState
 
 
+class SessionMoveToLocalProject(ProtocolModel):
+    kind: Literal["local"] = "local"
+    id: str = Field(min_length=1)
+
+
+class SessionMoveToNoProject(ProtocolModel):
+    kind: Literal["none"] = "none"
+
+
+type SessionMoveTarget = Annotated[
+    SessionMoveToLocalProject | SessionMoveToNoProject, Field(discriminator="kind")
+]
+
+
+class SessionMoveParams(ProtocolModel):
+    session_id: str
+    project: SessionMoveTarget
+
+
+class SessionMoveResponse(ProtocolModel):
+    state: PublicSessionState
+
+
 class ReviewStateParams(ProtocolModel):
     session_id: str
 
@@ -1128,7 +1176,7 @@ class PublicPullRequestSharedEnrichment(ProtocolModel):
     unknown keys; older clients drop them, newer clients parse payloads
     without them).
 
-    ``pr_status`` and ``checks`` are app-server-wire-only: the Rust CLI's
+    ``pr_status``, ``pr_status_reason`` and ``checks`` are app-server-wire-only: the Rust CLI's
     bottom bar and artifacts modal read them here, while the Code Web
     contract (``code-server-contract/artifact/details``) does not declare
     them — TS consumers derive the status from the raw ``checks_status`` /
@@ -1145,6 +1193,17 @@ class PublicPullRequestSharedEnrichment(ProtocolModel):
     provider_merged_at: str | None = None
     merge_commit_sha: str | None = None
     pr_status: Literal["action_needed", "waiting", "mergeable"] | None = None
+    pr_status_reason: (
+        Literal[
+            "changes_requested",
+            "checks_failing",
+            "conflicts",
+            "checks_pending",
+            "review_required",
+            "merge_blocked",
+        ]
+        | None
+    ) = None
     checks: PublicChecksSummary | None = None
     checks_status: Literal["none", "pending", "passing", "failing"] | None = None
     optional_checks_status: Literal["none", "pending", "passing", "failing"] | None = (
@@ -1221,12 +1280,28 @@ class PublicSessionArtifact(ProtocolModel):
     details: PublicPullRequestArtifactDetails | None = None
 
 
+class PublicWorktreeArtifact(ProtocolModel):
+    """A git worktree the session created.
+
+    Listed apart from ``artifacts``: clients built before this kind validate
+    every entry there as a PR/MR.
+    """
+
+    id: str
+    session_id: str
+    path: str
+    branch: str
+    repo_root: str
+    discovered_at: str
+
+
 class ArtifactsListParams(ProtocolModel):
     session_id: str
 
 
 class ArtifactsListResponse(ProtocolModel):
     artifacts: list[PublicSessionArtifact]
+    worktrees: list[PublicWorktreeArtifact] = Field(default_factory=list)
 
 
 class ArtifactsMarkViewedParams(ProtocolModel):
@@ -1729,106 +1804,6 @@ class DiagnosticsLogsReadParams(ProtocolModel):
 
 class DiagnosticsLogsReadResponse(ProtocolModel):
     logs: DebugLogPage
-
-
-class VibeCodeProjectsOpenParams(ProtocolModel):
-    session_id: str
-    purpose: VibeCodePickerPurpose = "configure"
-    prompt: str | None = None
-
-
-class VibeCodeProjectsOpenResponse(ProtocolModel):
-    picker_id: str
-    view: VibeCodePickerView
-    resolved_project_id: str | None = None
-
-
-class VibeCodeProjectsLoadMoreParams(ProtocolModel):
-    session_id: str
-    picker_id: str
-
-
-class VibeCodeProjectsLoadMoreResponse(ProtocolModel):
-    view: VibeCodePickerView
-    focus_option_id: str | None = None
-
-
-class VibeCodeProjectCreateParams(ProtocolModel):
-    session_id: str
-    picker_id: str
-    name: str
-    default_branch: str
-
-
-class VibeCodeProjectCreateResponse(ProtocolModel):
-    view: VibeCodePickerView
-    project: VibeCodeProject
-
-
-class VibeCodeProjectSelectParams(ProtocolModel):
-    session_id: str
-    picker_id: str
-    project_id: str
-
-
-class VibeCodeProjectSelectResponse(ProtocolModel):
-    view: VibeCodePickerView
-    project: VibeCodeProject
-
-
-class VibeCodeProjectUnlinkParams(ProtocolModel):
-    session_id: str
-    picker_id: str
-
-
-class VibeCodeProjectUnlinkResponse(ProtocolModel):
-    view: VibeCodePickerView
-
-
-class VibeCodeProjectCancelParams(ProtocolModel):
-    session_id: str
-    picker_id: str
-
-
-class VibeCodeProjectRecoverParams(ProtocolModel):
-    session_id: str
-    picker_id: str
-
-
-class VibeCodeProjectRecoverResponse(ProtocolModel):
-    recovered: bool
-    view: VibeCodePickerView
-
-
-class TeleportStartParams(ProtocolModel):
-    session_id: str
-    picker_id: str
-    operation_id: str
-    prompt: str | None = None
-    project_id: str
-
-
-class TeleportStartResponse(ProtocolModel):
-    operation_id: str
-
-
-class TeleportCancelParams(ProtocolModel):
-    session_id: str
-    operation_id: str
-
-
-class TeleportCancelResponse(ProtocolModel):
-    cancelled: bool
-
-
-class TeleportPushRespondParams(ProtocolModel):
-    session_id: str
-    operation_id: str
-    approved: bool
-
-
-class TeleportEventParams(ProtocolModel):
-    event: TeleportEvent
 
 
 class ConnectorCatalogToolView(ProtocolModel):
@@ -2702,12 +2677,32 @@ class _TurnQueueInputParams(ProtocolModel):
         return user_entry.entry_id if user_entry is not None else None
 
 
+class SessionMessageSender(ProtocolModel):
+    session_id: str = Field(min_length=1)
+    title: str | None = None
+
+
 class TurnEnqueueParams(_TurnQueueInputParams):
-    # Another session sent it, not the user.
+    # Another session sent it, not the user. `sender` says which; clients send
+    # only `sentBySession` to servers that predate `sender`.
     sent_by_session: bool = Field(default=False, exclude_if=lambda value: not value)
+    sender: SessionMessageSender | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # For a message from another session; see `SessionPeerSendParams`.
+    delivery: PeerDelivery = Field(
+        default="start_turn", exclude_if=lambda value: value == "start_turn"
+    )
+    hops: int = Field(default=1, ge=1, exclude_if=lambda value: value == 1)
+
+    @property
+    def from_session(self) -> bool:
+        return self.sent_by_session or self.sender is not None
 
 
 class TurnEnqueueResponse(ProtocolModel):
+    # For a message from another session that joined the running turn rather
+    # than queueing, the id of that message.
     queue_item_id: str
     # Whether it waits behind a running or queued turn, rather than starting
     # at once.
@@ -2910,6 +2905,8 @@ class SessionSpawnParams(ProtocolModel):
     model: str
     reasoning_effort: str | None = None
     approval_policy: str
+    # The client starts the session with these as `session/start`'s.
+    hops: int = Field(default=1, ge=1, exclude_if=lambda value: value == 1)
 
 
 class SessionSpawnResponse(ProtocolModel):
@@ -2925,6 +2922,7 @@ SESSION_PEER_READ_METHOD = "session/peer/read"
 SESSION_PEER_SEND_METHOD = "session/peer/send"
 SESSION_PEER_ARCHIVE_METHOD = "session/peer/archive"
 SESSION_PEER_RESTORE_METHOD = "session/peer/restore"
+SESSION_PEER_MARK_SEEN_METHOD = "session/peer/markSeen"
 """Server requests asking a client that advertised ``sessionPeers`` about the
 other sessions it hosts in the calling session's project. Each arrives on the
 calling session's own connection, which names the caller; every session id in
@@ -2973,6 +2971,8 @@ class PeerSessionSummary(ProtocolModel):
     cwd: str | None = Field(default=None, exclude_if=_is_empty)
     started_by_session_id: str | None = Field(default=None, exclude_if=_is_empty)
     queued_messages: int = Field(default=0, exclude_if=_is_empty)
+    # The user has not seen its latest activity.
+    is_unseen: bool = Field(default=False, exclude_if=_is_empty)
     pull_requests: list[PeerPullRequest] = Field(
         default_factory=list, exclude_if=_is_empty
     )
@@ -3007,6 +3007,8 @@ class SessionPeerReadResponse(ProtocolModel):
     status_detail: str | None = None
     url: str | None = None
     queued_messages: int = Field(default=0, ge=0)
+    # The user has not seen its latest activity.
+    is_unseen: bool = False
     messages: list[PeerSessionMessage]
     # Reads the older messages before these.
     next_cursor: str | None = None
@@ -3017,13 +3019,24 @@ class SessionPeerSendParams(ProtocolModel):
     text: str = Field(min_length=1)
     # Stable across replays of one tool call.
     idempotency_key: str = Field(min_length=1)
+    # The calling session, by this server's id; the client queues the message
+    # with it as `sender`, in its own ids.
+    sender: SessionMessageSender
+    # `queue` never starts a turn on an idle target: the message waits for its
+    # next one. The client forwards both on `session/turn/enqueue`.
+    delivery: PeerDelivery = "start_turn"
+    # Session messages and starts in a row since a user wrote, this one
+    # included; the server refuses a send or start past its limit.
+    hops: int = Field(default=1, ge=1, exclude_if=lambda value: value == 1)
 
 
 class SessionPeerSendResponse(ProtocolModel):
     session_id: str
     title: str | None = None
     url: str | None = None
-    # Whether the message waits behind a turn already running there.
+    # Whether the message waits behind turns queued there, or for the next
+    # turn of an idle session; one that reaches a running turn or starts one
+    # does not.
     queued: bool
 
 
@@ -3063,6 +3076,25 @@ class PeerSessionNotRestored(ProtocolModel):
 class SessionPeerRestoreResponse(ProtocolModel):
     restored: list[PeerSessionRestored]
     failed: list[PeerSessionNotRestored] = Field(default_factory=list)
+
+
+class SessionPeerMarkSeenParams(ProtocolModel):
+    session_ids: list[str] = Field(min_length=1)
+
+
+class PeerSessionMarkedSeen(ProtocolModel):
+    session_id: str
+    title: str | None = Field(default=None, exclude_if=_is_empty)
+
+
+class PeerSessionNotMarkedSeen(ProtocolModel):
+    session_id: str
+    error: str
+
+
+class SessionPeerMarkSeenResponse(ProtocolModel):
+    marked: list[PeerSessionMarkedSeen]
+    failed: list[PeerSessionNotMarkedSeen] = Field(default_factory=list)
 
 
 class CallbackResultError(ProtocolModel):

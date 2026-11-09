@@ -12,6 +12,8 @@ pub(crate) struct Prompts {
     pub tool_use: String,
     /// Connector inventory rendered after product instructions; requires `{groups}`.
     pub tool_groups: String,
+    /// Names the direct-only tools after the connector inventory; requires `{tools}`.
+    pub direct_tools: String,
     pub current_time: String,
 }
 
@@ -30,6 +32,11 @@ impl Prompts {
             &self.tool_groups,
             &["groups"],
             "settings.prompts.programs.tool_groups",
+        )?;
+        validate_template(
+            &self.direct_tools,
+            &["tools"],
+            "settings.prompts.programs.direct_tools",
         )
     }
 }
@@ -46,4 +53,21 @@ pub(crate) fn tool_group_inventory_prompt<'a>(
         .collect::<Vec<_>>()
         .join("\n");
     render_template(template, &[("groups", &groups)]).expect("validated tool groups prompt")
+}
+
+pub(crate) fn direct_tools_prompt<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    template: &str,
+) -> Option<String> {
+    let tools = names
+        .into_iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>();
+    if tools.is_empty() {
+        return None;
+    }
+    Some(
+        render_template(template, &[("tools", &tools.join(", "))])
+            .expect("validated direct tools prompt"),
+    )
 }

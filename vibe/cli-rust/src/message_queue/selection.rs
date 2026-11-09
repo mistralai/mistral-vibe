@@ -136,7 +136,7 @@ pub fn end_edit(app: &mut App) {
         }
     });
     if let Some(position) = consumed_position {
-        ui::notice::clear(app);
+        clear_consumed_hint(app);
         if app.queue.is_empty() {
             app.queue.editing = false;
             exit(app);
@@ -168,10 +168,22 @@ pub fn finish_consumed_edit(app: &mut App) -> bool {
         return false;
     }
     app.queue.editing = false;
-    ui::notice::clear(app);
+    clear_consumed_hint(app);
     exit(app);
     crate::completion_manager::input_changed(app);
     true
+}
+
+/// Drop the consumed-edit hint, leaving any other notice (e.g. a held failure) up.
+fn clear_consumed_hint(app: &mut App) {
+    if app
+        .overlays
+        .notice
+        .as_ref()
+        .is_some_and(|notice| notice.text == CONSUMED_EDIT_HINT)
+    {
+        ui::notice::clear(app);
+    }
 }
 
 /// Leave queue mode, restoring the draft the user had before it opened.

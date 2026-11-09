@@ -69,6 +69,7 @@ fails for a scenario without a committed golden and never generates one.
   requests (`requests.json`).
 - Generate: `make store_golden`. For one scenario: `uv run --no-project --with "pyte==0.8.2" --with "rich==15.0.0" python client-e2e/store_golden.py <scenario>`; unpinned `pyte`/`rich` can render different SVGs.
 - Test: `make test_golden`.
+- `goldens.lock` holds one hash per golden; `store_golden.py` rewrites it and `test_golden.py` fails when it is stale. PR CI tests a PR without newer main, so two PRs whose goldens depend on each other (one changes the footer, one adds a scenario) can both pass and break main together. Their locks change the same lines, so git reports a conflict instead. To resolve: merge main, run `store_golden.py --lock`, push, and fix whatever goldens CI then reports.
 
 ## Debugging golden mismatches
 

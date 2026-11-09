@@ -44,7 +44,9 @@ def model_config_write_ops(
 
     An empty alias is how this configuration says "follow the default", and
     writing it is the only way to unpin a session, so it is passed through
-    rather than looked up.
+    rather than looked up. A durable write of the pin names the model the way
+    the target file already does (an old name while it is there), via
+    ``ConfigSchema.layer_write_op``.
 
     Raises ``ValueError`` for a model this configuration does not offer.
     """

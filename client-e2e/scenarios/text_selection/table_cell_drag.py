@@ -6,7 +6,7 @@ from e2e.app_server.events import assistant_msg, turn_completed, turn_started, u
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-expected_clipboard = "ong table cell text wraps instead of disappearing"
+expected_clipboard = "ong table cell text wraps instead of"
 
 _PROMPT = "select within a table cell"
 _ANSWER = "\n".join([

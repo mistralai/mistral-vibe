@@ -84,10 +84,10 @@ def build_snapshot(materialized: MaterializedPluginSet) -> ResolvedPluginSnapsho
     """
     resolution = materialized.resolution
     plugins = {plugin.name: plugin for plugin in resolution.plugins}
-    by_namespace = {plugin.namespace: plugin for plugin in resolution.plugins}
+    by_prefix = {plugin.component_prefix: plugin for plugin in resolution.plugins}
     return build_plugin_snapshot(
         (plugin_identity(plugin) for plugin in resolution.plugins),
-        skills=_skills(resolution.skills, by_namespace),
+        skills=_skills(resolution.skills, by_prefix),
         knowledge=_knowledge(resolution.knowledge, plugins),
         agents=_agents(resolution.agents, plugins),
         hooks=_hooks(resolution.runtime_hooks, plugins),
@@ -99,12 +99,12 @@ def build_snapshot(materialized: MaterializedPluginSet) -> ResolvedPluginSnapsho
 
 
 def _skills(
-    skills: Mapping[str, SkillInfo], by_namespace: Mapping[str, PluginDescriptor]
+    skills: Mapping[str, SkillInfo], by_prefix: Mapping[str, PluginDescriptor]
 ) -> list[PluginSkillSnapshot]:
     snapshots: list[PluginSkillSnapshot] = []
     for alias, skill in skills.items():
-        namespace, _, _ = alias.partition(":")
-        plugin = by_namespace.get(namespace)
+        prefix, _, _ = alias.partition(":")
+        plugin = by_prefix.get(prefix)
         if plugin is None or skill.skill_path is None:
             continue
         snapshots.append(

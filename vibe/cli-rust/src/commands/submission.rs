@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use super::{dispatch, is_side_channel, parse, waits_for_jobs};
 use crate::app::{App, QueuedPrompt, Severity, Status};
-use crate::input_modes::{classify, classify_submitted, submitted_value, ClassifiedInput};
+use crate::input_modes::{classify_submitted, submitted_value, ClassifiedInput};
 use crate::startup::banners;
 use crate::telemetry::TelemetrySender;
 use crate::transcript::local;
@@ -49,13 +49,6 @@ pub fn flush_pending(
         crate::ui::notice::show_sticky(app, Severity::Warning, &message);
     };
     for value in pending {
-        if let ClassifiedInput::Teleport { target } = classify(&value, &[]) {
-            match reject_hint(app) {
-                Some(hint) => reject(app, value, teleport_rejection(hint)),
-                None => crate::teleport::submit(app, client, target),
-            }
-            continue;
-        }
         let Some(command) = parse(&value) else {
             continue;
         };
@@ -126,40 +119,12 @@ pub fn submit(
         if reject_while_shell_runs(app, &value) {
             return false;
         }
-        if app.vibe_code_project.pending {
-            reject_input(
-                app,
-                &value,
-                "Wait for the project request to finish.".into(),
-            );
-            return false;
-        }
         if app.agents.installing {
             reject_input(app, &value, "Wait for the agent install to finish.".into());
             return false;
         }
-        if app.teleport.is_some()
-            && matches!(
-                &classified,
-                ClassifiedInput::Prompt { .. } | ClassifiedInput::Skill { .. }
-            )
-        {
-            reject_input(app, &value, "Wait for the teleport to finish.".into());
-            return false;
-        }
     }
     match classified {
-        ClassifiedInput::Teleport { target } => {
-            if matches!(app.session.status, Status::Starting) {
-                clear_and_remember(app, &value);
-                app.pending_commands.push(value);
-            } else if let Some(hint) = reject_hint(app) {
-                reject_input(app, &value, teleport_rejection(hint));
-            } else {
-                clear_and_remember(app, &value);
-                crate::teleport::submit(app, client, target);
-            }
-        }
         ClassifiedInput::SlashCommand { command } => {
             // Defer every slash command until the session is ready: nothing
             // dispatches before it.
@@ -266,19 +231,12 @@ fn reject_input(app: &mut App, value: &str, message: String) {
     completion_manager::input_changed(app);
 }
 
-fn teleport_rejection(hint: &str) -> String {
-    format!("Teleport cannot be queued — {hint}")
-}
-
 /// Why this slash command cannot run now.
 fn command_hint(app: &App, command: &str) -> Option<&'static str> {
     if !is_side_channel(command) {
         return reject_hint(app);
     }
-    let job_running = app.compacting
-        || app.teleport.is_some()
-        || app.vibe_code_project.pending
-        || app.agents.installing;
+    let job_running = app.compacting || app.agents.installing;
     (job_running && waits_for_jobs(command)).then_some("wait for the current job to finish.")
 }
 
@@ -297,9 +255,7 @@ fn reject_hint(app: &App) -> Option<&'static str> {
     // Compaction runs as an agent job, so it counts as busy too.
     if matches!(app.session.status, Status::Generating { .. })
         || app.compacting
-        || app.vibe_code_project.pending
         || app.agents.installing
-        || app.teleport.is_some()
         || !app.queue.is_empty()
     {
         return Some("wait for the current job to finish.");

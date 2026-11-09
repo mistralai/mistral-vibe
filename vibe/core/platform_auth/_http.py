@@ -6,6 +6,7 @@ from typing import Any
 import httpx2
 
 from vibe.core.platform_auth._credentials_port import (
+    UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
     PlatformCredentialProvider,
     PlatformCredentialRequired,
     PlatformCredentialSnapshot,
@@ -17,7 +18,11 @@ from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 class PlatformCredentialUnavailable(Exception):
     def __init__(self, required: PlatformCredentialRequired) -> None:
-        super().__init__(f"Platform credential is {required.reason}")
+        super().__init__(
+            UNAUTHORIZED_AFTER_REFRESH_MESSAGE
+            if required.reason == "unauthorized_after_refresh"
+            else f"Platform credential is {required.reason}"
+        )
         self.required = required
 
 

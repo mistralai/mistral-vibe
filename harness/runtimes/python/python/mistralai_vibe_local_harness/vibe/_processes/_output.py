@@ -19,6 +19,23 @@ MAX_CURSOR = 9_007_199_254_740_991
 MAX_PAGE_BYTES = 64_000
 _SEGMENT_NAME_WIDTH = 20
 
+_written_bytes = 0
+_written_bytes_lock = threading.Lock()
+
+
+def written_output_bytes() -> int:
+    """Monotonic: pruning never lowers it, so the difference between two readings
+    bounds how much this process grew output storage in between.
+    """
+    with _written_bytes_lock:
+        return _written_bytes
+
+
+def _count_written(size: int) -> None:
+    global _written_bytes
+    with _written_bytes_lock:
+        _written_bytes += size
+
 
 class OutputUnavailableError(Exception):
     pass
@@ -234,6 +251,7 @@ class ProcessOutputStore:
                     if not count:
                         raise OSError("process output segment write made no progress")
                     written += count
+                _count_written(written)
                 writer.flush()
                 end = self._state.output_end_cursor + len(chunk)
                 self._state = self._state.model_copy(update={"output_end_cursor": end})
@@ -508,6 +526,7 @@ def _replace_state(path: Path, state: ProcessOutputStateV1) -> None:
     descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(descriptor, "wb") as file:
+            _count_written(len(data))
             file.write(data)
             file.flush()
             os.fsync(file.fileno())

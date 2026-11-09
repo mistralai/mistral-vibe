@@ -1,4 +1,4 @@
-"""A resume rejected because the session is open elsewhere says how to continue."""
+"""A resume rejected because the session is open elsewhere says how to continue on the inline notice."""
 
 from __future__ import annotations
 
@@ -24,3 +24,4 @@ timeline: Timeline = ["/resume", "\r", "\x1b[A", "\r", _ESCAPE]
 capture_startup = False
 capture_steps = {1, 2, 3}
 screen_contains = ("open in another Vibe process",)
+screen_excludes = ("⚠", "✕")

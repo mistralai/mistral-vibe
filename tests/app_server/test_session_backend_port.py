@@ -138,6 +138,8 @@ def test_app_server_passes_services_to_session_backend_host_factory(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         ),
     )
 
@@ -161,6 +163,8 @@ def test_app_server_rejects_empty_session_backend_host_factory_result(
             host_handler=HostRequestHandler(
                 HarnessFilesManager(sources=("user", "project")),
                 org_config=process_services.org_config,
+                worktrees=process_services.worktrees,
+                experiments=process_services.experiments,
             ),
         )
 
@@ -177,6 +181,8 @@ async def test_pin_requires_the_optional_host_capability(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         ),
     )
 
@@ -200,6 +206,8 @@ async def test_mark_as_seen_requires_the_optional_host_capability(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         ),
     )
 
@@ -233,6 +241,8 @@ async def test_mark_as_seen_routes_to_the_selected_backend_host(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         ),
     )
 
@@ -273,6 +283,8 @@ async def test_app_server_shutdown_waits_for_host_cleanup(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         ),
     )
 
@@ -345,6 +357,8 @@ async def test_only_a_reopened_session_announces_its_running_turn(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         ),
     )
 

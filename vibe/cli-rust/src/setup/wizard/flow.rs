@@ -220,6 +220,11 @@ fn draw(
             crate::mouse::register_region(app, f.area(), crate::mouse::MouseTarget::Blocked);
             app.view.link_hitmap.clear();
             super::paint::draw(app, wizard, f, f.area());
+            crate::terminal_hyperlinks::mark(
+                app,
+                f.buffer_mut(),
+                crate::mouse::MouseTarget::OnboardingLinks,
+            );
         })
     })??;
     crate::pointer::sync(app);

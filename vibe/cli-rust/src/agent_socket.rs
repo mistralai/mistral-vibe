@@ -25,7 +25,6 @@ pub fn usage_error(cli: &Cli, windows: bool) -> Option<String> {
         (cli.worktree.is_some(), "--worktree"),
         (!cli.add_dir.is_empty(), "--add-dir"),
         (cli.continue_session, "--continue"),
-        (cli.teleport, "--teleport"),
     ]
     .into_iter()
     .filter_map(|(set, flag)| set.then_some(flag))

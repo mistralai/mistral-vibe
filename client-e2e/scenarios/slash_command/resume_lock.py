@@ -15,9 +15,10 @@ request_methods = {"session/lease/subscribe"}
 
 # Enter submits /resume (the picker highlights the current session), Up
 # selects the locked row, and its Enter is refused locally with the busy
-# warning row, without a session/resume request.
+# inline notice, without a session/resume request.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "\r"]
 
 capture_startup = False
 capture_steps = {2, 3}
 screen_contains = ("open in another Vibe process",)
+screen_excludes = ("⚠",)

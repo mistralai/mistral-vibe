@@ -13,13 +13,9 @@ from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
 from vibe.core.experiments.manager import config_variants_from_response
 from vibe.core.experiments.models import EvalResponse
 import vibe.core.experiments.wait as wait_module
-from vibe.core.experiments.wait import (
-    ExperimentsWait,
-    experiments_eval_failed,
-    experiments_wait_needed,
-    mark_experiments_eval_failed,
-)
+from vibe.core.experiments.wait import ExperimentsWait, experiments_wait_needed
 from vibe.core.model_catalog.wait import mark_model_catalog_failed, model_catalog_failed
+from vibe.core.utils.fetch_wait import FetchFailures
 
 
 async def _config(**fields: Any) -> Any:
@@ -33,14 +29,14 @@ async def _config(**fields: Any) -> Any:
 
 @pytest.mark.asyncio
 async def test_an_unpinned_session_without_a_cached_eval_waits() -> None:
-    assert experiments_wait_needed(await _config()) is True
+    assert experiments_wait_needed(await _config(), FetchFailures()) is True
 
 
 @pytest.mark.asyncio
 async def test_a_set_model_does_not_wait() -> None:
     orchestrator = await _config(active_model=DEFAULT_ACTIVE_MODEL_CONFIG.alias)
 
-    assert experiments_wait_needed(orchestrator) is False
+    assert experiments_wait_needed(orchestrator, FetchFailures()) is False
 
 
 @pytest.mark.asyncio
@@ -53,7 +49,7 @@ async def test_a_cached_eval_means_no_wait(monkeypatch: pytest.MonkeyPatch) -> N
         }),
     )
 
-    assert experiments_wait_needed(await _config()) is False
+    assert experiments_wait_needed(await _config(), FetchFailures()) is False
 
 
 @pytest.mark.asyncio
@@ -69,7 +65,7 @@ async def test_a_cached_eval_the_session_loaded_means_no_wait(
     assert isinstance(layer, GrowthbookLayer)
     layer.set_variants(config_variants_from_response(cached))
 
-    assert experiments_wait_needed(orchestrator) is False
+    assert experiments_wait_needed(orchestrator, FetchFailures()) is False
 
 
 @pytest.mark.asyncio
@@ -83,7 +79,7 @@ async def test_a_cached_eval_written_after_the_config_was_built_still_waits(
         wait_module, "load_cached_eval_response", lambda _c, _credentials=None: cached
     )
 
-    assert experiments_wait_needed(orchestrator) is True
+    assert experiments_wait_needed(orchestrator, FetchFailures()) is True
 
 
 @pytest.mark.asyncio
@@ -93,7 +89,7 @@ async def test_a_cached_eval_written_after_the_config_was_built_still_waits(
     ids=["telemetry-off", "experiments-off"],
 )
 async def test_no_eval_means_no_wait(fields: dict[str, Any]) -> None:
-    assert experiments_wait_needed(await _config(**fields)) is False
+    assert experiments_wait_needed(await _config(**fields), FetchFailures()) is False
 
 
 @pytest.mark.asyncio
@@ -104,21 +100,22 @@ async def test_no_mistral_credential_means_no_wait(
         wait_module, "mistral_credentials", lambda _config, _credentials=None: None
     )
 
-    assert experiments_wait_needed(await _config()) is False
+    assert experiments_wait_needed(await _config(), FetchFailures()) is False
 
 
 @pytest.mark.asyncio
 async def test_no_wait_once_an_eval_failed_in_this_process() -> None:
-    mark_experiments_eval_failed()
+    failures = FetchFailures()
+    failures.mark()
 
-    assert experiments_wait_needed(await _config()) is False
+    assert experiments_wait_needed(await _config(), failures) is False
 
 
 @pytest.mark.asyncio
 async def test_a_failed_catalog_fetch_does_not_stop_the_eval_wait() -> None:
     mark_model_catalog_failed()
 
-    assert experiments_wait_needed(await _config()) is True
+    assert experiments_wait_needed(await _config(), FetchFailures()) is True
 
 
 @pytest.mark.asyncio
@@ -127,12 +124,13 @@ async def test_an_eval_slower_than_the_cap_fails_only_the_eval(
 ) -> None:
     monkeypatch.setattr(wait_module, "EVAL_WAIT_CAP_SECONDS", 0.01)
     task = asyncio.create_task(asyncio.sleep(3600))
-    wait = ExperimentsWait(task)
+    failures = FetchFailures()
+    wait = ExperimentsWait(task, failures)
 
     await wait.wait()
 
     assert not task.done()
-    assert experiments_eval_failed() is True
+    assert failures.failed is True
     assert model_catalog_failed() is False
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):

@@ -36,5 +36,5 @@ screen_contains = (
     "I'm doing well, thank you!",
     "Read 1 line from test.txt",
     "File content here",
-    "Resumed session 00000000",
+    "Resumed session 00000003",
 )

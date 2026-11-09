@@ -104,7 +104,10 @@ pub fn spans(app: &App, buf: &Buffer, chat: Rect) -> Vec<RowSpan> {
         return Vec::new();
     };
     if let Some(table_cell) = &selection.table_cell {
-        return table::screen_spans(app, table_cell, chat);
+        return table::screen_spans(app, table_cell, chat)
+            .into_iter()
+            .flat_map(|span| split(&app.view.selection_chrome, span))
+            .collect();
     }
     let region = get(app, selection.owner);
     let (area, origin) = match selection.scroll_target {

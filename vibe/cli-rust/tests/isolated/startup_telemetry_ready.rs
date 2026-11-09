@@ -61,6 +61,10 @@ impl Startup {
     }
 
     fn ready_with(&mut self, startup_cache: StartupConfig, is_cold_start: bool) {
+        self.ready_runtime(startup_cache, is_cold_start, json!({"runtime": {}}));
+    }
+
+    fn ready_runtime(&mut self, startup_cache: StartupConfig, is_cold_start: bool, runtime: Value) {
         let ready = Ready {
             startup_cache,
             config: ConfigRead {
@@ -70,7 +74,7 @@ impl Startup {
             },
             state: json!({"eventId": 0, "session": {"id": "session"}}),
             attach: Attach::Started,
-            runtime: json!({"runtime": {}}),
+            runtime,
             is_cold_start,
             settled: None,
             prepared: None,
@@ -115,6 +119,16 @@ async fn ready_sends_one_startup_event_with_agent_ready_after_the_first_frame() 
     assert_eq!(properties["session_init_duration_ms"], Value::Null);
     assert_eq!(properties["is_cold_start"], true);
     assert_eq!(properties["mouse_capture"], true);
+    assert_eq!(properties["vim_keybindings"], false);
+}
+
+#[tokio::test]
+async fn a_config_with_vim_keybindings_reports_it_on() {
+    let mut startup = Startup::painted();
+    let runtime = json!({"runtime": {"config": {"vimKeybindings": true}}});
+    startup.ready_runtime(StartupConfig::default(), true, runtime);
+
+    assert_eq!(startup.startup_events()[0]["vim_keybindings"], true);
 }
 
 #[tokio::test]

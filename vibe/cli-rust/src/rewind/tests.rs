@@ -61,18 +61,18 @@ fn a_new_selection_reopens_on_the_action_step() {
     assert_eq!(app.view.scroll_to_entry, Some(0));
 }
 
+fn notice_text(app: &App) -> Option<&str> {
+    app.overlays.notice.as_ref().map(|n| n.text.as_str())
+}
+
 #[test]
-fn a_failure_with_the_panel_still_open_also_shows_a_notice() {
+fn a_failure_with_the_panel_still_open_shows_only_a_notice() {
     let mut app = App::default();
     selected(&mut app, false);
     apply_event(&mut app, Event::Failed("boom".into()));
     assert!(app.rewind.open);
-    assert_eq!(roles(&app), ["command_error"]);
-    assert!(app
-        .overlays
-        .notice
-        .as_ref()
-        .is_some_and(|n| n.text == "boom"));
+    assert!(roles(&app).is_empty());
+    assert_eq!(notice_text(&app), Some("boom"));
 }
 
 #[test]
@@ -80,7 +80,8 @@ fn a_failed_read_leaves_rewind_mode_when_nothing_is_highlighted() {
     let mut app = App::default();
     apply_event(&mut app, Event::Failed("boom".into()));
     assert!(!app.rewind.open);
-    assert_eq!(roles(&app), ["command_error"]);
+    assert!(roles(&app).is_empty());
+    assert_eq!(notice_text(&app), Some("boom"));
 }
 
 #[test]

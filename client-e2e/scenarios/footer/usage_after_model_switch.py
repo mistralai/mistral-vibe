@@ -9,7 +9,7 @@ from scenarios.footer.usage_gauge import handshake as _usage
 from scenarios.model.model_border_click_pick import DEVSTRAL
 
 handshake = copy.deepcopy(_usage)
-handshake["config/reload"] = {
+handshake["config/model/write"] = {
     "runtime": {"config": {"activeModel": DEVSTRAL, "activeModelPinned": True}}
 }
 

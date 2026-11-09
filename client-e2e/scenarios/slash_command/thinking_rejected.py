@@ -8,3 +8,6 @@ from e2e.app_server.scenario import Timeline
 handshake = {"config/model/write": {"rejected": True, "failures": []}}
 
 timeline: Timeline = ["/thinking\r", "j\r"]
+
+screen_contains = ("Failed to apply: thinking high",)
+screen_excludes = ("✕",)

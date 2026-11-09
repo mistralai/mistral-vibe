@@ -45,7 +45,7 @@ fn open_checked(url: &str) {
     }
 }
 
-fn is_safe(url: &str) -> bool {
+pub fn is_safe(url: &str) -> bool {
     let scheme = url.split_once(':').map(|(scheme, _)| scheme);
     matches!(scheme, Some(scheme) if SAFE_SCHEMES.iter().any(|safe| scheme.eq_ignore_ascii_case(safe)))
         && !url.chars().any(char::is_control)

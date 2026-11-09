@@ -17,10 +17,6 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
     }
     let id = format!("rs-command-{}", app.view.transcript.revision());
     match command {
-        CommandEvent::RemoteProject(event) => {
-            crate::vibe_code_project::apply_event(app, client, *event)
-        }
-        CommandEvent::Teleport(reply) => crate::teleport::apply_reply(app, client, *reply),
         CommandEvent::Plugins(event) => crate::plugins::apply_event(app, *event),
         CommandEvent::Context(event) => {
             let (generation, event) = *event;
@@ -50,7 +46,6 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             harness,
         } => crate::commands::branch::apply_branched(
             app,
-            &id,
             &old_session_id,
             &new_session_id,
             harness.as_deref(),

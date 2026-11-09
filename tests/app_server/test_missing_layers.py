@@ -48,20 +48,15 @@ from vibe.core.config import VibeConfigSchema
 from vibe.core.config.admin_config import ManagedConfig, ManagedConfigResult
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.experiments.active import ExperimentName
-from vibe.core.experiments.cache import (
-    clear_cached_eval_responses,
-    store_cached_eval_response,
-)
-from vibe.core.experiments.models import EvalResponse
-from vibe.core.experiments.wait import (
-    experiments_eval_failed,
-    mark_experiments_eval_failed,
-)
+from vibe.core.experiments.cache import clear_cached_eval_responses
+from vibe.core.experiments.manager import ExperimentManager
+from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
+from vibe.core.identity import IdentityResult
+from vibe.core.identity_cache import IdentityCache
 from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
 from vibe.core.model_catalog.cache import store_cached_model_catalog
 from vibe.core.model_catalog.wait import mark_model_catalog_failed, model_catalog_failed
 from vibe.core.telemetry.send import resolve_credential_cache_key
-from vibe.core.telemetry.types import LaunchContext
 from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.setup.auth import _oidc_runtime
 from vibe.setup.auth._oidc_config import OidcConfig
@@ -70,6 +65,7 @@ from vibe.setup.auth._oidc_credentials import (
     OidcTenant,
     OidcTokens,
 )
+from vibe.setup.auth.whoami import WhoAmICache
 
 
 @pytest.fixture
@@ -157,15 +153,34 @@ class _Remote:
         hang: bool = False,
         delays: dict[str, float] | None = None,
         org_toml: str = _ORG_TOML,
+        eval_response: EvalResponse | None = None,
     ):
         self.hang = hang
+        self.eval_response = eval_response or _smart_approve_eval()
         self.delays = delays or {}
         self.org_toml = org_toml
         self.release = asyncio.Event()
         self.calls = {"org": 0, "eval": 0, "catalog": 0}
         self.client_names: list[str | None] = []
         org_server.respond = self._org
-        monkeypatch.setattr(missing_layers, "fetch_and_cache_experiments", self._eval)
+        remote = self
+
+        async def initialize(
+            manager: ExperimentManager, attributes: ExperimentAttributes
+        ) -> None:
+            await remote._initialize(manager, attributes)
+
+        monkeypatch.setattr(ExperimentManager, "initialize", initialize)
+        monkeypatch.setattr(
+            IdentityCache,
+            "resolve",
+            AsyncMock(
+                return_value=IdentityResult(
+                    id="user-1", organization=None, workspace=None
+                )
+            ),
+        )
+        monkeypatch.setattr(WhoAmICache, "resolve", AsyncMock(return_value=None))
         monkeypatch.setattr(
             missing_layers, "fetch_and_cache_model_catalog", self._catalog
         )
@@ -183,16 +198,13 @@ class _Remote:
             config=ManagedConfig(state="enabled", toml=self.org_toml)
         )
 
-    async def _eval(
-        self, config: VibeConfigSchema, launch_context: LaunchContext, **_: Any
+    async def _initialize(
+        self, manager: ExperimentManager, attributes: ExperimentAttributes
     ) -> None:
-        self.client_names.append(launch_context.client_name)
+        # The eval request itself; identity and /whoami answer from the stubs.
+        self.client_names.append(attributes.client_name)
         if await self._block("eval"):
-            store_cached_eval_response(
-                config,
-                _smart_approve_eval(),
-                fetched_for=await resolve_credential_cache_key(config),
-            )
+            manager.hydrate(self.eval_response, attributes=attributes)
 
     async def _catalog(
         self, config: Any, _credentials: Any = None
@@ -210,6 +222,14 @@ def _set_local_config(config_dir: Path, **values: object) -> None:
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
     config.update(values)
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+def _model_catalog_eval(enabled: bool) -> EvalResponse:
+    return EvalResponse.model_validate({
+        "features": {
+            ExperimentName.MODEL_CATALOG.value: {"defaultValue": enabled, "rules": []}
+        }
+    })
 
 
 @pytest.fixture
@@ -252,7 +272,10 @@ async def process_services(
 
 def _handler(*, process_services: ProcessServices) -> HostRequestHandler:
     return HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
 
@@ -472,6 +495,42 @@ async def test_hanging_endpoints_answer_local_defaults_and_are_not_waited_for_ag
 
 
 @pytest.mark.asyncio
+async def test_a_catalog_the_eval_turns_on_is_fetched_for_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+    config_dir: Path,
+) -> None:
+    _set_local_config(config_dir, enable_telemetry=True)
+    remote = _Remote(
+        monkeypatch, org_server, eval_response=_model_catalog_eval(enabled=True)
+    )
+
+    view = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" in {model.alias for model in view.models}
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_the_eval_leaves_off_is_not_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+    config_dir: Path,
+) -> None:
+    _set_local_config(config_dir, enable_telemetry=True)
+    remote = _Remote(
+        monkeypatch, org_server, eval_response=_model_catalog_eval(enabled=False)
+    )
+
+    view = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" not in {model.alias for model in view.models}
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 0}
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("remote_config_enabled")
 async def test_a_read_with_everything_cached_fetches_nothing(
     monkeypatch: pytest.MonkeyPatch,
@@ -605,7 +664,7 @@ async def test_a_slow_org_config_is_not_counted_against_the_other_fetches(
     second = (await _read_config(handler)).config
 
     assert "catalog-model" not in {model.alias for model in first.models}
-    assert not experiments_eval_failed()
+    assert not process_services.experiments.failures.failed
     assert not model_catalog_failed()
     assert "catalog-model" in {model.alias for model in second.models}
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
@@ -668,9 +727,11 @@ async def test_only_the_source_without_a_cache_is_fetched(
     await _read_config(handler)
     clear_cached_eval_responses()
 
-    await _read_config(handler)
+    agents = await _list_agents(handler)
 
-    assert remote.calls == {"org": 1, "eval": 2, "catalog": 1}
+    # The eval the process holds answers again, unfetched.
+    assert "smart-approve" in {agent.name for agent in agents.agents}
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
 
 
 @pytest.mark.asyncio
@@ -682,7 +743,7 @@ async def test_a_source_that_already_failed_is_not_fetched(
 ) -> None:
     # The session path recorded these failures; the read shares them.
     remote = _Remote(monkeypatch, org_server)
-    mark_experiments_eval_failed()
+    process_services.experiments.failures.mark()
     mark_model_catalog_failed()
 
     await _read_config(_handler(process_services=process_services))
@@ -695,6 +756,8 @@ class _RecordingHost(HostRequestHandler):
         super().__init__(
             HarnessFilesManager(sources=("user",)),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         )
         self.dispatched: list[tuple[str, str | None, ClientInfo | None]] = []
 

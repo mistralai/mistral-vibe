@@ -23,6 +23,7 @@ from mistralai_vibe_local_harness.vibe import (
 from mistralai_vibe_local_harness.vibe.completion_profile import ANTHROPIC_VERSION
 from vibe.core.config.models import MissingAPIKeyError
 from vibe.core.platform_auth import (
+    UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
     ApiKeyPlatformCredentialProvider,
     PlatformCredentialFactory,
     PlatformCredentialIdentity,
@@ -86,6 +87,9 @@ class ProviderCredentialService:
         # provider name, with that snapshot's revision: a rejection is reported
         # to its owner (Desktop), who alone can replace it.
         self._platform_sources: dict[str, tuple[str, PlatformCredentialIdentity]] = {}
+        # Revisions refused right after a successful refresh: their rejection
+        # asks to update Vibe or sign in again.
+        self._refused_after_refresh: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def resolve(self) -> ProviderCredentialResult:
@@ -131,7 +135,9 @@ class ProviderCredentialService:
                     reason="rejected",
                     provider=provider.name,
                     message=(
-                        f"The {provider.name} credential was rejected. "
+                        UNAUTHORIZED_AFTER_REFRESH_MESSAGE
+                        if snapshot.revision in self._refused_after_refresh
+                        else f"The {provider.name} credential was rejected. "
                         + (
                             "Sign in again and retry."
                             if self._is_user_token(provider.name, snapshot.revision)
@@ -272,6 +278,11 @@ class ProviderCredentialService:
         except Exception:
             # Rejection bookkeeping must not hide the original typed HTTP failure.
             return False
+        if (
+            isinstance(replacement, PlatformCredentialRequired)
+            and replacement.reason == "unauthorized_after_refresh"
+        ):
+            self._refused_after_refresh.add(observed_revision)
         return (
             isinstance(replacement, PlatformCredentialSnapshot)
             and replacement.identity != source[1]
@@ -294,6 +305,12 @@ def _credential_required(
     and the CLI session behind the OIDC marker asks to sign in again.
     """
     reason = required.reason
+    if reason == "unauthorized_after_refresh":
+        return ProviderAuthRequired(
+            reason="rejected",
+            provider=provider.name,
+            message=UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
+        )
     if not user_token and reason == "rejected":
         return ProviderAuthRequired(
             reason="rejected",

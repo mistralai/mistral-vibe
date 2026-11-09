@@ -251,6 +251,17 @@ class TestRemembering:
 
         assert ModelAvailabilityCache().peek(provider=_provider(), model=_MODEL) is None
 
+    def test_a_non_utf8_cache_file_reads_as_unknown_and_is_overwritten(self) -> None:
+        UTILITY_MODEL_CACHE_FILE.path.parent.mkdir(parents=True, exist_ok=True)
+        UTILITY_MODEL_CACHE_FILE.path.write_bytes(b'{"k": "\xff"}')
+
+        assert ModelAvailabilityCache().peek(provider=_provider(), model=_MODEL) is None
+
+        ModelAvailabilityCache().remember(
+            provider=_provider(), model=_MODEL, available=True
+        )
+        assert ModelAvailabilityCache().peek(provider=_provider(), model=_MODEL) is True
+
 
 class TestProbeVerdicts:
     @pytest.mark.asyncio

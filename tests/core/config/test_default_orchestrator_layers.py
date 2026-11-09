@@ -235,14 +235,14 @@ class TestSuppliedUserConfig:
 
         # Do
         orch = await build_default_orchestrator(harness_files=harness_files)
-        await orch.set_field("/enable_connectors", False)
+        await orch.set_field("/enable_connectors", True)
 
         # Assert
         assert orch.config.theme == "supplied-theme"
         assert orch.writable_layer_name == "user-supplied"
-        assert orch.config.enable_connectors is False
+        assert orch.config.enable_connectors is True
         assert (config_dir / "config.toml").read_bytes() == before
-        assert "enable_connectors" not in supplied
+        assert supplied["enable_connectors"] is False
 
     @pytest.mark.asyncio
     async def test_supplied_config_loads_and_migrates_as_the_file_would(self) -> None:

@@ -113,13 +113,14 @@ impl State {
         });
     }
 
-    /// Move one page toward `side` and return the new position.
-    pub fn page(&mut self, side: Side) -> Option<usize> {
+    /// Move one page toward `side`, less the `covered` rows an overlay hides, and return the new position.
+    pub fn page(&mut self, side: Side, covered: usize) -> Option<usize> {
         let geometry = self.geometry.as_mut()?;
         let max = geometry.virtual_size.saturating_sub(geometry.window_size);
+        let step = geometry.window_size.saturating_sub(covered).max(1);
         let position = match side {
-            Side::Above => geometry.position.saturating_sub(geometry.window_size),
-            Side::Below => geometry.position.saturating_add(geometry.window_size),
+            Side::Above => geometry.position.saturating_sub(step),
+            Side::Below => geometry.position.saturating_add(step),
         };
         geometry.position = position.min(max);
         Some(geometry.position)

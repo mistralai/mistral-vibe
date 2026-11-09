@@ -354,7 +354,7 @@ mod tests {
             tool.description,
             r#"Exact string replacement in a file.
 
-Read the current file first. `old_string` must match exactly, including whitespace, indentation, and line endings. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.
+Read the current file first. `old_string` must match exactly, including whitespace and indentation. Line endings don't need to match: the file keeps its own. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.
 
 Example:
 {"file_path":"src/config.ts","old_string":"const mode = \"old\";","new_string":"const mode = \"new\";","replace_all":false}"#
@@ -369,7 +369,7 @@ Example:
         );
         assert_eq!(
             tool.parameters["properties"]["old_string"]["description"],
-            "Exact text to find, including whitespace, indentation, and line endings. It must occur exactly once unless `replace_all` is true."
+            "Exact text to find, including whitespace and indentation. It must occur exactly once unless `replace_all` is true."
         );
         assert_eq!(
             tool.parameters["properties"]["new_string"]["description"],

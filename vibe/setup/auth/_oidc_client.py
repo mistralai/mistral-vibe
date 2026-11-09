@@ -25,6 +25,7 @@ class OidcMetadata(BaseModel):
     token_endpoint: str
     jwks_uri: str
     userinfo_endpoint: str | None = None
+    revocation_endpoint: str | None = None
     id_token_signing_alg_values_supported: list[str] = ["RS256"]
 
 
@@ -48,6 +49,7 @@ class OidcClient:
         return AsyncOAuth2Client(
             client_id=self.config.client_id,
             token_endpoint_auth_method="none",
+            revocation_endpoint_auth_method="none",
             redirect_uri=self.config.redirect_uri,
             scope=self.config.scope,
             code_challenge_method="S256",
@@ -75,15 +77,41 @@ class OidcClient:
         ):
             if endpoint is not None:
                 validate_oidc_url(endpoint)
-        if metadata.userinfo_endpoint is not None:
-            issuer_url = urlsplit(self.config.issuer)
-            userinfo_url = urlsplit(metadata.userinfo_endpoint)
-            if (userinfo_url.scheme, userinfo_url.netloc) != (
-                issuer_url.scheme,
-                issuer_url.netloc,
-            ):
-                raise OidcError("OIDC UserInfo must belong to the issuer origin")
+        if metadata.userinfo_endpoint is not None and not self._on_issuer_origin(
+            metadata.userinfo_endpoint
+        ):
+            raise OidcError("OIDC UserInfo must belong to the issuer origin")
         return metadata
+
+    def _on_issuer_origin(self, url: str) -> bool:
+        issuer_url = urlsplit(self.config.issuer)
+        parsed = urlsplit(url)
+        return (parsed.scheme, parsed.netloc) == (issuer_url.scheme, issuer_url.netloc)
+
+    async def revoke_refresh_token(
+        self,
+        session: AsyncOAuth2Client,
+        metadata: OidcMetadata,
+        refresh_token: SecretStr,
+    ) -> None:
+        """RFC 7009 revocation as the public client ``session()`` builds.
+
+        The endpoint is checked here, not in ``discover()``: a bad optional
+        endpoint must fail only this best-effort call, never sign-in or refresh.
+        """
+        endpoint = metadata.revocation_endpoint
+        if endpoint is None:
+            raise OidcError("OIDC issuer does not advertise a revocation endpoint")
+        validate_oidc_url(endpoint)
+        # The long-lived refresh token never leaves the issuer origin.
+        if not self._on_issuer_origin(endpoint):
+            raise OidcError("OIDC revocation endpoint must belong to the issuer origin")
+        response = await session.revoke_token(
+            endpoint,
+            token=refresh_token.get_secret_value(),
+            token_type_hint="refresh_token",
+        )
+        response.raise_for_status()
 
     async def validated_tokens(
         self,

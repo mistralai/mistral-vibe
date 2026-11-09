@@ -7,6 +7,7 @@ mod document;
 mod entry;
 mod layout;
 mod paint;
+pub mod sticky;
 mod table_cells;
 mod viewport;
 
@@ -88,6 +89,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     if !scroll_view(total_full, area.height, view.scroll).overflow {
         // Short content flows from the top (banner top-left), no scrollbar; the queue stays at the bottom.
         view.scroll_to_entry = None;
+        view.sticky_prompt = None;
         view.scroll_anchor = None;
         view.selection_region.scrollbar = false;
         view.selection_scrollbar.clear();
@@ -147,6 +149,14 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     );
     let total = document_height(banner_content.lines(), content_layout, content_w);
     let document_top = measure(banner_content.lines(), content_w).saturating_add(1);
+    let pin = sticky::Geometry {
+        layout: content_layout,
+        transcript: &view.transcript,
+        top: document_top,
+        height: area.height,
+        width: content_w,
+        enabled: view.sticky_prompt_enabled,
+    };
     let anchored = view.scroll_anchor.take().and_then(|scroll_anchor| {
         anchor::resolve(
             &scroll_anchor,
@@ -156,6 +166,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
                 top: document_top,
                 total,
                 viewport: area.height,
+                sticky: pin,
             },
         )
     });
@@ -202,6 +213,10 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         .update(scrollbar_area, total, area.height, scroll.position);
     let top = area.y as i32 - scroll.position as i32;
     view.selection_region.top = top;
+    let pinned = sticky::measure(&pin, scroll.position);
+    let covered = pinned.as_ref().map_or(0, |(_, _, shown)| *shown);
+    // The pinned prompt owns the rows it covers, so a link under it never takes the hover.
+    let hovered = mouse_position.filter(|&(_, y)| y >= area.y.saturating_add(covered));
     viewport::render(
         &view.expanded,
         &mut view.markdown_cache,
@@ -213,7 +228,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             rows: &mut view.entry_rows,
             hangs: selecting.then_some(&mut view.selection_hangs),
         },
-        mouse_position,
+        hovered,
         &view.transcript,
         f,
         Viewport {
@@ -230,6 +245,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             rewind: rewind.as_deref(),
         },
     );
+    sticky::draw(app, f, content_area, pinned);
     scrollbar::draw(
         app,
         f,

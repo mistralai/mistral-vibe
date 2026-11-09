@@ -28,6 +28,18 @@ fn rejected_server() {
     });
 }
 
+#[test]
+#[ignore]
+fn unauthorized_after_refresh_server() {
+    fake_server::serve_scripted(|_, _| {
+        Err(json!({
+            "code": "unauthorized",
+            "message": "Vibe couldn't authenticate you. Update Vibe or sign in again.",
+            "data": {"reason": "unauthorized_after_refresh"},
+        }))
+    });
+}
+
 #[tokio::test]
 async fn rust_audio_uses_server_oidc_headers_instead_of_saved_key() {
     let _sandbox = sandbox::sandbox();
@@ -75,6 +87,37 @@ async fn oidc_failure_never_falls_back_to_api_key() {
         oidc::headers(None, "https://api.mistral.ai", oidc::API_KEY_MARKER)
             .await
             .is_err()
+    );
+}
+
+#[tokio::test]
+async fn audio_says_update_or_sign_in_after_a_refused_refresh() {
+    let _sandbox = sandbox::sandbox();
+    std::env::set_var("VIBE_CLI_OIDC_ENABLED", "1");
+    let (client, _child) =
+        fake_server::spawn(&test_name!("unauthorized_after_refresh_server")).await;
+    let error = oidc::headers(
+        Some(&client),
+        "https://api.mistral.ai",
+        oidc::API_KEY_MARKER,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "Vibe couldn't authenticate you. Update Vibe or sign in again."
+    );
+    let (rejected, _rejected_child) = fake_server::spawn(&test_name!("rejected_server")).await;
+    let error = oidc::headers(
+        Some(&rejected),
+        "https://api.mistral.ai",
+        oidc::API_KEY_MARKER,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "OIDC credential resolution failed; explicitly re-login"
     );
 }
 

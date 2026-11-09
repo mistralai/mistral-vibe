@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use serde_json::json;
 use vibe_rs::app::App;
+use vibe_rs::commands::shell;
+use vibe_rs::message_queue::QueueItem;
 use vibe_rs::server::Client;
 use vibe_rs::startup::banners;
 use vibe_rs::utils::whats_new_cache;
@@ -160,6 +162,43 @@ fn the_startup_resume_picker_defers_what_s_new_to_a_fresh_session() {
     let app = launch.mount_on(picking);
 
     assert_eq!(whats_new(&app), None);
+    assert!(!launch
+        .cache_toml()
+        .contains(&format!("seen_whats_new_version = \"{VERSION}\"")));
+}
+
+#[tokio::test]
+async fn a_submission_waiting_at_startup_defers_what_s_new_to_a_fresh_session() {
+    let launch = Launch::new(UNSEEN, &[("0.1.0", "- Faster startup")], false);
+    let mut with_prompt = App::default();
+    with_prompt.session.initial_prompt = Some("say hi".to_owned());
+    let mut with_queued = App::default();
+    with_queued.queue.items.push(QueueItem {
+        queue_item_id: None,
+        message_id: "m".to_owned(),
+        server_message_id: "m".to_owned(),
+        text: "say hi".to_owned(),
+        images: Vec::new(),
+        mentions: None,
+        sent: false,
+        ever_sent: false,
+        revision: 0,
+        replacing: false,
+    });
+    let mut with_command = App::default();
+    with_command.pending_commands.push("/model".to_owned());
+    let mut with_shell = App::default();
+    shell::run(
+        &mut with_shell,
+        &Arc::new(Client::stub()),
+        "ls".to_owned(),
+        "!ls",
+    );
+    assert!(with_shell.session.pending_shell.is_some());
+
+    for waiting in [with_prompt, with_queued, with_command, with_shell] {
+        assert_eq!(whats_new(&launch.mount_on(waiting)), None);
+    }
     assert!(!launch
         .cache_toml()
         .contains(&format!("seen_whats_new_version = \"{VERSION}\"")));

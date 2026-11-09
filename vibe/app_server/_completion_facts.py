@@ -46,6 +46,7 @@ from mistralai_vibe_local_harness.vibe.completion_profile import (
     compile_profile,
     credential_fingerprint,
     lookup_catalogue,
+    threshold_bounds,
 )
 from vibe.app_server._agent_socket import OUTCOME_ERROR_FIELD
 from vibe.app_server._session_backend_port import SessionBackendError
@@ -253,14 +254,14 @@ def compile_session_model_facts(
     if reused is not None:
         catalogue = {**catalogue, agent.name: reused}
     agent_catalogue = catalogue.get(agent.name)
-    agent_profile = _compile(
+    agent_profile, _ = _compile(
         provider,
         agent,
         threshold=agent.auto_compact_threshold,
         catalogue=agent_catalogue,
         max_tokens=agent_max_tokens,
     )
-    compaction_profile = _compile(
+    compaction_profile, _ = _compile(
         provider, compaction, threshold=None, catalogue=catalogue.get(compaction.name)
     )
     agent_reasoning = agent_profile.profile.format.reasoning
@@ -306,6 +307,8 @@ class AgentRouteFacts:
     compaction_threshold: int
     thinking: ThinkingLevel
     thinking_levels: tuple[ThinkingLevel, ...]
+    # Set when the configured threshold did not fit the window and was moved.
+    threshold_warning: str | None = None
 
 
 def compile_agent_route_facts(
@@ -316,7 +319,7 @@ def compile_agent_route_facts(
     Reads only what the catalogue already answered: this never waits on it.
     """
     catalogue = _catalogue_lookups(provider, (agent.name,), fetch=False)
-    compiled = _compile(
+    compiled, threshold_warning = _compile(
         provider,
         agent,
         threshold=agent.auto_compact_threshold,
@@ -326,6 +329,7 @@ def compile_agent_route_facts(
         compiled.profile.facts.compaction_threshold,
         profile_thinking(compiled),
         offered_thinking_levels(agent, compiled.profile.format.reasoning),
+        threshold_warning,
     )
 
 
@@ -463,38 +467,81 @@ def _compile(
     threshold: int | None,
     catalogue: CatalogueLookup | None,
     max_tokens: int | None = None,
+) -> tuple[CompiledProfile, str | None]:
+    """The profile, and a warning when the threshold was fitted into the window."""
+
+    def compile_with(value: int | None) -> CompiledProfile:
+        return _compile_profile(
+            provider, model, threshold=value, catalogue=catalogue, max_tokens=max_tokens
+        )
+
+    try:
+        try:
+            return compile_with(threshold), None
+        except ProfileError:
+            if threshold is None:
+                raise
+            # The threshold and the window can come from different config
+            # layers (a GrowthBook threshold over a user's window): fit the
+            # threshold rather than refuse the model.
+            window = compile_with(None).profile.facts.context_window
+            bounds = threshold_bounds(window)
+            fitted = max(bounds.minimum, min(threshold, bounds.maximum))
+            if fitted == threshold:
+                raise
+            too, moved = ("high", "capped") if fitted < threshold else ("low", "raised")
+            window_label = (
+                f"max_context_length {window}"
+                if model.max_context_length is not None
+                else f"its {window}-token context window"
+            )
+            warning = (
+                f"Model '{model.alias}': auto_compact_threshold {threshold} is too "
+                f"{too} for {window_label} (allowed: {bounds.minimum} to "
+                f"{bounds.maximum}), so it was {moved} automatically to {fitted}. "
+                "Set auto_compact_threshold within that range or remove it."
+            )
+            return compile_with(fitted), warning
+    except ProfileError as error:
+        raise ModelFactsError(
+            f"Model '{model.alias}' cannot be used with provider "
+            f"'{provider.name}': {error}."
+        ) from error
+
+
+def _compile_profile(
+    provider: ProviderConfig,
+    model: ModelConfig,
+    *,
+    threshold: int | None,
+    catalogue: CatalogueLookup | None,
+    max_tokens: int | None,
 ) -> CompiledProfile:
     adapter = LocalRuntimeAdapterConfig(
         backend=str(provider.backend),
         api_style=provider.api_style,
         emits_finish_reason=provider.emits_finish_reason,
     )
-    try:
-        return compile_profile(
-            model.name,
-            adapter_capabilities(adapter),
-            ExplicitFacts(
-                context_window=model.max_context_length,
-                max_output_tokens=model.max_output_tokens,
-                # Unset (None) leaves the input modalities to the catalogue and the
-                # known-model table. Vibe still only offers images (attachments,
-                # the describer) to a model whose config says so.
-                input_modalities=_supports_images_modalities(model.supports_images),
-                compaction_threshold=threshold,
-                # Unset fits nothing: the route then takes the model's lowest.
-                reasoning=model.thinking if model.thinking_is_set else None,
-                reasoning_levels=written_reasoning_levels(model),
-                # Read only to warn when the cap leaves no room for reasoning;
-                # the Runtime sets each request's max_tokens itself.
-                max_tokens=max_tokens,
-            ),
-            catalogue.entry if catalogue is not None else None,
-        )
-    except ProfileError as error:
-        raise ModelFactsError(
-            f"Model '{model.alias}' cannot be used with provider "
-            f"'{provider.name}': {error}."
-        ) from error
+    return compile_profile(
+        model.name,
+        adapter_capabilities(adapter),
+        ExplicitFacts(
+            context_window=model.max_context_length,
+            max_output_tokens=model.max_output_tokens,
+            # Unset (None) leaves the input modalities to the catalogue and the
+            # known-model table. Vibe still only offers images (attachments,
+            # the describer) to a model whose config says so.
+            input_modalities=_supports_images_modalities(model.supports_images),
+            compaction_threshold=threshold,
+            # Unset fits nothing: the route then takes the model's lowest.
+            reasoning=model.thinking if model.thinking_is_set else None,
+            reasoning_levels=written_reasoning_levels(model),
+            # Read only to warn when the cap leaves no room for reasoning;
+            # the Runtime sets each request's max_tokens itself.
+            max_tokens=max_tokens,
+        ),
+        catalogue.entry if catalogue is not None else None,
+    )
 
 
 def _supports_images_modalities(

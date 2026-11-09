@@ -75,6 +75,12 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         return self._extra_layers.pop(index)
 
     def rebuild(self) -> None:
+        self._install(run_sync(self._builder_for_rebuild().build()))
+
+    async def arebuild(self) -> None:
+        self._install(await self._builder_for_rebuild().build())
+
+    def _builder_for_rebuild(self) -> ConfigBuilder[C]:
         builder = ConfigBuilder(type(self._base_config))
         builder.add_layer(
             OverridesLayer(
@@ -82,7 +88,9 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
             )
         )
         builder.add_layers(list(self._extra_layers))
-        result = run_sync(builder.build())
+        return builder
+
+    def _install(self, result: C) -> None:
         # The verbatim base is already validated (e.g. active_model fixed up), so
         # re-validation won't reproduce its warnings; carry them forward to match
         # the real orchestrator, which re-merges raw layer snapshots.

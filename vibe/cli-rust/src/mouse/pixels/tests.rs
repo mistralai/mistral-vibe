@@ -155,3 +155,33 @@ fn reports_ambiguous_near_the_top_left_take_the_new_units_once_the_budget_runs_o
 
     assert_eq!(cell_of(DRAG, 2, 1), (1, 0));
 }
+
+#[test]
+fn a_move_into_the_padding_below_the_last_row_is_past_it() {
+    let _guard = reset(true);
+    let row = |y: u16| to_cells(report(MouseEventKind::Moved, 50, y)).1;
+    assert!(!past_last_row(row(799)), "the last row's bottom pixel");
+    assert!(past_last_row(row(800)));
+    assert!(past_last_row(row(830)));
+}
+
+#[test]
+fn a_move_straight_down_into_the_padding_is_kept() {
+    let _guard = reset(true);
+    let mut coalesce = Coalesce::default();
+    let mut keep = |y: u16| {
+        let event = Event::Mouse(report(MouseEventKind::Moved, 55, y));
+        coalesce.keep(grid(), &event)
+    };
+    assert!(keep(790));
+    assert!(!keep(795), "same footer cell");
+    assert!(keep(805), "padding below the footer");
+}
+
+#[test]
+fn without_pixel_reports_no_row_is_past_the_last_one() {
+    let _guard = reset(false);
+    assert!(!past_last_row(
+        to_cells(report(MouseEventKind::Moved, 5, 40)).1
+    ));
+}

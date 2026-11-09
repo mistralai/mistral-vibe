@@ -804,6 +804,7 @@ class RustSystemMessage(RustProtocolModel):
 class RustUserMessage(RustProtocolModel):
     role: Literal["user"] = "user"
     content: list[RustContentBlock] = Field(min_length=1)
+    context: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class RustAssistantMessage(RustProtocolModel):
@@ -1010,6 +1011,16 @@ RustExternalToolCall = Annotated[
 ]
 
 
+class RustOutputType(RustProtocolModel):
+    """The JSON Schema one Turn's answer must match."""
+
+    name: str = Field(min_length=1)
+    # Named `schema` on the wire; `schema` would shadow a BaseModel attribute.
+    json_schema: JsonObject = Field(
+        validation_alias="schema", serialization_alias="schema"
+    )
+
+
 class RustLLMCallAction(RustProtocolModel):
     type: Literal["llm_call"] = "llm_call"
     action_id: str
@@ -1029,6 +1040,10 @@ class RustLLMCallAction(RustProtocolModel):
     iteration: int = Field(ge=0)
     max_iterations: Annotated[int, Field(gt=0)] | None
     model_input: RustModelInputUpdate
+    # The Turn's output type, on its agent calls only; omitted when unset.
+    output_type: RustOutputType | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def validate_purpose(self) -> Self:
@@ -1227,7 +1242,9 @@ class RustAgentResultError(RustProtocolModel):
     details: JsonValue = None
 
 
-type RustTurnStopReason = Literal["iteration_limit", "skipped", "rejected"]
+type RustTurnStopReason = Literal[
+    "iteration_limit", "skipped", "rejected", "output_limit"
+]
 
 
 class RustCompletedAgentResult(RustProtocolModel):
@@ -1611,6 +1628,9 @@ class RustUserMessageEvent(RustProtocolModel):
     turn_id: str = Field(min_length=1)
     content: list[RustContentBlock] = Field(min_length=1)
     mode: Literal["queue", "steer"]
+    output_type: RustOutputType | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class RustCurrentAgentTaskContext(RustProtocolModel):
@@ -2099,13 +2119,23 @@ def _is_programmatic_identifier(value: str) -> bool:
 
 
 def _is_skill_name(value: str) -> bool:
-    namespace, separator, skill_name = value.partition(":")
+    qualifier, separator, skill_name = value.partition(":")
     if not separator:
         return _is_unqualified_skill_name(value)
     return (
         ":" not in skill_name
-        and _is_programmatic_identifier(namespace)
+        and _is_skill_qualifier(qualifier)
         and _is_unqualified_skill_name(skill_name)
+    )
+
+
+def _is_skill_qualifier(value: str) -> bool:
+    # Usually the name of the plugin that provides the skill, such as
+    # `acme-tools`; a programmatic identifier such as a tool namespace is
+    # accepted too.
+    return bool(value) and all(
+        character.isascii() and (character.isalnum() or character in "-._$")
+        for character in value
     )
 
 

@@ -15,6 +15,7 @@ from vibe.app_server.protocol import (
     ConfigFieldWire,
     ConfigLayerValueWire,
 )
+from vibe.core.config._catalog_filter import CATALOG_FILTER_KEY, with_catalog_filter
 from vibe.core.config.layer import ConfigLayer, ConfigLayerError, RawConfig
 from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.patch import escape_json_pointer_token
@@ -87,27 +88,34 @@ def classify_annotation(annotation: Any) -> tuple[ConfigFieldKind, tuple[str, ..
 
 
 async def collect_layer_values(
-    layers: Sequence[ConfigLayer[RawConfig]],
+    layers: Sequence[ConfigLayer[RawConfig]], config: VibeConfigSchema
 ) -> dict[str, list[ConfigLayerValueWire]]:
-    """Collect each field's per-layer values, highest priority first."""
-    values: dict[str, list[ConfigLayerValueWire]] = {}
-    for layer in reversed(layers):
+    """Collect each field's per-layer values, highest priority first.
+
+    A model's values are keyed on the model they apply to in ``config``, so a
+    layer that keeps them under a catalog alias still shows as their source.
+    """
+    loaded: list[tuple[str, dict[str, Any]]] = []
+    for layer in layers:
         try:
-            data = (await layer.load()).model_dump(mode="json")
+            loaded.append((layer.name, (await layer.load()).model_dump(mode="json")))
         except ConfigLayerError:
             continue
+    # The catalog's values as the merge sees them, GrowthBook's filter applied.
+    values: dict[str, list[ConfigLayerValueWire]] = {}
+    for layer_name, data in reversed(with_catalog_filter(loaded)):
         for name, value in data.items():
             # The default layer materializes an unset threshold; it means "no
             # layer set one" and must not surface in the settings UI.
             if name == AUTO_COMPACT_THRESHOLD and value is None:
                 continue
+            # The GrowthBook layer carries the catalog filter; it is no setting.
+            if name == CATALOG_FILTER_KEY:
+                continue
             values.setdefault(name, []).append(
-                ConfigLayerValueWire(layer=layer.name, value=value)
+                ConfigLayerValueWire(layer=layer_name, value=value)
             )
-        models = data.get("models")
-        if not isinstance(models, Mapping):
-            continue
-        for alias, model in models.items():
+        for alias, model in config.layer_models(data).items():
             if not isinstance(alias, str) or not isinstance(model, Mapping):
                 continue
             for field in (AUTO_COMPACT_THRESHOLD, MAX_CONTEXT_LENGTH):
@@ -115,7 +123,7 @@ async def collect_layer_values(
                     continue
                 path = _model_field_path(alias, field)
                 values.setdefault(path, []).append(
-                    ConfigLayerValueWire(layer=layer.name, value=model[field])
+                    ConfigLayerValueWire(layer=layer_name, value=model[field])
                 )
     return values
 

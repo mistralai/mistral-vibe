@@ -232,6 +232,22 @@ class TrustedFoldersManager:
         manager._session_trusted = []
         return manager
 
+    def persisted_decisions(self) -> dict[str, list[str]]:
+        """What ``for_session`` keeps, for another process: ``from_decisions``."""
+        return {"trusted": list(self._trusted), "untrusted": list(self._untrusted)}
+
+    @classmethod
+    def from_decisions(cls, decisions: dict[str, list[str]]) -> TrustedFoldersManager:
+        """Answers as the manager ``persisted_decisions`` came from, without
+        reading or rewriting the trust file.
+        """
+        manager = cls.__new__(cls)
+        manager._file_path = TRUSTED_FOLDERS_FILE.path
+        manager._trusted = list(decisions["trusted"])
+        manager._untrusted = list(decisions["untrusted"])
+        manager._session_trusted = []
+        return manager
+
     def trust_for_session(self, path: Path) -> None:
         self._session_trusted.append(self._normalize_path(path))
 

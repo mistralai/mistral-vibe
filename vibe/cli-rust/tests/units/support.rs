@@ -30,10 +30,13 @@ pub fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
 }
 
-/// Route one key through the app's top-level input handler; true means exit.
+/// Route one key through vim mode and the app's top-level input handler; true means exit.
 pub fn send_key(app: &mut App, key: KeyEvent) -> bool {
     let (config_tx, _config_rx) = mpsc::channel(1);
-    vibe_rs::input::handle_key(app, &stub(), &config_tx, key)
+    let pending = app.vim.pending.take();
+    vibe_rs::vim::route(app, key, pending, |app, key| {
+        vibe_rs::input::handle_key(app, &stub(), &config_tx, key)
+    })
 }
 
 pub fn press(app: &mut App, code: KeyCode) -> bool {

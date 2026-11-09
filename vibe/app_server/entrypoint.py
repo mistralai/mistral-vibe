@@ -9,6 +9,14 @@ if sys.argv[1:2] == ["--internal-posix-pty-helper"]:
 
     raise SystemExit(_pty_helper_main(sys.argv[2:]))
 
+if sys.argv[1:2] == ["--internal-background-worker"]:
+    from vibe.app_server._background_worker_process import (
+        main as _background_worker_main,
+    )
+
+    _background_worker_main(sys.argv[1:])
+    raise SystemExit(0)
+
 from vibe.app_server.stdio import main
 
 if __name__ == "__main__":

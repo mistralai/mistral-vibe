@@ -16,5 +16,5 @@ timeline: Timeline = [
     turn_completed(session_id=_SAVED),
 ]
 
-screen_contains = ("Resumed session 00000000", "Reply in the resumed session.")
+screen_contains = ("Resumed session 00000003", "Reply in the resumed session.")
 screen_excludes = ("Resuming session",)

@@ -17,6 +17,8 @@ VIBE_DIR = E2E_DIR.parent
 SCENARIO_DIR = E2E_DIR / "scenarios"
 # Committed golden reference snapshots.
 GOLDEN_DIR = E2E_DIR / "goldens"
+# One hash per golden, so PRs changing the same goldens conflict in git.
+GOLDEN_LOCK = E2E_DIR / "goldens.lock"
 FIXTURE_PATH = E2E_DIR / "fixtures" / "fixture.json"
 # A frozen release-notes history, so what's-new goldens never churn per release.
 WHATS_NEW_FIXTURE = E2E_DIR / "fixtures" / "whats_new"

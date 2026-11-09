@@ -126,6 +126,10 @@ fn handle_input_event(
     if event.as_ref().is_some_and(crate::replay_fence::observe) {
         return InputOutcome::Redraw { reset_blink: false };
     }
+    // A vim operator survives only a key the composer reads.
+    let vim_pending = event
+        .as_ref()
+        .and_then(|event| crate::vim::take_pending(app, event));
     match event {
         Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
             if input::request_suspend(app, &key) {
@@ -133,7 +137,7 @@ fn handle_input_event(
             }
             // Esc aborts a drag in flight; any other key ends it like a release.
             crate::mouse::cancel_capture(app, key.code != KeyCode::Esc);
-            if dispatch_key(app, client, config_tx, key) {
+            if dispatch_key(app, client, config_tx, key, vim_pending) {
                 return InputOutcome::Exit;
             }
             app.set_app_focus_from_terminal(true);
@@ -155,6 +159,7 @@ fn handle_input_event(
                 Focus::Trust
                 | Focus::Approval
                 | Focus::VoiceApp
+                | Focus::BranchApp
                 | Focus::ResumePicker
                 | Focus::McpOAuth
                 | Focus::ConnectorAuth
@@ -169,7 +174,6 @@ fn handle_input_event(
                 Focus::ProxySetup => crate::proxy_setup::paste(app, &text),
                 Focus::Config => config::handle_paste(app, text),
                 Focus::ReleaseNotes => crate::release_notes::paste(app, &text),
-                Focus::VibeCodeProject => crate::vibe_code_project::input::paste(app, &text),
                 Focus::Mcp => crate::mcp::search::paste(app, &text),
                 Focus::Plugins => crate::plugins::paste(app, &text),
                 Focus::SubagentList | Focus::Composer => input::handle_paste(app, text),
@@ -210,6 +214,7 @@ fn dispatch_key(
     client: &Arc<Client>,
     config_tx: &mpsc::Sender<config::Loaded>,
     key: crossterm::event::KeyEvent,
+    vim_pending: Option<char>,
 ) -> bool {
     // Any key answers a refusal, whichever surface has focus.
     crate::ui::notice::answered(app);
@@ -231,8 +236,8 @@ fn dispatch_key(
         Focus::Config => config::handle_key(app, client, config_tx, key),
         Focus::ReleaseNotes => crate::release_notes::handle_key(app, key),
         Focus::VoiceApp => crate::voice_app::handle_key(app, client, key),
+        Focus::BranchApp => crate::branch_app::handle_key(app, key),
         Focus::ProxySetup => crate::proxy_setup::handle_key(app, client, key),
-        Focus::VibeCodeProject => crate::vibe_code_project::input::handle_key(app, client, key),
         Focus::ResumePicker => crate::resume_picker::handle_key(app, client, key),
         Focus::Mcp => input::handle_mcp_key(app, client, key),
         Focus::Plugins => crate::plugins::handle_key(app, client, key),
@@ -245,12 +250,10 @@ fn dispatch_key(
         Focus::LogLevelPicker => input::handle_log_level_key(app, client, key),
         Focus::ThinkingPicker => input::handle_thinking_key(app, client, key),
         Focus::ArtifactsModal => input::handle_artifacts_modal_key(app, key),
-        // Esc cancels a project request in flight before the composer sees it.
-        Focus::SubagentList | Focus::Composer if esc && app.vibe_code_project.pending => {
-            crate::vibe_code_project::input::handle_key(app, client, key)
-        }
         Focus::SubagentList | Focus::Composer => {
-            return input::handle_key(app, client, config_tx, key)
+            return crate::vim::route(app, key, vim_pending, |app, key| {
+                input::handle_key(app, client, config_tx, key)
+            });
         }
     }
     false

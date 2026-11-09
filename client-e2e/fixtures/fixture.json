@@ -70,6 +70,7 @@
         "enableUpdateChecks": true,
         "enableNotifications": true,
         "experimentalEnableTabStatus": true,
+        "enablePrMonitoring": true,
         "vibeCodeEnabled": true,
         "models": [
           {
@@ -298,6 +299,7 @@
           "enableUpdateChecks": true,
           "enableNotifications": true,
           "experimentalEnableTabStatus": true,
+          "enablePrMonitoring": true,
           "vibeCodeEnabled": true,
           "models": [
             {
@@ -479,12 +481,7 @@
         "status": "unavailable",
         "plan": null,
         "planOffer": null,
-        "rateLimitAction": null,
-        "teleportEligible": false,
-        "teleportAction": {
-          "kind": "upgrade_to_pro",
-          "url": "https://chat.mistral.ai/code/extensions?focus=key"
-        }
+        "rateLimitAction": null
       }
     },
     "identity/read": {
@@ -1832,6 +1829,7 @@
           "enableUpdateChecks": true,
           "enableNotifications": true,
           "experimentalEnableTabStatus": true,
+          "enablePrMonitoring": true,
           "vibeCodeEnabled": true,
           "models": [
             {

@@ -85,8 +85,6 @@ fn a_picker_opened_during_a_turn_hides_the_interrupt_hints() {
     let mut app = busy_app(Status::Generating {
         since: crate::clock::now(),
     });
-    app.vibe_code_project.pending = true;
-    assert!(running(&app).is_empty(), "Esc cancels the opening picker");
     app.question_app.open = true;
     assert_eq!(
         running(&app),
@@ -94,7 +92,6 @@ fn a_picker_opened_during_a_turn_hides_the_interrupt_hints() {
         "a question keeps them"
     );
     app.question_app.open = false;
-    app.vibe_code_project.pending = false;
     app.theme_picker.open = true;
     assert!(running(&app).is_empty());
 
@@ -104,6 +101,19 @@ fn a_picker_opened_during_a_turn_hides_the_interrupt_hints() {
         [("Esc", "interrupt")],
         "a callback keeps them"
     );
+}
+
+#[test]
+fn vim_insert_mode_takes_esc_so_only_ctrl_c_interrupts() {
+    let mut app = busy_app(Status::Generating {
+        since: crate::clock::now(),
+    });
+    app.vim.enabled = true;
+    assert_eq!(running(&app), [("Enter", "steer"), CANCEL_LAST_QUEUED]);
+    app.queue.items.clear();
+    assert_eq!(running(&app), [("Ctrl+C", "interrupt")]);
+    app.vim.mode = crate::vim::Mode::Normal;
+    assert_eq!(running(&app), [("Esc/Ctrl+C", "interrupt")]);
 }
 
 #[test]

@@ -7,11 +7,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{Event, Session};
-use crate::app::App;
+use crate::app::{App, Severity};
 use crate::server::{
     method,
     request_error::{describe, resume_failure_message},
-    Client,
+    Client, RequestFailure,
 };
 
 /// How much history a preview reads.
@@ -24,7 +24,9 @@ pub(super) fn list(app: &App, client: &Arc<Client>, cwd: Option<String>) {
             .await
         {
             Ok(value) => Event::Loaded(sessions(&value)),
-            Err(error) => Event::Error(format!("Failed to list sessions: {error}")),
+            Err(error) => {
+                Event::Error(Severity::Error, format!("Failed to list sessions: {error}"))
+            }
         }
     });
 }
@@ -43,9 +45,12 @@ pub(super) fn resume(app: &App, client: &Arc<Client>, id: String, params: Value)
         match client.request(method::SESSION_RESUME, params).await {
             Ok(value) => match parse_state(&value) {
                 Some(state) => Event::Resumed { id, state },
-                None => Event::Error("Failed to resume session: malformed response.".into()),
+                None => Event::Error(
+                    Severity::Error,
+                    "Failed to resume session: malformed response.".into(),
+                ),
             },
-            Err(error) => Event::Error(resume_failure_message(&error)),
+            Err(error) => Event::Error(severity(&error), resume_failure_message(&error)),
         }
     });
 }
@@ -104,6 +109,14 @@ pub fn lease_locked(holder: Option<&Value>, own_pid: Option<u32>, is_current: bo
         .and_then(Value::as_u64)
         .and_then(|pid| u32::try_from(pid).ok())
         .is_some_and(|pid| Some(pid) != own_pid && !is_current)
+}
+
+/// A session open elsewhere is an expected refusal; anything else failed.
+fn severity(error: &anyhow::Error) -> Severity {
+    match error.downcast_ref::<RequestFailure>() {
+        Some(RequestFailure::Rpc(rpc)) if rpc.is_session_busy() => Severity::Warning,
+        _ => Severity::Error,
+    }
 }
 
 /// Spawn one call; skipped once the answer channel is gone.

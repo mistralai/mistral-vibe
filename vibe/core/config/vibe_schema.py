@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import tomllib
+from types import MappingProxyType
 import typing
 from typing import Annotated, Any, ClassVar, Self
 
@@ -22,6 +23,7 @@ from pydantic import (
 )
 
 from vibe.core.agents.models import REMOVED_BUILTIN_AGENTS, BuiltinAgentName
+from vibe.core.config._catalog_filter import with_catalog_filter
 from vibe.core.config._defaults import (
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
     DEFAULT_API_STREAM_IDLE_TIMEOUT,
@@ -41,9 +43,18 @@ from vibe.core.config._defaults import (
 # DEFAULT_LOG_LEVEL is not imported here to avoid a circular dependency
 # (vibe_schema.py imports from vibe.observability.logging). The constant
 # lives in vibe.config_values.
-from vibe.core.config._model_aliases import build_alias_index, warn_ignored_alias
+from vibe.core.config._model_aliases import (
+    CATALOG_LAYER,
+    build_alias_index,
+    catalog_alias_index,
+    defines_model,
+    models_on_catalog_ids,
+    settings_keys,
+    warn_ignored_alias,
+)
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.layers.admin import AdminConfigLayer
+from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.models import (
     ACTIVE_MODEL_SELECTOR,
     THINKING_LEVELS,
@@ -65,6 +76,12 @@ from vibe.core.config.models import (
     normalize_model_configs,
     refuse_zero_auto_compact_threshold,
     serialize_model_configs,
+)
+from vibe.core.config.patch import (
+    PatchOp,
+    RemoveOperationPatch,
+    escape_json_pointer_token,
+    unescape_json_pointer_token,
 )
 from vibe.core.config.schema import (
     ConfigSchema,
@@ -285,22 +302,12 @@ def _non_empty(items: list[Any]) -> list[Any]:
     return items
 
 
-def _defines_model(payload: object) -> bool:
-    """Whether a ``models`` entry is a whole model, not a setting on another one.
-
-    Without ``name`` and ``provider`` the entry cannot validate on its own: it
-    adjusts a model some layer defines, like ``[models.<id>]`` or a field-only
-    write.
-    """
-    return not isinstance(payload, Mapping) or {"name", "provider"} <= payload.keys()
-
-
 def _without_orphan_model_overrides(
     data: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
     """Drop model overrides that no layer completes, and name them.
 
-    A merged entry that is still not a whole model (``_defines_model``) only
+    A merged entry that is still not a whole model (``defines_model``) only
     adjusts a model nothing defines (a retired catalog model, an ended
     experiment, a typo); it cannot validate, so it is left out for the rest of
     the config to load, and applies again if the model returns.
@@ -308,9 +315,7 @@ def _without_orphan_model_overrides(
     models = data.get("models")
     if not isinstance(models, Mapping):
         return data, []
-    orphans = [
-        alias for alias, payload in models.items() if not _defines_model(payload)
-    ]
+    orphans = [alias for alias, payload in models.items() if not defines_model(payload)]
     if not orphans:
         return data, []
     kept = {alias: payload for alias, payload in models.items() if alias not in orphans}
@@ -459,11 +464,12 @@ def _mistral_thinking_levels() -> list[str]:
     return [*standard, *sorted(efforts - set(standard))]
 
 
-class VibeConfigSchema(ConfigSchema):
+class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config read by every caller
     # Fields a runtime layer populates (model catalog, GrowthBook, managed
     # shell), never the user's files. The settings UI hides them; declare a new
     # one here, not in a second list.
     RUNTIME_INJECTED_FIELDS: ClassVar[frozenset[str]] = frozenset({
+        "catalog_default_model",
         "catalog_model_aliases",
         "catalog_recommended_model",
         "managed_shell_tools_enabled",
@@ -477,6 +483,7 @@ class VibeConfigSchema(ConfigSchema):
     # The pin the fallback replaced, so validate_merged can skip the orphan
     # notice for the same alias.
     _missing_pin: str = PrivateAttr(default="")
+    _alias_targets: dict[str, str] = PrivateAttr(default_factory=dict)
 
     @property
     def validation_warnings(self) -> tuple[str, ...]:
@@ -484,7 +491,145 @@ class VibeConfigSchema(ConfigSchema):
 
     @classmethod
     def defines_entry(cls, key: str, payload: Any) -> bool:
-        return key != "models" or _defines_model(payload)
+        return key != "models" or defines_model(payload)
+
+    @classmethod
+    def prepare_layers(
+        cls, layers: list[tuple[str, dict[str, Any]]]
+    ) -> list[tuple[str, dict[str, Any]]]:
+        layers = with_catalog_filter(layers)
+        # While the catalog lists models, the built-ins below it are unavailable;
+        # an empty catalog keeps them, and layers above still win their names.
+        catalog_lists_models = False
+        for name, data in layers:
+            if name == CATALOG_LAYER:
+                models = normalize_model_configs(data.get("models"))
+                catalog_lists_models = isinstance(models, Mapping) and bool(models)
+        if catalog_lists_models:
+            layers = [
+                (
+                    name,
+                    {key: value for key, value in data.items() if key != "models"}
+                    if name == DefaultConfigLayer.NAME
+                    else data,
+                )
+                for name, data in layers
+            ]
+        targets = catalog_alias_index(layers).targets
+        if not targets:
+            return layers
+        prepared: list[tuple[str, dict[str, Any]]] = []
+        for name, data in layers:
+            models = normalize_model_configs(data.get("models"))
+            if name != CATALOG_LAYER and isinstance(models, Mapping):
+                data = {**data, "models": models_on_catalog_ids(models, targets)}
+            prepared.append((name, data))
+        return prepared
+
+    def expand_layer_write(
+        self, op: PatchOp, layer_data: Mapping[str, Any]
+    ) -> list[PatchOp]:
+        ops = [self.layer_write_op(op, layer_data)]
+        # A field reset must clear every entry of the model that sets it,
+        # or the leftover alias value still applies after the merge.
+        match op.path.split("/", 3):
+            case ["", "models", token, field] if isinstance(op, RemoveOperationPatch):
+                key = unescape_json_pointer_token(token)
+                models = normalize_model_configs(layer_data.get("models"))
+                if not isinstance(models, Mapping):
+                    return ops
+                name = unescape_json_pointer_token(field)
+                seen = {ops[0].path}
+                for candidate in settings_keys(models, key, self._alias_targets):
+                    payload = models.get(candidate)
+                    if not isinstance(payload, Mapping) or name not in payload:
+                        continue
+                    path = "/".join([
+                        "",
+                        "models",
+                        escape_json_pointer_token(candidate),
+                        field,
+                    ])
+                    if path not in seen:
+                        seen.add(path)
+                        ops.append(op.model_copy(update={"path": path}))
+        return ops
+
+    def layer_write_op(self, op: PatchOp, layer_data: Mapping[str, Any]) -> PatchOp:
+        update: dict[str, Any] = {}
+        match op.path.split("/", 3):
+            case ["", "models", token, *rest]:
+                key = unescape_json_pointer_token(token)
+                models = normalize_model_configs(layer_data.get("models"))
+                if isinstance(models, Mapping):
+                    keys = settings_keys(models, key, self._alias_targets)
+                    layer_key = keys[0] if keys else key
+                    if isinstance(op, RemoveOperationPatch) and rest:
+                        # A remove must land where the field actually is, not
+                        # where a set would go.
+                        field = unescape_json_pointer_token(rest[0])
+                        for candidate in keys or [key]:
+                            payload = models.get(candidate)
+                            if isinstance(payload, Mapping) and field in payload:
+                                layer_key = candidate
+                                break
+                    if layer_key != key:
+                        update["path"] = "/".join([
+                            "",
+                            "models",
+                            escape_json_pointer_token(layer_key),
+                            *rest,
+                        ])
+                        # A whole-entry upsert carries the model's alias: it
+                        # must match the key the layer uses, or the patched
+                        # layer fails to normalize.
+                        value = getattr(op, "value", None)
+                        if (
+                            not rest
+                            and isinstance(value, Mapping)
+                            and isinstance(value.get("alias"), str)
+                            and value["alias"] != layer_key
+                        ):
+                            update["value"] = {**value, "alias": layer_key}
+            case ["", "active_model"]:
+                # While a rollout keeps a model's settings under an old name
+                # in a file, the pin names the model the way that file does:
+                # an older Vibe without the catalog, sharing the file, still
+                # resolves it.
+                value = getattr(op, "value", None)
+                if isinstance(value, str):
+                    models = normalize_model_configs(layer_data.get("models"))
+                    if isinstance(models, Mapping):
+                        keys = settings_keys(models, value, self._alias_targets)
+                        if keys and keys[0] != value:
+                            update["value"] = keys[0]
+            case _:
+                pass
+        return op.model_copy(update=update) if update else op
+
+    @property
+    def catalog_aliases(self) -> Mapping[str, str]:
+        """Each catalog alias that selects a model, mapped to the model's key."""
+        return MappingProxyType(self._alias_targets)
+
+    def layer_models(self, layer_data: Mapping[str, Any]) -> Mapping[str, Any]:
+        """A layer's model entries keyed on the model each one applies to.
+
+        An entry keyed on a catalog alias is merged into its model's, in the
+        order ``prepare_layers`` uses.
+        """
+        models = normalize_model_configs(layer_data.get("models"))
+        if not isinstance(models, Mapping):
+            return {}
+        return models_on_catalog_ids(models, self._alias_targets)
+
+    def resolve_model_name(self, name: str) -> str:
+        """The model key ``name`` selects: itself, or the model a catalog alias
+        names.
+        """
+        if name in self.models:
+            return name
+        return self._alias_targets.get(name, name)
 
     def check_layer_keys(self, layers: Sequence[tuple[str, Mapping[str, Any]]]) -> None:
         from vibe.core.config._setting_keys import (
@@ -524,8 +669,8 @@ class VibeConfigSchema(ConfigSchema):
             config._validation_warnings.append(message)
         # The missing-pin warning already named a pinned orphan: one notice
         # per model, not one per config value. Only the fallback's own alias
-        # is skipped — a pin that resolves through a catalog alias fires no
-        # fallback, and its orphaned override keeps its warning.
+        # is skipped: settings under an alias two models claim stay orphaned
+        # and keep their warning.
         for alias in orphans:
             if alias == config._missing_pin:
                 continue
@@ -574,6 +719,9 @@ class VibeConfigSchema(ConfigSchema):
     # The catalog's recommended model ID, populated at runtime by the model
     # catalog layer: the default below a live GrowthBook routed default.
     catalog_recommended_model: Annotated[str, WithReplaceMerge()] = ""
+    # The default GrowthBook picks among the catalog's models, populated at
+    # runtime by the catalog filter: the default above the recommendation.
+    catalog_default_model: Annotated[str, WithReplaceMerge()] = ""
     # Extra models injected into the dropdown at runtime by the GrowthBook layer,
     # for exposure/rollout without changing the default. Unlike
     # ``routed_model_config``, these never influence ``resolve_default_model_alias``.
@@ -629,7 +777,7 @@ class VibeConfigSchema(ConfigSchema):
             "Token count before automatic compaction for models without their "
             "own threshold. Unset uses each model's default, derived from its "
             "context window. A threshold outside the range the window allows is "
-            "refused with an error that names the range."
+            "moved into that range, with a warning."
         ),
     )
     active_transcribe_model: Annotated[str, WithReplaceMerge()] = (
@@ -833,26 +981,16 @@ class VibeConfigSchema(ConfigSchema):
             " Read once when Vibe Desktop starts its app server."
         ),
     )
-    experimental_enable_pr_monitoring: Annotated[bool, WithReplaceMerge()] = Field(
-        default=False,
+    enable_pr_monitoring: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
         description=(
-            "Experimental: detect pull requests and merge requests created during"
+            "Detect pull requests and merge requests created during"
             " a session (gh pr create, glab mr create) and discover the ones that"
             " already exist for the session's repository at session load"
             " (gh pr list, glab mr list), persist them as session artifacts,"
             " keep their status in sync with the provider, and expose them via"
             " the artifacts/ RPC namespace. Requires gh/glab (system-installed or"
             " bundled)."
-        ),
-    )
-    experimental_enable_pr_discovery: Annotated[bool, WithReplaceMerge()] = Field(
-        default=False,
-        description=(
-            "Experimental: discover open pull requests / merge requests for the"
-            " session's repository at session load (gh pr list, glab mr list),"
-            " persist them as session artifacts, and notify clients. Runs again"
-            " when the session moves to another checkout, and skips a branch"
-            " the session already has a PR for. Local only."
         ),
     )
     experimental_local_runtime_session_api: Annotated[bool, WithReplaceMerge()] = Field(
@@ -900,6 +1038,10 @@ class VibeConfigSchema(ConfigSchema):
     cursor_blink: Annotated[bool, WithReplaceMerge()] = Field(
         default=True, description="Blink the input cursor. Disable for a steady cursor."
     )
+    vim_keybindings: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description="Edit the prompt input with vim Normal and Insert modes.",
+    )
     show_greeting: Annotated[bool, WithReplaceMerge()] = Field(
         default=True,
         description="Show greeting at startup (Mistral providers only, once per 24h).",
@@ -910,6 +1052,13 @@ class VibeConfigSchema(ConfigSchema):
         description=(
             "Capture the mouse for scrolling, clicks and in-app selection. "
             "Disable to keep the terminal's native text selection."
+        ),
+    )
+    enable_sticky_prompt: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "Pin the prompt of the conversation section at the top of the "
+            "transcript while scrolling; a click scrolls back to it."
         ),
     )
     enable_file_autocomplete: Annotated[bool, WithReplaceMerge()] = Field(
@@ -1124,6 +1273,8 @@ class VibeConfigSchema(ConfigSchema):
         available = self.available_models()
         if self.routed_default_model and self.routed_default_model in available:
             return self.routed_default_model
+        if self.catalog_default_model in available:
+            return self.catalog_default_model
         if self.catalog_recommended_model in available:
             return self.catalog_recommended_model
         if DEFAULT_ACTIVE_MODEL_CONFIG.alias in available or not available:
@@ -1131,13 +1282,24 @@ class VibeConfigSchema(ConfigSchema):
             return DEFAULT_ACTIVE_MODEL_CONFIG.alias
         return next(iter(available))
 
+    def _matches_allowed(self, model: ModelConfig) -> bool:
+        if name_matches(model.name, self.allowed_models):
+            return True
+        # Catalog aliases match too: a retired built-in's names (e.g. its wire
+        # name) are published as aliases of the catalog model replacing it, so
+        # an allowlist written against the built-in keeps matching.
+        return any(
+            name_matches(alias, self.allowed_models)
+            for alias in self.catalog_model_aliases.get(model.alias, [])
+        )
+
     def available_models(self) -> dict[str, ModelConfig]:
         if not self.allowed_models:
             return self.models
         allowed = {
             alias: model
             for alias, model in self.models.items()
-            if name_matches(model.name, self.allowed_models)
+            if self._matches_allowed(model)
         }
         if self.origin_of("allowed_models") == "admin":
             # An administrator's policy must fail closed: an invalid policy must
@@ -1413,8 +1575,18 @@ class VibeConfigSchema(ConfigSchema):
         )
         for alias, reason in index.dropped.items():
             warn_ignored_alias(alias, reason)
+        object.__setattr__(self, "_alias_targets", index.targets)
         if target := index.targets.get(self.active_model):
             object.__setattr__(self, "active_model", target)
+        utility = {
+            feature.value: index.targets[alias]
+            for feature, alias in self.utility_models.configured()
+            if alias in index.targets
+        }
+        if utility:
+            object.__setattr__(
+                self, "utility_models", self.utility_models.model_copy(update=utility)
+            )
         return self
 
     @model_validator(mode="after")

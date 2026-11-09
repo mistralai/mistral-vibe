@@ -139,6 +139,7 @@ fn session_start_params_serialize_history_limit() {
         history_limit: HISTORY_LIMIT,
         model: None,
         session_only: false,
+        kind: None,
     };
     let value: Value = serde_json::to_value(&params).unwrap();
     assert_eq!(value["historyLimit"], 200);

@@ -44,7 +44,7 @@ fn start(
     state: &mut HarnessState,
     request: CompactionRequest<'_>,
 ) -> Result<CompactionStartResolution, CoreError> {
-    let task_id = state.config.task_id.clone();
+    let task_id = state.config().task_id.clone();
     let generated_system = state.generated_system_message();
     start_compaction(
         &mut state.context,
@@ -53,8 +53,8 @@ fn start(
         &task_id,
         request,
         compaction_inputs(
-            &state.config.settings,
-            state.resolved_tools.top_level_tools(),
+            &state.compiled.config().settings,
+            state.compiled.resolved_tools().top_level_tools(),
             state.estimate_correction,
         ),
     )
@@ -111,8 +111,8 @@ pub(crate) fn finish_summary_request(
                 pending,
                 candidate,
                 compaction_inputs(
-                    &state.config.settings,
-                    state.resolved_tools.top_level_tools(),
+                    &state.compiled.config().settings,
+                    state.compiled.resolved_tools().top_level_tools(),
                     state.estimate_correction,
                 ),
             )?;
@@ -126,8 +126,8 @@ pub(crate) fn finish_summary_request(
                 &mut state.context,
                 pending,
                 compaction_inputs(
-                    &state.config.settings,
-                    state.resolved_tools.top_level_tools(),
+                    &state.compiled.config().settings,
+                    state.compiled.resolved_tools().top_level_tools(),
                     state.estimate_correction,
                 ),
                 error,
@@ -155,8 +155,8 @@ fn refit_refused_summary_request(
     pending: PendingCompaction,
     error: ProtocolError,
 ) -> Result<(Outcome, CompactionAttemptResolution), CoreError> {
-    let settings = &state.config.settings;
-    let tools = state.resolved_tools.top_level_tools();
+    let settings = &state.compiled.config().settings;
+    let tools = state.compiled.resolved_tools().top_level_tools();
     let inputs = compaction_inputs(settings, tools, state.estimate_correction);
     let Some(limits) = CompactionLimits::from_settings(&settings.context) else {
         let resolution = fail_compaction_or_fall_back(&mut state.context, pending, inputs, error)?;
@@ -218,7 +218,7 @@ pub(crate) fn correct_refused_agent_request(
     action_id: &str,
     error: ProtocolError,
 ) -> Result<AgentRefusal, CoreError> {
-    let Some(limits) = CompactionLimits::from_settings(&state.config.settings.context) else {
+    let Some(limits) = CompactionLimits::from_settings(&state.config().settings.context) else {
         return Ok(AgentRefusal::Fail {
             outcome: Outcome::quiet(),
             error,
@@ -328,8 +328,10 @@ mod tests {
         // context keeps, so compaction cannot make it fit.
         let mut state = started();
         let estimate = estimate_agent_request_tokens(&state).unwrap();
-        set_threshold(&mut state.config.settings, estimate * 2);
-        let window = state.config.settings.context.model_facts.context_window;
+        edit_config(&mut state, |config| {
+            set_threshold(&mut config.settings, estimate * 2)
+        });
+        let window = state.config().settings.context.model_facts.context_window;
 
         let refused = refuse_as_too_long(state);
 
@@ -345,17 +347,15 @@ mod tests {
 
     #[test]
     fn a_refused_request_over_the_corrected_threshold_compacts() {
-        let request = "a long request ".repeat(4_000);
-        let mut state = advance(
-            initial_state(config()).unwrap(),
-            user_message(&request, UserMessageMode::Queue),
-        )
-        .unwrap()
-        .state;
+        let mut state = started_with_long_request();
         let estimate = estimate_agent_request_tokens(&state).unwrap();
-        set_threshold(&mut state.config.settings, estimate + 1);
-        // A window just over the request: the growth floor decides.
-        state.config.settings.context.model_facts.context_window = estimate + 2;
+        edit_config(&mut state, |config| {
+            set_threshold(&mut config.settings, estimate + 1);
+            // A window just over the request: the growth floor decides.
+            let facts = &mut config.settings.context.model_facts;
+            facts.compaction_threshold_max = estimate + 1;
+            facts.context_window = estimate + 2;
+        });
 
         let refused = refuse_as_too_long(state);
 

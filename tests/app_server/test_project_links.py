@@ -19,8 +19,7 @@ from vibe.app_server._project_links import (
 )
 from vibe.app_server.protocol import SERVER_METHODS, ProtocolErrorCode
 from vibe.core.config.harness_files import HarnessFilesManager
-from vibe.core.git.errors import GitError
-from vibe.core.teleport.errors import ServiceTeleportError
+from vibe.core.git.errors import GitError, GitRepositoryError
 from vibe.core.vibe_code_project import VibeCodeProjectApiError
 from vibe.core.vibe_code_project.picker_service import (
     VibeCodeProjectCreateResult,
@@ -41,7 +40,7 @@ REPO_URL = "https://github.com/acme/widgets.git"
 REPO_ROOT = Path("/tmp/widgets")
 
 
-class FutureServiceTeleportError(ServiceTeleportError):
+class FutureGitRepositoryError(GitRepositoryError):
     pass
 
 
@@ -105,7 +104,7 @@ def test_git_inspection_failure_is_not_a_plain_directory(
         raise GitError("git unavailable")
 
     monkeypatch.setattr(project_links, "GitRepo", SimpleNamespace(open=_raise))
-    with pytest.raises(ServiceTeleportError, match="git unavailable"):
+    with pytest.raises(GitRepositoryError, match="git unavailable"):
         _read_inspected_directory(tmp_path)
 
 
@@ -303,7 +302,7 @@ class TestResolveRoot:
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def _raise(root_path: Path) -> SimpleNamespace:
-            raise ServiceTeleportError("some other failure")
+            raise GitRepositoryError("some other failure")
 
         monkeypatch.setattr(controller, "_inspect_directory", _raise)
         result = await controller.resolve_root(str(REPO_ROOT))
@@ -470,11 +469,11 @@ class TestInspectRoot:
         assert captured == ["store is read-only"]
 
     @pytest.mark.asyncio
-    async def test_service_teleport_subclass_is_nested_unresolvable(
+    async def test_git_repository_error_subclass_is_nested_unresolvable(
         self, controller: ProjectLinksController, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         async def _raise(root_path: Path) -> SimpleNamespace:
-            raise FutureServiceTeleportError("future git metadata failure")
+            raise FutureGitRepositoryError("future git metadata failure")
 
         monkeypatch.setattr(controller, "_inspect_directory", _raise)
         result = await controller.inspect_root(str(REPO_ROOT))
@@ -1040,6 +1039,8 @@ class TestProjectLinksJsonRpc:
         handler = HostRequestHandler(
             HarnessFilesManager(sources=("user",)),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         )
         monkeypatch.setattr(handler, "_project_links", controller)
 
@@ -1071,6 +1072,8 @@ class TestProjectLinksJsonRpc:
         handler = HostRequestHandler(
             HarnessFilesManager(sources=("user",)),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         )
         monkeypatch.setattr(handler, "_project_links", controller)
 
@@ -1094,6 +1097,8 @@ class TestProjectLinksJsonRpc:
         handler = HostRequestHandler(
             HarnessFilesManager(sources=("user",)),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         )
         monkeypatch.setattr(handler, "_project_links", controller)
 
@@ -1137,6 +1142,8 @@ class TestProjectLinksJsonRpc:
         handler = HostRequestHandler(
             HarnessFilesManager(sources=("user",)),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         )
         monkeypatch.setattr(
             handler, "_project_links", _FakeProjectLinksController(error)

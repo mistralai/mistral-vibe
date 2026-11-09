@@ -5,9 +5,10 @@
 use crossterm::event::KeyCode;
 use serde_json::json;
 
+use vibe_rs::app::Severity;
 use vibe_rs::resume_picker::{self, held, lease_locked, Event};
 
-use crate::feedback_support::warnings;
+use crate::feedback_support::{notice, warnings};
 use crate::support::{stub, with_picker};
 
 const BUSY: &str = "This session is open in another Vibe process. Close it there to continue here.";
@@ -163,7 +164,8 @@ async fn enter_on_a_locked_row_warns_with_the_busy_refusal_instead_of_resuming()
     resume_picker::handle_key(&mut app, &stub(), KeyCode::Enter.into());
     assert!(!app.resume_picker.resuming);
     assert!(app.resume_picker.open);
-    assert_eq!(warnings(&app), [BUSY]);
+    assert_eq!(notice(&app), Some((Severity::Warning, BUSY)));
+    assert!(warnings(&app).is_empty());
 }
 
 #[tokio::test]

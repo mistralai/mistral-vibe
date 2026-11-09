@@ -8,13 +8,13 @@ use ratatui::layout::Rect;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use vibe_rs::agents::{self, Event};
-use vibe_rs::app::{App, Status};
+use vibe_rs::app::{App, Severity, Status};
 use vibe_rs::config;
 use vibe_rs::input::handle_key;
 use vibe_rs::server::Client;
 use vibe_rs::ui_event::{self, UiEvent};
 
-use crate::feedback_support::errors;
+use crate::feedback_support::{errors, notice};
 use crate::support::{key, render, row};
 
 const PRIMARY: [&str; 3] = ["default", "plan", "accept-edits"];
@@ -173,10 +173,10 @@ async fn a_failed_switch_clears_the_in_flight_state_and_restores_the_prompt() {
     let event = harness.next_event().await;
     assert!(event.runtime.is_err());
     ui_event::apply(&mut harness.app, &harness.client, event.into());
-    let failures = errors(&harness.app);
-    assert!(failures
-        .last()
-        .is_some_and(|text| text.starts_with("Failed to switch agent: ")));
+    assert!(notice(&harness.app).is_some_and(|(severity, text)| {
+        severity == Severity::Error && text.starts_with("Failed to switch agent: ")
+    }));
+    assert!(errors(&harness.app).is_empty());
 
     assert!(!agents::switching(&harness.app));
     assert!(!harness.app.agents.switching_indicator);

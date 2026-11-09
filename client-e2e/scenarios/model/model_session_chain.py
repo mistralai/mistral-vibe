@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from e2e.app_server.scenario import Timeline
+from scenarios.model._session import session_handshake
+
+handshake = session_handshake()
 
 # /model, submit, navigate down, `s` selects model for this session only, then
 # the thinking picker chains. `s` selects thinking level for this session only.

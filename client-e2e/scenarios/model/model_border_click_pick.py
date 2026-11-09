@@ -15,7 +15,7 @@ DEVSTRAL: dict[str, Any] = {
 }
 
 handshake = {
-    "config/reload": {
+    "config/model/write": {
         "runtime": {"config": {"activeModel": DEVSTRAL, "activeModelPinned": True}}
     }
 }

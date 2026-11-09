@@ -8,8 +8,9 @@ from functools import cached_property, partial
 import os
 from pathlib import Path, PureWindowsPath
 import shutil
+import threading
 import time
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from vibe.core.git.errors import GitError
@@ -41,6 +42,7 @@ from vibe.core.git.worktree.progress import (
     WorktreeProgressCallback,
 )
 from vibe.core.git.worktree.record import (
+    RECORD_FILENAME,
     WorktreeClaim,
     WorktreeRecord,
     WorktreeRecordError,
@@ -69,6 +71,9 @@ _RESERVED_WORKTREE_NAMES = frozenset(
 
 
 class WorktreeError(GitError): ...
+
+
+class BrokenCheckoutError(WorktreeError): ...
 
 
 @dataclass(frozen=True)
@@ -141,12 +146,11 @@ class PreparedWorktree:
             new_commit_count = int(
                 repo.git.rev_list("--count", f"{self.base_commit}..HEAD").strip()
             )
-        except (
-            git.invalid_git_repository_error,
-            git.git_command_error,
-            GitError,
-            ValueError,
-        ) as e:
+        except (git.invalid_git_repository_error, git.no_such_path_error) as e:
+            raise BrokenCheckoutError(
+                f"Failed to inspect worktree {self.name!r}: {e!r}"
+            ) from e
+        except (git.git_command_error, GitError, ValueError) as e:
             raise WorktreeError(f"Failed to inspect worktree {self.name!r}: {e}") from e
 
         return WorktreeCleanupState(
@@ -410,8 +414,21 @@ class WorktreeRepository:
         branch: str | None = None,
         on_progress: WorktreeProgressCallback | None = None,
         base: RefreshedBase | None = None,
+        branch_in_use: Literal["fail", "branch_off"] = "fail",
     ) -> PreparedWorktree:
+        """``branch_in_use="branch_off"`` continues a branch git already checks
+        out elsewhere from its tip, on a new branch named after the worktree:
+        git checks a branch out in one place only.
+        """
         _validate_worktree_name(name)
+        start_point: str | None = None
+        if (
+            branch is not None
+            and branch_in_use == "branch_off"
+            and not (self.worktree_root / name).exists()
+            and self._checked_out(branch)
+        ):
+            start_point, branch = branch, self._unused_branch(name)
         branch = name if branch is None else branch
         self._git.validate_branch(branch)
 
@@ -456,6 +473,10 @@ class WorktreeRepository:
             ) from e
 
         branch_created = not self._git.branch_exists(branch)
+        # A branch only the remote has (a PR's) is continued, not restarted
+        # from the default branch under the same name.
+        if branch_created and start_point is None:
+            start_point = self._git.remote_branch_ref(branch)
         record = WorktreeRecord.new(
             name=name,
             branch=branch,
@@ -471,6 +492,7 @@ class WorktreeRepository:
             record,
             target,
             branch_created=branch_created,
+            start_point=start_point,
             on_progress=on_progress,
             base=base,
         )
@@ -501,7 +523,7 @@ class WorktreeRepository:
             trust_root=self._paths.repo_root,
         ) as source:
             source_head = source.head_commit()
-            source_had_uncommitted_changes = source._has_uncommitted_changes()
+            source_had_uncommitted_changes = source.has_uncommitted_changes()
         return replace(
             self._prepare_auto(
                 _auto_worktree_name(None, suggested_name), start_point=source_head
@@ -580,6 +602,9 @@ class WorktreeRepository:
             for record in self._git.records()
             if not (root := record.root.resolve()).is_relative_to(templates)
         )
+
+    def _checked_out(self, branch: str) -> bool:
+        return any(record.branch == branch for record in self._git.records())
 
     def linked(self) -> tuple[LinkedWorktree, ...]:
         paths = self._paths
@@ -762,6 +787,13 @@ class WorktreeRepository:
             claim.finish_starting()
             raise
         return restored
+
+    def _unused_branch(self, preferred: str) -> str:
+        for suffix in range(1, _MAX_AUTO_WORKTREE_ATTEMPTS + 1):
+            candidate = preferred if suffix == 1 else f"{preferred}-{suffix}"
+            if not self._git.branch_exists(candidate):
+                return candidate
+        raise WorktreeError(f"Unable to find an unused branch for {preferred!r}.")
 
     def _available_recovery_branch(self, preferred: str) -> str:
         if not self._git.branch_exists(preferred):
@@ -987,6 +1019,7 @@ class ManagedWorktree:
         session_finished: Callable[[Path], bool] | None = None,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        broken: BrokenCheckouts | None = None,
     ) -> int:
         """Snapshot and remove the oldest inactive managed worktrees over the limit.
 
@@ -1019,10 +1052,16 @@ class ManagedWorktree:
                     break
                 if claim.is_starting():
                     continue
+                managed = cls(claim=claim)
+                if broken is not None and broken.known(managed):
+                    continue
                 try:
-                    release = cls(claim=claim)._prune_with_snapshot(
-                        trust_store=trust_store
-                    )
+                    release = managed._prune_with_snapshot(trust_store=trust_store)
+                except BrokenCheckoutError as exc:
+                    if broken is None:
+                        raise
+                    broken.record(managed, exc)
+                    continue
                 except (GitError, OSError) as exc:
                     logger.warning(
                         "Keeping managed worktree %s/%s: retention cleanup failed",
@@ -1559,6 +1598,49 @@ class ManagedWorktree:
             branch_deleted=record.branch_created,
             snapshot_ref=snapshot,
         )
+
+
+class BrokenCheckouts:
+    """Managed worktrees whose checkout is not a git repository any more.
+
+    Each is reported once, then skipped by reaps and prunes until its claim or
+    its directory changes: retrying cannot repair it, and every retry logs the
+    same traceback.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._known: dict[Path, tuple[object, ...]] = {}
+
+    def known(self, managed: ManagedWorktree) -> bool:
+        with self._lock:
+            seen = self._known.get(managed.claim.directory)
+        return seen is not None and seen == _checkout_signature(managed)
+
+    def record(self, managed: ManagedWorktree, error: BrokenCheckoutError) -> None:
+        with self._lock:
+            self._known[managed.claim.directory] = _checkout_signature(managed)
+        logger.warning(
+            "Skipping worktree %s until it changes: its checkout is broken (%s)",
+            managed.root,
+            error,
+        )
+
+
+def _checkout_signature(managed: ManagedWorktree) -> tuple[object, ...]:
+    def signature(path: Path) -> tuple[int, int, int] | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+
+    root = managed.root
+    return (
+        signature(managed.claim.directory / RECORD_FILENAME),
+        signature(root),
+        signature(root / ".git"),
+    )
 
 
 def _all_finished(

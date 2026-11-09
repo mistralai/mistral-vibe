@@ -724,6 +724,8 @@ async def test_app_server_discovers_claude_projects_and_their_sessions(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         ),
     )
 

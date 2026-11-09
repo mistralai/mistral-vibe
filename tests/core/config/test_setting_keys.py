@@ -323,7 +323,6 @@ def test_a_file_of_old_written_defaults_raises_no_issue() -> None:
 
 def test_a_changed_unused_setting_is_still_reported() -> None:
     issues = _issues({
-        "vim_keybindings": True,
         "include_model_info": False,
         "tools": {
             "read_file": {"max_read_bytes": 10},
@@ -333,7 +332,6 @@ def test_a_changed_unused_setting_is_still_reported() -> None:
     })
 
     assert issues == {
-        "vim_keybindings": KeyIssueKind.RETIRED,
         "include_model_info": KeyIssueKind.RETIRED,
         "tools.read_file.max_read_bytes": KeyIssueKind.NO_EFFECT,
         "tools.edit.fuzzy_threshold": KeyIssueKind.RETIRED,

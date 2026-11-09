@@ -227,7 +227,7 @@ def _raw_entry(  # noqa: PLR0911 - one return per entry type
             return {
                 **_base(entry, session_id),
                 "type": "checkpoint",
-                "kind": kind if isinstance(kind, str) else entry.checkpoint_kind,
+                "kind": kind if isinstance(kind, str) else str(entry.checkpoint_kind),
                 "message": entry.message,
                 "details": entry.details,
             }
@@ -236,7 +236,7 @@ def _raw_entry(  # noqa: PLR0911 - one return per entry type
             return {
                 **_base(entry, session_id),
                 "type": "notice",
-                "level": entry.level,
+                "level": str(entry.level),
                 "message": entry.message,
                 str(key): entry.details,
             }
@@ -281,7 +281,9 @@ def _raw_effect(
         and state.get("status") == "completed"
     ):
         state["output"] = result.result
-    finished = result is not None and result.generation_status == "complete"
+    # As in _base: only "generating" runs, so a status a newer host added reads
+    # as completed.
+    finished = result is not None and result.generation_status != "generating"
     related = display.get("relatedEntryId")
     input_entry = display.get("inputEntryId")
     return {

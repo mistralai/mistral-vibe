@@ -1,6 +1,9 @@
 //! ChatInput editing policy: keys become `Action`s, `apply` runs them against the
 //! text, caret, and selection. The text mechanics live in `input_edit`.
 
+use crate::app::App;
+use crate::edit_history::Snapshot;
+use crate::input_modes::InputMode;
 use crate::utils::input_edit::{
     cursor_left, cursor_line_end, cursor_line_start, cursor_right, cursor_word_left,
     cursor_word_right, delete_left, delete_right, delete_to_end_of_line_or_delete_line,
@@ -51,6 +54,18 @@ impl Action {
                 | Action::DeleteToStartOfLine
                 | Action::DeleteToEndOfLine
                 | Action::Insert(_)
+        )
+    }
+
+    /// Whether the removed text goes to the kill buffer, as in readline.
+    pub fn is_kill(&self) -> bool {
+        matches!(
+            self,
+            Action::DeleteLine
+                | Action::DeleteWordLeft
+                | Action::DeleteWordRight
+                | Action::DeleteToStartOfLine
+                | Action::DeleteToEndOfLine
         )
     }
 }
@@ -261,4 +276,27 @@ pub fn apply(action: &Action, input: &mut String, cursor: &mut usize, anchor: &m
             insert(input, cursor, c.encode_utf8(&mut [0; 4]));
         }
     }
+}
+
+/// Append `text` to the draft as a prompt, in one undoable edit that keeps the draft and its collapsed pastes.
+pub fn append_prompt(app: &mut App, text: &str) {
+    app.chat_input.normalize_positions();
+    let before = Snapshot::capture(&app.chat_input);
+    crate::input::reset_history_state(app);
+    let input = &mut app.chat_input;
+    input.mode = InputMode::Prompt;
+    let at = if input.input.trim().is_empty() {
+        input.input.clear();
+        0
+    } else {
+        input.input.push_str("\n\n");
+        input.input.len()
+    };
+    input.input.push_str(text);
+    input.cursor = input.input.len();
+    input.anchor = None;
+    input.scroll = None;
+    input.sync_mentions_at(at);
+    input.record_edit(before, true, crate::clock::now());
+    crate::completion_manager::input_changed(app);
 }

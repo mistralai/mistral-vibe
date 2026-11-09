@@ -1,4 +1,4 @@
-"""The first turn closes the startup warnings box: a later warning mounts as a row (VIBE-4099)."""
+"""The first turn removes the startup warnings box: a later warning mounts as a row (VIBE-4099, VIBE-5543)."""
 
 from __future__ import annotations
 
@@ -30,8 +30,5 @@ timeline: Timeline = [
     server_warning("Request too long: compacting the conversation."),
 ]
 
-screen_contains = (
-    "Warnings",
-    "Failed to parse: bad toml",
-    "⚠ Request too long: compacting the conversation.",
-)
+screen_contains = ("⚠ Request too long: compacting the conversation.",)
+screen_excludes = ("Warnings", "Failed to parse: bad toml")

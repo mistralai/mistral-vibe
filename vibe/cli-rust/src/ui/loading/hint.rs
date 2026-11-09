@@ -1,5 +1,6 @@
 //! Loading-line key hints, gated by the state their keys dispatch on.
 
+use crossterm::event::KeyCode;
 use ratatui::text::Span;
 
 use crate::app::App;
@@ -37,11 +38,22 @@ pub(super) fn running(app: &App) -> Vec<Hint> {
             false => vec![(key::CTRL_C, action::INTERRUPT)],
         };
     }
+    // Vim Insert mode takes Esc to Normal mode, so only Ctrl+C interrupts.
+    let esc_interrupts =
+        !crate::vim::inserting(app) || !crate::vim::owns(app, &KeyCode::Esc.into());
     // Ctrl+C cancels a queued prompt before interrupting.
     if !message_queue::has_removable(app) {
-        return vec![(key::ESC_CTRL_C, action::INTERRUPT)];
+        let keys = if esc_interrupts {
+            key::ESC_CTRL_C
+        } else {
+            key::CTRL_C
+        };
+        return vec![(keys, action::INTERRUPT)];
     }
-    let mut hints = vec![(key::ESC, action::INTERRUPT)];
+    let mut hints = match esc_interrupts {
+        true => vec![(key::ESC, action::INTERRUPT)],
+        false => Vec::new(),
+    };
     if !crate::input::composer_reachable(app) {
         return hints;
     }

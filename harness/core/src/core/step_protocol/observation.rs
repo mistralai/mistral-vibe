@@ -18,6 +18,10 @@ pub(crate) enum TurnStopReason {
     Skipped,
     /// A `post_llm_call` or `post_agent_turn` hook rejected the reply; the Turn's output is the hook's reason.
     Rejected,
+    /// The model's final reply stopped at the output limit (`finish_reason` `length`), and
+    /// output-limit recovery was off, out of retries, or at the Turn's last iteration; the Turn's
+    /// output is the cut-off reply, or a hook's replacement of it.
+    OutputLimit,
 }
 
 /// What one Core feature function produced: actions for the Runtime to run and

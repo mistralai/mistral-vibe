@@ -202,7 +202,7 @@ expression: reviewable(snapshot)
     },
     {
       "name": "write_file",
-      "description": "Create or overwrite a UTF-8 file.",
+      "description": "Create or overwrite a UTF-8 file. Line breaks in `content` can be `\\n`, `\\r\\n` or `\\r`: the file keeps the line endings of the file it replaces, and a new file uses the repository's line endings when they can be found, or the platform default otherwise. To change a file's line endings, run a command such as `unix2dos` or `dos2unix`.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
@@ -226,7 +226,7 @@ expression: reviewable(snapshot)
         "$multiline": [
           "Exact string replacement in a file.",
           "",
-          "Read the current file first. `old_string` must match exactly, including whitespace, indentation, and line endings. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.",
+          "Read the current file first. `old_string` must match exactly, including whitespace and indentation. Line endings don't need to match: the file keeps its own. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.",
           "",
           "Example:",
           "{\"file_path\":\"src/config.ts\",\"old_string\":\"const mode = \\\"old\\\";\",\"new_string\":\"const mode = \\\"new\\\";\",\"replace_all\":false}"
@@ -242,7 +242,7 @@ expression: reviewable(snapshot)
           },
           "old_string": {
             "type": "string",
-            "description": "Exact text to find, including whitespace, indentation, and line endings. It must occur exactly once unless `replace_all` is true.",
+            "description": "Exact text to find, including whitespace and indentation. It must occur exactly once unless `replace_all` is true.",
             "minLength": 1
           },
           "new_string": {
@@ -270,7 +270,7 @@ expression: reviewable(snapshot)
           "",
           "- Each command runs independently in a fresh, stateless Git Bash process.",
           "- Use POSIX shell syntax and Unix-style command chaining, redirects, variables, and quoting, not PowerShell or cmd.exe syntax.",
-          "- Write Windows drives as `/c/...` with forward slashes, never `C:\\...`.",
+          "- Write Windows drives as `/c/...` with forward slashes, never `C:\\...`, even when the user or a tool gives one: bash drops unquoted backslashes, and in `\"C:\\dir\\\"` the `\\\"` keeps the quote open. Inside code passed to a Windows program (`python -c`, `node -e`), write `C:/...` instead: paths inside code are not converted.",
           "- Standard output and standard error are captured separately. Read `returncode` to determine whether the command succeeded.",
           "- Do not discard stderr (`2>/dev/null`) on exploratory commands like `find` or `ls`: an empty result would then hide a wrong path.",
           "- The call blocks until the command exits, and a command still running after `timeout_seconds` is stopped. Start long-running commands, such as servers and long builds, with `tools.process.start` and read their output with `tools.process.output`.",
@@ -407,7 +407,7 @@ expression: reviewable(snapshot)
         "namespace": "file_system",
         "name": "write_file"
       },
-      "description": "Create or overwrite a UTF-8 file.",
+      "description": "Create or overwrite a UTF-8 file. Line breaks in `content` can be `\\n`, `\\r\\n` or `\\r`: the file keeps the line endings of the file it replaces, and a new file uses the repository's line endings when they can be found, or the platform default otherwise. To change a file's line endings, run a command such as `unix2dos` or `dos2unix`.",
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
@@ -454,7 +454,7 @@ expression: reviewable(snapshot)
         "$multiline": [
           "Exact string replacement in a file.",
           "",
-          "Read the current file first. `old_string` must match exactly, including whitespace, indentation, and line endings. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.",
+          "Read the current file first. `old_string` must match exactly, including whitespace and indentation. Line endings don't need to match: the file keeps its own. With `replace_all=false` (the default), `old_string` must occur exactly once; set `replace_all=true` only to replace every occurrence. If an edit fails, re-read the file before retrying.",
           "",
           "Example:",
           "{\"file_path\":\"src/config.ts\",\"old_string\":\"const mode = \\\"old\\\";\",\"new_string\":\"const mode = \\\"new\\\";\",\"replace_all\":false}"
@@ -470,7 +470,7 @@ expression: reviewable(snapshot)
           },
           "old_string": {
             "type": "string",
-            "description": "Exact text to find, including whitespace, indentation, and line endings. It must occur exactly once unless `replace_all` is true.",
+            "description": "Exact text to find, including whitespace and indentation. It must occur exactly once unless `replace_all` is true.",
             "minLength": 1
           },
           "new_string": {
@@ -524,7 +524,7 @@ expression: reviewable(snapshot)
           "",
           "- Each command runs independently in a fresh, stateless Git Bash process.",
           "- Use POSIX shell syntax and Unix-style command chaining, redirects, variables, and quoting, not PowerShell or cmd.exe syntax.",
-          "- Write Windows drives as `/c/...` with forward slashes, never `C:\\...`.",
+          "- Write Windows drives as `/c/...` with forward slashes, never `C:\\...`, even when the user or a tool gives one: bash drops unquoted backslashes, and in `\"C:\\dir\\\"` the `\\\"` keeps the quote open. Inside code passed to a Windows program (`python -c`, `node -e`), write `C:/...` instead: paths inside code are not converted.",
           "- Standard output and standard error are captured separately. Read `returncode` to determine whether the command succeeded.",
           "- Do not discard stderr (`2>/dev/null`) on exploratory commands like `find` or `ls`: an empty result would then hide a wrong path.",
           "- The call blocks until the command exits, and a command still running after `timeout_seconds` is stopped. Start long-running commands, such as servers and long builds, with `tools.process.start` and read their output with `tools.process.output`.",
@@ -1176,6 +1176,7 @@ expression: reviewable(snapshot)
               },
               "message": {
                 "type": "string",
+                "description": "The child's task, sent as its first message. Every child needs one.",
                 "minLength": 1
               },
               "instructions": {
@@ -1203,6 +1204,7 @@ expression: reviewable(snapshot)
               },
               "message": {
                 "type": "string",
+                "description": "The child's task, sent as its first message. Every child needs one.",
                 "minLength": 1
               },
               "config_name": {

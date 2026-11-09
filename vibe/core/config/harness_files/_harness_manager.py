@@ -32,6 +32,9 @@ class HarnessFilesManager:
     cwd: Path | None = field(default=None)
     _additional_dirs: tuple[Path, ...] = ()
     _session_root: Path | None = None
+    # Writable without being opened as a project: no config, skills, hooks or
+    # AGENTS.md are read from them.
+    writable_roots: tuple[Path, ...] = ()
     trust_store: TrustedFoldersManager = field(
         default_factory=lambda: trusted_folders_manager, compare=False, repr=False
     )

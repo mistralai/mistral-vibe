@@ -48,6 +48,29 @@ fn a_warning_before_the_first_turn_joins_the_startup_box() {
 }
 
 #[test]
+fn a_hook_message_is_a_status_row_not_a_startup_warning() {
+    let mut app = App::default();
+    app.set_status(Status::Ready);
+    let client = Arc::new(Client::stub());
+
+    for (code, message) in [
+        (
+            "warning",
+            "session_start hook 'broken' failed: exited with code 7",
+        ),
+        ("hook_message", "[load] Context loaded"),
+    ] {
+        let event = notif(
+            notification::WARNING,
+            json!({"warning": {"code": code, "message": message}}),
+        );
+        event_handler::apply_notification(&mut app, &client, &event);
+    }
+
+    assert_eq!(roles(&app), vec!["startup_notices", "command_status"]);
+}
+
+#[test]
 fn a_warning_before_ready_is_kept() {
     let mut app = App::default();
     let client = Arc::new(Client::stub());

@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::app::{App, Status};
+use crate::app::{App, Severity, Status};
 use crate::server::{
     method, AgentSafety, AgentSummary, AgentSwitchParams, AgentType, Client, RuntimeSnapshot,
 };
@@ -242,7 +242,8 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
         // target so the next Shift+Tab steps past it instead of asking again.
         Err(error) => {
             app.agents.refused = Some(event.target.clone());
-            crate::notices::failed(app, &format!("Failed to switch agent: {error}"));
+            let message = format!("Failed to switch agent: {error}");
+            crate::notices::inline(app, Severity::Error, &message);
         }
     }
     send_desired(app, client);

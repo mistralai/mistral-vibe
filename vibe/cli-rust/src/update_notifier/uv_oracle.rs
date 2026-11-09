@@ -11,7 +11,9 @@ use std::path::Path;
 
 use tokio::process::Command;
 
-use super::gateway::{Update, UpdateGateway, UpdateGatewayCause, UpdateGatewayError};
+use super::gateway::{
+    PyPIUpdateGateway, Update, UpdateGateway, UpdateGatewayCause, UpdateGatewayError,
+};
 use super::update::plain_output_env;
 
 /// The tool this oracle watches.
@@ -180,7 +182,10 @@ pub fn git_source_from_receipt(receipt: &str) -> Option<String> {
 }
 
 /// The oracle gateway: the latest release uv's own resolution would deliver.
-pub struct UvOracleGateway;
+/// A uv older than 0.10.10 has no `--outdated`, so it asks `fallback` instead.
+pub struct UvOracleGateway {
+    pub fallback: PyPIUpdateGateway,
+}
 
 impl UpdateGateway for UvOracleGateway {
     async fn fetch_update(&self) -> Result<Option<Update>, UpdateGatewayError> {
@@ -193,6 +198,9 @@ impl UpdateGateway for UvOracleGateway {
         .await;
         let output = match output {
             Ok(Ok(output)) if output.status.success() => output,
+            Ok(Ok(output)) if lacks_outdated_flag(&String::from_utf8_lossy(&output.stderr)) => {
+                return self.fallback.fetch_update().await;
+            }
             Ok(Ok(output)) => {
                 return Err(UpdateGatewayError {
                     cause: UpdateGatewayCause::ErrorResponse,
@@ -218,6 +226,11 @@ impl UpdateGateway for UvOracleGateway {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(parse_outdated_tool_list(&stdout).map(|latest_version| Update { latest_version }))
     }
+}
+
+/// uv's usage error for a flag it predates; any other failure stays an error.
+fn lacks_outdated_flag(stderr: &str) -> bool {
+    stderr.contains("unexpected argument '--outdated'")
 }
 
 /// `uv tool list --outdated` prints one entry per outdated tool as

@@ -11,8 +11,6 @@ handshake = {
             "plan": {"kind": "chat", "name": "TEAM", "title": "Team"},
             "planOffer": None,
             "rateLimitAction": None,
-            "teleportEligible": True,
-            "teleportAction": None,
         }
     }
 }

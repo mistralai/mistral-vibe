@@ -196,16 +196,14 @@ fn stamp_user_message_id(batch: &mut [Value], client_message_id: &str) {
     }
 }
 
-/// Bind `$operationId` placeholders (shell entry ids, teleport events) to the request's id.
+/// Bind `$operationId` shell entry id placeholders to the request's id.
 fn stamp_operation_id(events: &mut [Value], operation_id: &str) {
     for event in events {
-        for pointer in ["/params/entry/id", "/params/event/operationId"] {
-            if let Some(slot) = event
-                .pointer_mut(pointer)
-                .filter(|slot| slot.as_str() == Some("$operationId"))
-            {
-                *slot = json!(operation_id);
-            }
+        if let Some(slot) = event
+            .pointer_mut("/params/entry/id")
+            .filter(|slot| slot.as_str() == Some("$operationId"))
+        {
+            *slot = json!(operation_id);
         }
     }
 }

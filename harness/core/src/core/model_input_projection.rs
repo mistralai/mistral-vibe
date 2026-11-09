@@ -105,7 +105,9 @@ fn embedded_image(resource: &ResourceContents) -> Option<(&str, &str, &str)> {
 fn project_model_input_message(message: &Message, image_delivery: ImageDeliveryMode) -> Message {
     let mut message = message.clone();
     match &mut message {
-        Message::System { content } | Message::User { content } | Message::Tool { content, .. } => {
+        Message::System { content }
+        | Message::User { content, .. }
+        | Message::Tool { content, .. } => {
             for block in content {
                 if let Cow::Owned(projected) = project_model_input_content(block, image_delivery) {
                     *block = projected;

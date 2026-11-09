@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from hashlib import sha256
+import time
 from typing import Literal
 
 import httpx2
@@ -29,12 +30,18 @@ from vibe.setup.auth._oidc_credentials import (
 )
 from vibe.setup.auth._oidc_tenant import (
     OidcTenantResolver,
+    OidcUnauthorized,
     TenantSelection,
     tenant_principal,
 )
 
 _NAMESPACE = "oidc_id_token:cli"
 _SOURCE = "the CLI OIDC session"
+# How long a refreshed token counts as "just refreshed": refused within this
+# window, it is not refreshed again. Later, a 401 is an ordinary one.
+_JUST_REFRESHED_S = 120.0
+
+type _Withheld = Literal["rejected", "unauthorized_after_refresh"]
 
 
 class CliOidcPlatformCredentialProvider:
@@ -43,12 +50,21 @@ class CliOidcPlatformCredentialProvider:
         tenants: OidcTenantResolver,
         *,
         id_token: Callable[[], str] | None = None,
+        refresh_id_token: Callable[[str], str] | None = None,
         stored_tokens: Callable[[], OidcTokens | None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._tenants = tenants
         self._id_token = id_token or _fresh_id_token
+        self._refresh_id_token = refresh_id_token or _refreshed_id_token
         self._stored_tokens = stored_tokens or _stored_tokens
-        self._rejected: set[tuple[PlatformCredentialTarget, str]] = set()
+        # Tokens the platform refused, by destination, and what to answer
+        # instead of sending them again.
+        self._withheld: dict[tuple[PlatformCredentialTarget, str], _Withheld] = {}
+        self._clock = clock
+        # The revision the last refresh minted to replace a refused token, and
+        # when: refused in turn right after, it is not refreshed again.
+        self._refreshed: tuple[str, float] | None = None
 
     async def resolve(
         self, target: PlatformCredentialTarget
@@ -65,22 +81,41 @@ class CliOidcPlatformCredentialProvider:
             return PlatformCredentialRequired(reason="reauthentication_required")
         except OidcStorageError:
             return PlatformCredentialRequired(reason="missing")
-        if snapshot is not None and (target, snapshot.revision) in self._rejected:
-            return PlatformCredentialRequired(
-                reason="rejected", observed_revision=snapshot.revision
-            )
-        # None: a login or logout replaced the bundle between both reads.
-        return snapshot or PlatformCredentialRequired(reason="transient")
+        if not isinstance(snapshot, PlatformCredentialSnapshot):
+            # None: a login or logout replaced the bundle between both reads.
+            return snapshot or PlatformCredentialRequired(reason="transient")
+        return self._unless_withheld(target, snapshot)
 
-    async def _snapshot(self, config: OidcConfig) -> PlatformCredentialSnapshot | None:
+    def _unless_withheld(
+        self, target: PlatformCredentialTarget, snapshot: PlatformCredentialSnapshot
+    ) -> PlatformCredentialResult:
+        withheld = self._withheld.get((target, snapshot.revision))
+        if withheld is None:
+            return snapshot
+        return PlatformCredentialRequired(
+            reason=withheld, observed_revision=snapshot.revision
+        )
+
+    async def _snapshot(
+        self, config: OidcConfig
+    ) -> PlatformCredentialSnapshot | PlatformCredentialRequired | None:
         token = await asyncio.to_thread(self._id_token)
         stored = await asyncio.to_thread(self._stored_tokens)
         if stored is None or stored.id_token.get_secret_value() != token:
             return None
-        tenant = await self._tenants.resolve(
-            config.audience, _user(stored), token, TenantSelection.from_env()
-        )
         revision = sha256(token.encode()).hexdigest()
+        try:
+            tenant = await self._tenants.resolve(
+                config.audience, _user(stored), token, TenantSelection.from_env()
+            )
+        except OidcUnauthorized:
+            # Workspace discovery is the first request a session sends.
+            if self._just_refreshed(revision):
+                return PlatformCredentialRequired(
+                    reason="unauthorized_after_refresh", observed_revision=revision
+                )
+            await self._refresh(revision)
+            return await self._snapshot(config)
         return PlatformCredentialSnapshot(
             kind="oidc_id_token",
             headers={"Authorization": f"Bearer {token}", **tenant.headers},
@@ -106,15 +141,38 @@ class CliOidcPlatformCredentialProvider:
         del reason
         if observed.cache_namespace != _NAMESPACE:
             return PlatformCredentialRequired(reason="invalid")
+        if self._just_refreshed(observed.revision):
+            # Refused again right after a successful refresh: no other refresh.
+            self._withheld[(target, observed.revision)] = "unauthorized_after_refresh"
+            return PlatformCredentialRequired(
+                reason="unauthorized_after_refresh", observed_revision=observed.revision
+            )
         current = await self.resolve(target)
         if (
             isinstance(current, PlatformCredentialSnapshot)
             and current.revision != observed.revision
         ):
             return current
-        self._rejected.add((target, observed.revision))
-        return PlatformCredentialRequired(
-            reason="rejected", observed_revision=observed.revision
+        self._withheld[(target, observed.revision)] = "rejected"
+        try:
+            await self._refresh(observed.revision)
+        except OidcError:
+            # Expired session or revoked refresh token: sign in again.
+            return PlatformCredentialRequired(
+                reason="rejected", observed_revision=observed.revision
+            )
+        return await self.resolve(target)
+
+    async def _refresh(self, rejected_revision: str) -> None:
+        """Replace the refused token; raises ``OidcError`` when refresh fails."""
+        token = await asyncio.to_thread(self._refresh_id_token, rejected_revision)
+        self._refreshed = (sha256(token.encode()).hexdigest(), self._clock())
+
+    def _just_refreshed(self, revision: str) -> bool:
+        return (
+            self._refreshed is not None
+            and self._refreshed[0] == revision
+            and self._clock() < self._refreshed[1] + _JUST_REFRESHED_S
         )
 
     def has_credential(self) -> bool:
@@ -169,6 +227,12 @@ def _fresh_id_token() -> str:
     from vibe.setup.auth import _oidc_runtime
 
     return _oidc_runtime._resolve_id_token()
+
+
+def _refreshed_id_token(rejected_revision: str) -> str:
+    from vibe.setup.auth import _oidc_runtime
+
+    return _oidc_runtime._refresh_id_token(rejected_revision)
 
 
 def _stored_tokens() -> OidcTokens | None:

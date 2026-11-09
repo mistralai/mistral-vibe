@@ -12,6 +12,7 @@ from authlib.integrations.httpx_client import AsyncOAuth2Client
 import httpx2
 
 from vibe.core.platform_auth import MistralPlatformHTTPClient, PlatformCredentialTarget
+from vibe.observability.logging import logger
 from vibe.setup.auth._oidc_callback import OidcCallback
 from vibe.setup.auth._oidc_client import OidcClient
 from vibe.setup.auth._oidc_config import OidcConfig, OidcError, require_oidc_enabled
@@ -22,6 +23,8 @@ from vibe.setup.auth._oidc_credentials import (
 )
 from vibe.setup.auth._oidc_platform_credentials import OidcPlatformCredentialProvider
 from vibe.utils.http import build_ssl_context
+
+REVOCATION_TIMEOUT_SECONDS = 5
 
 
 @dataclass(slots=True)
@@ -176,7 +179,40 @@ class OidcService:
         require_oidc_enabled()
         async with self._lock:
             await self.cancel()
-            await self.store.clear()
+            tokens = await self.store.take()
+        if tokens is None:
+            logger.info("OIDC sign-out skipped revocation: no readable stored session")
+            return
+        await self._revoke(tokens)
+
+    async def _revoke(self, tokens: OidcTokens) -> None:
+        """Best-effort RFC 7009 revocation once the local session is gone."""
+        config = self.client.config
+        if tokens.refresh_token is None:
+            logger.info("OIDC sign-out skipped revocation: no refresh token")
+            return
+        # The audience does not matter here: only the issuer and client that
+        # issued the refresh token can revoke it.
+        if (tokens.issuer, tokens.client_id) != (config.issuer, config.client_id):
+            logger.info("OIDC sign-out skipped revocation: issuer or client changed")
+            return
+        try:
+            async with asyncio.timeout(REVOCATION_TIMEOUT_SECONDS):
+                session = self.client.session()
+                async with cast(httpx2.AsyncClient, session):
+                    metadata = await self.client.discover(session)
+                    await self.client.revoke_refresh_token(
+                        session, metadata, tokens.refresh_token
+                    )
+        except Exception as exc:
+            # Only the error type and status: library messages may echo request
+            # details.
+            reason = type(exc).__name__
+            if isinstance(exc, httpx2.HTTPStatusError):
+                reason = f"{reason} {exc.response.status_code}"
+            logger.warning(
+                "OIDC refresh token revocation failed (%s); signed out locally", reason
+            )
 
     async def access_tokens(self, *, force_refresh: bool = False) -> OidcTokens:
         require_oidc_enabled()

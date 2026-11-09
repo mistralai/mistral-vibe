@@ -21,6 +21,25 @@ class HookType(StrEnum):
     POST_AGENT = auto()
     PRE_TOOL = auto()
     POST_TOOL = auto()
+    PRE_AGENT = auto()
+    NOTIFICATION = auto()
+    SESSION_START = auto()
+    SESSION_END = auto()
+
+
+# Where a failing hook may block instead of letting things through.
+STRICT_HOOK_TYPES = frozenset({
+    HookType.PRE_TOOL,
+    HookType.POST_TOOL,
+    HookType.PRE_AGENT,
+})
+
+# Hooks the app server fires itself, outside the engine's turn.
+HOST_HOOK_TYPES = frozenset({
+    HookType.NOTIFICATION,
+    HookType.SESSION_START,
+    HookType.SESSION_END,
+})
 
 
 class HookSource(StrEnum):
@@ -74,10 +93,9 @@ class HookConfig(BaseModel):
 
     @model_validator(mode="after")
     def _apply_defaults_and_constraints(self) -> Self:
-        if self.strict and self.type == HookType.POST_AGENT:
-            raise ValueError(
-                "strict is only valid for tool hooks (pre_tool / post_tool)"
-            )
+        if self.strict and self.type not in STRICT_HOOK_TYPES:
+            allowed = " / ".join(sorted(STRICT_HOOK_TYPES))
+            raise ValueError(f"strict is only valid for {allowed} hooks")
         if self.timeout is None:
             self.timeout = _DEFAULT_HOOK_TIMEOUT
         return self

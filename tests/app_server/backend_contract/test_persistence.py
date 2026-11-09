@@ -13,6 +13,7 @@ from tests.app_server.backend_contract.conftest import (
     connect_backend_contract_host,
 )
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server.events import ServerWarning
 from vibe.app_server.models import PublicCheckpointEntry, PublicMessageEntry
 from vibe.app_server.protocol import (
     AppServerResponseError,
@@ -180,6 +181,50 @@ async def test_compaction_keeps_the_public_session_and_history(
         )
         == 1
     )
+
+
+@pytest.mark.asyncio
+async def test_cut_off_compaction_warns_and_keeps_the_session_usable(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # Prepare
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response(
+                "<summary>One turn, cut", finish_reason="length"
+            ),
+            backend_contract_mistral_response(
+                "<summary>One turn, cut again", finish_reason="length"
+            ),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("<summary>Two turns</summary>"),
+        ]
+    )
+    session = backend_contract_persistent_session
+    _ = [event async for event in session.act("First")]
+
+    async def next_warning() -> str | None:
+        async for event in session.events():
+            if isinstance(event, ServerWarning):
+                return event.params.warning.code
+        return None
+
+    # Do
+    await session.compact()
+
+    # Assert
+    assert (
+        await asyncio.wait_for(next_warning(), timeout=10)
+        == "compaction_summary_cut_off"
+    )
+    _ = [event async for event in session.act("Second")]
+    assert [
+        entry.text for entry in session.history if isinstance(entry, PublicMessageEntry)
+    ][-2:] == ["Second", "Second answer"]
+    assert await session.compact() == "Two turns"
 
 
 @pytest.mark.asyncio

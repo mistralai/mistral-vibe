@@ -23,6 +23,7 @@ from vibe.cli.transcribe.transcribe_client_port import (
     TranscribeTextDelta,
 )
 from vibe.core.platform_auth import (
+    UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
     PlatformCredentialProvider,
     PlatformCredentialRequired,
     PlatformCredentialSnapshot,
@@ -160,4 +161,6 @@ def _process_credentials(api_key_env_var: str) -> PlatformCredentialProvider:
 def _credential_error(required: PlatformCredentialRequired) -> str:
     if required.reason == "missing":
         return "No Mistral credential: set an API key or sign in"
+    if required.reason == "unauthorized_after_refresh":
+        return UNAUTHORIZED_AFTER_REFRESH_MESSAGE
     return "Mistral sign-in required: sign in again"

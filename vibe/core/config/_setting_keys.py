@@ -80,7 +80,6 @@ _FORMER_DEFAULTS: Mapping[str, Any] = {
     "tool_paths": [],
     "vibe_code_api_key_env_var": "MISTRAL_API_KEY",
     "vibe_code_enabled": True,
-    "vim_keybindings": False,
 }
 # The same for tool settings, including those whose default has changed.
 _FORMER_TOOL_DEFAULTS: Mapping[str, Mapping[str, Any]] = {

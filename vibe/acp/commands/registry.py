@@ -10,7 +10,6 @@ class AcpCommandKind(StrEnum):
     RELOAD = auto()
     LOG = auto()
     MCP = auto()
-    TELEPORT = auto()
     PROXY_SETUP = auto()
     RETRY = auto()
     LEANSTALL = auto()
@@ -76,11 +75,6 @@ def _build_commands() -> dict[str, AcpCommand]:
             description="Show MCP OAuth status, login guidance, or log out an OAuth MCP server",
             kind=AcpCommandKind.MCP,
             input_hint="status | login <alias> | logout <alias>",
-        ),
-        "teleport": AcpCommand(
-            name="teleport",
-            description="Teleport session to Vibe Code Web",
-            kind=AcpCommandKind.TELEPORT,
         ),
         "proxy-setup": AcpCommand(
             name="proxy-setup",

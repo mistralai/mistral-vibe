@@ -102,6 +102,8 @@ class Scenario:
     screen_rows: Mapping[int, str] = field(default_factory=dict)
     screen_cursor: tuple[int, int] | None = None
     """Expected final terminal cursor ``(row, column)``."""
+    screen_hyperlinks: tuple[tuple[str, str], ...] | None = None
+    """Exact OSC 8 runs ``(text, target)`` on the final screen, top to bottom."""
     mouse_tracking: bool | None = None
     """Whether the terminal must end up reporting mouse events to the client."""
     mouse_tracking_seen: bool | None = None
@@ -201,6 +203,7 @@ def _build_scenario(module: ModuleType, name: str, origin: str) -> Scenario:
         screen_excludes=_texts(module, "screen_excludes"),
         screen_rows=getattr(module, "screen_rows", {}),
         screen_cursor=getattr(module, "screen_cursor", None),
+        screen_hyperlinks=getattr(module, "screen_hyperlinks", None),
         mouse_tracking=getattr(module, "mouse_tracking", None),
         mouse_tracking_seen=getattr(module, "mouse_tracking_seen", None),
         skip_reason=getattr(module, "skip", None),

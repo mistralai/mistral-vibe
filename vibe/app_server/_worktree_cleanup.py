@@ -1,12 +1,24 @@
-"""Removes archived sessions' worktrees off the request path, one worker per process."""
+"""Worktree housekeeping, run in the background worker process.
+
+``worktree_jobs`` is the job set the app server's ``WorktreeHousekeeping``
+registers: reaps of worktrees whose sessions finished, the sweep of every
+joined worktree and of the trash, and retention pruning.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
 import threading
+from typing import Any
 
-from vibe.core.git.worktree import ManagedWorktree, WorktreeReleaseOutcome
+from vibe.app_server._background_worker_process import Job, JobSet
+from vibe.core.git.worktree import (
+    BrokenCheckoutError,
+    BrokenCheckouts,
+    ManagedWorktree,
+    WorktreeReleaseOutcome,
+)
 from vibe.core.session.session_loader import SessionLoader
 from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
 from vibe.observability.logging import logger
@@ -34,10 +46,12 @@ class WorktreeCleanup:
         retry_delays: tuple[float, ...] = _RETRY_DELAYS,
         *,
         trust_store: TrustedFoldersManager | None = None,
+        broken: BrokenCheckouts | None = None,
     ) -> None:
         self._trust_store = trust_store or trusted_folders_manager
         self._session_finished = session_finished
         self._retry_delays = retry_delays
+        self.broken = broken or BrokenCheckouts()
         self._condition = threading.Condition()
         self._pending: dict[_Work, TrustedFoldersManager] = {}
         self._busy = False
@@ -58,6 +72,16 @@ class WorktreeCleanup:
 
     def sweep(self, *, trust_store: TrustedFoldersManager | None = None) -> None:
         self._enqueue(None, trust_store)
+
+    def prune(
+        self, limit: int, *, trust_store: TrustedFoldersManager | None = None
+    ) -> int:
+        return ManagedWorktree.prune(
+            limit,
+            self._session_finished,
+            trust_store=(trust_store or self._trust_store).for_session(),
+            broken=self.broken,
+        )
 
     def wait_idle(self, timeout: float) -> bool:
         with self._condition:
@@ -117,11 +141,16 @@ class WorktreeCleanup:
     def _complete(
         self, managed: ManagedWorktree, *, trust_store: TrustedFoldersManager
     ) -> bool:
+        if self.broken.known(managed):
+            return True
         # Broad: an escaping error would end the worker with work queued.
         try:
             release = managed.reap_if_finished(
                 self._session_finished, trust_store=trust_store
             )
+        except BrokenCheckoutError as exc:
+            self.broken.record(managed, exc)
+            return True
         except Exception as exc:
             logger.warning(
                 "Keeping worktree %s for now: its reap failed",
@@ -160,8 +189,31 @@ class WorktreeCleanup:
             self._enqueue(root, trust_store)
 
 
-_PROCESS_CLEANUP = WorktreeCleanup()
+def worktree_jobs(cleanup: WorktreeCleanup | None = None) -> JobSet:
+    cleanup = cleanup or WorktreeCleanup()
+
+    def trust(args: dict[str, Any]) -> TrustedFoldersManager:
+        return TrustedFoldersManager.from_decisions(args["trust"])
+
+    def reap(args: dict[str, Any]) -> None:
+        cleanup.schedule(Path(args["cwd"]), trust_store=trust(args))
+
+    def sweep(args: dict[str, Any]) -> None:
+        cleanup.sweep(trust_store=trust(args))
+
+    def prune(args: dict[str, Any]) -> int:
+        return cleanup.prune(args["limit"], trust_store=trust(args))
+
+    def wait_idle(args: dict[str, Any]) -> bool:
+        return cleanup.wait_idle(args["timeout"])
+
+    return {
+        # Reap and sweep only queue: inline, so a later prune or wait sees them.
+        "worktrees.reap": Job(reap, inline=True),
+        "worktrees.sweep": Job(sweep, inline=True),
+        "worktrees.prune": Job(prune),
+        "worktrees.wait_idle": Job(wait_idle),
+    }
 
 
-def worktree_cleanup() -> WorktreeCleanup:
-    return _PROCESS_CLEANUP
+__all__ = ["WorktreeCleanup", "session_finished", "worktree_jobs"]

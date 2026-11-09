@@ -10,6 +10,7 @@ fn anchor(row: i32, height: u16, landing: u16) -> ScrollAnchor {
         row,
         height,
         landing,
+        inset: 0,
         key: Some("entry".into()),
         reveal: true,
     }
@@ -28,6 +29,12 @@ fn a_cut_off_unchanged_entry_keeps_its_offset() {
 #[test]
 fn a_collapse_from_the_body_lands_the_header_on_the_clicked_row() {
     assert_eq!(anchored_row(&anchor(-30, 60, 12), 1, 2), 11);
+}
+
+#[test]
+fn a_loop_prompt_title_under_two_gap_rows_stays_put() {
+    assert_eq!(anchored_row(&anchor(-2, 9, 0), 2, 4), -2);
+    assert_eq!(anchored_row(&anchor(-9, 12, 3), 2, 4), 1);
 }
 
 #[test]
@@ -59,15 +66,42 @@ fn offset_clamps_to_the_document() {
 
 #[test]
 fn ctrl_o_while_pinned_keeps_following_the_newest_content() {
-    assert_eq!(bulk_toggle_anchor(0, &[(3, -2, 5)]), None);
+    assert_eq!(bulk_toggle_anchor(0, &[(3, -2, 5)], 0), None);
 }
 
 #[test]
 fn ctrl_o_while_scrolled_up_anchors_the_top_entry() {
-    let anchor = bulk_toggle_anchor(12, &[(3, -2, 5), (4, 3, 2)]).expect("anchor");
+    let anchor = bulk_toggle_anchor(12, &[(3, -2, 5), (4, 3, 2)], 0).expect("anchor");
     assert_eq!((anchor.index, anchor.row, anchor.height), (3, -2, 5));
     assert_eq!(
         (anchor.landing, anchor.key, anchor.reveal),
         (0, None, false)
     );
+}
+
+#[test]
+fn ctrl_o_under_a_pinned_prompt_anchors_the_first_entry_below_it() {
+    let anchor = bulk_toggle_anchor(12, &[(3, -2, 5), (4, 3, 4)], 4).expect("anchor");
+    assert_eq!((anchor.index, anchor.row, anchor.landing), (4, 3, 4));
+}
+
+#[test]
+fn ctrl_o_lands_a_hidden_header_just_under_the_pinned_prompt() {
+    let anchor = bulk_toggle_anchor(12, &[(3, -6, 9), (4, 3, 4)], 2).expect("anchor");
+    assert_eq!(anchored_row(&anchor, 1, 20), 1);
+}
+
+#[test]
+fn ctrl_o_folding_an_entry_whose_header_sits_under_the_pinned_prompt_lands_it_below() {
+    let anchor = bulk_toggle_anchor(12, &[(3, -1, 6)], 4).expect("anchor");
+    assert_eq!(anchored_row(&anchor, 1, 2), 3);
+}
+
+#[test]
+fn a_click_collapse_whose_header_sits_under_the_pinned_prompt_lands_it_on_the_clicked_row() {
+    let anchor = ScrollAnchor {
+        inset: 3,
+        ..anchor(1, 30, 5)
+    };
+    assert_eq!(anchored_row(&anchor, 1, 2), 4);
 }

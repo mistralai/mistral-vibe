@@ -17,6 +17,7 @@ pub enum Kind {
     Approval,
     Question,
     Voice,
+    Branch,
     ProxySetup,
     Theme,
     Model,
@@ -30,7 +31,6 @@ pub enum Kind {
     Context,
     McpOAuth,
     ConnectorAuth,
-    RemoteProject,
 }
 
 impl Kind {
@@ -39,7 +39,6 @@ impl Kind {
         match self {
             Kind::Approval => MouseTarget::Approval,
             Kind::Question => MouseTarget::Question,
-            Kind::RemoteProject => MouseTarget::RemoteProject,
             Kind::ProxySetup => MouseTarget::ProxySetup,
             _ => MouseTarget::BottomApp,
         }

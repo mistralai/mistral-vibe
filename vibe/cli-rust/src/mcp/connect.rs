@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use super::{back, rows, Event};
-use crate::app::App;
+use crate::app::{App, Severity};
 use crate::server::{method, Client, MCPSourceKind};
 
 /// Connect `name`; its detail view reads `Connecting...` until the answer lands.
@@ -42,8 +42,9 @@ pub(super) fn finished(app: &mut App, client: &Arc<Client>, name: &str, response
         })
     {
         leave(app, name);
-        crate::notices::refused(
+        crate::notices::inline(
             app,
+            Severity::Warning,
             "The connector is not ready yet. Press r to refresh in a moment.",
         );
     }
@@ -52,7 +53,7 @@ pub(super) fn finished(app: &mut App, client: &Arc<Client>, name: &str, response
 /// Say why `name` did not connect, leaving its `Connecting...` view if still on it.
 pub(super) fn failed(app: &mut App, name: &str, message: &str) {
     leave(app, name);
-    crate::notices::failed(app, message);
+    crate::notices::inline(app, Severity::Error, message);
 }
 
 /// Settle `name`'s connect and leave its `Connecting...` view if still on it.

@@ -70,7 +70,9 @@ Rules:
 - `$schema` must be exactly
   `https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`. Any other
   schema URL produces a fatal `plugin.schema.version_unsupported` error.
-- All fields other than those listed above are rejected (`extra="forbid"`).
+- Agent Plugins 1.0 defines no other top-level fields. Vibe ignores one with a
+  `plugin.manifest.unknown_field` warning and loads the rest; put Vibe settings
+  in the `ai.mistral.vibe` extension instead.
 
 ## Step 2 — Vibe extension (optional)
 
@@ -110,6 +112,11 @@ stays its identity.
 tool name from MCP servers or connectors. `exposure` is one of
 `programmatic`, `direct`, or `direct_and_programmatic`.
 
+Vibe ignores a key the extension's schema does not define, with a
+`plugin.extension.unknown_field` warning, and keeps the rest of the extension.
+An invalid value for a defined key drops the whole extension, and with it the
+plugin's hooks, knowledge, agents, libraries, and connectors.
+
 ## Step 3 — Skills (optional)
 
 Place skills under `skills/` — one subdirectory per skill, each containing a
@@ -123,8 +130,9 @@ skills/
 ```
 
 Skills follow the standard SKILL.md format with YAML frontmatter (`name`,
-`description`, `user-invocable`, `allowed-tools`). Plugin skills are namespaced
-as `<namespace>:<skill-name>` at runtime.
+`description`, `user-invocable`, `allowed-tools`). Plugin skills are named
+`<plugin-name>:<skill-name>` at runtime, with the plugin's name as written (for
+example `my-plugin:review`). Only tools use the `toolNamespace`.
 
 ## Step 4 — MCP servers (optional)
 
@@ -233,7 +241,7 @@ Rules:
 - Maximum 100 knowledge folders per plugin.
 - `KNOWLEDGE.md` entrypoint limit: 256 KB.
 - No symbolic links inside knowledge directories.
-- Knowledge is namespaced as `<namespace>:<name>`.
+- Knowledge is named `<plugin-name>:<name>`.
 
 ## Step 7 — Agents (optional, Vibe extension only)
 
@@ -273,7 +281,7 @@ Rules:
 - `safety` is one of `"safe"`, `"neutral"`, `"destructive"`, `"yolo"`.
 - Maximum 128 agents per plugin, 64 KB per file.
 - Tool lists cannot contain duplicates or empty names.
-- Agent names are namespaced as `<namespace>:<filename-stem>`.
+- Agent names are `<plugin-name>:<filename-stem>`.
 
 ## Step 8 — Libraries (optional, Vibe extension only)
 
@@ -346,6 +354,8 @@ most common ones:
 | `plugin.namespace.collision` | yes | two plugins claim one namespace |
 | `plugin.name.collision` | yes | two plugins share a name at the same scope |
 | `plugin.path.outside_root` | yes | a declared path escapes the plugin root |
+| `plugin.manifest.unknown_field` | no | `plugin.json` has a field Agent Plugins 1.0 does not define; it is ignored |
+| `plugin.extension.unknown_field` | no | the `ai.mistral.vibe` extension has a key its schema does not define; it is ignored |
 | `plugin.skill.invalid` | no | one `SKILL.md` failed to parse |
 | `plugin.hooks.invalid` | no | one hook entry failed validation |
 | `plugin.knowledge.invalid` | no | one knowledge folder failed validation |

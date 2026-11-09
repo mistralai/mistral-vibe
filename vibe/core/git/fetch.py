@@ -2,7 +2,7 @@
 
 Vibe can open repositories it did not create, so a fetch must not run a command
 chosen by the repository's configuration or by process state the checkout can
-influence. Teleport and the worktree refresh share this policy:
+influence. Every fetch, including the worktree refresh, follows this policy:
 
 - The remote is resolved to an explicit SSH or HTTPS URL, and the fetch passes
   that URL with explicit refspecs, so ``remote.<name>.vcs``, upload-pack

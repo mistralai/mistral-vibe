@@ -34,6 +34,6 @@ timeline: Timeline = ["/resume", "\r", "d", "d"]
 capture_startup = False
 capture_steps = {1, 3}
 screen_contains = (
-    "Deleted session 00000000",
+    "Deleted session 00000003",
     "No saved sessions left for this directory.",
 )

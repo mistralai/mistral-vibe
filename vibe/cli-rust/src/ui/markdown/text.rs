@@ -69,6 +69,76 @@ pub(crate) fn wrap_chars(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
     rows
 }
 
+/// A text split once into words, for repeated [`wrap_chars`] height queries.
+pub(crate) struct Words(Vec<Word>);
+
+struct Word {
+    hard_break: bool,
+    visible: usize,
+    total: usize,
+    graphemes: Vec<(u16, bool)>,
+}
+
+impl Words {
+    pub(crate) fn new(chars: &[Sc]) -> Self {
+        let words = split_words(chars).into_iter().map(|word| {
+            let text = word.iter().map(|sc| sc.0).collect::<String>();
+            let graphemes: Vec<(u16, bool)> = text
+                .graphemes(true)
+                .map(|grapheme| {
+                    let width = u16::try_from(grapheme.width()).unwrap_or(u16::MAX);
+                    (width, grapheme == " ")
+                })
+                .collect();
+            let total = graphemes
+                .iter()
+                .map(|grapheme| grapheme.0 as usize)
+                .sum::<usize>();
+            let trailing_spaces = word.iter().rev().take_while(|sc| sc.0 == ' ').count();
+            Word {
+                hard_break: word.len() == 1 && word[0].0 == '\n',
+                visible: total.saturating_sub(trailing_spaces),
+                total,
+                graphemes,
+            }
+        });
+        Self(words.collect())
+    }
+
+    /// `wrap_chars(chars, width).len()`, without building the rows.
+    pub(crate) fn height(&self, width: usize) -> usize {
+        let width = width.max(1);
+        let (mut rows, mut used, mut open) = (1, 0, false);
+        for word in &self.0 {
+            if word.hard_break || (open && used + word.visible > width) {
+                (rows, used, open) = (rows + 1, 0, false);
+                if word.hard_break {
+                    continue;
+                }
+            }
+            if word.visible <= width {
+                (used, open) = (used + word.total, true);
+                continue;
+            }
+            let (mut chunk, mut started, mut blank) = (0, false, true);
+            for &(cell, space) in &word.graphemes {
+                let cell = cell as usize;
+                if started && chunk + cell > width {
+                    rows += usize::from(!blank);
+                    (chunk, blank) = (0, true);
+                }
+                (chunk, started, blank) = (chunk + cell, true, blank && space);
+            }
+            if chunk > width {
+                rows += 1;
+            } else {
+                (used, open) = (used + chunk, true);
+            }
+        }
+        rows
+    }
+}
+
 /// [`wrap_chars`], pairing each row with its fold gap.
 pub(crate) fn wrap_chars_folded(chars: &[Sc], width: usize) -> Vec<(Vec<Sc>, Option<u16>)> {
     let text = |chars: &[Sc]| chars.iter().map(|sc| sc.0).collect::<String>();
@@ -166,3 +236,6 @@ pub(super) fn merge(chars: &[Sc]) -> Vec<Span<'static>> {
     }
     spans
 }
+
+#[cfg(test)]
+mod tests;

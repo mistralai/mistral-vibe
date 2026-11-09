@@ -386,135 +386,6 @@ class TestTelemetryClient:
         assert properties["session_id"] == "session-id"
         assert properties["parent_session_id"] == "parent-session-id"
 
-    def test_send_teleport_completed_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_teleport_completed(push_required=True, nb_session_messages=4)
-
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe.teleport_completed"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "push_required": True,
-            "nb_session_messages": 4,
-            "context_summary": "skipped",
-            "context_summary_chars": None,
-        }
-
-    def test_send_teleport_completed_payload_includes_project_picker_context(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_teleport_completed(
-            push_required=True,
-            nb_session_messages=4,
-            project_picker={
-                "project_picker_shown": True,
-                "project_selection_source": "selected_existing",
-                "project_candidate_count_loaded": 3,
-                "project_multi_repo_match_count": 1,
-                "saved_project_link_cleared": False,
-                "project_repo_remote_changed": False,
-            },
-        )
-
-        assert telemetry_events[0]["event_name"] == "vibe.teleport_completed"
-        assert {
-            "project_picker_shown": True,
-            "project_selection_source": "selected_existing",
-            "project_candidate_count_loaded": 3,
-            "project_multi_repo_match_count": 1,
-            "saved_project_link_cleared": False,
-            "project_repo_remote_changed": False,
-        }.items() <= telemetry_events[0]["properties"].items()
-
-    def test_send_teleport_failed_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_teleport_failed(
-            stage="push",
-            error_class="ServiceTeleportError",
-            push_required=True,
-            nb_session_messages=4,
-        )
-
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe.teleport_failed"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "stage": "push",
-            "error_class": "ServiceTeleportError",
-            "push_required": True,
-            "nb_session_messages": 4,
-            "context_summary": "skipped",
-            "context_summary_chars": None,
-        }
-
-    def test_send_teleport_failed_payload_includes_error_details(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_teleport_failed(
-            stage="workflow_start",
-            error_class="ServiceTeleportError",
-            push_required=False,
-            nb_session_messages=4,
-            error_details={"failure_kind": "http_error", "http_status_code": 502},
-        )
-
-        assert telemetry_events[0]["event_name"] == "vibe.teleport_failed"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "stage": "workflow_start",
-            "error_class": "ServiceTeleportError",
-            "push_required": False,
-            "nb_session_messages": 4,
-            "context_summary": "skipped",
-            "context_summary_chars": None,
-            "failure_kind": "http_error",
-            "http_status_code": 502,
-        }
-
-    def test_send_remote_project_configured_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_remote_project_configured(
-            outcome="configured",
-            project_picker={
-                "project_picker_shown": True,
-                "project_selection_source": "selected_existing",
-                "project_candidate_count_loaded": 2,
-                "project_multi_repo_match_count": 0,
-                "saved_project_link_cleared": False,
-                "project_repo_remote_changed": False,
-            },
-        )
-
-        assert telemetry_events[0]["event_name"] == "vibe.remote_project_configured"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "outcome": "configured",
-            "project_picker_shown": True,
-            "project_selection_source": "selected_existing",
-            "project_candidate_count_loaded": 2,
-            "project_multi_repo_match_count": 0,
-            "saved_project_link_cleared": False,
-            "project_repo_remote_changed": False,
-        }
-
     def test_send_new_session_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
@@ -538,6 +409,7 @@ class TestTelemetryClient:
             has_outside_workdir_deny=False,
             nb_post_agent_scoped_hooks=2,
             nb_post_agent_main_hooks=1,
+            nb_hooks_by_type={"pre_agent": 2, "notification": 1},
         )
 
         assert len(telemetry_events) == 1
@@ -550,6 +422,8 @@ class TestTelemetryClient:
         assert properties["nb_models"] == 3
         assert properties["nb_post_agent_scoped_hooks"] == 2
         assert properties["nb_post_agent_main_hooks"] == 1
+        assert properties["nb_hooks_pre_agent"] == 2
+        assert properties["nb_hooks_notification"] == 1
         assert properties["entrypoint"] == "cli"
         assert properties["host_kind"] == "local"
         assert properties["client_name"] == "vscode"

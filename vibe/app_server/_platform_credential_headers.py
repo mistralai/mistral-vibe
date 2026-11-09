@@ -14,6 +14,7 @@ from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server.protocol import ProtocolErrorCode
 from vibe.core.platform_auth import (
+    UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
     PlatformCredentialFactory,
     PlatformCredentialRequired,
 )
@@ -51,6 +52,12 @@ async def platform_credential_headers(
             ProtocolErrorCode.INTERNAL_ERROR, "Platform credential resolution failed"
         ) from None
     if isinstance(snapshot, PlatformCredentialRequired):
+        if snapshot.reason == "unauthorized_after_refresh":
+            raise RequestFailure(
+                ProtocolErrorCode.UNAUTHORIZED,
+                UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
+                {"reason": snapshot.reason},
+            )
         raise RequestFailure(
             ProtocolErrorCode.UNAUTHORIZED,
             f"Platform credential is {snapshot.reason}; sign in again",

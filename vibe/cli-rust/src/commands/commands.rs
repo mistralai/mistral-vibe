@@ -1,7 +1,22 @@
 //! Built-in slash commands, hardcoded in the client.
 
+use crate::app::App;
 use crate::completion_manager::CompletionEntry;
 use crate::skill::Skill;
+
+/// A config feature a command needs before help and completion offer it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Feature {
+    PrMonitoring,
+}
+
+impl Feature {
+    pub fn is_on(self, app: &App) -> bool {
+        match self {
+            Self::PrMonitoring => app.artifacts_modal.enabled,
+        }
+    }
+}
 
 /// One `/`-prefixed alias group; `side_channel` marks the
 /// commands that still run while the session is busy. The first alias is canonical.
@@ -9,10 +24,12 @@ pub struct Command {
     pub aliases: &'static [&'static str],
     pub description: &'static str,
     pub side_channel: bool,
-    /// A side-channel command that still waits for a compaction, teleport, project request or agent install.
+    /// A side-channel command that still waits for a compaction or agent install.
     pub waits_for_jobs: bool,
     /// Inline hint shown after `/command ` until an argument is typed; empty when none.
     pub arguments: &'static str,
+    /// Hidden from help and completion while this feature is off; typing it still runs it.
+    pub requires: Option<Feature>,
 }
 
 const fn cmd(
@@ -26,6 +43,7 @@ const fn cmd(
         side_channel,
         waits_for_jobs: false,
         arguments: "",
+        requires: None,
     }
 }
 
@@ -37,6 +55,13 @@ impl Command {
     const fn after_jobs(self) -> Self {
         Self {
             waits_for_jobs: true,
+            ..self
+        }
+    }
+
+    const fn requires(self, feature: Feature) -> Self {
+        Self {
+            requires: Some(feature),
             ..self
         }
     }
@@ -67,6 +92,8 @@ const COMMANDS: &[Command] = &[
     cmd(&["/proxy-setup"], "Configure proxy and SSL certificate settings", true).after_jobs(),
     cmd(&["/resume", "/continue"], "Browse, resume, or delete saved sessions", false),
     cmd(&["/rename"], "Rename the current session", true).args("<title>"),
+    cmd(&["/pr"], "Show this session's pull requests and merge requests", true)
+        .requires(Feature::PrMonitoring),
     cmd(&["/mcp", "/connectors"], "Display available MCP servers and connectors. Pass a name to list tools; subcommands: add <url> [--transport http|streamable-http], status, login <alias>, logout <alias>", false)
         .args("[name] | add <url> | status | login <alias> | logout <alias>"),
     cmd(&["/plugins"], "Display the plugins this session is running", false),
@@ -75,19 +102,12 @@ const COMMANDS: &[Command] = &[
     cmd(&["/leanstall"], "Install the Lean 4 agent (leanstral)", false),
     cmd(&["/unleanstall"], "Uninstall the Lean 4 agent", false),
     cmd(&["/rewind"], "Rewind to a previous message (or press Esc twice)", false),
-    cmd(&["/branch", "/fork"], "Fork the current conversation into a new resumable session, leaving this session unchanged. Resume the copy with `vibe --resume <id>`.", false),
+    cmd(&["/branch", "/fork"], "Fork the current conversation into a new resumable session, leaving this session unchanged. Resume the copy with `vibe --resume <id>`.", true).after_jobs(),
     cmd(&["/retry"], "Retry a failed or interrupted response; optionally pass additional instructions", false).args("[instructions]"),
     cmd(&["/loop"], "Schedule a recurring prompt: /loop [schedule] [prompt]", false).args("[schedule] [prompt]"),
     cmd(&["/data-retention"], "Show data retention information", true),
     cmd(&["/release-notes", "/whatsnew"], "Browse the release notes of every Vibe version", true),
     cmd(&["/theme"], "Select theme", true).after_jobs(),
-    cmd(&["/teleport"], "Teleport session to Vibe Code Web", false),
-    cmd(
-        &["/remote-project"],
-        "Select the Vibe Code Web project for this repository",
-        true,
-    )
-    .after_jobs(),
 ];
 
 const PASTE_IMAGE: Command = cmd(
@@ -100,6 +120,11 @@ const PASTE_IMAGE: Command = cmd(
 fn available() -> impl Iterator<Item = &'static Command> {
     let paste_image = crate::paste_image::is_supported() && !crate::utils::is_replaying();
     COMMANDS.iter().chain(paste_image.then_some(&PASTE_IMAGE))
+}
+
+/// The commands help and completion offer: those whose feature is on.
+fn offered(on: impl Fn(Feature) -> bool) -> impl Iterator<Item = &'static Command> {
+    available().filter(move |command| command.requires.is_none_or(&on))
 }
 
 /// Whether a built-in command with this canonical alias is registered.
@@ -127,7 +152,7 @@ pub fn is_side_channel(label: &str) -> bool {
     available().any(|command| command.aliases.contains(&label) && command.side_channel)
 }
 
-/// Whether a side-channel command still waits for a compaction, teleport, project request or agent install.
+/// Whether a side-channel command still waits for a compaction or agent install.
 pub fn waits_for_jobs(label: &str) -> bool {
     available().any(|command| command.aliases.contains(&label) && command.waits_for_jobs)
 }
@@ -155,8 +180,8 @@ pub fn parse(input: &str) -> Option<&'static str> {
 
 /// Built-in commands only (no skills), one entry per command group, for `/help`.
 /// Each label joins all aliases in backticks, canonical first.
-pub fn builtin() -> Vec<(String, String)> {
-    available()
+pub fn builtin(on: impl Fn(Feature) -> bool) -> Vec<(String, String)> {
+    offered(on)
         .map(|command| {
             let labels = command
                 .aliases
@@ -172,8 +197,8 @@ pub fn builtin() -> Vec<(String, String)> {
 /// The full popup entry list, expanding aliases into individual entries,
 /// merging with skills as `/name`, sorted by name then description. A skill
 /// named like a built-in is left out, since typing its name runs the built-in.
-pub fn entries(skills: &[Skill]) -> Vec<CompletionEntry> {
-    let mut out: Vec<CompletionEntry> = available()
+pub fn entries(skills: &[Skill], on: impl Fn(Feature) -> bool) -> Vec<CompletionEntry> {
+    let mut out: Vec<CompletionEntry> = offered(on)
         .flat_map(|command| {
             command
                 .aliases

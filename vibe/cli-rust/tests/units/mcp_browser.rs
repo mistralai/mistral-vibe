@@ -1,12 +1,12 @@
 //! MCP browser rows, wire tolerance and runtime adoption.
 
 use serde_json::{json, Value};
-use vibe_rs::app::App;
+use vibe_rs::app::{App, Severity};
 use vibe_rs::mcp::{self, rows, rows::Row};
 use vibe_rs::server::{MCPSourceKind, MCPSourceStatus, MCPState};
 use vibe_rs::ui_event::{self, UiEvent};
 
-use crate::feedback_support::{errors, warnings};
+use crate::feedback_support::{errors, notice, warnings};
 use crate::support::stub;
 
 fn source(name: &str, kind: &str, extra: Value) -> Value {
@@ -400,7 +400,8 @@ fn rejected_toggle_restores_the_server_state_and_warns() {
     assert_eq!(status(&app, "fs"), MCPSourceStatus::Disabled);
     mcp::apply_event(&mut app, &client, toggle_failed("fs", None));
     assert_eq!(status(&app, "fs"), MCPSourceStatus::Connected);
-    assert_eq!(errors(&app), ["rejected"]);
+    assert_eq!(notice(&app), Some((Severity::Error, "rejected")));
+    assert!(errors(&app).is_empty());
 }
 
 fn toggle_failed(name: &str, tool_name: Option<&str>) -> mcp::Event {
@@ -463,9 +464,13 @@ fn plugin_server_toggles_are_refused_locally() {
     mcp::set_disabled(&mut app, &stub(), true);
     assert_eq!(status(&app, "fs"), MCPSourceStatus::Connected);
     assert_eq!(
-        warnings(&app),
-        ["fs is managed by the devtools plugin and cannot be toggled here."]
+        notice(&app),
+        Some((
+            Severity::Warning,
+            "fs is managed by the devtools plugin and cannot be toggled here."
+        ))
     );
+    assert!(warnings(&app).is_empty());
 }
 
 fn opened(app: &mut App, reopened: bool) {
@@ -624,7 +629,10 @@ fn a_failed_connect_leaves_another_viewed_connector_alone() {
     mcp::apply_event(&mut app, &stub(), failed);
     assert_eq!(app.mcp.viewing_name.as_deref(), Some("wiki"));
     assert_eq!(app.mcp.connecting.as_deref(), Some("wiki"));
-    assert_eq!(errors(&app).len(), 1);
+    assert_eq!(
+        notice(&app),
+        Some((Severity::Error, "Could not connect DeepWiki (HTTP 503)."))
+    );
 }
 
 #[test]

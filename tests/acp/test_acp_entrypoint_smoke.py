@@ -424,7 +424,7 @@ async def test_vibe_acp_survives_broken_config(vibe_home_dir: Path) -> None:
 def test_acp_agent_import_does_not_load_gitpython() -> None:
     # GitPython probes for a git executable on import and raises when none is
     # found. The ACP startup path (e.g. `vibe-acp --version`) must not import it,
-    # so binaries run on machines without git. See teleport lazy import.
+    # so binaries run on machines without git.
     result = subprocess.run(
         [
             sys.executable,

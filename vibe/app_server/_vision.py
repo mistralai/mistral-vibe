@@ -171,6 +171,8 @@ class SessionImageDescriber:
         )
 
     def _image_text(self, attachment: CoreImageAttachment) -> str:
+        # pre_agent hooks recognize a described image by this shape, so they never
+        # take it for the text the user typed (see the local harness _foreign_hooks).
         body = self._describer.cached(attachment) or UNREADABLE_IMAGE
         return f'<image alias="{attachment.alias}">\n{body}\n</image>'
 

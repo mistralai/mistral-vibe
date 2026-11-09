@@ -43,7 +43,10 @@ async def test_agents_list_offers_smart_approve_from_cached_experiment(
         lambda _config, _credentials=None: _smart_approve_available_response(),
     )
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(

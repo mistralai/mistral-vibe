@@ -13,6 +13,7 @@ from typing import Any, cast
 from vibe.app_server._approval_permissions import available_path_scopes
 from vibe.app_server._effect_output_cap import capped_effect_entry
 from vibe.app_server._loop_prompt import project_loop_message
+from vibe.app_server._session_message import project_session_message
 from vibe.app_server._skill_invocation import (
     invoked_skill_payloads,
     skill_invocation_display_names,
@@ -28,6 +29,7 @@ from vibe.app_server._unified_tool_projection import (
 from vibe.app_server.models import (
     ApprovalCallbackDetail,
     CompletedEffectState,
+    GenericEffectDetail,
     PublicCallbackEntry,
     PublicEffectEntry,
     PublicEntryGenerationStatus,
@@ -59,7 +61,7 @@ def project_raw_history_entry(
 def project_history_entry(
     value: object, display_roots: Sequence[Path]
 ) -> PublicHistoryEntry:
-    source = validate_history_entry(value)
+    source = with_approval_display(validate_history_entry(value))
     category = unified_tool_category(source)
     projected = project_unified_history_entry(source, display_roots)
     if category is not None:
@@ -74,8 +76,60 @@ def project_history_entry(
         )
     return capped_effect_entry(
         with_available_path_scopes(
-            project_loop_message(normalize_effect_output(projected))
+            project_session_message(
+                project_loop_message(normalize_effect_output(projected))
+            )
         )
+    )
+
+
+def approval_call_display(tool_name: str) -> EffectCallDisplay:
+    """How Vibe asks to run a tool, whatever wording the Runtime sent.
+
+    A tool with a projection of its own replaces this with its own wording;
+    `process.start` keeps this one when its projection cannot apply.
+    """
+    if tool_name == "process.start":
+        return EffectCallDisplay(
+            summary=tool_name,
+            verb="Run",
+            message=(
+                "Start an interactive process. Vibe may send it further input "
+                "until it exits or is stopped."
+            ),
+            settled_verb="Ran",
+            settled_message=tool_name,
+            status_text="Waiting for approval to start an interactive process",
+        )
+    return EffectCallDisplay(
+        summary=tool_name,
+        verb="Run",
+        message=tool_name,
+        settled_verb="Ran",
+        settled_message=tool_name,
+        status_text=f"Waiting for approval to run {tool_name}",
+    )
+
+
+def with_approval_display[HistoryEntryT: PublicHistoryEntry](
+    entry: HistoryEntryT,
+) -> HistoryEntryT:
+    if not isinstance(entry, PublicCallbackEntry) or not isinstance(
+        entry.detail, ApprovalCallbackDetail
+    ):
+        return entry
+    effect = entry.detail.effect
+    if not isinstance(effect, GenericEffectDetail):
+        return entry
+    display = approval_call_display(effect.tool_name)
+    if effect.display == display:
+        return entry
+    return entry.model_copy(
+        update={
+            "detail": entry.detail.model_copy(
+                update={"effect": effect.model_copy(update={"display": display})}
+            )
+        }
     )
 
 
@@ -203,9 +257,11 @@ def normalize_effect_output(entry: PublicHistoryEntry) -> PublicHistoryEntry:
 
 
 __all__ = [
+    "approval_call_display",
     "normalize_effect_output",
     "project_history_entries",
     "project_history_entry",
     "project_raw_history_entry",
+    "with_approval_display",
     "with_available_path_scopes",
 ]

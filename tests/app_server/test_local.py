@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import Mock
 
 from git import Repo
 import pytest
@@ -15,7 +15,6 @@ from vibe.app_server import _runtime as runtime
 import vibe.app_server._host as host_module
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._process_services import ProcessServices
-from vibe.app_server._worktree_cleanup import session_finished
 from vibe.app_server._worktree_session import SessionWorktrees
 from vibe.app_server.protocol import (
     AutoWorktreeInput,
@@ -524,7 +523,10 @@ async def test_passive_host_lists_linked_worktrees(
     _init_repo(tmp_path)
     worktree = _prepare("host-listed", tmp_path, branch="feat/host-listed")
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -549,32 +551,48 @@ async def test_passive_host_lists_linked_worktrees(
 
 
 @pytest.mark.asyncio
-async def test_passive_host_uses_worktree_limit(
-    config_dir: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+async def test_passive_host_prunes_over_the_worktree_limit_in_the_worker(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
 ) -> None:
-    (config_dir / "config.toml").write_text("worktree_limit = 25\n")
+    """*Prepare*: A worktree limit of 1, two managed worktrees, and a prune
+    that would fail if it ran in this process.
+    *Do*: Ask the host to prune.
+    *Assert*: The oldest worktree is removed, by the background worker.
+    """
+    # Prepare
+    (config_dir / "config.toml").write_text("worktree_limit = 1\n")
+    _init_repo(tmp_path)
+    oldest = _prepare_auto(tmp_path)
+    _finish_worktree_start(oldest)
+    newest = _prepare_auto(tmp_path)
+    _finish_worktree_start(newest)
+
+    def in_this_process(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("pruned in the app-server process")
+
+    monkeypatch.setattr(ManagedWorktree, "prune", in_this_process)
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
-    prune = Mock(return_value=2)
-    monkeypatch.setattr(ManagedWorktree, "prune", prune)
-    cleanup = Mock()
-    monkeypatch.setattr("vibe.app_server._host.worktree_cleanup", lambda: cleanup)
-    prune_result = await handler.dispatch(
+    # Do
+    result = await handler.dispatch(
         "workspace/git/worktrees/prune",
         WorkspaceWorktreePruneParams().model_dump(mode="json", by_alias=True),
     )
 
-    prune_response = cast(WorkspaceWorktreePruneResponse, prune_result.response)
-    assert prune_response.removed == 2
-    assert prune.call_args.args == (25, session_finished)
-    assert (
-        prune.call_args.kwargs["trust_store"] is not handler._harness_files.trust_store
-    )
-    cleanup.sweep.assert_called_once_with(
-        trust_store=handler._harness_files.trust_store
-    )
+    # Assert
+    assert cast(WorkspaceWorktreePruneResponse, result.response).removed == 1
+    assert not oldest.root.exists()
+    assert newest.root.is_dir()
+    worker_pid = process_services.background.pid
+    assert worker_pid is not None and worker_pid != os.getpid()
 
 
 @pytest.mark.asyncio
@@ -582,7 +600,10 @@ async def test_passive_host_updates_worktree_limit(
     config_dir: Path, process_services: ProcessServices
 ) -> None:
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -608,7 +629,10 @@ async def test_passive_host_reports_the_repository_counterpart(
     (tmp_path / "packages" / "api").mkdir(parents=True)
     (worktree.root / "packages" / "api").mkdir(parents=True)
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -636,7 +660,10 @@ async def test_passive_host_reports_the_counterpart_of_a_retained_worktree(
     (retained_cwd / "saved.txt").write_text("saved\n")
     assert ManagedWorktree.prune(limit=0) == 1
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -667,7 +694,10 @@ async def test_retained_worktree_listing_ignores_a_repository_above_its_leftover
     retained_cwd.mkdir(parents=True)
     _init_repo(config_dir.parent)
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -697,7 +727,10 @@ async def test_passive_host_reports_no_counterpart_outside_the_main_checkout(
     worktree = _prepare("only-here", tmp_path, branch="feat/only-here")
     (worktree.root / "packages" / "api").mkdir(parents=True)
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -726,7 +759,10 @@ async def test_passive_host_lists_no_worktrees_without_git(
 
     monkeypatch.setattr(WorktreeRepository, "linked", missing_git)
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -753,7 +789,10 @@ async def test_passive_host_reads_the_main_checkout(
     """The main checkout is absent from the worktree listing by design."""
     _init_repo(tmp_path)
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -792,7 +831,10 @@ async def test_passive_host_reads_the_worktree_holding_the_session(
     _init_repo(tmp_path)
     worktree = _prepare("status-listed", tmp_path, branch="feat/status-listed")
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -837,7 +879,10 @@ async def test_passive_host_keeps_an_unreadable_repository_as_the_holder(
 
     monkeypatch.setattr(WorktreeRepository, "linked", unreadable_inner)
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -867,7 +912,10 @@ async def test_passive_host_reads_the_branch_of_a_worktree_the_listing_skips(
     worktree = _prepare("detached-listed", tmp_path, branch="feat/detached-listed")
     Repo(worktree.root).git.checkout("--detach")
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -892,7 +940,10 @@ async def test_passive_host_leaves_out_a_path_git_knows_nothing_about(
     # git knows nothing about, and an entry for it would put a permanent error
     # in the header rather than simply nothing.
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(
@@ -911,7 +962,10 @@ async def test_passive_host_lists_no_worktrees_for_non_git_root(
     tmp_path: Path, process_services: ProcessServices
 ) -> None:
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     result = await handler.dispatch(

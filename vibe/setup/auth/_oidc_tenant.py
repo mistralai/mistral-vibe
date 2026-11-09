@@ -18,6 +18,7 @@ import threading
 import time
 from typing import Any
 
+import httpx2
 from pydantic import BaseModel
 
 from vibe.core.platform_auth._mistral import OIDC_PRINCIPAL_PREFIX
@@ -63,6 +64,10 @@ class TenantSelection:
         )
 
 
+class OidcUnauthorized(OidcError):
+    """The platform refused the ID token itself (HTTP 401)."""
+
+
 class _Workspace(BaseModel):
     id: str
     organization_id: str
@@ -92,6 +97,8 @@ async def discover_tenant(
                 params={"limit": _PAGE_SIZE, "offset": offset},
                 headers={"Authorization": f"Bearer {id_token}"},
             )
+            if response.status_code == httpx2.codes.UNAUTHORIZED:
+                raise OidcUnauthorized("OIDC sign-in was refused; sign in again")
             response.raise_for_status()
             page = _Workspaces.model_validate(response.json())
             for workspace in page.workspaces:
@@ -111,6 +118,16 @@ type _Key = tuple[str, str, TenantSelection]
 class _Failure:
     error: OidcError
     retry_at: float
+    # Digest of the token that failed: a refused token's failure does not
+    # answer for the token a refresh replaced it with.
+    token_digest: str
+
+    def answers(self, id_token: str, now: float) -> bool:
+        if now >= self.retry_at:
+            return False
+        return not isinstance(self.error, OidcUnauthorized) or (
+            self.token_digest == _digest(id_token)
+        )
 
 
 class _Abandoned(Exception):
@@ -162,7 +179,7 @@ class OidcTenantResolver:
                 return tenant
             with self._lock:
                 failure = self._failures.get(key)
-                if failure is not None and self._clock() < failure.retry_at:
+                if failure is not None and failure.answers(id_token, self._clock()):
                     raise failure.error
                 flight = self._flights.get(key)
                 owner = flight is None
@@ -191,18 +208,18 @@ class OidcTenantResolver:
                     audience, id_token, selection.workspace_id
                 )
         except OidcError as exc:
-            self._settle(key, flight, started, failure=exc)
+            self._settle(key, flight, started, id_token, failure=exc)
             raise
         except Exception:
             error = OidcError(
                 f"OIDC workspace discovery failed; retry or set {ORGANIZATION_ENV}"
             )
-            self._settle(key, flight, started, failure=error)
+            self._settle(key, flight, started, id_token, failure=error)
             raise error from None
         except BaseException:
-            self._settle(key, flight, started, failure=None)
+            self._settle(key, flight, started, id_token, failure=None)
             raise
-        self._settle(key, flight, started, tenant=tenant)
+        self._settle(key, flight, started, id_token, tenant=tenant)
         return tenant
 
     def invalidate(self, principal: str | None = None) -> None:
@@ -228,6 +245,7 @@ class OidcTenantResolver:
         key: _Key,
         flight: Future[OidcTenant],
         started: tuple[int, int],
+        id_token: str,
         *,
         tenant: OidcTenant | None = None,
         failure: OidcError | None = None,
@@ -244,12 +262,16 @@ class OidcTenantResolver:
                 self._failures.pop(key, None)
             elif current and failure is not None:
                 self._failures[key] = _Failure(
-                    failure, self._clock() + _FAILURE_RETRY_S
+                    failure, self._clock() + _FAILURE_RETRY_S, _digest(id_token)
                 )
         if tenant is not None:
             flight.set_result(tenant)
         else:
             flight.set_exception(failure or _Abandoned())
+
+
+def _digest(id_token: str) -> str:
+    return sha256(id_token.encode()).hexdigest()
 
 
 def tenant_principal(
@@ -273,6 +295,7 @@ def tenant_principal(
 __all__ = [
     "OidcTenant",
     "OidcTenantResolver",
+    "OidcUnauthorized",
     "TenantSelection",
     "discover_tenant",
     "tenant_principal",

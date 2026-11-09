@@ -214,12 +214,9 @@ pub fn apply_event(app: &mut App, event: Event) {
             *state,
         ),
         Event::Failed(message) => {
-            crate::notices::failed(app, &message);
+            crate::notices::inline(app, Severity::Error, &message);
             if app.rewind.entry_id.is_none() {
                 quit(app);
-            } else {
-                // The panel keeps the conversation scrolled to the selection, off the new row.
-                crate::ui::notice::show_sticky(app, Severity::Error, &message);
             }
         }
     }

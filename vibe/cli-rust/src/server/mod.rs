@@ -26,13 +26,11 @@ pub mod proto_entry;
 pub mod proto_fork;
 pub mod proto_mcp;
 pub mod proto_plugins;
-pub mod proto_projects;
 pub mod proto_proxy;
 pub mod proto_questions;
 pub mod proto_runtime;
 pub mod proto_stats;
 pub mod proto_subagents;
-pub mod proto_teleport;
 pub mod proto_trust;
 pub mod proto_turn;
 pub mod reader;
@@ -44,7 +42,7 @@ pub mod web_output;
 #[cfg(windows)]
 mod windows_job;
 
-pub use child::{ChildHandle, SHUTDOWN_GRACE};
+pub use child::{ChildHandle, SESSION_STOP_GRACE, SHUTDOWN_GRACE};
 pub use connect::{Connect, Connected, Connection};
 pub use effect::*;
 pub use effect_output::*;

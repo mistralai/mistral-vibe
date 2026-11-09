@@ -48,6 +48,12 @@ Then, use uv command below.
 uv tool install mistral-vibe
 ```
 
+If a new terminal then reports that `vibe` is not found, add uv's tool directory to your `PATH`, then open a new terminal:
+
+```bash
+uv tool update-shell
+```
+
 Vibe needs a GIL-enabled build of Python 3.12 or later. If you have a free-threaded (no-GIL) Python installed and the install fails, force the GIL build of Python 3.14:
 
 ```bash
@@ -144,8 +150,11 @@ custom agent file in `~/.vibe/agents/` or the project's `.vibe/agents/`
 directory. Subagents such as `explore` are not accepted.
 
 > Note: `default_agent` applies in both interactive and programmatic
-> (`-p` / `--prompt`) sessions. Pass `--auto-approve` or `--yolo` with any
-> agent when a run should approve all tool calls without prompting.
+> (`-p` / `--prompt`) sessions. Pass `--auto-approve` or `--yolo` when a run
+> should approve all tool calls without prompting: a new session on a built-in
+> mode (`ask`, `accept-edits`, `smart-approve`) starts the `auto-approve` agent
+> instead, and resumes on it; a custom agent keeps running with every call
+> approved.
 
 ### Subagents and Task Delegation
 
@@ -269,7 +278,9 @@ Rust binary (`vibe-rs`) bundled with the package.
 - **File Paths**: Reference files in your prompt using the `@` symbol for smart autocompletion (e.g., `> Read the file @src/agent.py`). A bare `@` quickly lists immediate non-hidden entries; after a path character, Git workspaces suggest tracked and non-ignored files. Pasting a standalone existing absolute or home-relative file or folder also creates a mention.
 - **Shell Commands**: Prefix any command with `!` to execute it directly in your shell, bypassing the agent (e.g., `> !ls -l`).
 - **External Editor**: Press `Ctrl+G` to edit your current input in an external editor.
-- **History Search**: Press `Ctrl+R` to search your previous prompts. Type in the `reverse-i-search:` field of the bottom bar; the input previews the newest prompt containing your text. `↑`/`Ctrl+R` move to older matches, `↓`/`Ctrl+S` to newer ones, `Enter` keeps the match in the input for editing, and `Esc` or `Ctrl+C` restores your draft.
+- **History Search**: Press `Ctrl+R` to search your previous prompts. Type in the `reverse-i-search:` field of the bottom bar; the input previews the newest prompt containing your text. `↑`/`Ctrl+R` move to older matches, `↓`/`Ctrl+S` to newer ones, `Enter` keeps the match in the input for editing, and `Esc` or `Ctrl+C` restores your draft. In vim Normal mode `Ctrl+R` redoes instead; press `i` first to search.
+- **Vim Keybindings**: Set `vim_keybindings = true` (in `config.toml` or `/config`) to edit the prompt with vim Normal and Insert modes. It covers common motions and edits (`hjkl`, `w b e`, `0 $`, `i a o`, `x dd dw cw`, `u`), not visual mode, yank/paste or `:` commands.
+- **Sticky Prompt**: While you scroll, the prompt of the section at the top of the transcript stays pinned there; click it to scroll back to it. Set `enable_sticky_prompt = false` (in `config.toml` or `/config`) to turn it off.
 - **Tool Output Toggle**: Press `Ctrl+O` to toggle the tool output view.
 - **Debug Console**: Press `Ctrl+\` to toggle the debug console.
 - **Agent Selection**: Press `Shift+Tab` to cycle through agents (ask, accept-edits, ...).
@@ -278,7 +289,7 @@ Rust binary (`vibe-rs`) bundled with the package.
 
 ### Copying & Text Selection
 
-- **Copy**: Use `Ctrl+Y` or `Ctrl+Shift+C` to copy the current selection to clipboard. With autocopy enabled (default via `autocopy_to_clipboard = true`), mouse selection automatically copies on release and shows a brief confirmation.
+- **Copy**: Use `Ctrl+Y` or `Ctrl+Shift+C` to copy the current selection to clipboard. On macOS and Linux, with nothing selected, `Ctrl+Y` pastes back the text last deleted with `Ctrl+K`, `Ctrl+U`, `Ctrl+W` or `Alt+D`. With autocopy enabled (default via `autocopy_to_clipboard = true`), mouse selection automatically copies on release and shows a brief confirmation.
 - **Multi-click selection**: Double-click selects a word, triple-click selects the paragraph. Dragging extends the selection at the same granularity. Clicking a collapsible transcript entry (tool group, tool call, reasoning) toggles it on every click; drag to select its text.
 - **Linux clipboard**: In a local Linux session, Vibe copies through `wl-copy`, `xclip`, or `xsel`. If pasting fails, install `xclip` (or `wl-clipboard`), or hold Shift while selecting to use your terminal's native selection. Over SSH, Vibe relies on OSC 52 alone, so your terminal must support it.
 - **tmux clipboard**: Inside tmux, Vibe copies with `tmux load-buffer -w`, so the text lands in a tmux paste buffer and reaches your terminal's clipboard without `allow-passthrough`. Keep tmux's `set-clipboard` option `on` or `external` (the default). When tmux's `mouse` option is off (the default before tmux 3.8), Vibe leaves the mouse to your terminal, so its native selection and copy work as with `enable_mouse_capture = false`. After `set -g mouse on` in tmux, restart Vibe (or press `Ctrl+Z` then run `fg`) to get its mouse features back.
@@ -313,6 +324,25 @@ To approve all tool calls without prompting, pass `--auto-approve` or `--yolo`
 vibe --prompt "Refactor the main function in cli/main.py to be more modular." --auto-approve
 ```
 
+Without `--auto-approve`, a tool call that would ask for approval is denied, and the
+agent is told so. This lets an agent's allowlist restrict the shell to a few
+commands, for example only the test runner (`~/.vibe/agents/tester.toml`):
+
+```toml
+[tools.bash]
+permission = "ask"
+allowlist = ["pytest", "npm test"]
+```
+
+```bash
+vibe --prompt "Run the tests and fix failures." --agent tester --enabled-tools bash
+```
+
+A chained command such as `pytest; rm -rf build` is denied unless every part is
+allowlisted.
+
+Commands the agent runs get `VIBE_SESSION=1` in their environment, so scripts can detect they run under Vibe.
+
 #### Programmatic Mode Options
 
 When using `--prompt`, you can specify additional options:
@@ -322,7 +352,7 @@ When using `--prompt`, you can specify additional options:
 - **`--max-tokens N`**: Set a maximum cumulative LLM token budget for this run, counting both prompt and completion tokens. The turn is interrupted once usage exceeds this limit, and the outcome is `token_limit`.
 - **`--agent NAME`**: Select the agent profile for this run.
 - **`--model ALIAS`**: Use this model alias for the run instead of `active_model`, without saving it as the default. Only for a new session; an unknown alias is a usage error.
-- **`--auto-approve`, `--yolo`**: Approves all tool calls without prompting, including in interactive sessions. Can be combined with any `--agent` value.
+- **`--auto-approve`, `--yolo`**: Approves all tool calls without prompting, including in interactive sessions. A new session on a built-in mode (`ask`, `accept-edits`, `smart-approve`) starts the `auto-approve` agent instead, which Shift+Tab can leave; a custom agent, or a resumed session, keeps its agent with every call approved.
 - **`--enabled-tools TOOL`**: Enable specific tools. In programmatic mode, this disables all other tools. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--disabled-tools TOOL`**: Disable specific tools after `--enabled-tools` filtering. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--output FORMAT`**: Set the output format. Options:
@@ -380,8 +410,8 @@ things, either or both:
   session runs on this host as plain `vibe -p` does.
 
 The option needs `-p` or `--prompt-file`, and cannot be combined with
-`--workdir`, `--worktree`, `--add-dir`, `--continue` or `--teleport`; those are
-usage errors (exit 1). It is not supported on Windows (exit 1).
+`--workdir`, `--worktree`, `--add-dir` or `--continue`; those are usage errors
+(exit 1). It is not supported on Windows (exit 1).
 
 To continue a finished run with a new prompt, start a new run with
 `--resume SESSION_ID`, taking the ID from `session_id` in the first run's
@@ -689,6 +719,8 @@ at 9am review CI` work too, using the machine's local timezone. Ask the model to
 list or cancel schedules; `/loop` has no TUI management subcommands. Requests
 submitted while busy join the normal prompt queue. Schedules survive resume,
 but only run while Vibe is open and idle; missed runs do not accumulate.
+`/clear` starts a conversation with no schedules; the cleared session keeps its
+own and runs them again when resumed.
 The `cron` tool is enabled and allowed by default; explicit tool filters and
 `tools.cron.permission` settings still apply.
 
@@ -948,8 +980,9 @@ Compaction is always automatic. A model's context window is its
 `max_context_length`, else the known window of the model, else 262,144 tokens
 (Vibe then warns that it guessed). Without an `auto_compact_threshold`, the
 threshold is `min(256000, window - 60000)`, kept inside the range the window
-allows; an explicit threshold outside that range is refused with an error
-that names the range. `auto_compact_threshold` must be a positive number of tokens.
+allows. An explicit threshold outside that range is moved into it, with a
+warning that names the range. `auto_compact_threshold` must be a positive number
+of tokens.
 
 ### Custom Title Prompts
 

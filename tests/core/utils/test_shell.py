@@ -47,6 +47,19 @@ def test_shell_environment_preserves_other_user_locale_categories(monkeypatch) -
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shells only")
 @pytest.mark.asyncio
+async def test_a_command_sees_it_runs_under_vibe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VIBE_SESSION", raising=False)
+
+    process = await shell.spawn_shell_command('echo "$VIBE_SESSION"', cwd=tmp_path)
+    stdout, _ = await asyncio.wait_for(process.communicate(), timeout=10)
+
+    assert stdout == b"1\n"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shells only")
+@pytest.mark.asyncio
 async def test_a_command_runs_without_the_null_device(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

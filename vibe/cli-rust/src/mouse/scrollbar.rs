@@ -167,9 +167,14 @@ fn live_track(app: &App) -> Option<Track> {
 }
 
 fn page(app: &mut App, track: &mut Track) {
-    let (Some(position), Some(max)) =
-        (track.state.page(track.side), track.state.max_scroll_large())
-    else {
+    let covered = match track.target {
+        MouseTarget::Transcript => app.view.sticky_prompt.map_or(0, |(_, rows)| rows.into()),
+        _ => 0,
+    };
+    let (Some(position), Some(max)) = (
+        track.state.page(track.side, covered),
+        track.state.max_scroll_large(),
+    ) else {
         return;
     };
     if track.target == MouseTarget::Transcript {

@@ -1,20 +1,86 @@
 """Transport-neutral Session values shared by commands and public projections."""
 
-from typing import Annotated, Literal, get_args
+import builtins
+import re
+from dataclasses import dataclass
+from typing import Annotated, Literal, Self, get_args
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Discriminator,
     Field,
+    GetCoreSchemaHandler,
+    GetJsonSchemaHandler,
     JsonValue,
     Tag,
+    ValidationInfo,
     model_serializer,
     model_validator,
 )
 from pydantic.alias_generators import to_camel
+from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema, PydanticCustomError, PydanticOmit, core_schema
 
 EMBEDDED_RESOURCE_URI_PREFIX = "vibe-agents://embedded-resources/"
+
+
+REQUEST_CONTEXT = {"request": True}
+"""Validation context of a request a server reads: an `UnknownValue` is refused there."""
+
+
+@dataclass(frozen=True, slots=True)
+class UnknownValue:
+    """A value of a closed set, such as a status, added after your SDK version.
+
+    A field a reader gets from a Runtime, such as a status or a kind, is typed
+    ``Literal[...] | UnknownValue``. A value from the ``Literal`` reads as the plain string. A
+    string added after your SDK version reads as an instance with that ``text``, so the model
+    that holds it is still read. It is not a ``str``, so a type checker still flags a typo in a
+    known value. Serialized, it is its text. A request refuses it, and it is left out of the
+    JSON schema, so the published contract keeps the closed set.
+
+    Compare with ``str(value) == "paused"``, never with an instance holding ``"paused"``: a later
+    reader that knows ``paused`` reads it as the plain string.
+    """
+
+    text: str
+
+    def __str__(self) -> str:
+        return self.text
+
+    @classmethod
+    def _read(cls, value: object, info: ValidationInfo) -> Self:
+        if isinstance(value, UnknownValue):
+            text = value.text
+        elif isinstance(value, str):
+            text = value
+        else:
+            raise PydanticCustomError("unknown_value", "An unknown value must be a string")
+        if isinstance(info.context, dict) and info.context.get("request"):
+            raise PydanticCustomError(
+                "unknown_value", "'{text}' is not a value this Runtime knows", {"text": text}
+            )
+        return cls(text)
+
+    @staticmethod
+    def _write(value: "UnknownValue") -> str:
+        return value.text
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: object, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        return core_schema.with_info_plain_validator_function(
+            cls._read,
+            serialization=core_schema.plain_serializer_function_ser_schema(cls._write),
+        )
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, schema: CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        raise PydanticOmit
 
 
 class ForwardCompatibleModel(BaseModel):
@@ -51,13 +117,13 @@ class ProtocolError(SessionModel):
     details: JsonValue = None
 
 
-type CompletedStopReason = Literal["iteration_limit", "skipped", "rejected"]
+type CompletedStopReason = Literal["iteration_limit", "skipped", "rejected", "output_limit"]
 
 
 class CompletedTermination(SessionModel):
     outcome: Literal["completed"] = "completed"
     output: JsonValue = None
-    stop_reason: CompletedStopReason | None = None
+    stop_reason: CompletedStopReason | UnknownValue | None = None
 
 
 # Open: a newer server may name a cause this client does not know yet.
@@ -80,14 +146,13 @@ class FailedTermination(SessionModel):
 
 
 class UnknownTermination(SessionModel):
-    """A termination whose outcome this reader does not know.
+    """A termination whose outcome was added after your SDK version.
 
-    A newer Runtime can add outcomes. Such a termination is kept, so that it does not fail
-    the Turn, Session or event that holds it. Its outcome is saved in ``original_outcome``
-    and the termination as it came in ``raw``. Its own ``outcome`` is ``unknown``, so a
-    ``match`` on ``outcome`` still works for the known ones. Serialized, it is the
-    termination as it came: its own ``outcome``, no ``original_outcome``. A writer never
-    sends one.
+    Such a termination is kept, so that it does not fail the Turn, Session or event that
+    holds it. Its outcome is saved in ``original_outcome`` and the termination as it came in
+    ``raw``. Its own ``outcome`` is ``unknown``, so a ``match`` on ``outcome`` still works
+    for the known ones. Serialized, it is the termination as it came: its own ``outcome``,
+    no ``original_outcome``. A writer never sends one.
     """
 
     outcome: Literal["unknown"] = "unknown"
@@ -164,3 +229,34 @@ class ForkedContext(SessionModel):
 type SubagentContext = Literal["fresh"] | ForkedContext
 """What a spawned child starts from: `fresh`, a new conversation with only its task, or a
 copy of its parent's conversation."""
+
+
+class OutputType(SessionModel):
+    """The JSON Schema one Turn's answer must match: an ask on that Turn, not a model setting.
+
+    It names no provider: the Runtime asks its completion provider for an answer in this
+    schema, in strict mode. Strict mode makes every object of the schema require all its
+    properties and reject properties it does not list.
+    """
+
+    name: Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")]
+    # Named `schema` on the wire. Set as validation and serialization aliases, not `alias`, so
+    # Python code builds the model with the attribute name.
+    json_schema: dict[str, JsonValue] = Field(
+        validation_alias="schema", serialization_alias="schema"
+    )
+
+    @classmethod
+    def from_model(cls, model: builtins.type[BaseModel]) -> Self:
+        """Build the output type of a Pydantic model: its class name and its JSON Schema.
+
+        Each character of the class name that `name` does not allow becomes `_`, and only the
+        first 64 characters are kept, so a generic model such as `Page[City]` is named
+        `Page_City_`.
+        """
+
+        name = _OUTPUT_TYPE_NAME_DISALLOWED.sub("_", model.__name__)[:64]
+        return cls(name=name or "output", json_schema=model.model_json_schema())
+
+
+_OUTPUT_TYPE_NAME_DISALLOWED = re.compile(r"[^A-Za-z0-9_-]")

@@ -640,10 +640,16 @@ mod tests {
     #[test]
     fn runtime_qualified_skill_aliases_are_generic_catalog_names() {
         let mut config = config();
+        // A plugin name qualifies its skills; a programmatic identifier still does too.
         config.capabilities.skills.push(SkillDefinition {
-            name: "acme_tools:prepare-report".to_string(),
+            name: "acme.tools:prepare-report".to_string(),
             description: "Prepare a report.".to_string(),
             path: r"C:\plugins\acme.tools\skills\prepare-report\SKILL.md".to_string(),
+        });
+        config.capabilities.skills.push(SkillDefinition {
+            name: "acme_tools:summarize".to_string(),
+            description: "Summarize a report.".to_string(),
+            path: r"C:\plugins\acme.tools\skills\summarize\SKILL.md".to_string(),
         });
 
         let step = advance(
@@ -653,7 +659,8 @@ mod tests {
         .unwrap();
 
         let system_prompt = message_text(&step.state.context.messages()[0]);
-        assert!(system_prompt.contains("<name>acme_tools:prepare-report</name>"));
+        assert!(system_prompt.contains("<name>acme.tools:prepare-report</name>"));
+        assert!(system_prompt.contains("<name>acme_tools:summarize</name>"));
         let Some(Action::Completion {
             model_input:
                 ModelInputUpdate {

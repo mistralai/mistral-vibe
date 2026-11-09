@@ -43,6 +43,27 @@ catalog, experiments and the model catalog next) follows one path:
 A running turn keeps the config it started with. `/reload` reloads the local
 files, refreshes the remote values, then converges at once.
 
+The GrowthBook eval (`ExperimentsService`) is held in a `RemoteCache` too, with
+its own copy on disk (`experiment_held_eval_cache.json`: the response with the
+attributes and plan telemetry segments it by), but not followed: a session
+loads the eval held for its account and client once, after it opens, and keeps
+it for its life, a worktree move included, so a variant never changes under a
+running conversation. A refresh only reaches sessions opened after it.
+
+MCP tool descriptors take steps 1 and 4 only. `MCPDiscoveryService` holds the
+process's Harness `MCPDiscoveryFlights`, which every session's MCP runtime
+discovers through: one discovery per server and credential, shared by every
+session that would send it, and a backoff for that server and credential after
+a failure, so an unreachable server is asked once rather than by every session
+that opens. Each session keeps its own copy of the descriptors over the
+on-disk cache, which is what sessions and processes share; a background
+refresh takes a copy another session has just written there, so a server is
+refreshed once. It is not a `RemoteCache`, because the fetch runs over the
+session's own connections and credential (a stdio server lives in the
+session's pool), so the flights share the request instead of making it. A
+refreshed copy reaches the sessions opened after it; a running session keeps
+the descriptors it opened with, apart from its own refresh.
+
 ## Rationale
 
 A module global is shared by every channel but hides its lifetime and leaks
@@ -70,6 +91,11 @@ installing it only once Core runs it leaves nothing to roll back.
   values on the context, not on the session, so `/clear` and rewind share
   them. Do not reconfigure MCP or connectors from the loader:
   `_converge_integrations` does.
+- Background work that runs Python for long (a walk over every worktree or
+  session on disk, PR discovery) is a job of the `background` worker process
+  (`_background_worker.py`), not a thread: a thread holds the GIL every
+  session of a multiplexed server shares. Add a job set (`{name: Job}`) and
+  register it with `add_jobs`, as `WorktreeHousekeeping` does.
 - In tests, take the `process_services` fixture (with `org_server` for the
   managed-config endpoint) instead of patching module functions, and cross a
   boundary with `_settle_configuration`.
