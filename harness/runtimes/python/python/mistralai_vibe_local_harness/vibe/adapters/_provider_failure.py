@@ -1,0 +1,346 @@
+"""One reading of a failed model provider call.
+
+Provider clients report failures in their own exception types. The Mistral SDK
+raises ``MistralError`` for an error response. HTTPX2 raises ``HTTPStatusError``
+for one, and its transport errors when the connection fails. A streamed API can
+also report an error as an event after its response has started, which the
+adapters raise as ``ProviderStreamError``, and the stream guard raises
+``StreamStalledError`` for a response that went silent.
+
+This module is the only place that inspects those types. The retry policy and
+the failure reported to the user both read the ``ProviderFailure`` it returns,
+so they cannot disagree about what happened.
+"""
+
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
+from dataclasses import dataclass
+from http import HTTPStatus
+import json
+import ssl
+
+import httpx2
+from mistralai.client.errors import MistralError
+
+from mistralai_vibe_local_harness.session_protocol import PublicRetryCategory
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    NO_USAGE_MESSAGE,
+    StreamStalledError,
+    is_context_overflow,
+)
+
+
+def read_provider_failure(error: BaseException) -> ProviderFailure:
+    response = _error_response(error)
+    context_overflow = _is_context_overflow(error, response)
+    return ProviderFailure(
+        # The same prompt overflows the same window on every attempt.
+        retryable=not context_overflow and _is_retryable(error, response),
+        stalled=isinstance(error, StreamStalledError),
+        unusable_tool_calls=isinstance(error, UnusableToolCalls),
+        context_overflow=context_overflow,
+        category=_category(error, response),
+        label=type(error).__name__ if response is None else f"HTTP {response.status}",
+        message=_message(error),
+        explanation=_provider_explanation(error),
+        response=response,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFailure:
+    """What the Runtime knows about one failed provider call."""
+
+    retryable: bool
+    """Whether another attempt of the same request can succeed."""
+    stalled: bool
+    """Whether the response went silent past a limit of the stream guard.
+
+    A silence can also be a long generation the provider does not stream, which
+    another attempt would repeat, so the retry policy limits how often a stall
+    is retried.
+    """
+    unusable_tool_calls: bool
+    """Whether every tool call in a finished response came without a name.
+
+    A model that does this can do it again on every attempt, and each attempt
+    resends the whole context, so the retry policy limits how often it is
+    retried.
+    """
+    context_overflow: bool
+    """Whether the provider rejected the prompt as over the model's context window.
+
+    The same prompt overflows again, so it is not retried; Core can shorten it.
+    """
+    category: PublicRetryCategory
+    label: str
+    """A short name for the cause, such as ``HTTP 503`` or ``ConnectError``."""
+    message: str
+    """A sentence for the user that carries the provider's own explanation."""
+    explanation: str | None
+    """The message the provider put in its error response body, if any."""
+    response: ProviderErrorResponse | None
+    """The provider's error response, or ``None`` when it never answered."""
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderErrorResponse:
+    status: int
+    headers: Mapping[str, str]
+
+
+class ProviderStreamError(RuntimeError):
+    """An error the provider reported inside a response stream that had started.
+
+    ``status`` is the HTTP status that the provider's error type stands for, when
+    it stands for one.
+    """
+
+    def __init__(self, message: str, status: int | None) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+class IncompleteProviderStream(RuntimeError):
+    """A response stream that ended before the provider marked it finished."""
+
+
+class UnusableToolCalls(RuntimeError):
+    """A finished response whose every tool call came without a name.
+
+    The model meant to call a tool, but none of the calls can be run. Ending the
+    turn would leave the model's announced action undone, and another attempt
+    usually produces a usable call.
+    """
+
+
+class ProviderRefusal(RuntimeError):
+    """A response the model ended by declining the request.
+
+    The provider answers successfully, so nothing in the transport marks the
+    failure. Another attempt of the same request is declined again, and text the
+    model produced before declining is not an answer. ``category`` and
+    ``explanation`` are the provider's own, and either may be missing.
+    """
+
+    def __init__(self, *, category: str | None, explanation: str | None) -> None:
+        lead = "The model declined to respond to this request and stopped early."
+        if category:
+            lead += f" (category: {category})"
+        detail = explanation or (
+            "Try rephrasing your request or starting a new conversation."
+        )
+        super().__init__(f"{lead} {detail}")
+        self.category = category
+        self.explanation = explanation
+
+
+class MissingTokenUsage(RuntimeError):
+    """A finished reply that did not say how many tokens it used.
+
+    Core sizes the next request from each reply's usage, so a reply without it
+    cannot be accepted. Another attempt reaches the same provider, which leaves
+    usage out the same way, so the failure is not retried. A stream cut before
+    its trailing usage fails on the transport error instead, which is retried.
+    """
+
+    def __init__(
+        self, message: str = f"The provider reply is unusable: {NO_USAGE_MESSAGE}."
+    ) -> None:
+        super().__init__(message)
+
+
+def is_read_timeout(error: BaseException) -> bool:
+    """Whether a stream read failed on the transport read timeout."""
+    return isinstance(error, httpx2.ReadTimeout)
+
+
+async def until_connection_lost[T](
+    source: AsyncIterator[T], *, complete: Callable[[], bool]
+) -> AsyncGenerator[T]:
+    """Yield the items of ``source``; once ``complete()`` holds, a lost connection ends it.
+
+    A provider sends the finish reason and the usage before the stream's end
+    marker. A connection lost or stalled after both leaves a complete answer,
+    and retrying it would pay for the whole generation again. One lost before
+    the usage arrives is retried: Core cannot accept a reply without it.
+    """
+    iterator = aiter(source)
+    while True:
+        try:
+            item = await anext(iterator)
+        except StopAsyncIteration:
+            return
+        except (httpx2.TransportError, ssl.SSLError, StreamStalledError):
+            if not complete():
+                raise
+            return
+        yield item
+
+
+# 520 is the status an edge proxy answers with when the origin returns
+# something it cannot relay; the next attempt usually succeeds.
+# Twin: mistralai.vibe.harness.runtime.completion.providers.utils.RETRYABLE_STATUS_CODES
+# holds the same statuses; a parity test keeps both equal.
+_RETRYABLE_STATUSES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 520, 529})
+_RETRYABLE_TRANSPORT_ERRORS: tuple[type[httpx2.TransportError], ...] = (
+    httpx2.TimeoutException,
+    httpx2.NetworkError,
+    httpx2.RemoteProtocolError,
+)
+
+
+def _error_response(error: BaseException) -> ProviderErrorResponse | None:
+    if isinstance(error, MistralError):
+        return ProviderErrorResponse(status=error.status_code, headers=error.headers)
+    if isinstance(error, httpx2.HTTPStatusError):
+        return ProviderErrorResponse(
+            status=error.response.status_code, headers=error.response.headers
+        )
+    if isinstance(error, ProviderStreamError) and error.status is not None:
+        return ProviderErrorResponse(status=error.status, headers={})
+    return None
+
+
+def _is_retryable(error: BaseException, response: ProviderErrorResponse | None) -> bool:
+    if response is not None:
+        return response.status in _RETRYABLE_STATUSES
+    if isinstance(
+        error, StreamStalledError | IncompleteProviderStream | UnusableToolCalls
+    ):
+        return True
+    # A rejected certificate is the one deterministic TLS fault: every attempt
+    # fails the same way. During the handshake the transport wraps it in a
+    # ConnectError; while the body streams it arrives bare.
+    if _rejected_certificate(error):
+        return False
+    # A TLS fault while the response body streams arrives as a bare
+    # ``ssl.SSLError``, outside the HTTPX2 transport errors.
+    if isinstance(error, ssl.SSLError):
+        return True
+    return isinstance(error, _RETRYABLE_TRANSPORT_ERRORS)
+
+
+def _is_context_overflow(
+    error: BaseException, response: ProviderErrorResponse | None
+) -> bool:
+    if isinstance(error, ProviderStreamError):
+        return is_context_overflow(error.status, str(error))
+    if response is None:
+        return False
+    return is_context_overflow(response.status, _response_body(error))
+
+
+def _rejected_certificate(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ssl.SSLCertVerificationError):
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def _category(
+    error: BaseException, response: ProviderErrorResponse | None
+) -> PublicRetryCategory:
+    if response is not None:
+        return _status_category(response.status)
+    if isinstance(error, httpx2.TimeoutException | StreamStalledError):
+        return "timed_out"
+    if isinstance(error, _RETRYABLE_TRANSPORT_ERRORS + (ssl.SSLError,)):
+        return "connection"
+    return "unknown"
+
+
+def _status_category(status: int) -> PublicRetryCategory:
+    if status == HTTPStatus.TOO_MANY_REQUESTS:
+        return "rate_limited"
+    if status == HTTPStatus.REQUEST_TIMEOUT:
+        return "timed_out"
+    if status >= HTTPStatus.INTERNAL_SERVER_ERROR:
+        return "server_error"
+    return "unknown"
+
+
+def _message(error: BaseException) -> str:
+    """The failure sentence, carrying the provider's own explanation.
+
+    A status error renders as the status line and the URL, which says the
+    request failed but not why. The response body usually says why, and that is
+    the part a user can act on.
+    """
+    rendered = str(error) or _unexplained_message(error)
+    explanation = _provider_explanation(error)
+    if explanation is None or explanation in rendered:
+        return rendered
+    return f"{rendered}: {explanation}"
+
+
+def _unexplained_message(error: BaseException) -> str:
+    """A sentence for an exception that renders as an empty string.
+
+    HTTPX2 raises its transport timeouts without a message, which would otherwise
+    reach the user as a blank error.
+    """
+    name = type(error).__name__
+    if isinstance(error, httpx2.ReadTimeout):
+        return f"Timed out waiting for the model to send its response ({name})."
+    if isinstance(error, httpx2.ConnectTimeout):
+        return f"Timed out connecting to the model provider ({name})."
+    if isinstance(error, httpx2.TimeoutException):
+        return f"The model request timed out ({name})."
+    return f"The model request failed ({name})."
+
+
+def _provider_explanation(error: BaseException) -> str | None:
+    """The message a provider put in an error response body.
+
+    The OpenAI-compatible ``error.message`` first, then its common variants.
+    """
+    body = _response_body(error)
+    if body is None:
+        return None
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    nested = payload.get("error")
+    for candidate in (
+        nested.get("message") if isinstance(nested, dict) else None,
+        nested if isinstance(nested, str) else None,
+        payload.get("message"),
+        payload.get("detail"),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+def _response_body(error: BaseException) -> str | None:
+    if isinstance(error, MistralError):
+        return error.body
+    if not isinstance(error, httpx2.HTTPStatusError):
+        return None
+    try:
+        return error.response.text
+    except httpx2.ResponseNotRead:
+        # Reading here would block on a connection the failure already abandoned.
+        return None
+
+
+__all__ = [
+    "IncompleteProviderStream",
+    "MissingTokenUsage",
+    "ProviderErrorResponse",
+    "ProviderFailure",
+    "ProviderRefusal",
+    "ProviderStreamError",
+    "is_read_timeout",
+    "read_provider_failure",
+    "until_connection_lost",
+]

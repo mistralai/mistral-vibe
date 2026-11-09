@@ -1,0 +1,389 @@
+//! The pre-TUI update prompt, run before the
+//! main terminal owns the screen.
+
+mod ansi;
+mod manual;
+mod view;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::style::{Modifier, Style};
+
+use crate::terminal_read;
+use crate::ui::banner::petit_chat::PetitChat;
+use crate::ui::theme;
+use crate::update_notifier::gateway::UpdateSource;
+use crate::update_notifier::update;
+
+pub use ansi::color_span;
+pub use manual::{manual_update_command, manual_update_lines};
+pub use view::draw;
+pub use view::option_span;
+
+/// Which flow opened the prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdatePromptMode {
+    Startup,
+    CheckUpgrade,
+}
+
+/// The two prompt choices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateChoice {
+    Update,
+    Continue,
+}
+
+/// The prompt's answer; `Updated` and `UpdateFailed` carry what the
+/// update commands actually printed, so the post-dialog lines can show the
+/// real outcome.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UpdatePromptResult {
+    Continue,
+    Updated(Vec<update::UpdateCommandOutcome>),
+    UpdateFailed(Vec<update::UpdateCommandOutcome>),
+    /// The user must close Vibe and run the upgrade from a shell.
+    ManualUpdate,
+    Quit,
+}
+
+impl UpdatePromptMode {
+    /// The Continue option's label.
+    pub fn continue_label(self) -> &'static str {
+        match self {
+            Self::Startup => "Continue with current version",
+            Self::CheckUpgrade => "Cancel upgrade",
+        }
+    }
+}
+
+impl UpdateChoice {
+    pub fn label(self, mode: UpdatePromptMode) -> &'static str {
+        match self {
+            Self::Update => "Update now",
+            Self::Continue => mode.continue_label(),
+        }
+    }
+
+    /// Either direction swaps between the two choices.
+    fn next(self) -> Self {
+        match self {
+            Self::Update => Self::Continue,
+            Self::Continue => Self::Update,
+        }
+    }
+}
+
+/// The dialog's UI state, pure except for the update run itself.
+#[derive(Clone, Debug)]
+pub struct UpdatePromptState {
+    pub current_version: String,
+    pub latest_version: String,
+    pub mode: UpdatePromptMode,
+    /// The manager whose answer the offer carries; its command's outcome
+    /// settles whether a run that upgraded nothing was a no-op.
+    pub source: UpdateSource,
+    pub selected: UpdateChoice,
+    pub updating: bool,
+    /// Windows cannot replace files a running Vibe holds, so the upgrade is left to the user.
+    pub manual_update: bool,
+}
+
+impl UpdatePromptState {
+    pub fn new(
+        current_version: &str,
+        latest_version: &str,
+        mode: UpdatePromptMode,
+        source: UpdateSource,
+    ) -> Self {
+        Self {
+            current_version: current_version.to_owned(),
+            latest_version: latest_version.to_owned(),
+            mode,
+            source,
+            // Start on "Update now".
+            selected: UpdateChoice::Update,
+            updating: false,
+            manual_update: cfg!(windows),
+        }
+    }
+
+    /// The cycleable choices in display order.
+    pub fn choices(&self) -> [UpdateChoice; 2] {
+        [UpdateChoice::Update, UpdateChoice::Continue]
+    }
+
+    /// Swap choices, ignored while updating.
+    pub fn move_selection(&mut self) {
+        if !self.updating {
+            self.selected = self.selected.next();
+        }
+    }
+}
+
+/// Own the terminal, answer one prompt. A terminal that cannot be taken over
+/// (piped stdout) falls back to Continue.
+pub async fn ask_update_prompt(state: &UpdatePromptState) -> UpdatePromptResult {
+    let Ok(mut terminal) = crate::terminal::try_init() else {
+        return UpdatePromptResult::Continue;
+    };
+    let result = dialog_loop(&mut terminal, state).await;
+    // Erase while the dialog still owns the screen: terminals that do not
+    // track alternate screens (the e2e vt) would otherwise keep its frame
+    // under the next app, which styles blank cells differently than it
+    // paints them.
+    let _ = crate::terminal::repaint(&mut terminal);
+    ratatui::restore();
+    // `ratatui::restore` leaves the cursor hidden; give the shell it back.
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::cursor::Show,
+        crossterm::terminal::SetTitle("")
+    );
+    result
+}
+
+/// Run the dialog, then act on its
+/// answer. Returns the exit code to take, or `None` to continue into the TUI.
+/// A dismissed-update cache write failure is logged by
+/// `mark_update_as_dismissed`.
+pub async fn show_update_prompt(
+    state: &UpdatePromptState,
+    dismiss_on_continue: bool,
+) -> Option<i32> {
+    let result = ask_update_prompt(state).await;
+    match result {
+        UpdatePromptResult::Continue => {
+            if dismiss_on_continue {
+                crate::update_notifier::update::mark_update_as_dismissed(
+                    &crate::update_notifier::cache::FileSystemUpdateCacheRepository,
+                    &state.latest_version,
+                );
+            }
+            None
+        }
+        UpdatePromptResult::Quit => Some(0),
+        UpdatePromptResult::ManualUpdate => manual::print_manual_update(state),
+        UpdatePromptResult::Updated(outcomes) => {
+            // The manager's own answer can differ from the advertised latest
+            // (a lagging brew formula, a re-resolved uv constraint); its
+            // evidence line names the version the user actually got.
+            let installed = update::upgraded_version(&outcomes, state.source)
+                .unwrap_or_else(|| state.latest_version.clone());
+            // A brew revision stays newer than `CARGO_PKG_VERSION` after the
+            // upgrade; record the bare release so the next launch is quiet.
+            update::record_revision_upgrade(
+                &crate::update_notifier::cache::FileSystemUpdateCacheRepository,
+                &state.latest_version,
+            );
+            println!(
+                "{}\n  Run {} to start using the new version.",
+                color_span(
+                    theme::text(theme::success()),
+                    &format!(
+                        "✔ Vibe was updated from {} to {}.",
+                        state.current_version, installed
+                    )
+                ),
+                color_span(Style::default().add_modifier(Modifier::BOLD), "vibe")
+            );
+            Some(0)
+        }
+        UpdatePromptResult::UpdateFailed(outcomes) => {
+            // One line, from what the package managers actually said: their
+            // exit codes cannot tell a failed upgrade from a no-op one. The
+            // offer's own manager settles the meaning — a no-op (its command
+            // exited 0 without upgrading) is not an error, so orange; only
+            // real failures print red.
+            let no_op = update::run_was_no_op(&outcomes, state.source);
+            let color = if no_op { theme::ORANGE } else { theme::error() };
+            println!(
+                "{}",
+                color_span(
+                    theme::text(color),
+                    &format!(
+                        "✗ Vibe was not updated: {}",
+                        update::not_updated_reason(&outcomes, state.source)
+                    )
+                )
+            );
+            // A startup no-op — the offer's own manager exited 0 without
+            // upgrading, e.g. the re-resolved version is not newer after all
+            // — must not cost the user their session or re-offer the same
+            // no-op on every launch: dismiss the offer and continue into the
+            // TUI. A real failure still exits 1.
+            if state.mode == UpdatePromptMode::Startup && no_op {
+                crate::update_notifier::update::mark_update_as_dismissed(
+                    &crate::update_notifier::cache::FileSystemUpdateCacheRepository,
+                    &state.latest_version,
+                );
+                return None;
+            }
+            Some(1)
+        }
+    }
+}
+
+/// Ctrl+C or Ctrl+Q quits, from either selection and
+/// while updating.
+fn is_quit_key(key: &crossterm::event::KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q'))
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// One key's effect on the dialog state, or the dialog's answer.
+pub fn apply_key(
+    state: &mut UpdatePromptState,
+    key: crossterm::event::KeyEvent,
+) -> Option<UpdatePromptResult> {
+    if key.kind != KeyEventKind::Press {
+        return None;
+    }
+    if is_quit_key(&key) {
+        return Some(UpdatePromptResult::Quit);
+    }
+    match key.code {
+        KeyCode::Left | KeyCode::Right if !state.updating => {
+            state.move_selection();
+            None
+        }
+        KeyCode::Enter if !state.updating => match state.selected {
+            UpdateChoice::Continue => Some(UpdatePromptResult::Continue),
+            UpdateChoice::Update if state.manual_update => Some(UpdatePromptResult::ManualUpdate),
+            UpdateChoice::Update => {
+                state.updating = true;
+                None
+            }
+        },
+        _ => None,
+    }
+}
+
+async fn dialog_loop(
+    terminal: &mut crate::terminal::Tui,
+    state: &UpdatePromptState,
+) -> UpdatePromptResult {
+    let mut state = state.clone();
+    let mut chat = PetitChat::default();
+    loop {
+        view::draw(terminal, &state, &mut chat);
+        // The dialog runs no work, so its drawn frame is final; a closing key's fence is acked by the next surface.
+        crate::replay_fence::ack_if(|| true);
+        let event = match terminal_read::read() {
+            Ok(event) => event,
+            // Fall back to Continue when the dialog cannot run.
+            Err(_) => return UpdatePromptResult::Continue,
+        };
+        if crate::replay_fence::observe(&event) {
+            continue;
+        }
+        let Event::Key(key) = event else {
+            continue;
+        };
+        if let Some(result) = apply_key(&mut state, key) {
+            return result;
+        }
+        if state.updating {
+            // Swap the options for the spinner, then run the upgrade,
+            // cancellable by the quit keys.
+            view::draw(terminal, &state, &mut chat);
+            return run_update(terminal, &state, &mut chat).await;
+        }
+    }
+}
+
+/// Await the upgrade while animating the spinner, quitting on Ctrl+C/Q: the
+/// running command is terminated (gentle stop
+/// first, so a mid-install uv is not SIGKILLed half-way through) and the
+/// terminated run settles before the dialog answers. The key reader is a
+/// `spawn_blocking` task whose poll loop rechecks the stop flag every
+/// `QUIT_POLL_INTERVAL`, so awaiting it after the run joins within one poll
+/// cycle — leaving it alive would let it read and discard the terminal's
+/// next key while the TUI starts.
+async fn run_update(
+    terminal: &mut crate::terminal::Tui,
+    state: &UpdatePromptState,
+    chat: &mut PetitChat,
+) -> UpdatePromptResult {
+    let stop = Arc::new(AtomicBool::new(false));
+    let reader_stop = Arc::clone(&stop);
+    // A reader that lives as long as the dialog never holds the client busy.
+    #[allow(clippy::disallowed_methods)]
+    let mut quit_keys = tokio::task::spawn_blocking(move || quit_key_reader(&reader_stop));
+    let (terminate_update, update_terminated) = tokio::sync::watch::channel(false);
+    let update = update::do_update(&update_terminated);
+    tokio::pin!(update);
+    // The cat runs on UI time; the machine frame draws and acks the fences the key reader counts.
+    let mut cat = crate::clock::interval(crate::ui::banner::petit_chat::FRAME_INTERVAL);
+    let mut frame = crate::clock::interval_real(crate::ui::banner::petit_chat::FRAME_INTERVAL);
+    loop {
+        tokio::select! {
+            biased;
+            outcomes = &mut update => {
+                stop.store(true, Ordering::Relaxed);
+                // Join the reader before the result travels: a startup
+                // no-op continues into the TUI, and a reader still in its
+                // poll loop could read and swallow that first key.
+                let _ = (&mut quit_keys).await;
+                return if update::any_command_upgraded(&outcomes, state.source) {
+                    UpdatePromptResult::Updated(outcomes)
+                } else {
+                    UpdatePromptResult::UpdateFailed(outcomes)
+                }
+            }
+            _ = &mut quit_keys => {
+                // The reader answered or died; either way the run must be
+                // wound down before quitting. The remaining commands are
+                // skipped by the terminated flag inside `do_update`.
+                let _ = terminate_update.send(true);
+                break;
+            }
+            _ = cat.tick() => {
+                chat.tick(crate::clock::now());
+            }
+            _ = frame.tick() => {
+                view::draw(terminal, state, chat);
+                // Only the cat moves; the reader advances UI time before counting the next fence, so no stale cat is acked.
+                crate::replay_fence::ack_if(|| !cat.is_due());
+            }
+        }
+    }
+    // Settling is bounded: the current command gets the terminate grace
+    // window, then the hard kill; nothing else is started after it.
+    let _ = (&mut update).await;
+    stop.store(true, Ordering::Relaxed);
+    UpdatePromptResult::Quit
+}
+
+/// How long the quit-key reader waits for an event before rechecking the
+/// stop flag. Small enough that the reader's exit after the dialog goes
+/// unnoticed, large enough not to busy-loop.
+const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Poll for a quit key until one arrives, the terminal errors, or `stop` is
+/// set. Returns whether a quit key was pressed. Public for the stop-flag
+/// exit test; the poll loop never touches the terminal once stopped.
+pub fn quit_key_reader(stop: &AtomicBool) -> bool {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return false;
+        }
+        match crossterm::event::poll(QUIT_POLL_INTERVAL) {
+            Ok(true) => match terminal_read::read() {
+                Ok(Event::Key(key)) if key.kind == KeyEventKind::Press && is_quit_key(&key) => {
+                    return true
+                }
+                // Other events are dropped, but a replay fence still counts.
+                Ok(event) => {
+                    crate::replay_fence::observe(&event);
+                }
+                Err(_) => return false,
+            },
+            Ok(false) => {}
+            Err(_) => return false,
+        }
+    }
+}

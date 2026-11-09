@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import Field
+
+from vibe.app_server._model import ProtocolModel
+from vibe.config_values import (
+    DEFAULT_THINKING_LEVELS as DEFAULT_THINKING_LEVELS,
+    THINKING_LEVELS as THINKING_LEVELS,
+    AudioClient,
+    SpeechOutputFormat,
+    ThinkingLevel as ThinkingLevel,
+    TranscriptionEncoding,
+)
+
+# Where a model comes from, as the pickers group it: `project` covers project
+# config, agent profile, env and session overrides; `local` the user config and
+# built-ins.
+ModelSource = Literal["admin", "growthbook", "catalog", "project", "local"]
+
+
+class ModelConfigView(ProtocolModel):
+    name: str
+    alias: str
+    thinking: ThinkingLevel
+    supports_images: bool
+    display_name: str
+    # None when the model's window is unknown; defaulted so older clients
+    # tolerate the field's absence (ADR 0014).
+    max_context_length: int | None = None
+    auto_compact_threshold: int | None = None
+    # The levels the active model offers; defaulted so a client against an
+    # older server still renders the five (ADR 0014).
+    thinking_levels: list[ThinkingLevel] = Field(
+        default_factory=lambda: list(DEFAULT_THINKING_LEVELS)
+    )
+    # Expected delivery of file-backed images; None means the runtime has not
+    # advertised a delivery mode. Native model support alone is not a fallback policy.
+    image_delivery: Literal["native", "resource_link"] | None = None
+    # The group the model is listed under, from the highest-priority layer that
+    # defines it; None from an older server (ADR 0014) or when no known layer
+    # defines it.
+    source: ModelSource | None = None
+
+
+class TranscribeModelConfigView(ProtocolModel):
+    name: str
+    sample_rate: int
+    encoding: TranscriptionEncoding
+    language: str
+    target_streaming_delay_ms: int
+
+
+class AudioProviderView(ProtocolModel):
+    api_base: str
+    api_key_env_var: str
+    client: AudioClient
+
+
+class TranscriptionConfigView(ProtocolModel):
+    model: TranscribeModelConfigView
+    provider: AudioProviderView
+
+
+class TTSModelConfigView(ProtocolModel):
+    name: str
+    voice: str
+    response_format: SpeechOutputFormat
+
+
+class SpeechConfigView(ProtocolModel):
+    model: TTSModelConfigView
+    provider: AudioProviderView
+
+
+class ProxySettingsView(ProtocolModel):
+    values: dict[str, str | None]
+    descriptions: dict[str, str]
+
+
+class ConfigView(ProtocolModel):
+    active_model: ModelConfigView
+    # Whether the user has pinned a specific model, vs. the "default" (unpinned)
+    active_model_pinned: bool
+    # Wider than `active_model.supports_images`, which stays a per-model fact:
+    # the backend may be able to show a model without vision something other
+    # than the pixels.
+    images_supported: bool = False
+    # Cold-cache first launch
+    awaiting_experiment_model: bool = False
+    default_model_alias: str
+    default_agent: str = "accept-edits"
+    theme: str
+    log_level: str | None
+    disable_welcome_banner_animation: bool
+    # Preserve blinking when reading an older app-server response (ADR 0014).
+    cursor_blink: bool = True
+    show_greeting: bool
+    autocopy_to_clipboard: bool
+    # Preserve mouse capture when reading an older app-server response (ADR 0014).
+    enable_mouse_capture: bool = True
+    # Preserve @ file completion when reading an older app-server response (ADR 0014).
+    enable_file_autocomplete: bool = True
+    file_watcher_for_autocomplete: bool
+    ask_confirmation_on_exit: bool
+    voice_mode_enabled: bool
+    narrator_enabled: bool
+    show_thinking_nodes: bool
+    show_subagent_status_list: bool
+    worktree_limit: int
+    enable_update_checks: bool
+    enable_notifications: bool
+    # ADR 0015: the outbound TLS trust policy the Rust client's update
+    # gateway applies; the server keeps its own copy for MCP/connector TLS.
+    enable_system_trust_store: bool = False
+    experimental_enable_tab_status: bool
+    # Consent gate for client-local sinks (the Rust client's crash reporter).
+    # Datalake events stay server-gated; clients never decide that.
+    enable_telemetry: bool = True
+    experimental_enable_registry_skills: bool = False
+    experimental_enable_local_projects: bool = False
+    models: list[ModelConfigView]
+    transcribe_models: list[str]
+    tts_models: list[str]
+    transcription: TranscriptionConfigView
+    speech: SpeechConfigView
+    validation_warnings: list[str]
+
+    def model_display_name(self, alias: str) -> str:
+        """User-facing name for a configured alias, or the alias when unknown."""
+        return next(
+            (model.display_name for model in self.models if model.alias == alias), alias
+        )
+
+    @property
+    def default_model_display_name(self) -> str:
+        return self.model_display_name(self.default_model_alias)

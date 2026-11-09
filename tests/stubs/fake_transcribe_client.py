@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from vibe.core.transcribe.transcribe_client_port import TranscribeEvent
+from vibe.cli.transcribe.transcribe_client_port import TranscribeEvent
 
 
 class FakeTranscribeClient:

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from pathlib import Path
 
 from vibe.core.config.layer import RawConfig
 from vibe.core.config.layers._base import BaseTomlConfigLayer
 from vibe.core.paths._vibe_home import VIBE_HOME
-from vibe.core.trusted_folders import trusted_folders_manager
+from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
 
 
 class ProjectConfigLayer(BaseTomlConfigLayer):
@@ -15,12 +16,31 @@ class ProjectConfigLayer(BaseTomlConfigLayer):
     until a trusted .vibe/config.toml is found.
     """
 
-    def __init__(self, *, path: Path | None = None, name: str = "project-toml") -> None:
+    NAME = "project-toml"
+
+    def __init__(
+        self,
+        *,
+        path: Path | None = None,
+        name: str = NAME,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> None:
         super().__init__(name=name)
         self._root = path or Path.cwd()
+        self._trust_store = trust_store or trusted_folders_manager
         self._config_file_path: Path | None = None
         self._is_set = False
         self._find_lock = asyncio.Lock()
+
+    def __deepcopy__(self, memo: dict[int, object]) -> ProjectConfigLayer:
+        copied = type(self)(
+            path=self._root, name=self.name, trust_store=self._trust_store
+        )
+        memo[id(self)] = copied
+        copied._config_file_path = self._config_file_path
+        copied._is_set = self._is_set
+        copied._state = copy.deepcopy(self._state, memo)
+        return copied
 
     @property
     def config_file_path(self) -> Path | None:
@@ -48,43 +68,32 @@ class ProjectConfigLayer(BaseTomlConfigLayer):
         if self._config_file_path is None:
             return True
 
-        return bool(trusted_folders_manager.is_trusted(self._config_file_path.parent))
-
-    async def _on_trust_changed(self, old: bool | None, new: bool | None) -> None:
-        if new is None or self._config_file_path is None:
-            return
-
-        if new:
-            trusted_folders_manager.add_trusted(self._config_file_path.parent)
-        else:
-            trusted_folders_manager.add_untrusted(self._config_file_path.parent)
-
-    async def grant_trust(self) -> None:
-        await self._find_config_file()
-        if self._config_file_path is None:
-            return
-
-        await super().grant_trust()
-
-    async def revoke_trust(self) -> None:
-        await self._find_config_file()
-        if self._config_file_path is None:
-            return
-
-        await super().revoke_trust()
+        return bool(self._trust_store.is_trusted(self._config_file_path.parent))
 
     async def _find_config_file(self) -> None:
         async with self._find_lock:
             if self._is_set:
                 return
-
-            for directory in [self._root, *self._root.parents]:
-                if directory == VIBE_HOME.path.parent:
-                    break
-
-                candidate = directory / ".vibe" / "config.toml"
-                if candidate.is_file():
-                    self._config_file_path = candidate
-                    break
-
+            self._config_file_path = await asyncio.to_thread(
+                _discover_config_file, self._root
+            )
             self._is_set = True
+
+
+def project_config_candidates(root: Path) -> list[Path]:
+    """The files discovery tries for *root*, nearest first; the first that is a
+    file is the project config.
+    """
+    stop = VIBE_HOME.path.parent
+    candidates: list[Path] = []
+    for directory in [root, *root.parents]:
+        if directory == stop:
+            break
+        candidates.append(directory / ".vibe" / "config.toml")
+    return candidates
+
+
+def _discover_config_file(root: Path) -> Path | None:
+    return next(
+        (path for path in project_config_candidates(root) if path.is_file()), None
+    )

@@ -1,0 +1,476 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from ipaddress import ip_address
+from urllib.parse import SplitResult, urlsplit, urlunsplit
+
+from pydantic import TypeAdapter, ValidationError
+
+from vibe.core.config.models import (
+    MCPHttp,
+    MCPOAuth,
+    MCPServer,
+    MCPStdio,
+    MCPStreamableHttp,
+    normalize_mcp_server_name,
+)
+from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.types import ConcurrencyConflictError
+from vibe.core.config.vibe_schema import VibeConfigSchema
+from vibe.utils.mcp import MCPAddTransport
+
+
+class MCPServerAddError(ValueError):
+    pass
+
+
+class MCPServerRemoveError(ValueError):
+    pass
+
+
+MCP_DISABLED_MESSAGE = (
+    "MCP servers are disabled by your administrator. "
+    "Contact your organization admin to enable MCP."
+)
+
+
+def _ensure_mcp_enabled(config: VibeConfigSchema) -> None:
+    if not config.enable_mcp:
+        raise MCPServerAddError(MCP_DISABLED_MESSAGE)
+
+
+@dataclass(frozen=True)
+class PersistedMCPServerResult[ServerT: MCPHttp | MCPStreamableHttp | MCPStdio]:
+    server: ServerT
+    created: bool
+
+
+@dataclass(frozen=True)
+class RemovedMCPServerResult:
+    name: str
+    server: MCPServer | None
+    removed: bool
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+_HOST_PREFIXES_TO_DROP = {"mcp", "www"}
+_GENERIC_ALIAS_SEGMENTS = {"api", "mcp", "server"}
+_LEADING_HOST_PREFIX_LABEL_MIN_COUNT = 3
+_MCP_SERVER_ADAPTER = TypeAdapter(MCPServer)
+_USER_MANAGED_FIELDS = {"prompt", "sampling_enabled", "disabled", "disabled_tools"}
+
+
+async def persist_oauth_mcp_server(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    *,
+    url: str,
+    name: str | None = None,
+    scopes: list[str] | None = None,
+    transport: MCPAddTransport = "streamable-http",
+    allow_insecure_http: bool = False,
+    startup_timeout_sec: float | None = None,
+    tool_timeout_sec: float | None = None,
+) -> PersistedMCPServerResult[MCPHttp | MCPStreamableHttp]:
+    _ensure_mcp_enabled(orchestrator.config)
+    normalized_url = normalize_mcp_server_url(
+        url, allow_insecure_http=allow_insecure_http
+    )
+    requested_name = normalize_mcp_server_name(name) if name is not None else None
+    if name is not None and not requested_name:
+        raise MCPServerAddError("MCP server name must contain letters or numbers.")
+
+    active_servers = list(orchestrator.config.mcp_servers)
+    if existing := _find_server_url(active_servers, normalized_url):
+        if not isinstance(existing.auth, MCPOAuth):
+            raise MCPServerAddError(
+                f"MCP server URL is already configured as `{existing.name}` "
+                "with static auth. `/mcp add` only supports OAuth MCP servers."
+            )
+        if requested_name is not None and requested_name != existing.name:
+            raise MCPServerAddError(
+                f"MCP server URL is already configured as `{existing.name}`."
+            )
+        return PersistedMCPServerResult(server=existing, created=False)
+
+    server_name = _resolve_new_server_name(
+        requested_name, normalized_url, {server.name for server in active_servers}
+    )
+    model = MCPHttp if transport == "http" else MCPStreamableHttp
+    try:
+        server = model.model_validate({
+            "name": server_name,
+            "transport": transport,
+            "url": normalized_url,
+            "auth": {"type": "oauth", "scopes": scopes or []},
+            **{
+                name: value
+                for name, value in (
+                    ("startup_timeout_sec", startup_timeout_sec),
+                    ("tool_timeout_sec", tool_timeout_sec),
+                )
+                if value is not None
+            },
+        })
+    except ValidationError as exc:
+        raise MCPServerAddError(f"Invalid MCP server configuration: {exc}") from exc
+    return await persist_remote_mcp_server(
+        orchestrator, server, allow_insecure_http=allow_insecure_http
+    )
+
+
+async def persist_remote_mcp_server(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    server: MCPHttp | MCPStreamableHttp,
+    *,
+    allow_insecure_http: bool = False,
+) -> PersistedMCPServerResult[MCPHttp | MCPStreamableHttp]:
+    _ensure_mcp_enabled(orchestrator.config)
+    normalized_server = server.model_copy(
+        update={
+            "url": normalize_mcp_server_url(
+                server.url, allow_insecure_http=allow_insecure_http
+            )
+        }
+    )
+    current_servers = list(orchestrator.config.mcp_servers)
+    if existing := _find_server_name(current_servers, normalized_server.name):
+        if isinstance(existing, MCPHttp | MCPStreamableHttp):
+            if _remote_servers_equivalent(existing, normalized_server):
+                return PersistedMCPServerResult(server=existing, created=False)
+            if _url_key(existing.url) == _url_key(normalized_server.url):
+                raise MCPServerAddError(
+                    f"MCP server `{normalized_server.name}` is already configured "
+                    "with different options."
+                )
+        raise MCPServerAddError(
+            f"MCP server name `{normalized_server.name}` is already configured."
+        )
+    if existing := _find_server_url(current_servers, normalized_server.url):
+        raise MCPServerAddError(
+            f"MCP server URL is already configured as `{existing.name}`."
+        )
+
+    await _append_persisted_mcp_server(orchestrator, normalized_server)
+    return PersistedMCPServerResult(server=normalized_server, created=True)
+
+
+async def persist_stdio_mcp_server(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], server: MCPStdio
+) -> PersistedMCPServerResult[MCPStdio]:
+    _ensure_mcp_enabled(orchestrator.config)
+    if existing := _find_server_name(
+        list(orchestrator.config.mcp_servers), server.name
+    ):
+        if isinstance(existing, MCPStdio) and _same_add_options(existing, server):
+            return PersistedMCPServerResult(server=existing, created=False)
+        raise MCPServerAddError(
+            f"MCP server name `{server.name}` is already configured."
+        )
+    await _append_persisted_mcp_server(orchestrator, server)
+    return PersistedMCPServerResult(server=server, created=True)
+
+
+async def _append_persisted_mcp_server(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], server: MCPServer
+) -> None:
+    def append(raw: object) -> list[dict[str, object]]:
+        raw_servers = _persisted_servers_list(raw, MCPServerAddError)
+        if _find_raw_server(raw_servers, server.name) is not None:
+            raise MCPServerAddError(
+                f"MCP server name `{server.name}` is already configured."
+            )
+        return [*raw_servers, _serialize_mcp_server(server)]
+
+    mutation = await orchestrator.mutate_field(
+        "/mcp_servers", append, reason=f"Add MCP server {server.name}", default=[]
+    )
+    _raise_persistence_failure(
+        mutation.failures, MCPServerAddError, "Failed to persist MCP server"
+    )
+
+
+async def remove_mcp_server(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], name: str
+) -> RemovedMCPServerResult:
+    if not orchestrator.config.enable_mcp:
+        raise MCPServerRemoveError(MCP_DISABLED_MESSAGE)
+    normalized_name = normalize_mcp_server_name(name)
+    if not normalized_name:
+        raise MCPServerRemoveError("MCP server name must contain letters or numbers.")
+
+    def drop(raw: object) -> object:
+        raw_servers = _persisted_servers_list(raw, MCPServerRemoveError)
+        if _persisted_server(raw_servers, normalized_name) is None:
+            return raw
+        return [
+            server
+            for server in raw_servers
+            if _raw_server_name(server) != normalized_name
+        ]
+
+    mutation = await orchestrator.mutate_field(
+        "/mcp_servers", drop, reason=f"Remove MCP server {normalized_name}", default=[]
+    )
+    _raise_persistence_failure(
+        mutation.failures, MCPServerRemoveError, "Failed to remove MCP server"
+    )
+    removed = _persisted_server(
+        _persisted_servers_list(mutation.previous, MCPServerRemoveError),
+        normalized_name,
+    )
+    return RemovedMCPServerResult(
+        name=normalized_name, server=removed, removed=removed is not None
+    )
+
+
+def _persisted_server(
+    raw_servers: list[dict[str, object]], name: str
+) -> MCPServer | None:
+    persisted = _find_raw_server(raw_servers, name)
+    if persisted is None:
+        return None
+    try:
+        return _parse_raw_mcp_server(persisted)
+    except ValidationError as exc:
+        raise MCPServerRemoveError(
+            "MCP server in the persistence layer is invalid."
+        ) from exc
+
+
+async def find_persisted_oauth_mcp_server(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], name: str
+) -> MCPHttp | MCPStreamableHttp | None:
+    normalized_name = normalize_mcp_server_name(name)
+    if not normalized_name:
+        return None
+    raw_servers = await _load_persisted_servers(orchestrator, MCPServerRemoveError)
+    persisted = _find_raw_server(raw_servers, normalized_name)
+    if persisted is None:
+        return None
+    try:
+        server = _parse_raw_mcp_server(persisted)
+    except ValidationError:
+        return None
+    if isinstance(server, MCPHttp | MCPStreamableHttp) and isinstance(
+        server.auth, MCPOAuth
+    ):
+        return server
+    return None
+
+
+def _serialize_mcp_server(server: MCPServer) -> dict[str, object]:
+    data = server.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    if isinstance(server, MCPHttp | MCPStreamableHttp):
+        # exclude_defaults drops MCPStaticAuth's `type="static"`, but the persisted
+        # auth union is discriminated by `type`, so re-add it.
+        data["auth"] = {**data.get("auth", {}), "type": server.auth.type}
+    return data
+
+
+def normalize_mcp_server_url(value: str, *, allow_insecure_http: bool = False) -> str:
+    parsed = _parse_mcp_server_url(value, allow_insecure_http=allow_insecure_http)
+    return _url_with_normalized_host(parsed, trim_trailing_slash=False)
+
+
+async def _load_persisted_servers(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    error_type: type[MCPServerAddError] | type[MCPServerRemoveError],
+) -> list[dict[str, object]]:
+    raw = (
+        (await orchestrator.load_persistence_layer())
+        .model_dump()
+        .get("mcp_servers", [])
+    )
+    return _persisted_servers_list(raw, error_type)
+
+
+def _persisted_servers_list(
+    raw: object, error_type: type[MCPServerAddError] | type[MCPServerRemoveError]
+) -> list[dict[str, object]]:
+    if not isinstance(raw, list):
+        raise error_type("Config field `mcp_servers` is not a list.")
+    return [server for server in raw if isinstance(server, dict)]
+
+
+def _raise_persistence_failure(
+    failures: list[BaseException],
+    error_type: type[MCPServerAddError] | type[MCPServerRemoveError],
+    message: str,
+) -> None:
+    if not failures:
+        return
+    failure = failures[0]
+    if isinstance(failure, ConcurrencyConflictError):
+        raise failure
+    raise error_type(f"{message}: {failure}") from failure
+
+
+def _resolve_new_server_name(
+    requested_name: str | None, normalized_url: str, active_names: set[str]
+) -> str:
+    if requested_name is None:
+        return _dedupe_server_name(_suggest_server_name(normalized_url), active_names)
+    if requested_name in active_names:
+        raise MCPServerAddError(
+            f"MCP server name `{requested_name}` is already configured."
+        )
+    return requested_name
+
+
+def _parse_mcp_server_url(
+    value: str, *, allow_insecure_http: bool = False
+) -> SplitResult:
+    raw_url = value.strip()
+    if not raw_url:
+        raise MCPServerAddError("MCP server URL is required.")
+    try:
+        parsed = urlsplit(raw_url)
+        host = parsed.hostname
+        _ = parsed.port
+    except ValueError as exc:
+        raise MCPServerAddError("MCP server URL must be a valid HTTP(S) URL.") from exc
+    scheme = parsed.scheme.lower()
+    if not scheme:
+        raise MCPServerAddError("MCP server URL must include a scheme.")
+    if scheme not in {"http", "https"}:
+        raise MCPServerAddError("MCP server URL must use https.")
+    if not host:
+        raise MCPServerAddError("MCP server URL must include a host.")
+    if parsed.fragment:
+        raise MCPServerAddError("MCP server URL must not include a fragment.")
+    if parsed.username is not None or parsed.password is not None:
+        raise MCPServerAddError("MCP server URL must not include credentials.")
+    if scheme == "http" and not allow_insecure_http and not _is_loopback_host(host):
+        raise MCPServerAddError(
+            "MCP server URL must use https unless it points to localhost. "
+            "Pass --allow-insecure-http to use a plaintext http:// URL anyway."
+        )
+    return parsed
+
+
+def _find_server_name(servers: list[MCPServer], name: str) -> MCPServer | None:
+    return next((server for server in servers if server.name == name), None)
+
+
+def _raw_server_name(raw_server: object) -> str | None:
+    if not isinstance(raw_server, dict):
+        return None
+    name = raw_server.get("name")
+    return normalize_mcp_server_name(name) if isinstance(name, str) else None
+
+
+def _find_raw_server(raw_servers: object, name: str) -> object | None:
+    if not isinstance(raw_servers, list):
+        return None
+    return next(
+        (server for server in raw_servers if _raw_server_name(server) == name), None
+    )
+
+
+def _parse_raw_mcp_server(raw_server: object) -> MCPServer:
+    return _MCP_SERVER_ADAPTER.validate_python(raw_server)
+
+
+def _find_server_url(
+    servers: list[MCPServer], url: str
+) -> MCPHttp | MCPStreamableHttp | None:
+    url_key = _url_key(url)
+    return next(
+        (
+            server
+            for server in servers
+            if isinstance(server, MCPHttp | MCPStreamableHttp)
+            and _url_key(server.url) == url_key
+        ),
+        None,
+    )
+
+
+def _remote_servers_equivalent(
+    existing: MCPHttp | MCPStreamableHttp, requested: MCPHttp | MCPStreamableHttp
+) -> bool:
+    if _url_key(existing.url) != _url_key(requested.url):
+        return False
+    return _same_add_options(
+        existing.model_copy(update={"url": requested.url}), requested
+    )
+
+
+def _same_add_options(existing: MCPServer, requested: MCPServer) -> bool:
+    return type(existing) is type(requested) and existing.model_dump(
+        exclude=_USER_MANAGED_FIELDS
+    ) == requested.model_dump(exclude=_USER_MANAGED_FIELDS)
+
+
+def _url_key(value: str) -> str:
+    return _url_with_normalized_host(urlsplit(value.strip()), trim_trailing_slash=True)
+
+
+def _url_with_normalized_host(parsed: SplitResult, *, trim_trailing_slash: bool) -> str:
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname
+    if host is None:
+        return parsed.geturl()
+    hostname = host.lower()
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname
+    if parsed.port is not None and parsed.port != _DEFAULT_PORTS.get(scheme):
+        netloc = f"{netloc}:{parsed.port}"
+    path = parsed.path.rstrip("/") if trim_trailing_slash else parsed.path
+    return urlunsplit((scheme, netloc, path, parsed.query, ""))
+
+
+def _is_loopback_host(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _suggest_server_name(url: str) -> str:
+    parsed = urlsplit(url)
+    labels = [label for label in (parsed.hostname or "mcp").lower().split(".") if label]
+    if (
+        len(labels) >= _LEADING_HOST_PREFIX_LABEL_MIN_COUNT
+        and labels[0] in _HOST_PREFIXES_TO_DROP
+    ):
+        labels = labels[1:]
+    candidate = labels[0] if labels else ""
+    if candidate in _GENERIC_ALIAS_SEGMENTS:
+        candidate = _path_alias_candidate(parsed.path)
+    return normalize_mcp_server_name(candidate) or "mcp"
+
+
+def _path_alias_candidate(path: str) -> str:
+    for segment in path.split("/"):
+        normalized = normalize_mcp_server_name(segment.lower())
+        if normalized and normalized not in _GENERIC_ALIAS_SEGMENTS:
+            return normalized
+    return ""
+
+
+def _dedupe_server_name(base: str, existing_names: set[str]) -> str:
+    if base not in existing_names:
+        return base
+    index = 2
+    while f"{base}_{index}" in existing_names:
+        index += 1
+    return f"{base}_{index}"
+
+
+__all__ = [
+    "MCP_DISABLED_MESSAGE",
+    "MCPServerAddError",
+    "MCPServerRemoveError",
+    "PersistedMCPServerResult",
+    "RemovedMCPServerResult",
+    "find_persisted_oauth_mcp_server",
+    "normalize_mcp_server_url",
+    "persist_oauth_mcp_server",
+    "persist_remote_mcp_server",
+    "persist_stdio_mcp_server",
+    "remove_mcp_server",
+]

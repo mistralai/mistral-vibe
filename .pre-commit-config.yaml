@@ -1,4 +1,6 @@
 ---
+# client-e2e is a standalone harness; generated golden artifacts are not linted.
+exclude: ^(vibe/)?client-e2e/(?!.*\.py$)
 repos:
   - repo: https://github.com/mpalmer/action-validator
     rev: 7fa61514fb806fc9afd664b909e83584aca84f78 # v0.7.0
@@ -11,13 +13,25 @@ repos:
       - id: check-toml
       - id: check-yaml
       - id: end-of-file-fixer
+        exclude: |
+          (?x)^(
+            client-e2e/goldens/.*\.svg$
+          )
       - id: trailing-whitespace
-        exclude: tests/snapshots/.*\.svg$
+        exclude: |
+          (?x)^(
+            client-e2e/goldens/.*\.svg$
+          )
 
   - repo: https://github.com/fsouza/mirrors-pyright
     rev: 35d1c990dba50abf6fabe1becfa0c289042b2073 # v1.1.407
     hooks:
       - id: pyright
+        # The synced harness/ is type-checked in dashboard CI against its own project.
+        exclude: ^((vibe/)?client-e2e/|harness/).*\.py$
+        # One process, not one per CPU: each loads the whole import graph
+        # (~2 GB), and a CI pod sees its node's CPUs, not its own limit.
+        require_serial: true
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: 5e2fb545eba1ea9dc051f6f962d52fe8f76a9794 # v0.15.13
@@ -32,4 +46,20 @@ repos:
     hooks:
       - id: typos
         args: [--write-changes]
-        exclude: __snapshots__/.*\.svg$
+        exclude: |
+          (?x)^(
+            client-e2e/goldens/.*\.svg$
+          )
+
+  # The Buildkite vibe-rust-cli-tests step gates `vibe/cli-rust` on
+  # `make lint_test`; run the same gate at commit time. This config runs from
+  # both the dashboard checkout root and the standalone vibe repo root, so
+  # pick the Makefile location accordingly.
+  - repo: local
+    hooks:
+      - id: cli-rust-lint
+        name: cli-rust fmt check + clippy (same as CI)
+        language: system
+        entry: sh -c 'if [ -f vibe/Makefile ]; then make -C vibe lint_test; else make lint_test; fi'
+        pass_filenames: false
+        files: ^(vibe/)?vibe/cli-rust/

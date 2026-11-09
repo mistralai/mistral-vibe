@@ -1,0 +1,34 @@
+"""Tab-indented content in a written file and in an expanded shell transcript."""
+
+from __future__ import annotations
+
+from e2e.app_server.events import (
+    bash,
+    turn_completed,
+    turn_started,
+    user_msg,
+    write_file,
+)
+from e2e.app_server.scenario import Timeline
+
+_PROMPT = "write the makefile"
+
+# The folded group header, then the write and bash headers under it.
+_EXPAND_GROUP = "\x1b[<0;1;11M\x1b[<0;1;11m"
+_EXPAND_WRITE = "\x1b[<0;1;12M\x1b[<0;1;12m"
+_EXPAND_BASH = "\x1b[<0;1;16M\x1b[<0;1;16m"
+
+timeline: Timeline = [
+    f"{_PROMPT}\r",
+    turn_started(),
+    user_msg(_PROMPT),
+    write_file(
+        "Makefile",
+        "old\r\x1b[31mrun:\x1b[0m\r\n\tcargo run\n\t\x1b]0;hidden\x07echo done\x00\x08\x7f\n",
+    ),
+    bash("make -n run", "cargo run\n\techo done\n\tdone\n"),
+    turn_completed(),
+    _EXPAND_GROUP,
+    _EXPAND_WRITE,
+    _EXPAND_BASH,
+]

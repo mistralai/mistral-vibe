@@ -13,16 +13,20 @@ import pytest
 import tomli_w
 
 from tests.conftest import ConfigBuilder, build_test_vibe_config
+from tests.stubs.fake_raw_layer import FakeRawLayer
+from vibe.config_values import THINKING_LEVELS
 from vibe.core.config import (
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
     DEFAULT_PROVIDERS,
     ConnectorConfig,
+    MissingAPIKeyError,
     ModelConfig,
     ProviderConfig,
     VibeConfigSchema,
 )
 from vibe.core.config._migration import BASH_READ_ONLY_MIGRATION, migrate_config_layers
+from vibe.core.config.builder import ConfigBuilder as _LayeredConfigBuilder
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     init_harness_files_manager,
@@ -30,11 +34,12 @@ from vibe.core.config.harness_files import (
 )
 from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.vibe_schema import stored_tool_allowlist_patterns
 from vibe.core.paths import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
 from vibe.core.types import Backend
-from vibe.core.utils.http import build_ssl_context, configure_ssl_context
-from vibe.setup.onboarding.context import OnboardingContext
+from vibe.setup.auth.onboarding_context import OnboardingContext
+from vibe.utils.http import build_ssl_context, configure_ssl_context
 
 
 class _ProviderConfigOverrides(TypedDict, total=False):
@@ -196,6 +201,52 @@ class TestSaveUpdates:
         assert orch.config.installed_agents == ["lean"]
 
 
+class TestMouseCaptureConfig:
+    @pytest.mark.asyncio
+    async def test_defaults_to_capturing_the_mouse(
+        self,
+        make_orchestrator: Callable[
+            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+        ],
+    ) -> None:
+        orch = await make_orchestrator()
+
+        assert orch.config.enable_mouse_capture is True
+
+    @pytest.mark.asyncio
+    async def test_reads_the_setting_from_toml(
+        self,
+        config_dir: Path,
+        make_orchestrator: Callable[
+            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+        ],
+    ) -> None:
+        config_file = config_dir / "config.toml"
+        with config_file.open("rb") as f:
+            data = tomllib.load(f)
+        data["enable_mouse_capture"] = False
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        orch = await make_orchestrator()
+
+        assert orch.config.enable_mouse_capture is False
+
+    @pytest.mark.asyncio
+    async def test_reads_the_setting_from_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        make_orchestrator: Callable[
+            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+        ],
+    ) -> None:
+        monkeypatch.setenv("VIBE_ENABLE_MOUSE_CAPTURE", "false")
+
+        orch = await make_orchestrator()
+
+        assert orch.config.enable_mouse_capture is False
+
+
 class TestSystemTrustStoreConfig:
     @pytest.mark.asyncio
     async def test_build_configures_ssl_context_from_toml(
@@ -263,8 +314,7 @@ class TestSystemTrustStoreConfig:
 
             default_ctx = MagicMock(spec=ssl.SSLContext)
             with patch(
-                "vibe.core.utils.http.ssl.create_default_context",
-                return_value=default_ctx,
+                "vibe.utils.http.ssl.create_default_context", return_value=default_ctx
             ):
                 await make_orchestrator()
                 assert build_ssl_context() is default_ctx
@@ -275,14 +325,39 @@ class TestSystemTrustStoreConfig:
 
             truststore_ctx = MagicMock(spec=ssl.SSLContext)
             with patch(
-                "vibe.core.utils.http.truststore.SSLContext",
-                return_value=truststore_ctx,
+                "vibe.utils.http.truststore.SSLContext", return_value=truststore_ctx
             ):
                 await make_orchestrator()
                 assert build_ssl_context() is truststore_ctx
         finally:
             configure_ssl_context(enable_system_trust_store=False)
             build_ssl_context.cache_clear()
+
+    @pytest.mark.asyncio
+    async def test_build_configures_ssl_context_when_the_api_key_is_missing(
+        self,
+        config_dir: Path,
+        make_orchestrator: Callable[
+            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+        ],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        config_file = config_dir / "config.toml"
+        with config_file.open("rb") as f:
+            data = tomllib.load(f)
+        data["enable_system_trust_store"] = True
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        with patch(
+            "vibe.core.config.default_orchestrator.configure_ssl_context"
+        ) as configure:
+            orchestrator = await make_orchestrator()
+
+        configure.assert_called_once_with(enable_system_trust_store=True)
+        with pytest.raises(MissingAPIKeyError):
+            orchestrator.config.require_active_provider_api_key()
 
 
 class TestModelThinkingFieldUpdate:
@@ -342,6 +417,51 @@ class TestModelThinkingFieldUpdate:
         assert model_b["thinking"] == "max"
 
     @pytest.mark.asyncio
+    async def test_an_unset_thinking_stays_unset_through_load_and_writes(
+        self,
+        config_dir: Path,
+        make_orchestrator: Callable[
+            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
+        ],
+    ) -> None:
+        """*Prepare*: A config file with one model without `thinking` and one
+        with thinking off.
+        *Do*: Load it, then write the other model's thinking level.
+        *Assert*: The first model's level stays unset in the loaded config and in
+        the file, so the session picks the model's lowest setting; off stays set.
+        """
+        # Prepare
+        config_file = config_dir / "config.toml"
+        data = {
+            "active_model": "glm",
+            "models": [
+                {"name": "zai-glm-5-3", "provider": "mistral", "alias": "glm"},
+                {
+                    "name": "model-b",
+                    "provider": "mistral",
+                    "alias": "model-b",
+                    "thinking": "off",
+                },
+            ],
+        }
+        with config_file.open("wb") as f:
+            tomli_w.dump(data, f)
+
+        # Do
+        orch = await make_orchestrator()
+        loaded = orch.config.models["glm"].thinking_is_set
+        await orch.set_field("/models/model-b/thinking", "high")
+
+        # Assert
+        with config_file.open("rb") as f:
+            result = tomllib.load(f)
+        glm = next(m for m in result["models"] if m["alias"] == "glm")
+        assert loaded is False
+        assert orch.config.models["glm"].thinking_is_set is False
+        assert orch.config.models["model-b"].thinking_is_set is True
+        assert "thinking" not in glm
+
+    @pytest.mark.asyncio
     async def test_persists_thinking_from_model_mapping_as_legacy_list(
         self,
         config_dir: Path,
@@ -385,17 +505,171 @@ class TestModelThinkingFieldUpdate:
             tomli_w.dump(data, f)
 
         orch = await make_orchestrator()
-        await orch.set_field("/models/mistral-medium-3.5/thinking", "low")
+        await orch.set_field("/models/mistral-medium-3.5/thinking", "off")
 
         with config_file.open("rb") as f:
             result = tomllib.load(f)
-        assert result["models"] == [{"alias": "mistral-medium-3.5", "thinking": "low"}]
+        assert result["models"] == [{"alias": "mistral-medium-3.5", "thinking": "off"}]
 
         await orch.reload()
 
         model = orch.config.models["mistral-medium-3.5"]
-        assert model.thinking == "low"
+        assert model.thinking == "off"
         assert model.supports_images is True
+
+
+class TestThinkingOutsideItsLevelsThroughLayers:
+    @pytest.mark.asyncio
+    async def test_a_level_outside_the_merged_set_is_kept_as_written(self) -> None:
+        """*Prepare*: The level set from a lower layer and a level outside it from
+        a higher one, so only the merged entry shows the mismatch (ADR 0005).
+        *Do*: Build the config.
+        *Assert*: The level is kept as written, not quietly swapped for another:
+        it is sent as set, and the provider says whether the model takes it.
+        """
+        # Prepare
+        builder = _LayeredConfigBuilder(VibeConfigSchema)
+        builder.add_layer(
+            FakeRawLayer(
+                name="project",
+                data={
+                    "active_model": "my-model",
+                    "models": [
+                        {
+                            "name": "my-model",
+                            "provider": "mistral",
+                            "alias": "my-model",
+                            "thinking_levels": ["off", "high"],
+                        }
+                    ],
+                },
+            )
+        )
+        builder.add_layer(
+            FakeRawLayer(
+                name="user",
+                data={"models": [{"alias": "my-model", "thinking": "medium"}]},
+            )
+        )
+
+        # Do
+        config = await builder.build()
+
+        # Assert
+        assert config.get_active_model().thinking == "medium"
+
+    @pytest.mark.parametrize(
+        ("thinking", "levels", "warned"),
+        [
+            ("turbo", ["low", "turbo"], False),
+            ("xhigh", ["low", "turbo"], False),
+            ("High", ["low", "turbo"], False),
+            ("Turbo", ["low", "turbo"], True),
+            ("wat", ["off", "turbo", "high"], True),
+        ],
+        ids=[
+            "listed-own-level",
+            "standard-level",
+            "standard-other-case",
+            "own-level-other-case",
+            "neither",
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_a_thinking_level_is_kept_and_warned_only_when_unlisted(
+        self, thinking: str, levels: list[str], warned: bool
+    ) -> None:
+        """*Prepare*: A model listing levels of its own, set to one of them, to a
+        standard level it does not list, and to a word that is neither.
+        *Do*: Build the config from its layers.
+        *Assert*: It loads, with the level and the list kept as written; only the
+        word that is neither warns, naming it and the way to fix it.
+        """
+        # Prepare
+        builder = _LayeredConfigBuilder(VibeConfigSchema)
+        builder.add_layer(
+            FakeRawLayer(
+                name="user",
+                data={
+                    "active_model": "my-model",
+                    "providers": [_custom_provider_payload(backend="generic")],
+                    "models": [
+                        _custom_model_payload(
+                            name="my-model",
+                            alias="my-model",
+                            thinking=thinking,
+                            thinking_levels=levels,
+                        )
+                    ],
+                },
+            )
+        )
+
+        # Do
+        config = await builder.build()
+
+        # Assert
+        model = config.get_active_model()
+        assert model.thinking == (
+            thinking.lower() if thinking.lower() in THINKING_LEVELS else thinking
+        )
+        assert model.thinking_levels == levels
+        if warned:
+            assert len(config.validation_warnings) == 1
+            warning = config.validation_warnings[0]
+            assert f"thinking {thinking!r} is neither a standard level" in warning
+            assert "Pick another thinking level" in warning
+        else:
+            assert config.validation_warnings == ()
+
+    @pytest.mark.parametrize(
+        ("thinking", "warned"),
+        [("turbo", True), ("minimal", False), ("high", False)],
+        ids=["level-the-sdk-drops", "sdk-own-word", "standard-level"],
+    )
+    @pytest.mark.asyncio
+    async def test_a_mistral_model_warns_for_a_level_its_sdk_cannot_send(
+        self, thinking: str, warned: bool
+    ) -> None:
+        """*Prepare*: A model on the Mistral backend that lists its thinking level,
+        set to a word the Mistral SDK drops, to one it lists, and to a standard one.
+        *Do*: Build the config from its layers.
+        *Assert*: It loads with the level kept; only the word the SDK drops warns,
+        once, naming it and the efforts the SDK sends.
+        """
+        # Prepare
+        builder = _LayeredConfigBuilder(VibeConfigSchema)
+        builder.add_layer(
+            FakeRawLayer(
+                name="user",
+                data={
+                    "active_model": "my-model",
+                    "models": [
+                        {
+                            "name": "my-model",
+                            "provider": "mistral",
+                            "alias": "my-model",
+                            "thinking": thinking,
+                            "thinking_levels": ["low", thinking],
+                        }
+                    ],
+                },
+            )
+        )
+
+        # Do
+        config = await builder.build()
+
+        # Assert
+        assert config.get_active_model().thinking == thinking
+        if warned:
+            assert len(config.validation_warnings) == 1
+            warning = config.validation_warnings[0]
+            assert f"the Mistral client cannot send thinking {thinking!r}" in warning
+            assert "minimal" in warning
+            assert "Pick another thinking level" in warning
+        else:
+            assert config.validation_warnings == ()
 
 
 class TestMigrateLeavesFindInBashAllowlist:
@@ -955,12 +1229,36 @@ class TestAutoCompactThresholdFallback:
         )
         assert cfg.get_active_model().auto_compact_threshold == 99_000
 
-    def test_default_global_threshold_used_when_nothing_set(
+    def test_threshold_stays_unset_when_nothing_sets_it(
         self, make_config: Callable[..., VibeConfigSchema]
     ) -> None:
-        model = ModelConfig(name="m", provider="p", alias="m")
+        # Unset reaches the session, which derives it from the model's window.
+        model = ModelConfig(
+            name="m", provider="p", alias="m", max_context_length=262_144
+        )
         cfg = make_config(models=[model], active_model="m")
+        assert cfg.get_active_model().auto_compact_threshold is None
+
+    def test_thresholds_past_the_window_are_kept_as_written(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        # The config keeps what the user wrote; the session start moves a
+        # threshold the window cannot hold into range, with a warning.
+        model = ModelConfig(
+            name="m",
+            provider="p",
+            alias="m",
+            max_context_length=128_000,
+            auto_compact_threshold=200_000,
+        )
+        other = ModelConfig(
+            name="o", provider="p", alias="o", max_context_length=128_000
+        )
+        cfg = make_config(
+            auto_compact_threshold=400_000, models=[model, other], active_model="m"
+        )
         assert cfg.get_active_model().auto_compact_threshold == 200_000
+        assert cfg.models["o"].auto_compact_threshold == 400_000
 
     def test_changed_global_threshold_propagates_on_reload(
         self, make_config: Callable[..., VibeConfigSchema]
@@ -1304,6 +1602,35 @@ class TestOnboardingContextResolution:
         assert context.provider.name == "custom-provider"
         assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
 
+    def test_load_ignores_an_unparseable_env_list_and_keeps_toml_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+        with (tmp_path / "config.toml").open("wb") as file:
+            tomli_w.dump(
+                {
+                    "active_model": "custom-model",
+                    "providers": [_custom_provider_payload()],
+                    "models": [_custom_model_payload()],
+                },
+                file,
+            )
+        monkeypatch.setenv("VIBE_MODELS", "mistral-large-latest,mistral-medium-latest")
+        monkeypatch.setenv("VIBE_PROVIDERS", "mistral")
+        reset_harness_files_manager()
+        init_harness_files_manager("user")
+
+        with caplog.at_level("WARNING"):
+            context = OnboardingContext.load()
+
+        assert context.provider.name == "custom-provider"
+        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
+        assert "Ignoring unparseable VIBE_MODELS environment value" in caplog.text
+        assert "mistral-large-latest" not in caplog.text
+
     def test_load_preserves_explicit_provider_override_when_toml_is_invalid(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -1440,7 +1767,7 @@ class TestOnboardingContextResolution:
 
         assert context.provider.name == "mistral"
 
-    def test_load_falls_back_when_onboarding_env_payload_is_invalid(
+    def test_load_ignores_unparseable_onboarding_env_providers(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         reset_harness_files_manager()
@@ -1449,6 +1776,34 @@ class TestOnboardingContextResolution:
         context = OnboardingContext.load()
 
         assert context.provider.name == "mistral"
+
+    def test_from_config_falls_back_when_active_provider_is_missing(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        config = make_config(
+            models=[ModelConfig(name="orphan", provider="ghost", alias="orphan")],
+            active_model="orphan",
+        )
+
+        context = OnboardingContext.from_config(config)
+
+        assert context.provider.name == DEFAULT_PROVIDERS[0].name
+
+    def test_from_config_preserves_merged_urls_when_falling_back(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        config = make_config(
+            models=[ModelConfig(name="orphan", provider="ghost", alias="orphan")],
+            active_model="orphan",
+            vibe_base_url="https://merged-vibe.example.com",
+            console_base_url="https://merged-console.example.com",
+        )
+
+        context = OnboardingContext.from_config(config)
+
+        assert context.provider.name == DEFAULT_PROVIDERS[0].name
+        assert context.vibe_base_url == "https://merged-vibe.example.com"
+        assert context.console_base_url == "https://merged-console.example.com"
 
 
 class TestCompactionModel:
@@ -1467,7 +1822,7 @@ class TestCompactionModel:
         cfg = make_config(compaction_model=compaction)
         assert cfg.get_compaction_model().name == "compact-model"
 
-    def test_compaction_model_provider_must_match_active(
+    def test_compaction_model_on_another_provider_falls_back_to_active(
         self, make_config: Callable[..., VibeConfigSchema]
     ) -> None:
         from vibe.core.config import ProviderConfig
@@ -1487,8 +1842,8 @@ class TestCompactionModel:
                 api_key_env_var="MISTRAL_API_KEY",
             ),
         ]
-        with pytest.raises(ValueError, match="must share the same provider"):
-            make_config(compaction_model=compaction, providers=providers)
+        cfg = make_config(compaction_model=compaction, providers=providers)
+        assert cfg.get_compaction_model() == cfg.get_active_model()
 
     def test_compaction_model_provider_must_exist(
         self, make_config: Callable[..., VibeConfigSchema]
@@ -1509,19 +1864,15 @@ class TestCompactionModel:
 
 
 class TestActiveModelValidation:
-    def test_unknown_active_model_falls_back_to_first(
+    def test_unknown_active_model_falls_back_to_default(
         self, build_config: ConfigBuilder, caplog: pytest.LogCaptureFixture
     ) -> None:
         with caplog.at_level("WARNING"):
             cfg = build_config(active_model="does-not-exist")
 
-        first_alias = next(iter(cfg.models))
-        assert cfg.active_model == first_alias
-        assert cfg.get_active_model().alias == first_alias
-        assert (
-            "Active model 'does-not-exist' is not in your configured models"
-            in caplog.text
-        )
+        assert cfg.active_model == ""
+        assert cfg.get_active_model().alias == cfg.resolve_default_model_alias()
+        assert "Model 'does-not-exist' is not available" in caplog.text
         assert len(cfg.validation_warnings) == 1
         assert "does-not-exist" in cfg.validation_warnings[0]
 
@@ -1683,71 +2034,28 @@ class TestConnectorsByName:
         assert build_config().connectors_by_name() == {}
 
 
-class TestAddToolAllowlistPatterns:
-    @pytest.mark.asyncio
-    async def test_strips_bash_wildcard(
-        self,
-        config_dir: Path,
-        make_orchestrator: Callable[
-            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
-        ],
-    ) -> None:
-        orch = await make_orchestrator()
-        payload = orch.config.build_tool_allowlist_update("bash", ["ls *"])
-        assert payload is not None
-        await orch.set_field(
-            "/tools/bash/allowlist", payload["tools"]["bash"]["allowlist"]
-        )
+class TestStoredToolAllowlistPatterns:
+    def test_strips_bash_wildcard(self) -> None:
+        assert stored_tool_allowlist_patterns("bash", ["ls *"]) == ["ls"]
 
-        with (config_dir / "config.toml").open("rb") as f:
-            result = tomllib.load(f)
-        assert result["tools"]["bash"]["allowlist"] == ["ls"]
+    @pytest.mark.parametrize("shell", ["git_bash", "powershell"])
+    def test_strips_the_wildcard_for_every_shell(self, shell: str) -> None:
+        """Windows spells the shell ``git_bash`` or ``powershell``, and their
+        allowlists match by prefix just as bash's does: a stored ``ls *`` matches no
+        command at all, so a permanent approval would quietly never take.
+        """
+        assert stored_tool_allowlist_patterns(shell, ["ls *"]) == ["ls"]
 
-    @pytest.mark.asyncio
-    async def test_merges_and_sorts_with_existing(
-        self,
-        config_dir: Path,
-        make_orchestrator: Callable[
-            [], Awaitable[ConfigOrchestrator[VibeConfigSchema]]
-        ],
-    ) -> None:
-        config_file = config_dir / "config.toml"
-        with config_file.open("rb") as f:
-            data = tomllib.load(f)
-        data.setdefault("tools", {})["edit"] = {"allowlist": ["c"]}
-        with config_file.open("wb") as f:
-            tomli_w.dump(data, f)
+    def test_keeps_the_wildcard_for_a_tool_that_is_not_a_shell(self) -> None:
+        """Only the shells append " *" to mean "any arguments" -- anywhere else a
+        trailing wildcard is part of the pattern itself.
+        """
+        assert stored_tool_allowlist_patterns("edit", ["src/lib *"]) == ["src/lib *"]
 
-        orch = await make_orchestrator()
-        payload = orch.config.build_tool_allowlist_update("edit", ["b", "a"])
-        assert payload is not None
-        await orch.set_field(
-            "/tools/edit/allowlist", payload["tools"]["edit"]["allowlist"]
-        )
-
-        with config_file.open("rb") as f:
-            result = tomllib.load(f)
-        assert result["tools"]["edit"]["allowlist"] == ["a", "b", "c"]
-
-    def test_noop_when_nothing_new(
-        self, config_dir: Path, build_config: ConfigBuilder
-    ) -> None:
-        cfg = build_config(tools={"edit": {"allowlist": ["a"]}})
-
-        assert cfg.build_tool_allowlist_update("edit", ["a"]) is None
-        with (config_dir / "config.toml").open("rb") as f:
-            persisted = tomllib.load(f)
-        assert "edit" not in persisted.get("tools", {})
-
-    def test_keeps_in_memory_config_current(self, build_config: ConfigBuilder) -> None:
-        cfg = build_config(tools={"edit": {"allowlist": ["a"]}})
-
-        first = cfg.build_tool_allowlist_update("edit", ["b"])
-        assert first == {"tools": {"edit": {"allowlist": ["a", "b"]}}}
-        assert cfg.tools["edit"]["allowlist"] == ["a", "b"]
-
-        second = cfg.build_tool_allowlist_update("edit", ["c"])
-        assert second == {"tools": {"edit": {"allowlist": ["a", "b", "c"]}}}
+    def test_drops_duplicates(self) -> None:
+        assert stored_tool_allowlist_patterns(
+            "bash", ["ls *", "ls", "cat *", "cat *"]
+        ) == ["ls", "cat"]
 
 
 class TestMigrateRenamedTools:
@@ -1859,3 +2167,138 @@ class TestMigrateRenamedTools:
         with config_file.open("rb") as f:
             result = tomllib.load(f)
         assert result["tools"] == {"read_file": {"permission": "always"}}
+
+
+class TestThinkingLevels:
+    def test_model_without_a_set_offers_the_five(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        model = ModelConfig(name="m", provider="p", alias="m", thinking="medium")
+        cfg = make_config(models=[model], active_model="m")
+
+        active = cfg.get_active_model()
+        assert active.thinking_levels == ["off", "low", "medium", "high", "max"]
+        assert active.thinking == "medium"
+
+    def test_narrowed_set_offers_exactly_those_levels(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        model = ModelConfig(
+            name="m", provider="p", alias="m", thinking_levels=["off", "high"]
+        )
+        cfg = make_config(models=[model], active_model="m")
+
+        assert cfg.get_active_model().thinking_levels == ["off", "high"]
+
+    def test_stored_low_stays_on_the_uncurated_set(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        model = ModelConfig(name="m", provider="p", alias="m", thinking="low")
+        cfg = make_config(models=[model], active_model="m")
+
+        assert cfg.get_active_model().thinking == "low"
+
+    def test_empty_set_offers_off_only(
+        self, make_config: Callable[..., VibeConfigSchema]
+    ) -> None:
+        model = ModelConfig(
+            name="m", provider="p", alias="m", thinking="medium", thinking_levels=[]
+        )
+        cfg = make_config(models=[model], active_model="m")
+
+        active = cfg.get_active_model()
+        assert active.thinking_levels == ["off"]
+
+    def test_a_level_of_the_models_own_is_kept_in_its_place(self) -> None:
+        model = ModelConfig.model_validate({
+            "name": "m",
+            "provider": "p",
+            "alias": "m",
+            "thinking_levels": ["off", "turbo", "high"],
+        })
+
+        assert model.thinking_levels == ["off", "turbo", "high"]
+
+    def test_a_standard_level_in_another_case_is_the_standard_one(self) -> None:
+        model = ModelConfig.model_validate({
+            "name": "m",
+            "provider": "p",
+            "alias": "m",
+            "thinking_levels": ["Off", " High ", "Turbo", "high"],
+            "thinking": "High",
+        })
+
+        assert model.thinking_levels == ["off", "high", "Turbo"]
+        assert model.thinking == "high"
+
+    def test_a_models_own_level_loses_its_padding(self) -> None:
+        model = ModelConfig.model_validate({
+            "name": "m",
+            "provider": "p",
+            "alias": "m",
+            "thinking_levels": [" turbo ", "turbo"],
+            "thinking": " turbo",
+        })
+
+        assert model.thinking_levels == ["turbo"]
+        assert model.thinking == "turbo"
+
+    @pytest.mark.parametrize(
+        ("field", "value", "kept"),
+        [
+            ("thinking", " ", None),
+            ("thinking", 5, None),
+            ("thinking_levels", ["off", "", 3, "turbo"], ["off", "turbo"]),
+            ("thinking_levels", [""], None),
+        ],
+        ids=["blank-thinking", "number-thinking", "mixed-levels", "only-blank"],
+    )
+    @pytest.mark.asyncio
+    async def test_a_value_that_is_not_a_word_is_dropped_with_a_warning(
+        self, field: str, value: object, kept: list[str] | None
+    ) -> None:
+        """*Prepare*: A model whose thinking or thinking_levels holds a blank or a
+        number.
+        *Do*: Build the config from its layers.
+        *Assert*: It loads: the value is dropped with a warning naming it, so the
+        pickers can still fix the model.
+        """
+        # Prepare
+        builder = _LayeredConfigBuilder(VibeConfigSchema)
+        builder.add_layer(
+            FakeRawLayer(
+                name="user",
+                data={
+                    "active_model": "my-model",
+                    "models": [
+                        {
+                            "name": "my-model",
+                            "provider": "mistral",
+                            "alias": "my-model",
+                            field: value,
+                        }
+                    ],
+                },
+            )
+        )
+
+        # Do
+        config = await builder.build()
+
+        # Assert
+        model = config.get_active_model()
+        if field == "thinking":
+            assert not model.thinking_is_set
+        elif kept is not None:
+            assert model.thinking_levels == kept
+        else:
+            assert not model.thinking_levels_curated
+        assert len(config.validation_warnings) == 1
+        assert f"Model 'my-model': {field}" in config.validation_warnings[0]
+
+    def test_duplicate_levels_offer_one_picker_row(self) -> None:
+        model = ModelConfig(
+            name="m", provider="p", alias="m", thinking_levels=["off", "off", "high"]
+        )
+
+        assert model.thinking_levels == ["off", "high"]

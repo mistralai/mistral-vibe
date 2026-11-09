@@ -1,0 +1,788 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path, PureWindowsPath
+import re
+from typing import TYPE_CHECKING, ClassVar
+
+from pydantic import BaseModel, Field
+
+from vibe import VIBE_ROOT
+from vibe.core.scratchpad import is_scratchpad_path
+from vibe.core.tools.base import BaseTool, BaseToolState, ToolPermission
+from vibe.core.tools.builtins._powershell_lexer import (
+    powershell_redirection_targets,
+    powershell_redirections,
+    split_powershell_arguments,
+    split_powershell_commands,
+)
+from vibe.core.tools.builtins._shell_permission_analysis import RedirectWrite
+from vibe.core.tools.builtins.bash import BashToolConfig, CapturedShellResult
+from vibe.core.tools.builtins.experimental_bash import (
+    BashLogFile,
+    BashLogFileArgs,
+    BashLogFileResult,
+    BashOutput,
+    BashOutputArgs,
+    BashOutputResult,
+    BashSessions,
+    BashSessionsArgs,
+    BashSessionsResult,
+    BashStdin,
+    BashStdinArgs,
+    BashStdinResult,
+    ExperimentalBash,
+    ExperimentalBashArgs,
+    ExperimentalBashToolConfig,
+    _BashPermissionMixin,
+    _matches_pattern,
+)
+from vibe.core.tools.builtins.managed_shell import backend as managed_shell_backend
+from vibe.core.tools.builtins.managed_shell._windows import (
+    git_bash_shell_available,
+    resolve_powershell_shell,
+)
+from vibe.core.tools.builtins.managed_shell.backend import ManagedShellBackendError
+from vibe.core.tools.permissions import PermissionContext, RequiredPermission
+from vibe.core.tools.utils import (
+    ToolPath,
+    is_path_within_workdir,
+    names_a_link,
+    resolve_tool_path,
+    ungranted_paths,
+)
+from vibe.core.utils import is_windows
+from vibe.core.workspace import Workspace
+from vibe.observability.logging import logger
+
+if TYPE_CHECKING:
+    from vibe.core.config import VibeConfigSchema
+
+
+# Load-bearing: keeps the inherited args/result models in this module's globals so
+# get_type_hints() can resolve the companion tools' annotations under
+# `from __future__ import annotations`. Do not remove — see get_parameters().
+_INHERITED_ANNOTATION_MODELS = (
+    BashLogFileArgs,
+    BashLogFileResult,
+    BashOutputArgs,
+    BashOutputResult,
+    BashSessionsArgs,
+    BashSessionsResult,
+    BashStdinArgs,
+    BashStdinResult,
+)
+
+WINDOWS_SESSION_PREFIX = "powershell"
+_WINDOWS_DRIVE_PREFIX_LENGTH = 2
+_WINDOWS_EXECUTABLE_SUFFIXES = (".exe", ".cmd", ".bat", ".com", ".ps1")
+_WINDOWS_POWERSHELL_COMMAND_ALIASES = {
+    "ac": "add-content",
+    "cat": "get-content",
+    "cd": "set-location",
+    "chdir": "set-location",
+    "copy": "copy-item",
+    "cp": "copy-item",
+    "cpi": "copy-item",
+    "del": "remove-item",
+    "dir": "get-childitem",
+    "erase": "remove-item",
+    "gc": "get-content",
+    "gci": "get-childitem",
+    "ls": "get-childitem",
+    "md": "new-item",
+    "mi": "move-item",
+    "mkdir": "new-item",
+    "move": "move-item",
+    "mv": "move-item",
+    "ni": "new-item",
+    "rd": "remove-item",
+    "ren": "rename-item",
+    "rename": "rename-item",
+    "ri": "remove-item",
+    "rm": "remove-item",
+    "rmdir": "remove-item",
+    "rni": "rename-item",
+    "sc": "set-content",
+    "sl": "set-location",
+    "sls": "select-string",
+    "type": "get-content",
+}
+_WINDOWS_NON_PATH_COMMANDS = {"echo", "write-host", "write-output"}
+_WINDOWS_SLASH_OPTION_COMMANDS = {
+    "findstr",
+    "more",
+    "robocopy",
+    "tree",
+    "ver",
+    "where",
+    "whoami",
+    "xcopy",
+}
+
+
+def _windows_managed_shell_enabled(config: VibeConfigSchema | None) -> bool:
+    _ = config
+    return bool(
+        is_windows()
+        and _powershell_treatment_available()
+        and managed_shell_backend.managed_shell_supported("powershell")
+    )
+
+
+def powershell_shell_available() -> bool:
+    if not is_windows():
+        return False
+    try:
+        resolve_powershell_shell(None, None)
+    except ManagedShellBackendError as exc:
+        logger.info("PowerShell managed-shell treatment unavailable: %s", exc)
+        return False
+    return True
+
+
+def _powershell_treatment_available() -> bool:
+    return powershell_shell_available() and not git_bash_shell_available()
+
+
+def _strip_windows_executable_suffix(value: str) -> str:
+    lowered = value.lower()
+    for suffix in _WINDOWS_EXECUTABLE_SUFFIXES:
+        if lowered.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
+def _windows_basename(value: str) -> str:
+    return PureWindowsPath(value.strip("\"'")).name
+
+
+def _windows_command_name(value: str) -> str:
+    return _strip_windows_executable_suffix(_windows_basename(value)).lower()
+
+
+def _windows_invoked_command(tokens: list[str]) -> tuple[str, list[str]]:
+    if tokens[0] == "&" and len(tokens) > 1:
+        return tokens[1].strip("\"'"), tokens[2:]
+    return tokens[0].strip("\"'"), tokens[1:]
+
+
+def _windows_powershell_alias_target(executable: str) -> str | None:
+    value = executable.strip("\"'")
+    # PowerShell aliases apply only to bare, unsuffixed command names. Expanding
+    # C:\tools\rm.exe would let a remove-item allowlist approve another program.
+    if value != _windows_basename(value):
+        return None
+    if value != _strip_windows_executable_suffix(value):
+        return None
+    return _WINDOWS_POWERSHELL_COMMAND_ALIASES.get(value.lower())
+
+
+def _windows_command_match_forms(
+    command: str, *, include_path_basename: bool = True
+) -> list[str]:
+    tokens = split_powershell_arguments(command)
+    if not tokens:
+        return []
+
+    executable, rest = _windows_invoked_command(tokens)
+    executable_basename = _windows_basename(executable)
+    candidates = [executable]
+    if include_path_basename or executable == executable_basename:
+        candidates.extend([
+            executable_basename,
+            _strip_windows_executable_suffix(executable_basename),
+        ])
+    if alias_target := _windows_powershell_alias_target(executable):
+        candidates.append(alias_target)
+
+    forms = [" ".join(tokens).strip().lower()] if tokens[0] == "&" else []
+    seen: set[str] = set()
+    seen.update(forms)
+    for candidate in candidates:
+        if not candidate:
+            continue
+        form = " ".join([candidate, *rest]).strip().lower()
+        if form in seen:
+            continue
+        seen.add(form)
+        forms.append(form)
+    return forms
+
+
+def _windows_policy_pattern_forms(pattern: str) -> list[str]:
+    normalized = pattern.lower()
+    tokens = split_powershell_arguments(pattern)
+    if not tokens:
+        return [normalized]
+
+    executable, rest = _windows_invoked_command(tokens)
+    alias_target = _windows_powershell_alias_target(executable)
+    if alias_target is None:
+        return [normalized]
+
+    canonical = " ".join([alias_target, *rest]).strip().lower()
+    return [normalized] if canonical == normalized else [normalized, canonical]
+
+
+def _windows_matches_policy_pattern(
+    command: str, pattern: str, *, include_path_basename: bool = True
+) -> bool:
+    return any(
+        _matches_pattern(command_form, pattern_form)
+        for command_form in _windows_command_match_forms(
+            command, include_path_basename=include_path_basename
+        )
+        for pattern_form in _windows_policy_pattern_forms(pattern)
+    )
+
+
+def _windows_looks_like_option(token: str) -> bool:
+    if token.startswith("-"):
+        return True
+    if not token.startswith("/") or token.startswith("//"):
+        return False
+    body = token[1:]
+    return bool(body) and "/" not in body and "\\" not in body and ":" not in body
+
+
+def _windows_looks_like_path(token: str, cwd: Path) -> bool:
+    value = token.strip("\"'")
+    return (
+        value.startswith(("~", ".", "\\\\"))
+        or (len(value) >= _WINDOWS_DRIVE_PREFIX_LENGTH and value[1] == ":")
+        or "/" in value
+        or "\\" in value
+        or names_a_link(value, cwd)
+    )
+
+
+_WINDOWS_POWERSHELL_VARIABLE = re.compile(
+    r"\$(?:\{(?P<braced_name>[^}]+)\}"
+    r"|(?:(?P<scope>[A-Za-z_][\w]*):)?(?P<name>[A-Za-z_][\w]*))",
+    re.IGNORECASE,
+)
+_WINDOWS_POWERSHELL_PROVIDER_PATH = re.compile(
+    r"^(?P<provider>[A-Za-z][\w.-]*)::(?P<path>.*)$"
+)
+
+
+def _windows_environment_value(environment: dict[str, str], name: str) -> str | None:
+    name = name.casefold()
+    return next(
+        (value for key, value in environment.items() if key.casefold() == name), None
+    )
+
+
+def _windows_home_value(environment: dict[str, str]) -> str | None:
+    if user_profile := _windows_environment_value(environment, "USERPROFILE"):
+        return user_profile
+    home_drive = _windows_environment_value(environment, "HOMEDRIVE")
+    home_path = _windows_environment_value(environment, "HOMEPATH")
+    if home_drive is None or home_path is None:
+        return None
+    return f"{home_drive}{home_path}"
+
+
+def _expand_windows_powershell_path(
+    token: str, *, command_cwd: Path, environment: dict[str, str]
+) -> tuple[str, bool]:
+    value = token.strip("\"'")
+    unresolved = False
+
+    def replace_variable(match: re.Match[str]) -> str:
+        nonlocal unresolved
+        if braced_name := match.group("braced_name"):
+            possible_scope, separator, name = braced_name.partition(":")
+            scope = possible_scope if separator else None
+        else:
+            name = match.group("name")
+            scope = match.group("scope")
+        if scope is None and name.casefold() == "pwd":
+            return str(command_cwd)
+        if scope is None and name.casefold() == "home":
+            resolved = _windows_home_value(environment)
+        elif scope is not None and scope.casefold() == "env":
+            resolved = _windows_environment_value(environment, name)
+        else:
+            resolved = None
+        if resolved is not None:
+            return resolved
+        unresolved = True
+        return match.group(0)
+
+    value = _WINDOWS_POWERSHELL_VARIABLE.sub(replace_variable, value)
+    unresolved = (
+        unresolved or "$" in value or "@(" in value or value.startswith(("(", "{"))
+    )
+    if value == "~" or value.startswith(("~/", "~\\")):
+        value = f"{Path.home()}{value[1:]}"
+    return value, unresolved
+
+
+def _windows_attached_parameter_value(token: str) -> str | None:
+    if not token.startswith("-"):
+        return None
+    match = re.match(r"^-[^:=\s]+[:=](.+)$", token)
+    return match.group(1) if match else None
+
+
+_WINDOWS_DISCARD_TARGETS = {"$null", "nul", "nul:"}
+
+
+def _windows_file_redirection_targets(command: str) -> list[str]:
+    """Return output redirects that can write a file.
+
+    PowerShell's null variable and CMD's null device discard output. Descriptor
+    duplication such as ``2>&1`` has no target and never reaches this filter.
+    """
+    return [
+        target
+        for target in powershell_redirection_targets(command)
+        if target.casefold() not in _WINDOWS_DISCARD_TARGETS
+    ]
+
+
+# A target PowerShell opens exactly as written: an unquoted word with no
+# escape, variable or pattern, or a quoted one whose quotes expand nothing.
+_PLAIN_POWERSHELL_TARGET = re.compile(
+    r"(?P<word>[\w.\\/:+=~%-]+)|'(?P<single>[^'‘’‚‛\r\n]*)'|\"(?P<double>[^\"“”„`$\r\n]*)\""
+)
+# How a target left to the classifier starts: a relative name, ``~``, or a
+# variable or subexpression the command decides.
+_POWERSHELL_RELATIVE_START = re.compile(r"[\w.-]")
+_POWERSHELL_EXPANSION_START = re.compile(r"\$[\w{(:]")
+# Quotes, escapes and spaces a target may open with before its path does.
+_TARGET_PREFIX = "'\"‘’‚‛“”„` \t\r\n"
+
+
+def windows_redirect_writes(command: str) -> tuple[RedirectWrite, ...]:
+    """The files a PowerShell command's redirects write from a root.
+
+    A target from a root -- a drive, a share or the current drive's root -- is
+    placed only where it is spelled plainly. A relative, ``~`` or
+    variable-led target (``$env:TEMP\\x``) is not listed: it moves with what
+    the command sets, and is left to the classifier. Every other target is
+    listed with no path, an array (``> a, b``) included, so a spelling this
+    reader does not know is never taken for one it does.
+    """
+    writes: list[RedirectWrite] = []
+    for redirect in powershell_redirections(command):
+        spelling, value = redirect.spelling, redirect.value
+        if redirect.array:
+            writes.append(RedirectWrite(spelling, None))
+            continue
+        if value.casefold() in _WINDOWS_DISCARD_TARGETS:
+            continue
+        plain = _PLAIN_POWERSHELL_TARGET.fullmatch(spelling)
+        path = (
+            next(text for text in plain.groups() if text is not None)
+            if plain is not None
+            else None
+        )
+        if path is not None and path == value:
+            if _windows_rooted(path):
+                writes.append(RedirectWrite(spelling, path))
+            continue
+        head = spelling.lstrip(_TARGET_PREFIX)
+        if _windows_rooted(head) or not (
+            head.startswith("~")
+            or _POWERSHELL_EXPANSION_START.match(head)
+            or _POWERSHELL_RELATIVE_START.match(head)
+        ):
+            writes.append(RedirectWrite(spelling, None))
+    return tuple(dict.fromkeys(writes))
+
+
+def _windows_rooted(path: str) -> bool:
+    pure = PureWindowsPath(path)
+    return bool(pure.drive or pure.root)
+
+
+def _windows_path(
+    token: str,
+    *,
+    command_cwd: Path,
+    workspace: Workspace,
+    scratchpad_dir: Path | None,
+    environment: dict[str, str],
+) -> tuple[str | None, bool]:
+    value, unresolved = _expand_windows_powershell_path(
+        token, command_cwd=command_cwd, environment=environment
+    )
+    unsupported_provider = False
+    if provider_path := _WINDOWS_POWERSHELL_PROVIDER_PATH.match(value):
+        unsupported_provider = (
+            provider_path.group("provider").casefold() != "filesystem"
+        )
+        if not unsupported_provider:
+            value = provider_path.group("path")
+    if unresolved or unsupported_provider:
+        return None, True
+    if not _windows_looks_like_path(value, command_cwd):
+        return None, False
+
+    windows_path = PureWindowsPath(value)
+    host_path = Path(value)
+    if windows_path.is_absolute() and not host_path.is_absolute():
+        return str(windows_path), False
+    if windows_path.drive and not windows_path.root:
+        return None, True
+
+    resolved = Path(value.replace("\\", os.sep)).expanduser()
+    if not resolved.is_absolute():
+        resolved = command_cwd / resolved
+    resolved = resolved.resolve()
+
+    if is_path_within_workdir(str(resolved), workspace=workspace) or is_scratchpad_path(
+        str(resolved), scratchpad_dir=scratchpad_dir
+    ):
+        return None, False
+    return str(resolved), False
+
+
+def _analyze_windows_paths(
+    command_parts: list[str],
+    *,
+    command_cwd: Path,
+    workspace: Workspace,
+    scratchpad_dir: Path | None,
+    environment: dict[str, str],
+    supplied_cwd: str | None = None,
+) -> tuple[dict[str, str], set[str]]:
+    """Resolved outside paths mapped to their supplied spelling, and dynamic tokens."""
+    paths: dict[str, str] = {}
+    dynamic_paths: set[str] = set()
+    if not is_path_within_workdir(
+        str(command_cwd), workspace=workspace
+    ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
+        paths[str(command_cwd)] = supplied_cwd or str(command_cwd)
+
+    def collect(token: str) -> None:
+        path, dynamic = _windows_path(
+            token,
+            command_cwd=command_cwd,
+            workspace=workspace,
+            scratchpad_dir=scratchpad_dir,
+            environment=environment,
+        )
+        if path is not None:
+            paths.setdefault(path, token)
+        if dynamic:
+            dynamic_paths.add(token)
+
+    for part in command_parts:
+        tokens = split_powershell_arguments(part)
+        if not tokens:
+            continue
+        executable, arguments = _windows_invoked_command(tokens)
+        if executable != _windows_basename(executable):
+            collect(executable)
+        for target in _windows_file_redirection_targets(part):
+            collect(target)
+
+        command = _windows_command_name(executable)
+        if not command or command in _WINDOWS_NON_PATH_COMMANDS:
+            continue
+
+        for token in arguments:
+            if _windows_looks_like_option(token):
+                if value := _windows_attached_parameter_value(token):
+                    collect(value)
+                    continue
+                if token.startswith("-") or command in _WINDOWS_SLASH_OPTION_COMMANDS:
+                    continue
+            collect(token)
+    return paths, dynamic_paths
+
+
+class WindowsShellToolConfig(ExperimentalBashToolConfig):
+    shell_tool_name: ClassVar[str] = "powershell"
+
+
+class WindowsShellArgs(BaseModel):
+    command: str = Field(description="PowerShell command to run.")
+    timeout: int | None = Field(
+        default=None, description="Backward-compatible timeout override in seconds."
+    )
+    timeout_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        description="Foreground wait time before the command is killed.",
+    )
+    cwd: ToolPath | None = Field(
+        default=None, description="Working directory override."
+    )
+    env: dict[str, str] | None = Field(
+        default=None, description="Environment variable overrides."
+    )
+    shell: str | None = Field(default=None, description="Shell executable override.")
+
+
+class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
+    _BashPermissionMixin[ConfigT]
+):
+    def _find_denylist_match(self, command: str) -> str | None:
+        return next(
+            (
+                pattern
+                for pattern in self.config.denylist
+                if _windows_matches_policy_pattern(command, pattern)
+            ),
+            None,
+        )
+
+    def _is_standalone_denylisted(self, command: str) -> bool:
+        tokens = split_powershell_arguments(command)
+        if not tokens:
+            return False
+        _executable, arguments = _windows_invoked_command(tokens)
+        if arguments:
+            return False
+        return any(
+            command_form == pattern_form
+            for command_form in _windows_command_match_forms(command)
+            for pattern in self.config.denylist_standalone
+            for pattern_form in _windows_policy_pattern_forms(pattern)
+        )
+
+    def _is_allowlisted(self, command: str) -> bool:
+        return any(
+            _windows_matches_policy_pattern(
+                command, pattern, include_path_basename=False
+            )
+            for pattern in self.config.allowlist
+        )
+
+    def _is_sensitive(self, command: str) -> bool:
+        return any(
+            _windows_matches_policy_pattern(command, pattern)
+            for pattern in self.config.sensitive_patterns
+        )
+
+    @staticmethod
+    def _tokenize_command(command: str) -> list[str]:
+        return split_powershell_arguments(command)
+
+    def _build_windows_context_permissions(
+        self, command_parts: list[str], shell: str | None, env: dict[str, str] | None
+    ) -> list[RequiredPermission]:
+        required: list[RequiredPermission] = []
+        if shell:
+            required.append(
+                self._build_command_required_permission(
+                    invocation_pattern=f"shell override: {shell}",
+                    session_pattern=f"shell override: {shell}",
+                    label=f"custom shell ({shell})",
+                )
+            )
+        if env:
+            names = ", ".join(sorted(env))
+            required.append(
+                self._build_command_required_permission(
+                    invocation_pattern=f"env override: {names}",
+                    session_pattern="env override *",
+                    label=f"custom environment ({names})",
+                )
+            )
+        redirection_targets = {
+            target
+            for part in command_parts
+            for target in _windows_file_redirection_targets(part)
+        }
+        required.extend(
+            self._build_command_required_permission(
+                invocation_pattern=f"output redirection: {target}",
+                session_pattern=f"output redirection: {target}",
+                label=f"output redirection ({target})",
+            )
+            for target in sorted(redirection_targets)
+        )
+        return required
+
+    def _resolve_windows_permission(
+        self,
+        *,
+        command: str,
+        cwd: str | None,
+        shell: str | None,
+        env: dict[str, str] | None,
+    ) -> PermissionContext | None:
+        command_parts = split_powershell_commands(command)
+        if not command_parts:
+            return None
+
+        command_cwd = resolve_tool_path(cwd, self.cwd)
+        guardrail_permission = self._resolve_guardrail_permission(
+            command_parts, command_cwd=command_cwd
+        )
+        if (
+            guardrail_permission
+            and guardrail_permission.permission == ToolPermission.NEVER
+        ):
+            return guardrail_permission
+
+        outside_paths, dynamic_paths = _analyze_windows_paths(
+            command_parts,
+            command_cwd=command_cwd,
+            workspace=self.workspace,
+            scratchpad_dir=self.scratchpad_dir,
+            environment={**os.environ, **(env or {})},
+            supplied_cwd=cwd,
+        )
+        outside_paths = ungranted_paths(
+            outside_paths, self.config.allowlist, self.workspace
+        )
+        context_required = self._build_windows_context_permissions(
+            command_parts, shell, env
+        )
+        commands_cleared = (
+            self._is_unconditionally_allowed(
+                command_parts, context_required, dynamic_paths=dynamic_paths
+            )
+            and not guardrail_permission
+        )
+        if commands_cleared and not outside_paths:
+            return PermissionContext(permission=ToolPermission.ALWAYS)
+
+        # Cleared commands leave only the outside paths to answer for.
+        required = self._build_required_permissions(
+            [] if commands_cleared else command_parts, outside_paths
+        )
+        required.extend(context_required)
+        required.extend(
+            self._build_command_required_permission(
+                invocation_pattern=f"dynamic path: {path}",
+                session_pattern=f"dynamic path: {path}",
+                label=f"dynamic PowerShell path ({path})",
+            )
+            for path in sorted(dynamic_paths)
+        )
+        if guardrail_permission:
+            required.extend(guardrail_permission.required_permissions)
+        if not required:
+            return None
+        return PermissionContext(
+            permission=ToolPermission.ASK, required_permissions=required
+        )
+
+
+class WindowsShell(
+    WindowsShellPermissionMixin[WindowsShellToolConfig],
+    BaseTool[
+        WindowsShellArgs, CapturedShellResult, WindowsShellToolConfig, BaseToolState
+    ],
+):
+    description: ClassVar[str] = "Run a PowerShell command."
+    shell_rollout: ClassVar[str | None] = "managed"
+    prompt_path = (
+        VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "powershell_fallback.md"
+    )
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "powershell"
+
+    @classmethod
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
+        return is_windows() and _powershell_treatment_available()
+
+    def resolve_permission(self, args: WindowsShellArgs) -> PermissionContext | None:
+        return self._resolve_windows_permission(
+            command=args.command, cwd=args.cwd, shell=args.shell, env=args.env
+        )
+
+
+class ExperimentalWindowsShell(
+    WindowsShellPermissionMixin[ExperimentalBashToolConfig], ExperimentalBash
+):
+    description: ClassVar[str] = "Run a PowerShell command in a managed PTY session."
+    prompt_path = (
+        VIBE_ROOT / "core" / "tools" / "builtins" / "prompts" / "managed_powershell.md"
+    )
+    shell_rollout: ClassVar[str | None] = "managed"
+    shell_family: ClassVar[str] = "powershell"
+    session_prefix: ClassVar[str] = WINDOWS_SESSION_PREFIX
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "powershell"
+
+    @classmethod
+    def _get_tool_config_class(cls) -> type[WindowsShellToolConfig]:
+        return WindowsShellToolConfig
+
+    @classmethod
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
+        return _windows_managed_shell_enabled(config)
+
+    def resolve_permission(
+        self, args: ExperimentalBashArgs
+    ) -> PermissionContext | None:
+        return self._resolve_windows_permission(
+            command=args.command, cwd=args.cwd, shell=args.shell, env=args.env
+        )
+
+
+class WindowsShellOutput(BashOutput):
+    description: ClassVar[str] = (
+        "Poll output from a running or completed PowerShell session."
+    )
+    shell_rollout: ClassVar[str | None] = "managed"
+    shell_family: ClassVar[str] = "powershell"
+    session_prefix: ClassVar[str] = WINDOWS_SESSION_PREFIX
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "powershell_output"
+
+    @classmethod
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
+        return _windows_managed_shell_enabled(config)
+
+
+class WindowsShellStdin(BashStdin):
+    description: ClassVar[str] = "Send input to an interactive PowerShell session."
+    shell_rollout: ClassVar[str | None] = "managed"
+    shell_family: ClassVar[str] = "powershell"
+    session_prefix: ClassVar[str] = WINDOWS_SESSION_PREFIX
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "powershell_stdin"
+
+    @classmethod
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
+        return _windows_managed_shell_enabled(config)
+
+
+class WindowsShellSessions(BashSessions):
+    description: ClassVar[str] = (
+        "List, inspect, kill, or reset managed PowerShell sessions."
+    )
+    shell_rollout: ClassVar[str | None] = "managed"
+    shell_family: ClassVar[str] = "powershell"
+    session_prefix: ClassVar[str] = WINDOWS_SESSION_PREFIX
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "powershell_sessions"
+
+    @classmethod
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
+        return _windows_managed_shell_enabled(config)
+
+
+class WindowsShellLogFile(BashLogFile):
+    description: ClassVar[str] = "Read or annotate managed PowerShell output files."
+    shell_rollout: ClassVar[str | None] = "managed"
+    shell_family: ClassVar[str] = "powershell"
+    session_prefix: ClassVar[str] = WINDOWS_SESSION_PREFIX
+
+    @classmethod
+    def get_name(cls) -> str:
+        return "powershell_log_file"
+
+    @classmethod
+    def is_available(cls, config: VibeConfigSchema | None = None) -> bool:
+        return _windows_managed_shell_enabled(config)

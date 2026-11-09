@@ -35,32 +35,38 @@ class TestOtelSpanExporterConfig:
         assert result.endpoint == "https://customer.mistral.ai/telemetry/v1/traces"
         assert result.headers == {"Authorization": "Bearer sk-test"}
 
-    def test_uses_first_mistral_provider(
-        self, vibe_config: VibeConfigSchema, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("api_base", "api_key_env_var", "api_key"),
+        [
+            ("https://api.eu.mistral.ai/v1", "EU_KEY", "sk-eu"),
+            ("https://api.us.mistral.ai/v1", "US_KEY", "sk-us"),
+        ],
+    )
+    def test_uses_global_endpoint_for_public_regional_api_host(
+        self,
+        api_base: str,
+        api_key_env_var: str,
+        api_key: str,
+        vibe_config: VibeConfigSchema,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("EU_KEY", "sk-eu")
+        monkeypatch.setenv(api_key_env_var, api_key)
         config = vibe_config.model_copy(
             update={
                 "providers": [
                     ProviderConfig(
-                        name="mistral-eu",
-                        api_base="https://eu.mistral.ai/v1",
-                        api_key_env_var="EU_KEY",
+                        name="mistral-regional",
+                        api_base=api_base,
+                        api_key_env_var=api_key_env_var,
                         backend=Backend.MISTRAL,
-                    ),
-                    ProviderConfig(
-                        name="mistral-us",
-                        api_base="https://us.mistral.ai/v1",
-                        api_key_env_var="US_KEY",
-                        backend=Backend.MISTRAL,
-                    ),
+                    )
                 ]
             }
         )
         result = _exporter_config(config)
         assert result is not None
-        assert result.endpoint == "https://eu.mistral.ai/telemetry/v1/traces"
-        assert result.headers == {"Authorization": "Bearer sk-eu"}
+        assert result.endpoint == "https://api.mistral.ai/telemetry/v1/traces"
+        assert result.headers == {"Authorization": f"Bearer {api_key}"}
 
     def test_falls_back_to_default_when_no_mistral_provider(
         self, vibe_config: VibeConfigSchema, monkeypatch: pytest.MonkeyPatch

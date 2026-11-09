@@ -4,6 +4,23 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum, auto
 from typing import Literal, Protocol
+from urllib.parse import SplitResult
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def normalize_url_origin(parsed: SplitResult) -> tuple[str, str | None, int | None]:
+    """Canonical (scheme, host, effective-port) tuple for origin comparison.
+
+    Single source of truth for origin equality across the gateway and the
+    onboarding auto-rewrite inference. Raises ``ValueError`` on a malformed
+    port (mirroring ``urllib.parse.SplitResult.port``); callers that must not
+    crash (e.g. UI seeding) wrap it in try/except.
+    """
+    scheme = parsed.scheme.lower()
+    port = parsed.port
+    effective_port = port if port is not None else _DEFAULT_PORTS.get(scheme)
+    return scheme, parsed.hostname, effective_port
 
 
 class BrowserSignInErrorCode(StrEnum):

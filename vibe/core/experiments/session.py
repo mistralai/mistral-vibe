@@ -1,63 +1,239 @@
 from __future__ import annotations
 
-import contextlib
-from typing import TYPE_CHECKING
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Final, Protocol
 
 from vibe import __version__
-from vibe.core.experiments.manager import ExperimentManager, hash_api_key
-from vibe.core.experiments.models import ExperimentAttributes
-from vibe.core.telemetry.send import get_mistral_provider_and_api_key
+from vibe.core.experiments.active import ExperimentSurface
+from vibe.core.experiments.cache import (
+    clear_cached_eval_responses,
+    store_cached_eval_response,
+)
+from vibe.core.experiments.client import RemoteEvalClient
+from vibe.core.experiments.manager import ExperimentManager
+from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
+from vibe.core.experiments.wait import mark_experiments_eval_failed
+from vibe.core.identity import IdentityResult, fetch_identity
+from vibe.core.identity_cache import IdentityCache
+from vibe.core.platform_auth import PlatformCredentialFactory
+from vibe.core.platform_auth._mistral import mistral_credentials, resolve_principal
 from vibe.core.utils import get_platform_id
+from vibe.observability.logging import logger
+from vibe.setup.auth.whoami import (
+    NO_PLAN_DATA,
+    WhoAmICache,
+    WhoAmIResult,
+    derive_user_plan,
+    fetch_whoami,
+)
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
-    from vibe.core.session.session_logger import SessionLogger
     from vibe.core.telemetry.types import LaunchContext
+
+EXPERIMENT_IDENTITY_TIMEOUT_S: Final = 10.0
+
+IdentityResolver = Callable[..., Awaitable[IdentityResult | None]]
+WhoAmIResolver = Callable[..., Awaitable[WhoAmIResult | None]]
+
+
+# Narrowed from ``SessionLogger`` so one initializer serves both backends: the
+# legacy logger satisfies this structurally, and Unified — whose persisted
+# session metadata has no experiments field — passes a no-op.
+class ExperimentStateSink(Protocol):
+    async def persist_experiments(self, response: EvalResponse | None) -> None: ...
+
+
+class NullExperimentSink:
+    """For a caller with nowhere to persist the assignment: the global eval
+    cache is then its only continuity.
+    """
+
+    async def persist_experiments(self, response: EvalResponse | None) -> None:
+        del response
+
+
+async def _fetch_plan_attributes(
+    *,
+    config: VibeConfigSchema,
+    launch_context: LaunchContext | None,
+    resolve_identity: IdentityResolver | None,
+    resolve_whoami: WhoAmIResolver | None,
+    harness: ExperimentSurface,
+    experiment_system_prompt_id: str | None = None,
+    credentials: PlatformCredentialFactory | None = None,
+) -> tuple[ExperimentAttributes | None, str | None]:
+    """Resolve the user-scoped attribute snapshot + user_plan from identity and
+    ``/whoami`` (through their caches), independent of the session.
+
+    Returns ``(attributes, user_plan)``:
+    - ``(sentinel, NO_PLAN_DATA)`` — no Mistral provider configured (not our
+      user); an expected absence, distinct from null.
+    - ``(None, None)`` — a Mistral provider exists but the key is missing; we
+      tried but could not look anything up, so leave the fields null (a signal
+      of a problem in our system), and do not stamp a snapshot.
+    - ``(attributes, user_plan)`` — identity + ``/whoami`` were fetched.
+
+    The fetch is gated on a Mistral credential, never on the active backend: a
+    user on a third-party model with a Mistral provider still gets their real
+    plan/org. This is the single resolution shared by fresh init and resume.
+    """
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
+        if config.get_mistral_provider() is None:
+            sentinel = _build_attributes(
+                config,
+                launch_context,
+                harness=harness,
+                experiment_system_prompt_id=experiment_system_prompt_id,
+            ).model_copy(update={"planType": NO_PLAN_DATA, "planName": NO_PLAN_DATA})
+            return sentinel, NO_PLAN_DATA
+        return None, None
+    _resolve_identity = resolve_identity or fetch_identity
+    _resolve_whoami = resolve_whoami or fetch_whoami
+    identity, whoami = await asyncio.gather(
+        _resolve_identity(
+            base_url=mistral.provider.api_base,
+            credentials=mistral.credentials,
+            timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
+        ),
+        _resolve_whoami(
+            base_url=config.console_base_url,
+            credentials=mistral.credentials,
+            timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
+        ),
+    )
+    logger.debug(
+        "GrowthBook experiment attributes: identity_fetched=%s whoami_fetched=%s",
+        identity is not None,
+        whoami is not None,
+    )
+    attributes = _build_attributes(
+        config,
+        launch_context,
+        harness=harness,
+        identity=identity,
+        whoami=whoami,
+        experiment_system_prompt_id=experiment_system_prompt_id,
+    )
+    return attributes, derive_user_plan(whoami)
 
 
 async def initialize_experiments(
     *,
     config: VibeConfigSchema,
     manager: ExperimentManager,
-    session_logger: SessionLogger,
+    session_logger: ExperimentStateSink,
     launch_context: LaunchContext | None,
-) -> bool:
+    harness: ExperimentSurface,
+    resolve_identity: IdentityResolver | None = None,
+    resolve_whoami: WhoAmIResolver | None = None,
+    experiment_system_prompt_id: str | None = None,
+    credentials: PlatformCredentialFactory | None = None,
+) -> tuple[bool, str | None]:
     if not config.enable_telemetry or not config.experiments.enable:
-        return False
-    provider_and_key = get_mistral_provider_and_api_key(config)
-    if provider_and_key is None:
-        return False
-    _, api_key = provider_and_key
-    attributes = _build_attributes(config, api_key, launch_context)
+        # The `vibe` launcher reads this cache without the config, so opting out must drop it.
+        clear_cached_eval_responses()
+    if not config.enable_telemetry:
+        return False, None
+    mistral = (
+        mistral_credentials(config, credentials) if config.experiments.enable else None
+    )
+    cache_key = await resolve_principal(mistral) if mistral is not None else None
+    attributes, user_plan = await _fetch_plan_attributes(
+        config=config,
+        launch_context=launch_context,
+        resolve_identity=resolve_identity,
+        resolve_whoami=resolve_whoami,
+        harness=harness,
+        experiment_system_prompt_id=experiment_system_prompt_id,
+        credentials=credentials,
+    )
+    if attributes is None:
+        # Mistral provider present but key missing — tried but failed.
+        return False, user_plan
+    if user_plan == NO_PLAN_DATA or not config.experiments.enable:
+        # No Mistral provider (sentinel) or the A/B opt-out: keep the attribute
+        # snapshot + user_plan for telemetry segmentation, but run no GrowthBook
+        # eval (no bucketing, no eval cache, no prompt refresh, no persist).
+        manager.set_attributes(attributes)
+        return False, user_plan
     await manager.initialize(attributes)
     state = manager.export_state()
     if state is None:
-        # Remote eval failed (network / 4xx-5xx / invalid payload). The
-        # manager is fail-open and stayed empty, so nothing changed —
-        # don't trigger a system prompt refresh.
-        return False
-    with contextlib.suppress(Exception):
+        # Remote eval failed (network / 4xx-5xx / invalid payload). The manager
+        # is fail-open and stayed empty, so nothing changed — don't trigger a
+        # prompt refresh. We still surface user_plan for early telemetry events.
+        mark_experiments_eval_failed()
+        return False, user_plan
+    if attributes.userId is None:
+        # Without the hash attribute the response carries no assignment:
+        # caching it would overwrite a good entry, and a later session gains
+        # nothing by waiting for another one.
+        mark_experiments_eval_failed()
+    else:
+        try:
+            store_cached_eval_response(
+                config, state, fetched_for=cache_key, credentials=credentials
+            )
+        except Exception:
+            logger.exception("Failed to cache experiment eval response")
+    # Persist ONLY the sticky variant assignment. Plan/org attributes and
+    # user_plan are user-scoped, not session-scoped, so they are never written
+    # to meta.json — they are re-resolved from the user cache on every session.
+    try:
         await session_logger.persist_experiments(state)
-    return True
+    except Exception:
+        logger.exception("Failed to persist experiments")
+    return True, user_plan
 
 
-async def hydrate_experiments_from_session(
-    *,
+async def fetch_and_cache_experiments(
     config: VibeConfigSchema,
-    manager: ExperimentManager,
-    session_logger: SessionLogger,
-) -> bool:
-    if not config.enable_telemetry or not config.experiments.enable:
-        return False
-    metadata = session_logger.session_metadata
-    if metadata is None or metadata.experiments is None:
-        return False
-    manager.hydrate(metadata.experiments)
-    return True
+    launch_context: LaunchContext,
+    *,
+    harness: ExperimentSurface,
+    credentials: PlatformCredentialFactory | None = None,
+) -> None:
+    """Evaluate the experiments once and cache the result, for a caller with
+    no session. Fail-open: never raises, and records a failure for the process
+    (``vibe.core.experiments.wait``).
+    """
+    manager = ExperimentManager(
+        client=RemoteEvalClient.from_settings(
+            api_host=config.experiments.api_host,
+            client_key=config.experiments.client_key,
+        )
+    )
+    try:
+        # Through the caches a session start resolves them with: /whoami's
+        # disk cache keeps the plan a failed live call would drop.
+        await initialize_experiments(
+            config=config,
+            manager=manager,
+            session_logger=NullExperimentSink(),
+            launch_context=launch_context,
+            harness=harness,
+            resolve_identity=IdentityCache().resolve,
+            resolve_whoami=WhoAmICache().resolve,
+            credentials=credentials,
+        )
+    except Exception:
+        mark_experiments_eval_failed()
+        logger.exception("Experiments fetch failed unexpectedly")
+    finally:
+        await manager.aclose()
 
 
 def _build_attributes(
-    config: VibeConfigSchema, api_key: str, launch_context: LaunchContext | None
+    config: VibeConfigSchema,
+    launch_context: LaunchContext | None,
+    *,
+    harness: ExperimentSurface,
+    identity: IdentityResult | None = None,
+    whoami: WhoAmIResult | None = None,
+    experiment_system_prompt_id: str | None = None,
 ) -> ExperimentAttributes:
     from vibe.core.config import VibeConfigSchema
 
@@ -67,13 +243,31 @@ def _build_attributes(
     agent_version = launch_context.agent_version if launch_context else __version__
     terminal_emulator = launch_context.terminal_emulator if launch_context else None
     default_prompt_id = VibeConfigSchema.model_fields["system_prompt_id"].default
+    organization_id = (
+        identity.organization.id if identity and identity.organization else None
+    )
+    organization_kind = whoami.organization_kind if whoami else None
+    customer_id = whoami.customer_id if whoami else None
+    plan_type = whoami.plan_type.value if whoami else None
+    plan_name = whoami.plan_name if whoami else None
+    workspace_id = identity.workspace.id if identity and identity.workspace else None
+    user_id = identity.id if identity else None
     return ExperimentAttributes(
-        userId=hash_api_key(api_key),
+        userId=user_id,
         entrypoint=entrypoint,
+        harness=harness,
         agent_version=agent_version,
         client_name=client_name,
         client_version=client_version,
         os=get_platform_id(),
         terminal_emulator=terminal_emulator,
-        custom_system_prompt=config.system_prompt_id != default_prompt_id,
+        # A prompt applied by an experiment (e.g. from the eval cache) is not the user's.
+        custom_system_prompt=config.system_prompt_id
+        not in {default_prompt_id, experiment_system_prompt_id},
+        organizationId=organization_id,
+        organizationKind=organization_kind,
+        workspaceId=workspace_id,
+        customerId=customer_id,
+        planType=plan_type,
+        planName=plan_name,
     )

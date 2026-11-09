@@ -20,15 +20,12 @@ from vibe.core.checkpoints.models import (
     TurnRegion,
     TurnStateError,
 )
-from vibe.core.checkpoints.recorder import CheckpointRecorder, FileSnapshot
 
 __all__ = [
     "AgentTurn",
-    "CheckpointRecorder",
     "Checkpointer",
     "Decision",
     "DiskFilesystem",
-    "FileSnapshot",
     "FileState",
     "FileStateError",
     "FileStore",

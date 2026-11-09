@@ -1,19 +1,20 @@
 from __future__ import annotations
 
+import platform
 from typing import Any, cast
 
 from vibe import __version__
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.telemetry.types import (
     AgentEntrypoint,
-    AttachmentKind,
+    ExperimentAssignment,
     LaunchContext,
     TelemetryBaseMetadata,
     TelemetryCallType,
     TelemetryRequestMetadata,
     TerminalEmulator,
 )
-from vibe.core.types import LLMMessage
-from vibe.core.utils.platform import get_platform_id, get_platform_version
+from vibe.utils.platform import get_platform_id, get_platform_version
 
 
 def build_base_metadata(
@@ -21,22 +22,30 @@ def build_base_metadata(
     launch_context: LaunchContext | None,
     session_id: str | None,
     parent_session_id: str | None = None,
-    experiments: dict[str, str] | None = None,
+    experiment_assignments: list[ExperimentAssignment] | None = None,
     user_plan: str | None = None,
+    experiment_attributes: dict[str, Any] | None = None,
+    harness_backend: ExperimentSurface | None = None,
 ) -> dict[str, Any]:
     launch_payload = (
         launch_context.telemetry_fields() if launch_context is not None else {}
     )
+    assignments = experiment_assignments or []
+    experiments = {a.experiment_id: a.variation_name for a in assignments}
     return cast(
         dict[str, Any],
         TelemetryBaseMetadata(
             os=get_platform_id(),
+            arch=platform.machine().lower(),
             os_version=get_platform_version(),
             version=__version__,
             session_id=session_id,
             parent_session_id=parent_session_id,
             experiments=experiments or None,
+            experiment_assignments=experiment_assignments or None,
             user_plan=user_plan,
+            experiment_attributes=experiment_attributes or None,
+            harness_backend=harness_backend,
             **launch_payload,
         ).model_dump(exclude_none=True),
     )
@@ -56,6 +65,7 @@ def build_request_metadata(
     )
     return TelemetryRequestMetadata(
         os=get_platform_id(),
+        arch=platform.machine().lower(),
         os_version=get_platform_version(),
         version=__version__,
         session_id=session_id,
@@ -65,17 +75,6 @@ def build_request_metadata(
         user_plan=user_plan,
         **launch_payload,
     )
-
-
-def build_attachment_counts(
-    message: LLMMessage | None, *, supports_images: bool
-) -> dict[AttachmentKind, int]:
-    if message is None:
-        return {}
-    counts: dict[AttachmentKind, int] = {}
-    if supports_images and message.images:
-        counts[AttachmentKind.IMAGE] = len(message.images)
-    return counts
 
 
 def build_launch_context(

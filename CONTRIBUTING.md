@@ -2,15 +2,22 @@
 
 Thank you for your interest in Mistral Vibe! We appreciate your enthusiasm and support.
 
-## Current Status
+## We Do Not Accept Pull Requests
 
-**Mistral Vibe is in active development** — our team is iterating quickly and making lots of changes under the hood. Because of this pace, we may be slower than usual when reviewing PRs and issues.
+**Mistral Vibe does not accept pull requests from the community.** Only maintainers can open pull requests on this repository.
+
+Instead, tell us what you need, and our team will take it from there:
+
+- **Found a bug?** [Open an issue](https://github.com/mistralai/mistral-vibe/issues/new/choose).
+- **Want a feature or a documentation improvement?** [Start a discussion](https://github.com/mistralai/mistral-vibe/discussions/new?category=ideas) in the Ideas category.
 
 **We especially encourage**:
 
 - **Bug reports** – Help us uncover and squash issues
 - **Feedback & ideas** – Tell us what works, what doesn't, and what could be even better
 - **Documentation improvements** – Suggest clarity improvements or highlight missing pieces
+
+Mistral Vibe is in active development and our team iterates quickly, so we may take some time to answer issues and discussions.
 
 ## How to Provide Feedback
 
@@ -40,12 +47,13 @@ We'd love to hear your ideas! When submitting feedback or feature request discus
 
 ## Development Setup
 
-This section is for developers who want to set up the repository for local development, even though we're not currently accepting contributions.
+This section is for developers who want to set up the repository for local development, for example to reproduce a bug before reporting it. We do not accept pull requests.
 
 ### Prerequisites
 
 - Python 3.12 or higher
 - [uv](https://github.com/astral-sh/uv) - Modern Python package manager
+- [Rust](https://rustup.rs) - Builds the `vibe-rs` terminal UI
 
 ### Setup
 
@@ -72,6 +80,38 @@ This section is for developers who want to set up the repository for local devel
 
    Pre-commit hooks will automatically run checks before each commit.
 
+4. Run Vibe:
+
+   ```bash
+   uv run vibe
+   ```
+
+   In a source checkout, the first run builds the `vibe-rs` terminal UI from
+   `vibe/cli-rust` with cargo. After changing the Rust sources, rebuild it with
+   `make build`. On Linux without the ALSA development files, set
+   `CARGO_BUILD_FLAGS=--no-default-features` to build it without voice mode.
+
+### Building distributions
+
+`uv build --wheel` produces one platform-specific wheel containing the Python
+package (`vibe-acp` and `vibe-app-server`), the Rust terminal UI, and the
+Unified Harness runtime. The build requires a working Rust toolchain and fails
+if either native component cannot be built.
+On Linux, a wheel built from a checkout is a portable `manylinux_2_28` wheel:
+the terminal UI is linked with zig for glibc 2.28 and built without voice mode,
+like the published Linux wheels, with a warning. Voice mode needs a wheel for
+this machine only (`MATURIN_PEP517_ARGS="--compatibility linux"`) and pkg-config
+with the ALSA development files (`libasound2-dev` or `alsa-lib-devel`). Without
+them, that build also prints a warning and leaves voice mode out.
+Setting `CARGO_BUILD_FLAGS` to select features (`--features`/`-F`,
+`--no-default-features`, `--all-features`) or a `--target` skips this detection.
+
+`VIBE_SKIP_RUST_TUI=1` may be used by development-only checks that do not need
+the terminal binary, and by test-only vibe-acp bundles that skip the setup
+wizard (vibe-acp bundles the terminal binary for `--setup`). Public releases always build both native
+components. The source distribution bundles both Rust sources, so building from
+it needs Rust.
+
 ### Logging Configuration
 
 Logs are written to `~/.vibe/logs/vibe.log` by default. Control logging via environment variables:
@@ -80,7 +120,7 @@ Logs are written to `~/.vibe/logs/vibe.log` by default. Control logging via envi
 |----------|-------------|---------|
 | `LOG_LEVEL` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`) | `WARNING` |
 | `LOG_MAX_BYTES` | Max log file size in bytes before rotation | `10485760` (10 MB) |
-| `DEBUG_MODE` | When `true`, forces `DEBUG` logging (and attaches `debugpy` on `localhost:5678` under `vibe-acp`) | - |
+| `DEBUG_MODE` | When `true`, forces `DEBUG` logging | - |
 
 Example:
 
@@ -88,7 +128,38 @@ Example:
 LOG_LEVEL=DEBUG uv run vibe
 ```
 
-You can also view logs in real-time within the application by pressing `Ctrl+\` to open the debug console.
+#### Runtime log level
+
+You can change the log level at runtime without restarting:
+
+```text
+/log-level                       # show current levels (session, env, config, effective)
+/log-level set DEBUG             # override for this process
+/log-level set-global INFO       # also persist to config.toml
+/log-level unset                 # clear the session override
+```
+
+You can also set `log_level` in `config.toml` (optional, defaults to `WARNING` when absent):
+
+```toml
+log_level = "DEBUG"
+```
+
+Precedence: session override > `LOG_LEVEL` env var > `log_level` in config.toml > default.
+
+The debug console (`Ctrl+\`) streams the file log in real time — change the level with `/log-level` and new entries appear immediately.
+
+#### Logging conventions for contributors
+
+- Import the logger from `vibe.observability.logging`:
+  ```python
+  from vibe.observability.logging import logger
+  ```
+- Pass variables as `%s` positional args, not f-string interpolation — this defers formatting to the logging framework (skipped entirely when the level gates the message out):
+  ```python
+  logger.info("Model call completed model=%s duration_ms=%d", alias, duration_ms)
+  ```
+- Use `DEBUG` for "about to do X" diagnostics and `INFO` for "here's what happened" outcomes with metadata (duration, token counts, error type). Never log raw model messages, tool arguments, or tool output — only metadata.
 
 ### Running Tests
 
@@ -96,6 +167,17 @@ Run all tests:
 
 ```bash
 uv run pytest
+```
+
+By default, local runs use `max(1, ceil(available CPUs / 2) - 1)` workers to
+leave resources available for the rest of the machine. CI runners (detected via
+`BUILDKITE` or `GITHUB_ACTIONS`) use every available CPU so the full suite stays
+fast; the generic `CI` variable is deliberately ignored because it is often set
+in developer shells. Set `PYTEST_XDIST_AUTO_NUM_WORKERS` to a positive integer
+to override either default:
+
+```bash
+PYTEST_XDIST_AUTO_NUM_WORKERS=4 uv run pytest
 ```
 
 Run tests with verbose output:
@@ -109,30 +191,6 @@ Run a specific test file:
 ```bash
 uv run pytest tests/test_agent_tool_call.py
 ```
-
-### Profiling
-
-Vibe ships a lightweight profiler module (`vibe.cli.profiler`) that wraps [pyinstrument](https://github.com/joerick/pyinstrument). It silently no-ops when pyinstrument is not installed or the `VIBE_PROFILE` env var is unset, so instrumentation can stay in the code with zero overhead in normal use.
-
-**1. Add profiling calls** around the code you want to measure:
-
-```python
-from vibe.cli import profiler
-
-profiler.start("startup")
-# ... code to measure ...
-profiler.stop_and_print()
-```
-
-Only one profiler can run at a time. The label passed to `start()` is used to name the output file. Each call to `stop_and_print` writes an HTML report (`<label>-profile.html`) and prints a text summary to stderr.
-
-**2. Run with profiling enabled:**
-
-```bash
-VIBE_PROFILE=1 uv run vibe
-```
-
-Without `VIBE_PROFILE=1`, all `start` / `stop_and_print` calls are no-ops.
 
 ### Linting and Type Checking
 
@@ -198,14 +256,10 @@ See `pyproject.toml` for detailed configuration of Ruff and Pyright.
 
 ## Code Contributions
 
-While we're not accepting code contributions at the moment, we may open up contributions in the future. When that happens, we'll update this document with:
-
-- Pull request process
-- Contribution guidelines
-- Review process
+We do not accept code contributions, and pull requests are restricted to maintainers. To report a bug, open an issue; to propose an improvement, start a discussion in the Ideas category. Give as much context as possible (use case, reproduction steps, suggested approach).
 
 ## Questions?
 
-If you have questions about using Mistral Vibe, please check the [README](README.md) first. For other inquiries, feel free to open a discussion or issue.
+If you have questions about using Mistral Vibe, please check the [README](README.md) first. For other inquiries, feel free to open a discussion.
 
 Thank you for helping make Mistral Vibe better! 🙏

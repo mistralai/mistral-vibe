@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import platform
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.telemetry.types import AgentEntrypoint, TerminalEmulator
 
 
@@ -11,21 +13,31 @@ class ExperimentAttributes(BaseModel):
     """Client-side attributes sent to the GrowthBook proxy for evaluation.
 
     `userId` is the GrowthBook hash attribute used for variant bucketing.
-    We use a hash of the Mistral API key to be stable per user without
-    leaking the key. The attribute name must match the one selected in the
-    experiment's "Assign variation based on attribute" setting on
+    It is the Mistral user id resolved from ``/v1/users/me`` — stable per
+    user and server-owned. The attribute name must match the one selected in
+    the experiment's "Assign variation based on attribute" setting on
     GrowthBook (which in turn must be registered as a User Attribute in
     the org's Settings → Attributes).
     """
 
-    userId: str
+    userId: str | None = None
     entrypoint: AgentEntrypoint
+    # Required, not defaulted: a default would let a new backend silently report
+    # someone else's surface.
+    harness: ExperimentSurface
     agent_version: str
     client_name: str | None = None
     client_version: str | None = None
     os: Literal["darwin", "linux", "windows"] | str
+    arch: str = platform.machine().lower()
     terminal_emulator: TerminalEmulator | None = None
     custom_system_prompt: bool = False
+    organizationId: str | None = None
+    organizationKind: str | None = None
+    workspaceId: str | None = None
+    customerId: str | None = None
+    planType: str | None = None
+    planName: str | None = None
 
 
 class TrackedExperiment(BaseModel):

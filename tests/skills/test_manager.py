@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
 from tests.conftest import build_test_vibe_config
 from tests.skills.conftest import create_skill
+from tests.skills.registry.conftest import make_item
 from vibe.core.config import VibeConfigSchema
-from vibe.core.skills.builtins import BUILTIN_SKILLS
 from vibe.core.skills.manager import SkillManager
+from vibe.core.skills.models import SkillSource
+from vibe.core.skills.registry import _manifest, _store
+from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
 from vibe.core.trusted_folders import trusted_folders_manager
 
 
@@ -27,7 +30,7 @@ class TestSkillManagerDiscovery:
     def test_discovers_no_skills_when_directory_empty(
         self, skill_manager: SkillManager
     ) -> None:
-        assert skill_manager.available_skills == BUILTIN_SKILLS
+        assert skill_manager.available_skills == {}
 
     def test_discovers_skill_from_skill_paths(self, skills_dir: Path) -> None:
         create_skill(skills_dir, "test-skill", "A test skill")
@@ -46,7 +49,7 @@ class TestSkillManagerDiscovery:
         config = build_test_vibe_config(skill_paths=[skills_dir])
         manager = SkillManager(lambda: config)
 
-        assert len(manager.available_skills) == 3 + len(BUILTIN_SKILLS)
+        assert len(manager.available_skills) == 3
         assert "skill-one" in manager.available_skills
         assert "skill-two" in manager.available_skills
         assert "skill-three" in manager.available_skills
@@ -64,7 +67,7 @@ class TestSkillManagerDiscovery:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1 + len(BUILTIN_SKILLS)
+        assert len(skills) == 1
         assert "valid-skill" in skills
         assert "not-a-skill" not in skills
 
@@ -79,7 +82,7 @@ class TestSkillManagerDiscovery:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1 + len(BUILTIN_SKILLS)
+        assert len(skills) == 1
         assert "valid-skill" in skills
 
 
@@ -131,7 +134,7 @@ class TestSkillManagerParsing:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1 + len(BUILTIN_SKILLS)
+        assert len(skills) == 1
         assert "valid-skill" in skills
         assert "invalid-skill" not in skills
 
@@ -148,7 +151,7 @@ class TestSkillManagerParsing:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1 + len(BUILTIN_SKILLS)
+        assert len(skills) == 1
         assert "valid-skill" in skills
 
 
@@ -202,7 +205,7 @@ class TestSkillManagerSearchPaths:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 2 + len(BUILTIN_SKILLS)
+        assert len(skills) == 2
         assert skills["vibe-only"].description == "From .vibe"
         assert skills["agents-only"].description == "From .agents"
 
@@ -221,7 +224,7 @@ class TestSkillManagerSearchPaths:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1 + len(BUILTIN_SKILLS)
+        assert len(skills) == 1
         assert skills["shared-skill"].description == "First from .vibe"
 
     def test_discovers_from_multiple_skill_paths(self, tmp_path: Path) -> None:
@@ -238,7 +241,7 @@ class TestSkillManagerSearchPaths:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 2 + len(BUILTIN_SKILLS)
+        assert len(skills) == 2
         assert "skill-from-dir1" in skills
         assert "skill-from-dir2" in skills
 
@@ -256,7 +259,7 @@ class TestSkillManagerSearchPaths:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1 + len(BUILTIN_SKILLS)
+        assert len(skills) == 1
         assert skills["duplicate-skill"].description == "First version"
 
     def test_ignores_nonexistent_skill_paths(self, tmp_path: Path) -> None:
@@ -270,7 +273,7 @@ class TestSkillManagerSearchPaths:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 1 + len(BUILTIN_SKILLS)
+        assert len(skills) == 1
         assert "valid-skill" in skills
 
 
@@ -317,7 +320,7 @@ class TestSkillManagerFiltering:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 2 + len(BUILTIN_SKILLS)
+        assert len(skills) == 2
         assert "skill-a" in skills
         assert "skill-b" not in skills
         assert "skill-c" in skills
@@ -428,63 +431,71 @@ class TestSkillUserInvocable:
         manager = SkillManager(lambda: config)
 
         skills = manager.available_skills
-        assert len(skills) == 3 + len(BUILTIN_SKILLS)
+        assert len(skills) == 3
         assert skills["visible-skill"].user_invocable is True
         assert skills["hidden-skill"].user_invocable is False
         assert skills["default-skill"].user_invocable is True
 
 
-class TestParseSkillCommand:
-    def test_plain_text_returns_none(self, skill_manager: SkillManager) -> None:
-        assert skill_manager.parse_skill_command("hello world") is None
-
-    def test_unknown_skill_returns_none(self, skill_manager: SkillManager) -> None:
-        assert skill_manager.parse_skill_command("/nonexistent") is None
-
-    def test_slash_only_returns_none(self, skill_manager: SkillManager) -> None:
-        assert skill_manager.parse_skill_command("/") is None
-
-    def test_parses_skill_without_args(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
+class TestSkillModelInvocable:
+    def test_disable_model_invocation_keeps_explicit_slash_invocation(
+        self, skills_dir: Path
     ) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
+        create_skill(
+            skills_dir,
+            "explicit-only",
+            disable_model_invocation=True,
+            body="Only run explicitly.",
+        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
 
-        parsed = manager.parse_skill_command("/my-skill")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-        assert "Do the thing." in parsed.content
-        assert parsed.extra_instructions is None
+        skill = manager.get_skill("explicit-only")
 
-    def test_parses_skill_with_args(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
+        assert skill is not None
+        assert skill.model_invocable is False
+        assert skill.user_invocable is True
+
+    def test_openai_policy_disables_model_invocation(self, skills_dir: Path) -> None:
+        skill_dir = create_skill(skills_dir, "openai-explicit-only")
+        agents_dir = skill_dir / "agents"
+        agents_dir.mkdir()
+        (agents_dir / "openai.yaml").write_text(
+            "policy:\n  allow_implicit_invocation: false\n", encoding="utf-8"
+        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
+
+        skill = manager.get_skill("openai-explicit-only")
+
+        assert skill is not None
+        assert skill.model_invocable is False
+        assert skill.user_invocable is True
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            'policy:\n  allow_implicit_invocation: "false"\n',
+            "policy:\n  allow_implicit_invocaton: false\n",
+        ],
+    )
+    def test_invalid_openai_policy_keeps_skill_explicit_only(
+        self, skills_dir: Path, metadata: str
     ) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
+        skill_dir = create_skill(skills_dir, "invalid-openai-policy")
+        agents_dir = skill_dir / "agents"
+        agents_dir.mkdir()
+        metadata_path = agents_dir / "openai.yaml"
+        metadata_path.write_text(metadata, encoding="utf-8")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        manager = SkillManager(lambda: config)
 
-        parsed = manager.parse_skill_command("/my-skill fix the bug")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-        assert parsed.extra_instructions == "fix the bug"
+        skill = manager.get_skill("invalid-openai-policy")
 
-    def test_case_insensitive(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
-    ) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
-
-        parsed = manager.parse_skill_command("/MY-SKILL")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-
-    def test_non_user_invocable_skill_returns_none(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
-    ) -> None:
-        create_skill(skills_dir, "hidden-skill", user_invocable=False)
-        manager = SkillManager(lambda: skill_config)
-
-        assert manager.get_skill("hidden-skill") is not None
-        assert manager.parse_skill_command("/hidden-skill") is None
+        assert skill is not None
+        assert skill.model_invocable is False
+        assert skill.user_invocable is True
+        assert manager.config_issues[0].file == metadata_path
 
 
 class TestSkillManagerConfigIssues:
@@ -520,25 +531,156 @@ class TestSkillManagerConfigIssues:
         assert "good-skill" in manager.available_skills
 
 
-class TestParseSkillCommandExtras:
-    def test_without_args(
-        self, skills_dir: Path, skill_config: VibeConfigSchema
+class TestRegistrySkillDiscovery:
+    async def _pin_materialized(
+        self, *, skill_id: str, name: str, description: str = "does things"
     ) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
+        await _store.materialize(
+            make_item(skill_id=skill_id, name=name, description=description, version=1),
+            name,
+        )
+        await _manifest.save(
+            _manifest.global_manifest_path(),
+            SkillManifest(
+                skills=[ManifestEntry(name=name, skill_id=skill_id, version=1)]
+            ),
+        )
 
-        parsed = manager.parse_skill_command("/my-skill")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-        assert parsed.content == "Do the thing."
-        assert parsed.extra_instructions is None
+    @pytest.mark.asyncio
+    async def test_discovers_materialized_registry_pin(self) -> None:
+        await self._pin_materialized(skill_id="cid", name="reg-skill")
 
-    def test_with_args(self, skills_dir: Path, skill_config: VibeConfigSchema) -> None:
-        create_skill(skills_dir, "my-skill", body="Do the thing.")
-        manager = SkillManager(lambda: skill_config)
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+        manager = SkillManager(lambda: config)
 
-        parsed = manager.parse_skill_command("/my-skill fix the bug")
-        assert parsed is not None
-        assert parsed.name == "my-skill"
-        assert parsed.content == "Do the thing."
-        assert parsed.extra_instructions == "fix the bug"
+        info = manager.available_skills.get("reg-skill")
+        assert info is not None
+        assert info.source is SkillSource.REGISTRY
+        assert info.registry is not None
+        assert info.registry.skill_id == "cid"
+        assert info.registry.version == 1
+
+    @pytest.mark.asyncio
+    async def test_disabled_flag_hides_registry_pins(self) -> None:
+        await self._pin_materialized(skill_id="cid", name="reg-skill")
+
+        config = build_test_vibe_config(experimental_enable_registry_skills=False)
+        manager = SkillManager(lambda: config)
+
+        assert "reg-skill" not in manager.available_skills
+
+    @pytest.mark.asyncio
+    async def test_local_skill_wins_over_registry(self, skills_dir: Path) -> None:
+        create_skill(skills_dir, "dup", "local one")
+        await self._pin_materialized(
+            skill_id="cid", name="dup", description="registry one"
+        )
+
+        config = build_test_vibe_config(
+            skill_paths=[skills_dir], experimental_enable_registry_skills=True
+        )
+        manager = SkillManager(lambda: config)
+
+        info = manager.available_skills.get("dup")
+        assert info is not None
+        assert info.source is SkillSource.LOCAL
+        assert info.description == "local one"
+
+    @pytest.mark.asyncio
+    async def test_unsafe_skill_id_is_skipped(self) -> None:
+        await _manifest.save(
+            _manifest.global_manifest_path(),
+            SkillManifest(
+                skills=[ManifestEntry(name="evil", skill_id="../escape", version=1)]
+            ),
+        )
+
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+        manager = SkillManager(lambda: config)
+
+        assert "evil" not in manager.available_skills
+
+
+class TestSkillManagerRediscovery:
+    def test_edited_skill_is_picked_up_by_the_next_discovery(
+        self, skills_dir: Path
+    ) -> None:
+        create_skill(skills_dir, "evolving", "Before")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        assert SkillManager(lambda: config).available_skills[
+            "evolving"
+        ].description == ("Before")
+
+        create_skill(skills_dir, "evolving", "After the edit")
+
+        skill = SkillManager(lambda: config).available_skills["evolving"]
+        assert skill.description == "After the edit"
+
+    def test_unchanged_skill_is_not_parsed_again(
+        self, skills_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from vibe.core.skills import manager as manager_module
+
+        create_skill(skills_dir, "stable")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        SkillManager(lambda: config)
+        parses: list[str] = []
+        parse = manager_module.parse_skill_markdown
+
+        def counting_parse(content: str) -> Any:
+            parses.append(content)
+            return parse(content)
+
+        monkeypatch.setattr(manager_module, "parse_skill_markdown", counting_parse)
+
+        assert "stable" in SkillManager(lambda: config).available_skills
+        assert parses == []
+
+    def test_openai_policy_added_later_is_picked_up(self, skills_dir: Path) -> None:
+        skill_dir = create_skill(skills_dir, "late-policy")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        assert (
+            SkillManager(lambda: config).available_skills["late-policy"].model_invocable
+        )
+
+        (skill_dir / "agents").mkdir()
+        (skill_dir / "agents" / "openai.yaml").write_text(
+            "policy:\n  allow_implicit_invocation: false\n", encoding="utf-8"
+        )
+
+        skill = SkillManager(lambda: config).available_skills["late-policy"]
+        assert skill.model_invocable is False
+
+    def test_cached_skill_still_reports_its_issues(self, skills_dir: Path) -> None:
+        skill_dir = create_skill(skills_dir, "bad-policy")
+        (skill_dir / "agents").mkdir()
+        metadata_path = skill_dir / "agents" / "openai.yaml"
+        metadata_path.write_text(
+            'policy:\n  allow_implicit_invocation: "false"\n', encoding="utf-8"
+        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+
+        first = SkillManager(lambda: config)
+        second = SkillManager(lambda: config)
+
+        assert [issue.file for issue in first.config_issues] == [metadata_path]
+        assert [issue.file for issue in second.config_issues] == [metadata_path]
+
+    def test_cached_skill_still_warns_about_its_directory_name(
+        self, skills_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from vibe.core.skills import manager as manager_module
+
+        create_skill(skills_dir, "original").rename(skills_dir / "renamed")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            manager_module.logger,
+            "warning",
+            lambda message, *args: warnings.append(message % args),
+        )
+
+        SkillManager(lambda: config)
+        SkillManager(lambda: config)
+
+        assert len([w for w in warnings if "doesn't match directory name" in w]) == 2

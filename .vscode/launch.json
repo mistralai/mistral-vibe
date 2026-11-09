@@ -50,34 +50,10 @@
       "subProcess": true
     },
     {
-      "name": "CLI",
-      "type": "debugpy",
-      "request": "launch",
-      "program": "vibe/cli/entrypoint.py",
-      "args": [],
-      "console": "integratedTerminal",
-      "justMyCode": false,
-      "cwd": "${workspaceFolder}",
-      "python": "${workspaceFolder}/.venv/bin/python",
-      "env": {
-        "PYTHONPATH": "${workspaceFolder}"
-      }
-    },
-    {
       "name": "Attach using PID",
       "type": "debugpy",
       "request": "attach",
       "processId": "${command:pickProcess}",
-      "justMyCode": true
-    },
-    {
-      "name": "Attach to Zed Process (Port)",
-      "type": "debugpy",
-      "request": "attach",
-      "connect": {
-        "host": "localhost",
-        "port": 5678
-      },
       "justMyCode": true
     }
   ],

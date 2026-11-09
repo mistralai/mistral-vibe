@@ -1,0 +1,268 @@
+//! UI components; each submodule owns one region of the screen.
+
+pub mod approval;
+pub mod artifacts_checks;
+pub mod artifacts_modal;
+pub mod auth_app;
+pub mod banner;
+pub(crate) mod bottom_app;
+pub mod bottom_bar;
+mod bottom_bar_parts;
+pub mod braille_renderer;
+pub mod chat_input;
+pub mod completion_popup;
+pub(crate) mod composer_layout;
+pub mod composer_title;
+pub mod config;
+pub mod config_edit;
+mod config_options;
+pub mod connector_auth;
+pub mod context_app;
+pub mod context_bar;
+pub mod debug_console;
+pub mod feedback_bar;
+pub mod footer_fit;
+pub mod footer_gauge;
+pub mod highlight;
+pub(crate) mod hint_line;
+pub mod jump_to_bottom;
+pub(crate) mod list_cursor;
+mod list_hover;
+pub mod list_scroll;
+pub mod loading;
+pub mod log_level_picker;
+pub mod markdown;
+pub mod mcp;
+pub mod mcp_oauth;
+pub mod model_picker;
+pub mod narrator;
+pub mod notice;
+pub mod plugins;
+pub mod proxy_setup;
+pub mod pulse;
+pub mod question_app;
+mod question_layout;
+pub(crate) mod question_other;
+mod question_rows;
+pub mod recording_indicator;
+pub mod release_notes;
+pub mod resume_picker;
+pub mod reverse_search;
+pub mod rewind;
+pub mod rng;
+pub mod scrollbar;
+pub(crate) mod search_field;
+pub mod selection;
+mod styled_text;
+pub mod subagent_list;
+pub mod tab_cells;
+pub mod theme;
+pub mod theme_picker;
+pub mod thinking_picker;
+pub mod todo;
+pub mod transcript;
+pub mod trust_folders;
+mod trust_folders_layout;
+mod trust_folders_paint;
+pub(crate) mod trust_folders_selection;
+mod trust_folders_text;
+pub mod vibe_code_project;
+pub mod voice_app;
+
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::Frame;
+
+use crate::app::App;
+use crate::focus::Focus;
+
+/// Lay out the screen and draw every component.
+pub fn draw(app: &mut App, f: &mut Frame) {
+    app.chat_input.sync_mentions();
+    let area = f.area();
+    draw_active_screen(app, f, area);
+    list_hover::paint(app, f);
+}
+
+fn draw_active_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
+    // Only a bottom app drawn this frame publishes a box a press can select in.
+    app.view.bottom_app_selection_region = crate::selection::Region::default();
+    // The trust gate runs before the session, so it owns the whole screen.
+    if app.focus() == Focus::Trust {
+        trust_folders::draw(app, f, area);
+        return;
+    }
+    // Docked, not an overlay: reserving the columns first lets bottom-apps reflow into the rest.
+    let (main, sidebar) = todo::split(app, area);
+    app.todo_sidebar.visible = sidebar.is_some();
+    let (main, console) = debug_console::split(app, main);
+    app.debug_console.visible = console.is_some();
+    draw_session_screen(app, f, main);
+    if let Some(sidebar) = sidebar {
+        f.buffer_mut().set_style(sidebar, theme::screen_style());
+        todo::draw_sidebar(app, f, sidebar);
+    }
+    if let Some(panel) = console {
+        debug_console::draw(app, f, panel);
+    }
+}
+
+fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
+    // Bottom apps replace the input box; `/config` and `/release-notes` overlay the base.
+    match app.focus() {
+        Focus::Approval => approval::draw(app, f, area),
+        Focus::Question => question_app::draw(app, f, area),
+        Focus::VoiceApp => voice_app::draw(app, f, area),
+        Focus::ProxySetup => proxy_setup::draw(app, f, area),
+        Focus::VibeCodeProject => vibe_code_project::draw(app, f, area),
+        Focus::ResumePicker => resume_picker::draw(app, f, area),
+        Focus::Mcp => mcp::draw(app, f, area),
+        Focus::Plugins => plugins::draw(app, f, area),
+        Focus::ContextApp => context_app::draw(app, f, area),
+        Focus::McpOAuth => mcp_oauth::draw(app, f, area),
+        Focus::ConnectorAuth => connector_auth::draw(app, f, area),
+        Focus::Rewind => rewind::draw(app, f, area),
+        Focus::ThemePicker => theme_picker::draw(app, f, area),
+        Focus::ModelPicker => model_picker::draw(app, f, area),
+        Focus::LogLevelPicker => log_level_picker::draw(app, f, area),
+        Focus::ThinkingPicker => thinking_picker::draw(app, f, area),
+        Focus::ArtifactsModal => artifacts_modal::draw(app, f, area),
+        Focus::Config => {
+            draw_base(app, f, area);
+            config::draw(app, f, area);
+        }
+        Focus::ReleaseNotes => {
+            draw_base(app, f, area);
+            release_notes::draw(app, f, area);
+        }
+        Focus::Trust | Focus::SubagentList | Focus::Composer => draw_base(app, f, area),
+    }
+}
+
+/// Input-box height: rendered chat rows, capped near 50vh.
+pub fn input_box_height(app: &App, area_width: u16, area_height: u16) -> u16 {
+    let lines = chat_input::content_height(app, area_width);
+    let max_content = (area_height / 2).max(3);
+    lines.clamp(3, max_content) + 2
+}
+
+/// Render the main chat UI (chat, loading, popup, todo, input, footer).
+fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
+    // The input box is back: the last bottom app's box selection goes with it.
+    if app.view.bottom_app.take().is_some() {
+        crate::selection::clear_region(app, crate::selection::RegionId::BottomApp);
+    }
+    // Paint the theme background on every cell first, since widgets set only fg.
+    f.buffer_mut().set_style(area, theme::screen_style());
+
+    // `#loading-area`: 3 rows on a fresh session (narrator/hint), else 2.
+    let loading_height = loading_height(app, area.width);
+    // The shared slash-command/file popup sits above the input box.
+    completion_popup::reconcile_scroll(app, area.width);
+    let popup_height = completion_popup::popup_height(app, area.width);
+    // The input box is hidden while a child is viewed.
+    let input_height = if app.subagents.viewed_subagent_id.is_some() {
+        0
+    } else {
+        input_box_height(app, area.width, area.height)
+    };
+    let chunks = Layout::vertical([
+        Constraint::Min(1),                             // #chat — height: 1fr
+        Constraint::Length(loading_height),             // #loading-area — height: auto
+        Constraint::Length(popup_height),               // #completion-popup — height: auto, max 12
+        Constraint::Length(todo::row_height(app)),      // pinned todo line — height: 1
+        Constraint::Length(input_height),               // #input-box (grows with rendered rows)
+        Constraint::Length(subagent_list::height(app)), // #subagent-list — under the input
+        Constraint::Length(1),                          // #bottom-bar — height: auto
+    ])
+    .split(area);
+
+    app.view.input_area = chunks[4];
+    // A child view swaps the rendered transcript in the same scroll region.
+    // The render cache and the last measured height belong to the transcript:
+    // their revision streams are independent, so both must follow the swap.
+    let viewed_child = app.subagents.viewed_subagent_id.clone();
+    let mut swapped = false;
+    if let Some(child_id) = &viewed_child {
+        if let Some(child) = app.subagents.transcripts.child_mut(child_id) {
+            std::mem::swap(&mut app.view.transcript, &mut child.transcript);
+            std::mem::swap(&mut app.view.transcript_cache, &mut child.cache);
+            std::mem::swap(&mut app.view.last_total, &mut child.last_total);
+            swapped = true;
+        }
+    }
+    transcript::draw(app, f, chunks[0]);
+    if swapped {
+        let child_id = viewed_child.clone().unwrap_or_default();
+        if let Some(child) = app.subagents.transcripts.child_mut(&child_id) {
+            std::mem::swap(&mut app.view.transcript, &mut child.transcript);
+            std::mem::swap(&mut app.view.transcript_cache, &mut child.cache);
+            std::mem::swap(&mut app.view.last_total, &mut child.last_total);
+        }
+        // The placeholder sits on the gap row above the first rendered row; with none, transcript::draw owns it.
+        if let Some(placeholder) = app
+            .subagents
+            .transcripts
+            .child(&child_id)
+            .and_then(|child| child.placeholder())
+        {
+            if let Some(top) = app.view.entry_hitmap.first().map(|(top, _, _, _)| *top) {
+                if top > chunks[0].y {
+                    let row = Rect {
+                        y: top - 1,
+                        width: chunks[0].width.saturating_sub(1),
+                        x: chunks[0].x + 1,
+                        height: 1,
+                    };
+                    f.render_widget(
+                        ratatui::widgets::Paragraph::new(placeholder).style(theme::muted_style()),
+                        row,
+                    );
+                }
+            }
+        }
+    }
+    if popup_height > 0 {
+        crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Completion);
+        completion_popup::draw(app, f, chunks[2]);
+    }
+    todo::draw_row(app, f, chunks[3]);
+    if input_height > 0 {
+        crate::mouse::register_region(app, chunks[4], crate::mouse::MouseTarget::Composer);
+        app.view.cursor_position = chat_input::draw(app, f, chunks[4]);
+    }
+    subagent_list::draw(app, f, chunks[5]);
+    bottom_bar::draw(app, f, chunks[6]);
+    selection::overlay(app, f);
+    draw_loading_area(app, f, chunks[1]);
+    selection::loading_region(app, f, chunks[1]);
+}
+
+/// The loading-area row, mounted on every screen that keeps it: the
+/// narrator status, the loading spinner, the inline notice and the feedback
+/// bar, laid out left to right.
+pub(crate) fn draw_loading_area(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
+    let notice_width = notice::width(app);
+    let feedback_width = feedback_bar::width(app);
+    // The narrator row is laid out before the loading spinner; zero width
+    // while idle keeps the split identical to before.
+    let loading_chunks = Layout::horizontal([
+        Constraint::Length(narrator::width(app)),
+        Constraint::Fill(1),
+        Constraint::Length(notice_width),
+        Constraint::Length(u16::from(feedback_width > 0)),
+        Constraint::Length(feedback_width),
+    ])
+    .split(area);
+
+    narrator::draw(app, f, loading_chunks[0]);
+    loading::draw(app, f, loading_chunks[1]);
+    feedback_bar::draw(app, f, loading_chunks[4]);
+    notice::draw(app, f, loading_chunks[2]);
+}
+
+/// A failed startup grows the area so the whole error wraps under the
+/// padding row.
+pub(crate) fn loading_height(app: &App, width: u16) -> u16 {
+    let base = if app.view.transcript.is_empty() { 3 } else { 2 };
+    base.max(loading::failure::rows(app, width).saturating_add(1))
+}

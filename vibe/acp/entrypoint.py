@@ -7,17 +7,23 @@ import os
 import sys
 
 from vibe import __version__
+from vibe._experimental_harness import (
+    ExperimentalHarnessUnavailableError,
+    require_experimental_harness,
+)
+from vibe.cli.launcher import exec_rust_cli
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import init_harness_files_manager
-from vibe.core.logger import logger
-from vibe.core.paths import HISTORY_FILE
+from vibe.core.paths import LOG_FILE, bootstrap_vibe_home
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.utils.windows_asyncio import silence_proactor_transport_teardown_warnings
+from vibe.observability.logging import init_file_logging
 
-# Configure line buffering for subprocess communication
-sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
-sys.stderr.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
-sys.stdin.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
+# Read by vibe-rs; an env var rather than a flag so an older vibe-rs ignores it.
+SETUP_ENTRYPOINT_ENV = "VIBE_SETUP_ENTRYPOINT"
+# Hidden mode the bundled vibe-rs spawns for `--setup`: only setup/* RPCs work, the
+# bundle lacks vibe-app-server's PTY helper, built-in skills and backend adapter.
+SETUP_APP_SERVER_FLAG = "--setup-app-server"
 
 
 @dataclass
@@ -35,58 +41,47 @@ def parse_arguments() -> Arguments:
     return Arguments(setup=args.setup)
 
 
-def bootstrap_config_files() -> None:
-    history_file = HISTORY_FILE.path
-    if not history_file.exists():
-        try:
-            history_file.parent.mkdir(parents=True, exist_ok=True)
-            history_file.write_text("Hello Vibe!\n", "utf-8")
-        except Exception as e:
-            logger.error(f"Could not create history file: {e}")
-            raise
-
-
-# When DEBUG_MODE=true, attaches debugpy on localhost:5678.
-def handle_debug_mode() -> None:
-    if os.environ.get("DEBUG_MODE") != "true":
-        return
-
-    try:
-        import debugpy
-    except ImportError:
-        return
-
-    debugpy.listen(("localhost", 5678))
-    # uncomment this to wait for the debugger to attach
-    # debugpy.wait_for_client()
+def _run_setup() -> None:
+    # A frozen bundle ships no vibe-app-server: vibe-rs spawns this executable.
+    frozen = getattr(sys, "frozen", False)
+    exec_rust_cli(
+        ["--setup"],
+        extra_env={SETUP_ENTRYPOINT_ENV: "acp"},
+        app_server_cmd=[sys.executable, SETUP_APP_SERVER_FLAG] if frozen else None,
+    )
 
 
 def main() -> None:
+    if sys.argv[1:2] == [SETUP_APP_SERVER_FLAG]:
+        from vibe.app_server.stdio import main as app_server_main
+
+        app_server_main(sys.argv[2:])
+        return
+    args = parse_arguments()
+    if args.setup:
+        # Before the dotenv load: vibe-rs must tell ~/.vibe/.env keys from real env.
+        _run_setup()
+        return
+
+    # Configure line buffering for subprocess communication
+    sys.stdout.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
+    sys.stderr.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
+    sys.stdin.reconfigure(line_buffering=True)  # pyright: ignore[reportAttributeAccessIssue]
     silence_proactor_transport_teardown_warnings()
 
-    handle_debug_mode()
+    # The gate must run before the harness files manager and file logging:
+    # their mkdir(parents=True) calls are otherwise the first to materialize
+    # ~/.vibe, at permissive modes.
+    bootstrap_vibe_home()
     init_harness_files_manager("user", "project")
+    init_file_logging(LOG_FILE.path)
 
-    from vibe.acp.acp_agent_loop import run_acp_server
+    from vibe.acp.agent import run_acp_server
     from vibe.core.config import load_dotenv_values
-    from vibe.core.sentry import SentryTarget, init_sentry
-    from vibe.core.tracing import setup_tracing
-    from vibe.setup.onboarding import run_onboarding
+    from vibe.observability.sentry import init_sentry
 
     environ_before_dotenv_load = os.environ.copy()
     load_dotenv_values()
-    bootstrap_config_files()
-    args = parse_arguments()
-    if args.setup:
-        run_onboarding(
-            launch_context=build_launch_context(
-                agent_entrypoint="acp",
-                agent_version=__version__,
-                client_name="vibe_acp",
-                client_version=__version__,
-            )
-        )
-        sys.exit(0)
 
     try:
         orchestrator = asyncio.run(build_default_orchestrator())
@@ -96,25 +91,29 @@ def main() -> None:
 
     if config is not None:
         try:
-            setup_tracing(config)
-        except Exception:
-            pass  # tracing disabled
-        try:
             init_sentry(
-                config,
+                enabled=config.enable_telemetry,
                 headless=True,
-                launch_context=build_launch_context(
+                tags=build_launch_context(
                     agent_entrypoint="acp",
                     agent_version=__version__,
                     client_name="vibe_acp",
                     client_version=__version__,
-                ),
-                target=SentryTarget.ACP,
+                ).sentry_tags(),
             )
         except Exception:
             pass  # error reporting disabled
 
-    run_acp_server(environ_before_dotenv_load=environ_before_dotenv_load)
+    # The Unified Harness is the required default runtime. Fail before the
+    # ACP server starts serving: a missing or incompatible Runtime must abort
+    # startup with an actionable error, not surface as a per-session failure
+    # on the live protocol.
+    try:
+        require_experimental_harness()
+        run_acp_server(environ_before_dotenv_load=environ_before_dotenv_load)
+    except ExperimentalHarnessUnavailableError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

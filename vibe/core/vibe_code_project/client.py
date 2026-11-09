@@ -4,11 +4,16 @@ import asyncio
 from dataclasses import dataclass
 import types
 
-import httpx
+import httpx2
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.core.platform_auth import (
+    PlatformCredentialProvider,
+    PlatformCredentialUnavailable,
+)
+from vibe.core.platform_auth._mistral import credential_request
 from vibe.core.vibe_code_project.selection import ProjectRepository, VibeCodeProject
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 
 class VibeCodeProjectApiError(Exception):
@@ -69,13 +74,13 @@ class VibeCodeProjectClient:
     def __init__(
         self,
         base_url: str,
-        api_key: str,
+        credentials: PlatformCredentialProvider,
         *,
-        client: httpx.AsyncClient | None = None,
+        client: httpx2.AsyncClient | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
-        self._api_key = api_key
+        self._credentials = credentials
         self._client = client
         self._owns_client = client is None
         self._timeout = timeout
@@ -83,7 +88,7 @@ class VibeCodeProjectClient:
     async def __aenter__(self) -> VibeCodeProjectClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
         return self
 
@@ -98,19 +103,37 @@ class VibeCodeProjectClient:
             self._client = None
 
     @property
-    def _http_client(self) -> httpx.AsyncClient:
+    def _http_client(self) -> httpx2.AsyncClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
             self._owns_client = True
         return self._client
 
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, str | int] | None = None,
+        json: object = None,
+    ) -> httpx2.Response:
+        try:
+            return await credential_request(
+                self._credentials,
+                method,
+                f"{self._base_url}{path}",
+                client=self._http_client,
+                headers={"Content-Type": "application/json"},
+                params=params,
+                json=json,
+            )
+        except PlatformCredentialUnavailable as e:
+            # "API key" keeps it an auth failure for the projectLinks boundary.
+            raise VibeCodeProjectApiError(
+                f"Vibe Code Web API key or sign-in is {e.required.reason}."
+            ) from e
 
     async def list_projects(
         self, cursor: str | None = None, limit: int | None = None
@@ -121,12 +144,10 @@ class VibeCodeProjectClient:
         if limit is not None:
             params["limit"] = limit
         try:
-            response = await self._http_client.get(
-                f"{self._base_url}/api/v1/code/projects",
-                headers=self._headers(),
-                params=params or None,
+            response = await self._request(
+                "GET", "/api/v1/code/projects", params=params or None
             )
-        except httpx.RequestError as e:
+        except httpx2.RequestError as e:
             raise VibeCodeProjectApiError(
                 "Failed to fetch Vibe Code Web projects."
             ) from e
@@ -149,20 +170,26 @@ class VibeCodeProjectClient:
             ) from e
 
     async def create_project(
-        self, *, name: str, repo_url: str, default_branch: str
+        self,
+        *,
+        name: str,
+        repo_url: str | None = None,
+        default_branch: str | None = None,
     ) -> VibeCodeProject:
+        if (repo_url is None) is not (default_branch is None):
+            raise ValueError("A project repository needs both URL and default branch")
+        repositories = (
+            [{"repoUrl": repo_url, "defaultBranch": default_branch}]
+            if repo_url is not None
+            else []
+        )
         try:
-            response = await self._http_client.post(
-                f"{self._base_url}/api/v1/code/projects",
-                headers=self._headers(),
-                json={
-                    "name": name,
-                    "repositories": [
-                        {"repoUrl": repo_url, "defaultBranch": default_branch}
-                    ],
-                },
+            response = await self._request(
+                "POST",
+                "/api/v1/code/projects",
+                json={"name": name, "repositories": repositories},
             )
-        except httpx.RequestError as e:
+        except httpx2.RequestError as e:
             raise VibeCodeProjectApiError(
                 "Failed to create Vibe Code Web project."
             ) from e
@@ -185,9 +212,9 @@ class VibeCodeProjectClient:
             ) from e
 
 
-def _parse_project_list_response(response: httpx.Response) -> VibeCodeProjectPage:
+def _parse_project_list_response(response: httpx2.Response) -> VibeCodeProjectPage:
     return _ProjectListResponse.model_validate(response.json()).to_domain()
 
 
-def _parse_project_response(response: httpx.Response) -> VibeCodeProject:
+def _parse_project_response(response: httpx2.Response) -> VibeCodeProject:
     return _ProjectResponse.model_validate(response.json()).to_domain()

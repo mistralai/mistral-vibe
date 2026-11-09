@@ -1,36 +1,150 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
-from datetime import date
-import html
+from concurrent.futures import Future, ThreadPoolExecutor
+import contextlib
 import os
 from pathlib import Path
 from string import Template
 import subprocess
+import threading
 from typing import TYPE_CHECKING
 
-from vibe.core.config import VibeConfigSchema
-from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.experiments import ExperimentName
-from vibe.core.logger import logger
 from vibe.core.paths import VIBE_HOME
-from vibe.core.prompts import MissingPromptFileError, UtilityPrompt, load_system_prompt
-from vibe.core.utils import (
-    WindowsShellKind,
-    get_platform_display_name,
-    is_dangerous_directory,
-    is_windows,
-    resolve_windows_shell,
-)
+from vibe.core.prompts import UtilityPrompt
+from vibe.core.utils import WindowsShellKind, is_windows, resolve_windows_shell
+from vibe.utils.paths import to_git_bash_path
+from vibe.utils.platform import resolve_git_executable
 
 if TYPE_CHECKING:
-    from vibe.core.agents import AgentManager
     from vibe.core.config import ProjectContextConfig
-    from vibe.core.experiments import ExperimentManager
-    from vibe.core.skills.manager import SkillManager
-    from vibe.core.tools.manager import ToolManager
 
-_git_status_cache: dict[Path, str] = {}
+_git_status_cache: dict[Path, Future[str]] = {}
+_git_status_lock = threading.Lock()
+
+GIT_TIMEOUT_MESSAGE = "Git operations timed out (large repository)"
+GIT_UNAVAILABLE_MESSAGE = "Not a git repository or git not available"
+_KILL_TIMEOUT_SECONDS = 2.0
+# The default-branch candidates, local and on origin. Named one by one so git
+# reads only these refs, never every ref.
+_DEFAULT_BRANCH_REFS = (
+    "refs/heads/main",
+    "refs/remotes/origin/main",
+    "refs/heads/master",
+    "refs/remotes/origin/master",
+)
+
+
+def git_bash_form(path: Path | str) -> str | None:
+    """The ``/c/...`` spelling of *path* when shell commands run in Git Bash.
+
+    Git Bash spells drives as /c/..., so the prompt gives the model that form
+    instead of leaving it to guess between C:\\, C:/ and /c/. Returns None off
+    Git Bash, and for UNC paths, which have no drive to convert.
+    """
+    if not is_windows() or resolve_windows_shell().kind is not WindowsShellKind.BASH:
+        return None
+
+    raw = str(path)
+    converted = to_git_bash_path(raw)
+    return None if converted == raw else converted
+
+
+def git_metadata_args(num_commits: int) -> tuple[list[str], list[str], list[str]]:
+    """The read-only git commands behind the project context.
+
+    Current branch, which of ``main`` and ``master`` exist, locally or on
+    ``origin``, and recent commits, in that order. Do not add ``git status``:
+    unlike these metadata-only commands, it may pass working-tree contents
+    through clean or process filters the repository configures, and project
+    context is collected outside the shell permission boundary. Nothing here
+    may list or decorate with every ref: that takes seconds on repositories
+    with many refs, longer on Windows.
+    """
+    return (
+        ["branch", "--show-current"],
+        ["for-each-ref", "--format=%(refname)", *_DEFAULT_BRANCH_REFS],
+        # Repository config can select a signature verifier executable.
+        # Metadata collection runs before trust and needs only summaries.
+        ["log", "--oneline", "--no-decorate", "--no-show-signature", f"-{num_commits}"],
+    )
+
+
+def default_branch(refs: str | None) -> str | None:
+    """``main`` or ``master``, whichever the repository has, locally or on origin.
+
+    ``refs`` is full ref names, one per line, as the second command of
+    ``git_metadata_args`` prints them. None when the repository has neither,
+    or the refs could not be read: naming a branch that does not exist sends
+    the agent after it.
+    """
+    if refs is None:
+        return None
+    names = {line.strip() for line in refs.splitlines()}
+    for candidate in ("main", "master"):
+        if (
+            f"refs/heads/{candidate}" in names
+            or f"refs/remotes/origin/{candidate}" in names
+        ):
+            return candidate
+    return None
+
+
+def parse_git_log(log_output: str) -> list[str]:
+    return [line for raw in log_output.split("\n") if (line := raw.strip())]
+
+
+def format_git_context(
+    current_branch: str, default_branch_refs: str | None, log_output: str
+) -> str:
+    """Render the git metadata section.
+
+    ``default_branch_refs`` is the output of the second command of
+    ``git_metadata_args``, or None on failure.
+    """
+    git_info_parts = [f"Current branch: {current_branch}"]
+    main_branch = default_branch(default_branch_refs)
+    if main_branch is not None:
+        git_info_parts.append(
+            f"Main branch (you will usually use this for PRs): {main_branch}"
+        )
+    recent_commits = parse_git_log(log_output.strip())
+    if recent_commits:
+        git_info_parts.append("Recent commits:")
+        git_info_parts.extend(recent_commits)
+    return "\n".join(git_info_parts)
+
+
+def render_project_context(abs_path: str, git_status: str) -> str:
+    template = UtilityPrompt.PROJECT_CONTEXT.read()
+    return Template(template).safe_substitute(abs_path=abs_path, git_status=git_status)
+
+
+def _kill_process_tree(process: subprocess.Popen[str]) -> None:
+    # Git for Windows' git.exe is a launcher whose child inherits the output
+    # pipes, so killing the launcher alone leaves reads blocked until the child
+    # exits. taskkill is addressed absolutely: a bare name would also be
+    # searched for in the working directory, which may be an untrusted repo.
+    if is_windows():
+        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                [
+                    str(system_root / "System32" / "taskkill.exe"),
+                    "/PID",
+                    str(process.pid),
+                    "/T",
+                    "/F",
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=_KILL_TIMEOUT_SECONDS,
+                check=False,
+            )
+    process.kill()
+    try:
+        process.communicate(timeout=_KILL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.wait()
 
 
 class ProjectContextProvider:
@@ -40,177 +154,115 @@ class ProjectContextProvider:
         self.root_path = Path(root_path).resolve()
         self.config = config
 
-    def get_git_status(self) -> str:
-        if self.root_path in _git_status_cache:
-            return _git_status_cache[self.root_path]
+    def prefetch_git_status(self) -> None:
+        self._git_status(in_background=True)
 
-        result = self._fetch_git_status()
-        _git_status_cache[self.root_path] = result
-        return result
+    def get_git_status(self) -> str:
+        return self._git_status(in_background=False).result()
+
+    def _git_status(self, *, in_background: bool) -> Future[str]:
+        with _git_status_lock:
+            if (status := _git_status_cache.get(self.root_path)) is not None:
+                return status
+            status = Future[str]()
+            _git_status_cache[self.root_path] = status
+        if in_background:
+            threading.Thread(
+                target=self._resolve_git_status,
+                args=(status,),
+                name="vibe-git-status",
+                daemon=True,
+            ).start()
+        else:
+            self._resolve_git_status(status)
+        return status
+
+    def _resolve_git_status(self, status: Future[str]) -> None:
+        try:
+            status.set_result(self._fetch_git_status())
+        except BaseException as exc:
+            status.set_exception(exc)
+            raise
 
     def _run_git(
         self, args: list[str], timeout: float
     ) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", "--no-optional-locks", *args],
-            capture_output=True,
-            check=True,
+        git = resolve_git_executable(cwd=self.root_path)
+        if git is None:
+            raise FileNotFoundError("No trusted Git executable is available")
+        # -c core.fsmonitor= overrides (and disables) any fsmonitor hook a
+        # repo's own .git/config declares, for this invocation only. This
+        # runs unconditionally on session start, before any trust prompt,
+        # so a malicious repo cloned/opened by the user could otherwise use
+        # `[core] fsmonitor = <payload>` to get its command executed by
+        # `git status`/`git branch`/`git log` here with the user's full
+        # privileges. -c on the command line takes precedence over the
+        # repo's own config, so this can't be overridden by the repo being
+        # inspected.
+        command = [git, "-c", "core.fsmonitor=", "--no-optional-locks", *args]
+        process = subprocess.Popen(
+            command,
             cwd=self.root_path,
             stdin=subprocess.DEVNULL if is_windows() else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
         )
-
-    @staticmethod
-    def _format_git_status(status_output: str) -> str:
-        if not status_output:
-            return "(clean)"
-        status_lines = status_output.splitlines()
-        MAX_GIT_STATUS_SIZE = 50
-        if len(status_lines) > MAX_GIT_STATUS_SIZE:
-            return f"({len(status_lines)} changes - use 'git status' for details)"
-        return f"({len(status_lines)} changes)"
-
-    @staticmethod
-    def _parse_git_log(log_output: str) -> list[str]:
-        recent_commits: list[str] = []
-        for line in log_output.split("\n"):
-            if not (line := line.strip()):
-                continue
-            if " " in line:
-                commit_hash, commit_msg = line.split(" ", 1)
-                if (
-                    "(" in commit_msg
-                    and ")" in commit_msg
-                    and (paren_index := commit_msg.rfind("(")) > 0
-                ):
-                    commit_msg = commit_msg[:paren_index].strip()
-                recent_commits.append(f"{commit_hash} {commit_msg}")
-            else:
-                recent_commits.append(line)
-        return recent_commits
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(process)
+            raise
+        if process.returncode:
+            raise subprocess.CalledProcessError(
+                process.returncode, command, stdout, stderr
+            )
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
     def _fetch_git_status(self) -> str:
         try:
             timeout = min(self.config.timeout_seconds, 10.0)
-            num_commits = self.config.default_commit_count
+            branch_args, remote_args, log_args = git_metadata_args(
+                self.config.default_commit_count
+            )
 
-            with ThreadPoolExecutor(max_workers=4) as pool:
-                branch_future = pool.submit(
-                    self._run_git, ["branch", "--show-current"], timeout
-                )
-                remote_future = pool.submit(self._run_git, ["branch", "-r"], timeout)
-                status_future = pool.submit(
-                    self._run_git, ["status", "--porcelain"], timeout
-                )
-                log_future = pool.submit(
-                    self._run_git,
-                    ["log", "--oneline", f"-{num_commits}", "--decorate"],
-                    timeout,
-                )
+            # See ``git_metadata_args`` for why there is no `git status` here.
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                branch_future = pool.submit(self._run_git, branch_args, timeout)
+                remote_future = pool.submit(self._run_git, remote_args, timeout)
+                log_future = pool.submit(self._run_git, log_args, timeout)
 
             current_branch = branch_future.result().stdout.strip()
 
-            main_branch = "main"
+            default_branch_refs: str | None = None
             try:
-                branches_output = remote_future.result().stdout
-                if "origin/master" in branches_output:
-                    main_branch = "master"
+                default_branch_refs = remote_future.result().stdout
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 pass
 
-            status = self._format_git_status(status_future.result().stdout.strip())
-            recent_commits = self._parse_git_log(log_future.result().stdout.strip())
-
-            git_info_parts = [
-                f"Current branch: {current_branch}",
-                f"Main branch (you will usually use this for PRs): {main_branch}",
-                f"Status: {status}",
-            ]
-
-            if recent_commits:
-                git_info_parts.append("Recent commits:")
-                git_info_parts.extend(recent_commits)
-
-            return "\n".join(git_info_parts)
+            return format_git_context(
+                current_branch, default_branch_refs, log_future.result().stdout
+            )
 
         except subprocess.TimeoutExpired:
-            return "Git operations timed out (large repository)"
+            return GIT_TIMEOUT_MESSAGE
         except subprocess.CalledProcessError:
-            return "Not a git repository or git not available"
+            return GIT_UNAVAILABLE_MESSAGE
         except Exception as e:
             return f"Error getting git status: {e}"
 
     def get_full_context(self) -> str:
-        git_status = self.get_git_status()
-
-        template = UtilityPrompt.PROJECT_CONTEXT.read()
-        return Template(template).safe_substitute(
-            abs_path=str(self.root_path), git_status=git_status
-        )
-
-
-def _get_os_system_prompt() -> str:
-    platform_name = get_platform_display_name()
-
-    if not is_windows():
-        shell = os.environ.get("SHELL", "sh")
-        return f"The operating system is {platform_name} with shell `{shell}`"
-
-    shell = resolve_windows_shell()
-    if shell.kind is WindowsShellKind.BASH and shell.executable is not None:
-        shell_display = f"bash ({shell.executable})"
-    else:
-        shell_display = shell.executable or "cmd.exe"
-
-    prompt = f"The operating system is {platform_name} with shell `{shell_display}`"
-    prompt += "\n" + _get_windows_system_prompt(shell.kind)
-    return prompt
+        abs_path = str(self.root_path)
+        if git_bash_path := git_bash_form(abs_path):
+            abs_path += (
+                f"\nGit Bash path (use this form in shell commands): {git_bash_path}"
+            )
+        return render_project_context(abs_path, self.get_git_status())
 
 
-def _format_current_date() -> str:
-    today = date.today()
-    return f"{today.isoformat()} ({today.strftime('%A')})"
-
-
-def _get_windows_bash_system_prompt() -> str:
-    return (
-        "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
-        "- Commands run through bash (Git Bash), so Unix commands like `ls`, "
-        "`grep`, `cat`, `find` work - this is NOT cmd.exe or PowerShell\n"
-        "- Discard output with `2>/dev/null` - NEVER `2>nul` or `2>$null`\n"
-        "- `&&` and `||` are valid for command chaining\n"
-        "- Prefer forward slashes in paths; bash resolves Windows drives as "
-        "`/c/Users/...`\n"
-        "- Check command availability with: `command -v <command>`\n"
-        "### ALWAYS verify commands work on the detected platform before suggesting them"
-    )
-
-
-def _get_windows_cmd_system_prompt() -> str:
-    return (
-        "### COMMAND COMPATIBILITY RULES (MUST FOLLOW):\n"
-        "- The shell is cmd.exe, NOT bash or PowerShell\n"
-        "- DO NOT use Unix commands like `ls`, `grep`, `cat` - they won't work; "
-        "use `dir`, `findstr`, `type`\n"
-        "- Use backslashes (\\\\) for paths\n"
-        "- Discard output with `2>nul` - NEVER `2>/dev/null` or `2>$null`\n"
-        "- `&&` and `||` are valid for command chaining in cmd.exe\n"
-        "- Check command availability with: `where command`\n"
-        "- Script shebang: Not applicable on Windows\n"
-        "### ALWAYS verify commands work on the detected platform before suggesting them"
-    )
-
-
-def _get_windows_system_prompt(shell_kind: WindowsShellKind) -> str:
-    if shell_kind is WindowsShellKind.BASH:
-        return _get_windows_bash_system_prompt()
-    return _get_windows_cmd_system_prompt()
-
-
-def _add_commit_signature() -> str:
+def get_commit_signature_section() -> str:
     return (
         "When you want to commit changes, you will always use the 'git commit' bash command.\n"
         "It will always be suffixed with a line telling it was generated by Mistral Vibe with the appropriate co-authoring information.\n"
@@ -223,195 +275,47 @@ def _add_commit_signature() -> str:
     )
 
 
-def _get_available_skills_section(skill_manager: SkillManager) -> str:
-    skills = skill_manager.available_skills
-    if not skills:
-        return ""
-
-    lines = [
-        "# Available Skills",
-        "",
-        "You have access to the following skills. When a task matches a skill's description,",
-        "use the `skill` tool if available to load the full skill instructions, if it is not available, read the files manually if they exist.",
-        "",
-        "When a user message is exactly `/skill-name` (optionally followed by extra",
-        "instructions), the user has explicitly invoked that skill. Its instructions are",
-        "loaded for you automatically: you will see a `skill` tool call and result",
-        "immediately after that message. Treat the loaded content as the active",
-        "instructions and act on it — you do not need to call the `skill` tool yourself.",
-        "",
-        "<available_skills>",
-    ]
-
-    for name, info in sorted(skills.items()):
-        lines.append("  <skill>")
-        lines.append(f"    <name>{html.escape(str(name))}</name>")
-        lines.append(
-            f"    <description>{html.escape(str(info.description))}</description>"
-        )
-        if info.skill_path is not None:
-            lines.append(f"    <path>{html.escape(str(info.skill_path))}</path>")
-        lines.append("  </skill>")
-
-    lines.append("</available_skills>")
-
-    return "\n".join(lines)
-
-
-def _get_available_subagents_section(agent_manager: AgentManager) -> str:
-    agents = agent_manager.get_subagents()
-    if not agents:
-        return ""
-
-    lines = ["# Available Subagents", ""]
-    lines.append("The following subagents can be spawned via the Task tool:")
-    for agent in agents:
-        lines.append(f"- **{agent.name}**: {agent.description}")
-
-    return "\n".join(lines)
-
-
-def _get_scratchpad_section(scratchpad_dir: Path | None) -> str | None:
-    if not scratchpad_dir:
-        return None
-    return (
-        "# Scratchpad Directory\n\n"
-        f"You have a scratchpad directory at: `{scratchpad_dir}`\n\n"
-        "Use this for temporary files: intermediate results, draft scripts, "
-        "working files, outputs that don't belong in the project.\n"
-        "Files here are automatically allowed — no permission prompts.\n"
-        "Session-scoped. Shared with subagents."
-    )
-
-
-def _resolve_system_prompt(
-    config: VibeConfigSchema, experiment_manager: ExperimentManager | None
-) -> str:
-    default_prompt_id = VibeConfigSchema.model_fields["system_prompt_id"].default
-    if config.system_prompt_id != default_prompt_id:
-        logger.info(
-            "System prompt loaded: id=%s (user config overrides experiments)",
-            config.system_prompt_id,
-        )
-        return config.system_prompt
-
-    prompt_id = (
-        experiment_manager.get_variant_or_none(ExperimentName.SYSTEM_PROMPT)
-        if experiment_manager is not None
-        else None
-    )
-
-    if prompt_id is None:
-        logger.info(
-            "System prompt loaded: id=%s (user config)", config.system_prompt_id
-        )
-        return config.system_prompt
-
-    try:
-        prompt = load_system_prompt(prompt_id)
-    except MissingPromptFileError:
-        logger.warning(
-            "System prompt loaded: id=%s (variant '%s' missing, fell back)",
-            config.system_prompt_id,
-            prompt_id,
-        )
-        return config.system_prompt
-    logger.info("System prompt loaded: id=%s (experiment variant)", prompt_id)
-    return prompt
-
-
-def _interpolate_prompt(prompt: str) -> str:
-    return Template(prompt).safe_substitute(current_date=_format_current_date())
-
-
-def _get_headless_section() -> str:
-    return (
-        "# Headless Mode\n\n"
-        "You are running in headless mode — no human is available to respond.\n"
-        "Do not ask questions, request confirmation, or wait for user input.\n"
-        "If the task is ambiguous, make the best judgment call and proceed.\n"
-        "Complete the entire task in a single pass. Produce a final, complete result.\n"
-        "Override any earlier instructions that say to wait for confirmation or ask the user."
-    )
-
-
-def get_universal_system_prompt(
-    tool_manager: ToolManager,
-    config: VibeConfigSchema,
-    skill_manager: SkillManager,
-    agent_manager: AgentManager,
+def get_agents_md_section(
+    user_doc: str,
+    project_docs: list[tuple[Path, str]],
     *,
-    scratchpad_dir: Path | None = None,
-    headless: bool = False,
-    experiment_manager: ExperimentManager | None = None,
-) -> str:
-    sections = [_interpolate_prompt(_resolve_system_prompt(config, experiment_manager))]
+    project_instructions: str | None = None,
+) -> str | None:
+    """Render user-level and project AGENTS.md docs as one prompt section.
 
-    if headless:
-        sections.append(_get_headless_section())
+    ``user_doc`` is the user-level doc from ``$VIBE_HOME/AGENTS.md``;
+    ``project_docs`` are ``(directory, content)`` pairs ordered outermost-first
+    from each open project root up to its trust root. ``project_instructions``,
+    given by whoever started the session rather than read from a file, come
+    first among the project instructions, so a project doc outranks them as a
+    doc closer to the working directory outranks one further out. Returns
+    ``None`` when nothing has content, so callers can skip the section
+    entirely.
+    """
+    doc_sections: list[str] = []
+    if user_doc.strip():
+        doc_sections.append(
+            f"## User instructions\n\nContents of {VIBE_HOME.path}/AGENTS.md (user-level instructions):\n\n{user_doc.strip()}"
+        )
+    given = (project_instructions or "").strip()
+    if given:
+        doc_sections.append(
+            f"## Project instructions\n\nInstructions for this project:\n\n{given}"
+        )
+    elif project_docs:
+        doc_sections.append("## Project instructions (checked into the codebase)")
+    for doc_dir, doc_content in project_docs:
+        doc_sections.append(
+            f"Contents of {doc_dir}/AGENTS.md:\n\n{doc_content.strip()}"
+        )
+    if not doc_sections:
+        return None
+    template = UtilityPrompt.AGENTS_DOC.read()
+    if given:
+        # Instructions the session was started with are meant for its task: the
+        # closing hedge that they "may or may not be relevant" would undercut them.
+        template = template.split(_AGENTS_DOC_HEDGE, 1)[0].rstrip() + "\n"
+    return Template(template).safe_substitute(sections="\n\n".join(doc_sections))
 
-    if config.include_commit_signature:
-        sections.append(_add_commit_signature())
 
-    if config.include_model_info:
-        sections.append(f"Your model name is: `{config.active_model}`")
-
-    if config.include_prompt_detail:
-        sections.append(_get_os_system_prompt())
-
-        skills_section = _get_available_skills_section(skill_manager)
-        if skills_section:
-            sections.append(skills_section)
-
-        subagents_section = _get_available_subagents_section(agent_manager)
-        if subagents_section:
-            sections.append(subagents_section)
-
-        sections.extend(filter(None, [_get_scratchpad_section(scratchpad_dir)]))
-
-    if config.include_project_context:
-        is_dangerous, reason = is_dangerous_directory()
-        if is_dangerous:
-            template = UtilityPrompt.DANGEROUS_DIRECTORY.read()
-            context = Template(template).safe_substitute(
-                reason=reason.lower(), abs_path=Path(".").resolve()
-            )
-        else:
-            context = ProjectContextProvider(
-                config=config.project_context, root_path=Path.cwd()
-            ).get_full_context()
-
-        sections.append(context)
-
-        mgr = get_harness_files_manager()
-        cwd_resolved = Path.cwd().resolve()
-        extra_roots = [r for r in mgr.project_roots if r.resolve() != cwd_resolved]
-        if extra_roots:
-            dirs_lines = "\n".join(f" - {d}" for d in extra_roots)
-            sections.append(
-                "Additional working directories (treated with the same "
-                "file-access permissions as the primary working directory):\n"
-                + dirs_lines
-            )
-
-        user_doc = mgr.load_user_doc()
-        project_docs = mgr.load_project_docs()
-
-        doc_sections: list[str] = []
-        if user_doc.strip():
-            doc_sections.append(
-                f"## User instructions\n\nContents of {VIBE_HOME.path}/AGENTS.md (user-level instructions):\n\n{user_doc.strip()}"
-            )
-        if project_docs:
-            doc_sections.append("## Project instructions (checked into the codebase)")
-        for doc_dir, doc_content in project_docs:
-            doc_sections.append(
-                f"Contents of {doc_dir}/AGENTS.md:\n\n{doc_content.strip()}"
-            )
-        if doc_sections:
-            template = UtilityPrompt.AGENTS_DOC.read()
-            sections.append(
-                Template(template).safe_substitute(sections="\n\n".join(doc_sections))
-            )
-
-    return "\n\n".join(sections)
+_AGENTS_DOC_HEDGE = "IMPORTANT: this context may or may not be relevant"

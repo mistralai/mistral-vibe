@@ -1,0 +1,142 @@
+//! Paint the region selection highlight and copy on a pending release.
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::Frame;
+
+use super::{notice, theme};
+use crate::app::App;
+use crate::selection::fold;
+use crate::selection::region::{self, RegionId, RowSpan};
+
+/// The non-scrolling region a surface that paints all its own text publishes
+/// (the question box content, the loading row); its copy comes from the frame.
+pub(crate) fn frame_region(area: Rect) -> crate::selection::Region {
+    crate::selection::Region {
+        area,
+        top: i32::from(area.y),
+        scrollbar: false,
+        end_exclusive: false,
+        document: false,
+        ..crate::selection::Region::default()
+    }
+}
+
+/// Register the loading row for mouse routing and paint its selection overlay.
+pub(crate) fn loading_region(app: &mut App, f: &mut Frame, area: Rect) {
+    crate::mouse::register_region(app, area, crate::mouse::MouseTarget::Loading);
+    app.view.loading_selection_region = frame_region(area);
+    overlay_region(app, f, RegionId::Loading);
+}
+
+/// Highlight the selection inside the main screen region.
+pub fn overlay(app: &mut App, f: &mut Frame) {
+    overlay_region(app, f, RegionId::Main);
+}
+
+/// Draw the transcript above a bottom app with its selection highlight and paint-time copy.
+pub(crate) fn draw_transcript(app: &mut App, f: &mut Frame, area: Rect) {
+    super::transcript::draw(app, f, area);
+    overlay(app, f);
+}
+
+/// Highlight the in-flight selection `owner` published, unless it is still a plain click.
+pub fn overlay_region(app: &mut App, f: &mut Frame, owner: RegionId) {
+    if app.selection.region.as_ref().is_none_or(|selection| {
+        selection.owner != owner
+            || crate::selection::is_collapsed(selection, app.selection.granularity)
+    }) {
+        return;
+    }
+    // The scrollbar gutter is chrome; selection stops one column short of it.
+    let content_chat = region::get(app, owner).content();
+    let spans = region::spans(app, f.buffer_mut(), content_chat);
+    if !cache_and_copy(app, f, &spans) {
+        return;
+    }
+    let style = Style::default()
+        .fg(theme::selection_fg())
+        .bg(theme::selection_bg());
+    let buf = f.buffer_mut();
+    for &span in &spans {
+        paint_row(buf, content_chat, style, span);
+    }
+}
+
+/// On the finalized (pending) frame, extract the selected text once, cache it so
+/// a copy key can read it with autocopy off, and copy it. Extraction re-renders
+/// the transcript slice, so it must not run on every drag frame or spinner tick.
+/// Returns false once a pending release turned out empty and cleared the selection.
+fn cache_and_copy(app: &mut App, f: &mut Frame, spans: &[RowSpan]) -> bool {
+    let Some((pending, owner)) = app
+        .selection
+        .region
+        .as_ref()
+        .map(|sel| (sel.pending_copy, sel.owner))
+    else {
+        return true;
+    };
+    // A frame-owned selection is cheap to read: cache it every paint for `honor_pending_copy`.
+    if !pending && region::get(app, owner).document {
+        return true;
+    }
+    let text = region::extract_document(app)
+        .unwrap_or_else(|| fold::extract(f.buffer_mut(), spans, &region::folds(app, owner)));
+    if !pending {
+        if let Some(selection) = app.selection.region.as_mut() {
+            selection.text = text;
+        }
+        return true;
+    }
+    if text.is_empty() {
+        app.selection.region = None;
+        return false;
+    }
+    if let Some(selection) = app.selection.region.as_mut() {
+        selection.text = text.clone();
+        selection.pending_copy = false;
+    }
+    notice::copy_if_autocopy(app, &text);
+    true
+}
+
+/// Highlight one row; a group header's label is dimmed, its marker keeps the raw selection style.
+fn paint_row(buf: &mut Buffer, chat: Rect, style: Style, (y, x0, x1): RowSpan) {
+    if is_group_header(buf, chat, y) {
+        let label = group_label_style();
+        for x in x0..=x1 {
+            let Some(cell) = buf.cell_mut((x, y)) else {
+                continue;
+            };
+            // The marker cell and its trailing pad sit before the label.
+            let patch = if x < chat.x + 2 { style } else { label };
+            cell.set_style(cell.style().remove_modifier(Modifier::all()).patch(patch));
+        }
+        return;
+    }
+    for x in x0..=x1 {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_style(cell.style().patch(style));
+        }
+    }
+}
+
+/// A folded group header row: its status indicator glyph at the row's first cell.
+fn is_group_header(buf: &Buffer, chat: Rect, y: u16) -> bool {
+    buf.cell((chat.x, y))
+        .is_some_and(|cell| matches!(cell.symbol(), "⏵" | "⏷" | "■" | "□"))
+}
+
+/// Selected group-header label: selection text at 55% opacity, or SGR dim on ANSI themes.
+fn group_label_style() -> Style {
+    /// The header's `text-opacity`.
+    const TEXT_OPACITY: f32 = 0.55;
+
+    let style = Style::default().bg(theme::selection_bg());
+    if theme::is_ansi() {
+        return style.fg(theme::selection_fg()).add_modifier(Modifier::DIM);
+    }
+    let fg = theme::blend(theme::selection_bg(), theme::selection_fg(), TEXT_OPACITY);
+    style.fg(fg)
+}

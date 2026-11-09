@@ -2,19 +2,30 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin
 
-import httpx
+import httpx2
 
 from vibe import __version__
-from vibe.core.config import ProviderConfig, VibeConfigSchema, resolve_api_key
-from vibe.core.llm.format import ResolvedToolCall
-from vibe.core.logger import logger
+from vibe.core.config import ProviderConfig, VibeConfigSchema
+from vibe.core.config.admin_config import AdminConfigOutcome
+from vibe.core.platform_auth import (
+    PlatformCredentialFactory,
+    PlatformCredentialRequired,
+    PlatformCredentialTarget,
+)
+from vibe.core.platform_auth._mistral import (
+    MistralCredentials,
+    is_user_principal,
+    mistral_credentials,
+    resolve_principal,
+    resolve_snapshot,
+)
 from vibe.core.telemetry.build_metadata import build_base_metadata
 from vibe.core.telemetry.types import (
     AttachmentKind,
+    ExperimentAssignment,
     LaunchContext,
     ProjectPickerTelemetryPayload,
     RemoteProjectOutcome,
@@ -23,14 +34,27 @@ from vibe.core.telemetry.types import (
     TeleportFailureDetails,
     TeleportFailureStage,
 )
-from vibe.core.utils import get_server_url_from_api_base, get_user_agent
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.observability.logging import logger
+from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.http import (
+    VibeAsyncHTTPClient,
+    build_ssl_context,
+    get_server_url_from_api_base,
+    get_user_agent,
+)
 
 if TYPE_CHECKING:
-    from vibe.core.agent_loop import ToolDecision
+    from vibe.core.experiments.active import ExperimentSurface
+    from vibe.core.experiments.models import ExperimentAttributes
 
 _DEFAULT_TELEMETRY_BASE_URL = "https://api.mistral.ai"
 _DATALAKE_EVENTS_PATH = "/v1/datalake/events"
+
+type SubagentOperation = Literal[
+    "list", "list_configs", "spawn", "wait", "send_message", "interrupt", "close"
+]
+type SubagentOutcome = Literal["success", "failure", "timeout"]
+type SubagentProfileSource = Literal["generic", "vibe_profile"]
 
 
 def get_mistral_provider_and_api_key(
@@ -57,11 +81,145 @@ def get_mistral_provider_and_api_key(
     return provider, api_key
 
 
-def _extract_file_extension(path: object) -> str | None:
-    if not isinstance(path, (str, Path)):
+def mistral_credential_cache_key(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> str | None:
+    """Stable, anonymous cache key for the Mistral credential and tenant.
+
+    The shared key for managed config, experiment eval, and model catalog:
+    the credential's principal (the hashed API key, or the user and tenant).
+    None means no credential or no known principal, so the caller has no
+    entry to read or write. Never refreshes nor reaches the network.
+    """
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
         return None
-    suffix = Path(path).suffix.lower()
-    return suffix or None
+    return mistral.cached_principal()
+
+
+async def resolve_credential_cache_key(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> str | None:
+    """The principal a fetch starts under, resolving the credential when it is
+    not known yet (a token refresh, a tenant discovery).
+
+    Pass it to the store as ``fetched_for``: a user token's principal, unlike
+    an API key's, does not name the material a request carried, so the store
+    keeps only a response fetched for the account still signed in. ``None``
+    when it cannot be resolved in time (fetch, but cache nothing).
+    """
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
+        return None
+    return await resolve_principal(mistral)
+
+
+def credential_cache_key_is_current(
+    fetched_for: str,
+    config: VibeConfigSchema | None = None,
+    credentials: PlatformCredentialFactory | None = None,
+) -> bool:
+    """``may_cache_under`` for a key computed when the fetch started."""
+    if not is_user_principal(fetched_for):
+        return True
+    if config is None:
+        return False
+    return mistral_credential_cache_key(config, credentials) == fetched_for
+
+
+def _subagent_depth(caller_agent_path: str) -> int:
+    """Depth of the subagent level an operation acts on: the caller's depth + 1.
+
+    Agent paths are absolute (``/root``, ``/root/research``), so the number of
+    segments is the caller's depth (root = 0) plus one.
+    """
+    segments = [segment for segment in caller_agent_path.split("/") if segment]
+    if not caller_agent_path.startswith("/") or not segments:
+        raise ValueError(f"not an absolute agent path: {caller_agent_path!r}")
+    return len(segments)
+
+
+def send_unified_subagent_tool_call_finished(
+    client: TelemetryClient,
+    *,
+    operation: SubagentOperation,
+    outcome: SubagentOutcome,
+    model: str,
+    caller_agent_path: str,
+    profile_source: SubagentProfileSource | None = None,
+    message_id: str | None = None,
+) -> None:
+    """Record one terminal Unified subagent operation without user content.
+
+    Stateful subagent effects are produced by Harness Core rather than the
+    legacy ``ResolvedToolCall`` path. Keep their analytics on the existing
+    tool-finished event while exposing only the approved low-cardinality
+    dimensions. In particular, never add agent names, child IDs, prompts,
+    paths, or error messages here: ``caller_agent_path`` is reduced to the
+    ``subagent_depth`` integer and never emitted.
+    """
+    core_operation = "stop" if operation == "close" else operation
+    payload: dict[str, Any] = {
+        # An analytics key, not a wire name: Core's tools are now `agents.*`,
+        # but this keeps the pre-rename `subagent.<op>` spelling on purpose so
+        # dashboards built on it stay continuous. Do not rename it.
+        "tool_name": f"subagent.{core_operation}",
+        "status": "success" if outcome == "success" else "failure",
+        "decision": None,
+        "approval_type": None,
+        "agent_profile_name": None,
+        "model": model,
+        "nb_files_created": 0,
+        "nb_files_modified": 0,
+        "file_extension": None,
+        "message_id": message_id,
+        "subagent_operation": operation,
+        "subagent_outcome": outcome,
+        "subagent_depth": _subagent_depth(caller_agent_path),
+    }
+    if profile_source is not None:
+        payload["subagent_profile_source"] = profile_source
+    client.send_telemetry_event("vibe.tool_call_finished", payload)
+
+
+def send_unified_tool_call_finished(  # noqa: PLR0913
+    client: TelemetryClient,
+    *,
+    tool_name: str,
+    status: Literal["success", "failure", "skipped"],
+    model: str,
+    agent_profile_name: str | None,
+    nb_files_created: int = 0,
+    nb_files_modified: int = 0,
+    file_extension: str | None = None,
+    message_id: str | None = None,
+    decision: Literal["execute", "skip"] | None = None,
+    approval_type: Literal["always", "never", "ask"] | None = None,
+    approval_source: Literal["config", "smart", "user", "bypass", "never"]
+    | None = None,
+) -> None:
+    """Record one terminal ordinary (non-subagent) Unified tool call.
+
+    The harness runs tool calls in Core, so they never pass through the legacy
+    ``ResolvedToolCall`` path. Hand-build the same ``vibe.tool_call_finished``
+    payload the legacy loop emits, sourcing name/status/file counts from the
+    reconciled effect and ``decision``/``approval_type``/``approval_source``
+    from the effect state.
+    """
+    payload: dict[str, Any] = {
+        "tool_name": tool_name,
+        "status": status,
+        "decision": decision,
+        "approval_type": approval_type,
+        "approval_source": approval_source,
+        "agent_profile_name": agent_profile_name,
+        "model": model,
+        "nb_files_created": nb_files_created,
+        "nb_files_modified": nb_files_modified,
+        "file_extension": file_extension,
+        "message_id": message_id,
+    }
+    client.send_telemetry_event("vibe.tool_call_finished", payload)
 
 
 class TelemetryClient:
@@ -71,15 +229,23 @@ class TelemetryClient:
         session_id_getter: Callable[[], str | None] | None = None,
         parent_session_id_getter: Callable[[], str | None] | None = None,
         launch_context: LaunchContext | None = None,
-        experiments_getter: Callable[[], dict[str, str]] | None = None,
+        experiments_getter: Callable[[], list[ExperimentAssignment]] | None = None,
         user_plan_getter: Callable[[], str | None] | None = None,
+        experiment_attributes_getter: (
+            Callable[[], ExperimentAttributes | None] | None
+        ) = None,
+        harness_backend: ExperimentSurface | None = None,
+        credentials: PlatformCredentialFactory | None = None,
     ) -> None:
         self._config_getter = config_getter
+        self._credentials = credentials
         self._session_id_getter = session_id_getter
         self._parent_session_id_getter = parent_session_id_getter
         self._launch_context = launch_context
         self._experiments_getter = experiments_getter
         self._user_plan_getter = user_plan_getter
+        self._experiment_attributes_getter = experiment_attributes_getter
+        self._harness_backend = harness_backend
         self._client: VibeAsyncHTTPClient | None = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self.last_correlation_id: str | None = None
@@ -88,12 +254,8 @@ class TelemetryClient:
         base = get_server_url_from_api_base(api_base) or _DEFAULT_TELEMETRY_BASE_URL
         return urljoin(base.rstrip("/"), _DATALAKE_EVENTS_PATH)
 
-    def _get_mistral_api_key(self) -> str | None:
-        provider_and_api_key = get_mistral_provider_and_api_key(self._config_getter())
-        if provider_and_api_key is None:
-            return None
-        _, api_key = provider_and_api_key
-        return api_key
+    def _mistral(self) -> MistralCredentials | None:
+        return mistral_credentials(self._config_getter(), self._credentials)
 
     def _is_enabled(self) -> bool:
         try:
@@ -102,14 +264,14 @@ class TelemetryClient:
             return False
 
     def is_active(self) -> bool:
-        return self._is_enabled() and self._get_mistral_api_key() is not None
+        return self._is_enabled() and self._mistral() is not None
 
     @property
     def client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(5.0),
-                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10),
+                timeout=httpx2.Timeout(5.0),
+                limits=httpx2.Limits(max_keepalive_connections=5, max_connections=10),
                 verify=build_ssl_context(),
             )
         return self._client
@@ -133,22 +295,30 @@ class TelemetryClient:
         return self._user_plan_getter()
 
     def build_client_event_metadata(self) -> dict[str, Any]:
-        experiments = (
+        experiment_assignments = (
             self._experiments_getter() if self._experiments_getter is not None else None
+        )
+        attributes = (
+            self._experiment_attributes_getter()
+            if self._experiment_attributes_getter is not None
+            else None
         )
         return build_base_metadata(
             launch_context=self._launch_context,
             session_id=self.session_id,
             parent_session_id=self.parent_session_id,
-            experiments=experiments,
+            experiment_assignments=experiment_assignments,
             user_plan=self.user_plan,
+            experiment_attributes=(
+                # mode="json" so nested enums (harness, terminal_emulator)
+                # serialize to their string values, matching the top-level fields
+                # and keeping the payload/logs free of Python enum reprs.
+                attributes.model_dump(mode="json", exclude_none=True)
+                if attributes
+                else None
+            ),
+            harness_backend=self._harness_backend,
         )
-
-    def _is_experimental_bash_tool_enabled(self) -> bool:
-        try:
-            return self._config_getter().experimental_bash_tool
-        except Exception:
-            return False
 
     def send_telemetry_event(
         self,
@@ -159,12 +329,12 @@ class TelemetryClient:
     ) -> None:
         if not self._is_enabled():
             return
-        provider_and_api_key = get_mistral_provider_and_api_key(self._config_getter())
-        if provider_and_api_key is None:
+        mistral = self._mistral()
+        if mistral is None:
             return
-        provider, mistral_api_key = provider_and_api_key
-        telemetry_url = self._get_telemetry_url(provider.api_base)
-        user_agent = get_user_agent(provider.backend)
+        credentials = mistral.credentials
+        telemetry_url = self._get_telemetry_url(mistral.provider.api_base)
+        user_agent = get_user_agent(mistral.provider.backend)
         properties = self.build_client_event_metadata() | properties
         logger.debug(
             "telemetry event=%s properties=%s correlation_id=%s",
@@ -179,15 +349,32 @@ class TelemetryClient:
 
         async def _send() -> None:
             try:
-                await self.client.post(
-                    telemetry_url,
-                    json=payload,
-                    headers={
-                        "Content-Type": "application/json",
-                        "Authorization": f"Bearer {mistral_api_key}",
-                        "User-Agent": user_agent,
-                    },
-                )
+                # Bound credential resolution (a token refresh) too.
+                async with asyncio.timeout(5):
+                    snapshot = await resolve_snapshot(credentials, telemetry_url)
+                    if isinstance(snapshot, PlatformCredentialRequired):
+                        return
+                    extra: dict[str, Any] = (
+                        {}
+                        if snapshot.follows_redirects
+                        else {"follow_redirects": False}
+                    )
+                    response = await self.client.post(
+                        telemetry_url,
+                        json=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            **snapshot.headers,
+                            "User-Agent": user_agent,
+                        },
+                        **extra,
+                    )
+                    if response.status_code == httpx2.codes.UNAUTHORIZED:
+                        await credentials.reject(
+                            PlatformCredentialTarget(telemetry_url),
+                            observed=snapshot.identity,
+                            reason="http_unauthorized",
+                        )
             except Exception:
                 pass  # Silently swallow all exceptions for fire-and-forget telemetry
 
@@ -201,73 +388,6 @@ class TelemetryClient:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-
-    def _calculate_file_metrics(
-        self,
-        tool_call: ResolvedToolCall,
-        status: Literal["success", "failure", "skipped"],
-        result: dict[str, Any] | None = None,
-    ) -> tuple[int, int, str | None]:
-        nb_files_created = 0
-        nb_files_modified = 0
-        file_extension: str | None = None
-        if status == "success" and result is not None:
-            match tool_call.tool_name:
-                case "write_file":
-                    nb_files_created = 1
-                    file_extension = _extract_file_extension(
-                        tool_call.args_dict.get("file_path")
-                    )
-                case "edit":
-                    nb_files_modified = 1
-                    file_extension = _extract_file_extension(
-                        tool_call.args_dict.get("file_path")
-                    )
-                case "read_file":
-                    file_extension = _extract_file_extension(
-                        tool_call.args_dict.get("file_path")
-                    )
-        return nb_files_created, nb_files_modified, file_extension
-
-    def send_tool_call_finished(
-        self,
-        *,
-        tool_call: ResolvedToolCall,
-        status: Literal["success", "failure", "skipped"],
-        decision: ToolDecision | None,
-        agent_profile_name: str,
-        model: str,
-        result: dict[str, Any] | None = None,
-        message_id: str | None = None,
-    ) -> None:
-        verdict_value = decision.verdict.value if decision else None
-        approval_type_value = decision.approval_type.value if decision else None
-
-        nb_files_created, nb_files_modified, file_extension = (
-            self._calculate_file_metrics(tool_call, status, result)
-        )
-
-        payload = {
-            "tool_name": tool_call.tool_name,
-            "status": status,
-            "decision": verdict_value,
-            "approval_type": approval_type_value,
-            "agent_profile_name": agent_profile_name,
-            "model": model,
-            "nb_files_created": nb_files_created,
-            "nb_files_modified": nb_files_modified,
-            "file_extension": file_extension,
-            "message_id": message_id,
-        }
-        self.send_telemetry_event("vibe.tool_call_finished", payload)
-
-    def send_user_copied_text(self, text: str) -> None:
-        payload = {"text_length": len(text)}
-        self.send_telemetry_event("vibe.user_copied_text", payload)
-
-    def send_user_cancelled_action(self, action: str) -> None:
-        payload = {"action": action}
-        self.send_telemetry_event("vibe.user_cancelled_action", payload)
 
     def send_auto_compact_triggered(
         self,
@@ -301,14 +421,16 @@ class TelemetryClient:
             payload["parent_session_id"] = parent_session_id
         self.send_telemetry_event("vibe.compaction_failed", payload)
 
-    def send_slash_command_used(
-        self, command: str, command_type: Literal["builtin", "skill"]
-    ) -> None:
-        payload = {"command": command.lstrip("/"), "command_type": command_type}
-        self.send_telemetry_event("vibe.slash_command_used", payload)
-
     def send_new_session(
-        self, has_agents_md: bool, nb_skills: int, nb_mcp_servers: int, nb_models: int
+        self,
+        has_agents_md: bool,
+        nb_skills: int,
+        nb_mcp_servers: int,
+        nb_models: int,
+        *,
+        has_outside_workdir_deny: bool,
+        nb_post_agent_scoped_hooks: int,
+        nb_post_agent_main_hooks: int,
     ) -> None:
         lc = self._launch_context
         payload = {
@@ -316,7 +438,11 @@ class TelemetryClient:
             "nb_skills": nb_skills,
             "nb_mcp_servers": nb_mcp_servers,
             "nb_models": nb_models,
+            "has_outside_workdir_deny": has_outside_workdir_deny,
+            "nb_post_agent_scoped_hooks": nb_post_agent_scoped_hooks,
+            "nb_post_agent_main_hooks": nb_post_agent_main_hooks,
             "entrypoint": lc.agent_entrypoint if lc else "unknown",
+            "host_kind": "local",
             "version": __version__,
             "client_name": lc.client_name if lc else None,
             "client_version": lc.client_version if lc else None,
@@ -325,16 +451,30 @@ class TelemetryClient:
                 if lc and lc.terminal_emulator is not None
                 else None
             ),
-            "experimental_bash_tool": self._is_experimental_bash_tool_enabled(),
         }
         self.send_telemetry_event("vibe.new_session", payload)
 
     def send_session_closed(self) -> None:
         self.send_telemetry_event("vibe.session_closed", {})
 
-    def send_onboarding_api_key_added(self) -> None:
+    def send_admin_config_applied(
+        self,
+        *,
+        outcome: AdminConfigOutcome,
+        enforced_keys: list[str] | None = None,
+        error: str | None = None,
+    ) -> None:
+        payload: dict[str, Any] = {"outcome": outcome.value}
+        if enforced_keys is not None:
+            payload["nb_enforced_fields"] = len(enforced_keys)
+        if error is not None:
+            payload["has_error"] = True
+        self.send_telemetry_event("vibe.admin_config_applied", payload)
+
+    def send_onboarding_api_key_added(self, *, custom_domain: bool = False) -> None:
         self.send_telemetry_event(
-            "vibe.onboarding_api_key_added", {"version": __version__}
+            "vibe.onboarding_api_key_added",
+            {"version": __version__, "custom_domain": custom_domain},
         )
 
     def send_request_sent(
@@ -364,25 +504,42 @@ class TelemetryClient:
         }
         self.send_telemetry_event("vibe.request_sent", payload)
 
+    def send_tool_call_detected(
+        self,
+        *,
+        model: str,
+        backend: str,
+        api_style: str,
+        call_type: TelemetryCallType,
+        reasons: list[str],
+        nb_unusable_attempts: int,
+        nb_dropped_tool_calls: int,
+        status: Literal["success", "error"],
+        message_id: str | None = None,
+    ) -> None:
+        """Record one model request whose responses broke the tool call contract.
+
+        Sent once per request, when it ends, and only when the runtime had to
+        repair at least one response. Carries counts and closed values only:
+        never tool names, arguments, or response text.
+        """
+        payload = {
+            "model": model,
+            "backend": backend,
+            "api_style": api_style,
+            "call_source": "vibe_code",
+            "call_type": call_type,
+            "message_id": message_id,
+            "reasons": reasons,
+            "nb_unusable_attempts": nb_unusable_attempts,
+            "nb_dropped_tool_calls": nb_dropped_tool_calls,
+            "status": status,
+        }
+        self.send_telemetry_event("vibe.tool_call.detected", payload)
+
     def send_ready(self, *, init_duration_ms: int) -> None:
         payload = {"init_duration_ms": init_duration_ms}
         self.send_telemetry_event("vibe.ready", payload)
-
-    def send_at_mention_inserted(
-        self,
-        *,
-        nb_mentions: int,
-        context_types: dict[str, int],
-        file_extensions: dict[str, int] | None,
-        message_id: str | None,
-    ) -> None:
-        payload: dict[str, Any] = {
-            "nb_mentions": nb_mentions,
-            "context_types": context_types,
-            "file_extensions": file_extensions,
-            "message_id": message_id,
-        }
-        self.send_telemetry_event("vibe.at_mention_inserted", payload)
 
     def send_user_rating_feedback(self, rating: int, model: str) -> None:
         self.send_telemetry_event(

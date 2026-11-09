@@ -1,0 +1,293 @@
+//! Chat input: the editable prompt with a `>` marker and top/bottom borders.
+
+use ratatui::layout::{Alignment, Position, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
+
+use super::composer_layout::{ComposerLayout, Row};
+use super::composer_title;
+use super::tab_cells::{cells, cells_width};
+use super::theme;
+use crate::agents;
+use crate::app::{App, Status};
+use crate::mentions::Mention;
+
+/// Draw the chat input, returning the caret's screen cell while it is in view and takes keys.
+pub fn draw(app: &mut App, f: &mut Frame, area: Rect) -> Option<Position> {
+    let title = composer_title::title(app, area.width);
+    composer_title::place_model(app, area, &title);
+    let caret = draw_box(app, f, area, title.line);
+    if app
+        .view
+        .mouse_position
+        .is_some_and(|at| composer_title::model_at(app, at))
+    {
+        f.buffer_mut()
+            .set_style(app.view.model_area, theme::link_hover_style());
+    }
+    caret
+}
+
+fn draw_box(app: &App, f: &mut Frame, area: Rect, title: Line<'static>) -> Option<Position> {
+    // The chat input is usable as soon as the cached startup config is shown; it
+    // buffers input locally while the app server is still loading (`Starting`),
+    // so the caret and normal text show throughout. Only a failed start stays inert.
+    let editable = !matches!(app.session.status, Status::Failed);
+    // Queue selection locks the input read-only and hides the caret (ADR 0013),
+    // but leaves the draft it holds styled like ordinary input.
+    let selecting = app.queue.selected.is_some() && !app.queue.editing;
+    let border = theme::border_style();
+    // Reserve one column on the right for the chat input content: a 1-cell
+    // scrollbar gutter (bar hidden), so text wraps and ends one column before
+    // the edge. The top/bottom borders still
+    // span the full width; only the inner content is inset.
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(border)
+        .padding(Padding::right(1))
+        .title(title)
+        .title_alignment(Alignment::Right);
+
+    // A slow agent switch, then recording, replace the prompt marker with their own glyph.
+    let cursor = crate::chat_input::clamp_offset(&app.chat_input.input, app.chat_input.cursor);
+    let marker = match agents::spinner_glyph(app).or_else(|| super::recording_indicator::glyph(app))
+    {
+        Some(glyph) => format!("{glyph} "),
+        None => app.chat_input.mode.marker().to_owned(),
+    };
+    let body = app.chat_input.input.as_str();
+    let body_off = cursor;
+    let prompt_style = theme::text(theme::ORANGE).add_modifier(Modifier::BOLD);
+    let input_style = if editable {
+        theme::text(theme::foreground())
+    } else {
+        theme::muted_style()
+    };
+    // While searching, the bottom bar owns the caret and the composer previews the match.
+    let owns_keys =
+        editable && !selecting && !app.subagents.list.focused && app.reverse_search.is_none();
+    let caret = (owns_keys && app.main_input_cursor_on()).then_some(body_off);
+    let sel =
+        crate::chat_input::selection_range(&app.chat_input.input, cursor, app.chat_input.anchor);
+    let hint = crate::commands::argument_hint(app.chat_input.mode.prefix(), body);
+    let mentions = app.chat_input.mentions.spans(body);
+    let mention_style = if editable {
+        theme::text(theme::text_primary())
+    } else {
+        input_style
+    };
+    let found = super::reverse_search::found(app);
+
+    // A pasted block keeps its line breaks: the marker leads the first row and
+    // continuation rows align under the text with a two-space gutter.
+    let layout = ComposerLayout::new(body, &marker, body_off, area.width);
+    let lines: Vec<Line> = layout
+        .rows()
+        .map(|row| {
+            let gutter = if row.index == 0 {
+                Span::styled(marker.clone(), prompt_style)
+            } else {
+                Span::raw("  ")
+            };
+            let caret_col = caret.and_then(|_| layout.caret_in(row));
+            // Selection overlap with this line, clamped to line-local columns.
+            let line_sel = sel.and_then(|(lo, hi)| {
+                (lo < row.end() && hi > row.start).then(|| {
+                    let a = lo.max(row.start);
+                    let b = hi.min(row.end());
+                    (a - row.start, b - row.start)
+                })
+            });
+            let styles = BodyStyles {
+                input: input_style,
+                mention: mention_style,
+                mentions: row_mentions(mentions, row),
+                found: row_mentions(&found, row),
+            };
+            let row_hint = hint.filter(|_| row.end() == body.len());
+            render_body_line(gutter, row, line_sel, caret_col, &styles, row_hint)
+        })
+        .collect();
+    // When the chat input has grown to its cap and the caret is below the visible
+    // content rows, scroll so the caret line stays in view at the bottom.
+    let content_h = area.height.saturating_sub(2) as usize;
+    let max_scroll = layout.height().saturating_sub(content_h as u16);
+    let scroll = app
+        .chat_input
+        .scroll
+        .unwrap_or_else(|| layout.scroll(content_h))
+        .min(max_scroll);
+    let cursor_line_bg = theme::input_cursor_line_bg();
+    let cursor_row = layout.caret_row();
+    let caret_y = (cursor_row >= scroll as usize && cursor_row < scroll as usize + content_h)
+        .then(|| area.y + 1 + (cursor_row - scroll as usize) as u16)
+        .filter(|_| owns_keys);
+    let line_lit = app.view.app_focus && cursor_line_bg != theme::background();
+    if let Some(y) = caret_y.filter(|_| line_lit) {
+        let row = Rect::new(area.x + 2, y, area.width.saturating_sub(2), 1);
+        f.buffer_mut().set_style(
+            row,
+            Style::default().fg(theme::foreground()).bg(cursor_line_bg),
+        );
+    }
+    let caret_cell = caret_y.and_then(|y| caret_position(&layout, cursor_row, &marker, area.x, y));
+    let para = Paragraph::new(lines).scroll((scroll, 0)).block(block);
+    f.render_widget(para, area);
+    if scroll > 0 && area.height > 2 {
+        f.buffer_mut()
+            .set_string(area.x, area.y + 1, marker, prompt_style);
+    }
+    caret_cell
+}
+
+/// Screen cell of the caret on visual row `index`, drawn at screen row `y`, whatever the blink phase.
+fn caret_position(
+    layout: &ComposerLayout,
+    index: usize,
+    marker: &str,
+    x: u16,
+    y: u16,
+) -> Option<Position> {
+    let row = layout.rows().nth(index)?;
+    let gutter = if row.index == 0 { marker.width() } else { 2 };
+    let column = gutter + cells_width(&row.text[..layout.caret_in(row)?], row.column);
+    Some(Position::new(x.saturating_add(column as u16), y))
+}
+
+fn composer_layout(app: &App, width: u16) -> ComposerLayout<'_> {
+    let cursor = crate::chat_input::clamp_offset(&app.chat_input.input, app.chat_input.cursor);
+    ComposerLayout::new(
+        &app.chat_input.input,
+        app.chat_input.mode.marker(),
+        cursor,
+        width,
+    )
+}
+
+/// Count composer rows at `width`, including soft wraps.
+pub fn content_height(app: &App, width: u16) -> u16 {
+    composer_layout(app, width).height()
+}
+
+/// Current hidden composer viewport top row, clamped to the rendered content.
+pub fn scroll(app: &App, width: u16, viewport_rows: usize) -> u16 {
+    let layout = composer_layout(app, width);
+    app.chat_input
+        .scroll
+        .unwrap_or_else(|| layout.scroll(viewport_rows))
+        .min(layout.height().saturating_sub(viewport_rows as u16))
+}
+
+/// Cursor target one visible composer page above or below the current position.
+pub fn page_cursor(app: &App, down: bool) -> usize {
+    let layout = composer_layout(app, app.view.input_area.width);
+    let rows = app.view.input_area.height.saturating_sub(2).max(1) as usize;
+    layout.page_cursor(rows, down)
+}
+
+/// Move vertically through visual rows, returning the input offset and whether
+/// another row existed in that direction.
+pub fn vertical_cursor(app: &App, down: bool) -> (usize, bool) {
+    composer_layout(app, app.view.input_area.width).vertical_offset(down)
+}
+
+/// Base text styles for one row: plain input, and accepted mentions as row-local byte ranges.
+struct BodyStyles {
+    input: Style,
+    mention: Style,
+    mentions: Vec<(usize, usize)>,
+    found: Vec<(usize, usize)>,
+}
+
+impl BodyStyles {
+    fn at(&self, byte: usize) -> Style {
+        let inside = |ranges: &[_]| ranges.iter().any(|&(lo, hi)| lo <= byte && byte < hi);
+        let base = [self.input, self.mention][usize::from(inside(&self.mentions))];
+        super::reverse_search::style(base, inside(&self.found))
+    }
+}
+
+/// Mentions overlapping `row`, clamped to row-local byte ranges.
+fn row_mentions(mentions: &[Mention], row: Row<'_>) -> Vec<(usize, usize)> {
+    mentions
+        .iter()
+        .filter(|mention| mention.start < row.end() && mention.end > row.start)
+        .map(|mention| {
+            (
+                mention.start.max(row.start) - row.start,
+                mention.end.min(row.end()) - row.start,
+            )
+        })
+        .collect()
+}
+
+/// Build one chat input row: base text, the selection range reversed, and the caret
+/// cell as a solid block (trailing when the caret is at the line end). `sel` and
+/// `caret` are byte columns within the row. Adjacent graphemes sharing a style are
+/// coalesced into one span; a tab draws as spaces up to its stop. `hint` trails the text muted.
+fn render_body_line(
+    gutter: Span<'static>,
+    row: Row<'_>,
+    sel: Option<(usize, usize)>,
+    caret: Option<usize>,
+    styles: &BodyStyles,
+    hint: Option<&'static str>,
+) -> Line<'static> {
+    let input_style = styles.input;
+    // The caret block: a solid $input-cursor-background
+    // cell, or reverse-video for ansi themes (terminal-default background).
+    let block = if theme::input_cursor_reverse() {
+        Style::default()
+            .fg(Color::Reset)
+            .bg(theme::input_cursor_bg())
+            .add_modifier(Modifier::REVERSED)
+    } else {
+        Style::default()
+            .fg(theme::foreground())
+            .bg(theme::input_cursor_bg())
+    };
+    let reversed = input_style.add_modifier(Modifier::REVERSED);
+    let mut spans = vec![gutter];
+    let text = row.text;
+    if text.is_empty() {
+        // A word joiner is invisible but not Ratatui-wrappable whitespace.
+        spans.push(Span::raw("\u{2060}"));
+    }
+    let mut buf = String::new();
+    let mut buf_style: Option<Style> = None;
+    for cell in cells(text, row.column) {
+        let b = cell.byte;
+        let style = if caret.is_some_and(|c| b <= c && c < b + cell.symbol.len()) {
+            block
+        } else if sel.is_some_and(|(lo, hi)| b >= lo && b < hi) {
+            reversed
+        } else {
+            styles.at(b)
+        };
+        if buf_style != Some(style) {
+            if let Some(s) = buf_style {
+                spans.push(Span::styled(std::mem::take(&mut buf), s));
+            }
+            buf_style = Some(style);
+        }
+        buf.push_str(cell.shown());
+    }
+    if let Some(s) = buf_style {
+        spans.push(Span::styled(buf, s));
+    }
+    // Caret at the line end: a block on the trailing cell, or on the hint's first char.
+    let mut hint = hint.unwrap_or_default();
+    if caret.is_some_and(|c| c >= text.len()) {
+        let split = hint.chars().next().map_or(0, char::len_utf8);
+        let cell = if split == 0 { " " } else { &hint[..split] };
+        spans.push(Span::styled(cell, block));
+        hint = &hint[split..];
+    }
+    if !hint.is_empty() {
+        spans.push(Span::styled(hint, theme::muted_style()));
+    }
+    Line::from(spans)
+}

@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator, Callable
+from dataclasses import dataclass
+from typing import Protocol
+
+from vibe.utils.audio import RecordingMode
+
+
+@dataclass(frozen=True, slots=True)
+class AudioRecording:
+    """Result of a completed recording."""
+
+    data: bytes
+    duration: float
+
+
+class AlreadyRecordingError(Exception):
+    pass
+
+
+class AudioBackendUnavailableError(Exception):
+    pass
+
+
+class NoAudioInputDeviceError(Exception):
+    pass
+
+
+class AudioRecorderPort(Protocol):
+    @property
+    def is_recording(self) -> bool: ...
+
+    @property
+    def peak(self) -> float: ...
+
+    @property
+    def has_signal(self) -> bool: ...
+
+    @property
+    def mode(self) -> RecordingMode: ...
+
+    def start(
+        self,
+        mode: RecordingMode,
+        *,
+        sample_rate: int = ...,
+        channels: int = ...,
+        max_duration: float = ...,
+        on_expire: Callable[[AudioRecording], object] | None = ...,
+    ) -> None: ...
+
+    def stop(self, *, wait_for_queue_drained: bool = ...) -> AudioRecording: ...
+
+    def cancel(self) -> None: ...
+
+    def audio_stream(self) -> AsyncGenerator[bytes]: ...

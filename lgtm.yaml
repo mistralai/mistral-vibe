@@ -1,0 +1,9 @@
+version: 2
+# The vibe/ tree has no codeowner: the CLI team drops ownership of the whole
+# directory. Its CODEOWNERS file stays owned by the CLI team so it can be
+# edited (and ownership restored) later.
+defaults:
+  owners: null
+  blocking: true
+rules:
+  - '.github/CODEOWNERS': '@mistralai/eng-vibe-code-cli'

@@ -1,0 +1,916 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+import contextlib
+import json
+from pathlib import Path
+import tomllib
+
+import httpx
+import pytest
+import respx
+import tomli_w
+
+from tests.app_server.backend_contract.conftest import (
+    BackendContractConnection,
+    connect_backend_contract_host,
+)
+from vibe.app_server._process_services import ProcessServices
+from vibe.app_server.events import (
+    CallbackRequested,
+    HistoryEntryAdded,
+    SessionSnapshot,
+    StatsUpdated,
+)
+from vibe.app_server.models import (
+    ApprovalCallbackOutput,
+    ApprovalDecision,
+    ApprovalDecisionType,
+    CompletedEffectState,
+    FailedEffectState,
+    PublicEffectEntry,
+    PublicEntryGenerationStatus,
+    PublicHistoryEntry,
+    PublicMessageEntry,
+    ResourceContentBlock,
+    SubagentEffectDetail,
+    TextContentBlock,
+    TurnErrorCode,
+)
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ClientCapabilities,
+    PageRequest,
+    ProtocolErrorCode,
+    SessionOptions,
+    SessionTurnsListParams,
+    SessionTurnsListResponse,
+    TurnSteerParams,
+)
+from vibe.app_server.session import AppServerSession, AppServerTurnError
+from vibe.user_content import UserResourceLink
+
+pytestmark = pytest.mark.both_paths
+
+
+@pytest.mark.asyncio
+async def test_turn_streams_public_events_over_json_rpc(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("hello")
+    )
+    context_window = backend_contract_session.resources.runtime.context_window
+
+    events = [
+        event
+        async for event in backend_contract_session.act("hi", client_message_id="u1")
+    ]
+
+    assert backend_contract_mistral_api.called
+    stats_updated = next(event for event in events if isinstance(event, StatsUpdated))
+    assert stats_updated.params.context_window == context_window
+    user = next(
+        event.entry
+        for event in events
+        if isinstance(event, HistoryEntryAdded)
+        and isinstance(event.entry, PublicMessageEntry)
+        and event.entry.role == "user"
+    )
+    assert user.id == "u1"
+    assert user.text == "hi"
+    assistant = next(
+        entry
+        for entry in backend_contract_session.history
+        if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+    )
+    assert assistant.text == "hello"
+    assert all(
+        entry.generation_status == "completed"
+        for entry in backend_contract_session.history
+    )
+
+
+@pytest.mark.asyncio
+async def test_stateful_subagent_runs_through_the_backend(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: Mock a parent that discovers and invokes the stateful subagent tool.
+    *Do*: Run a parent turn through the Unified Harness backend.
+    *Assert*: The child runs and its completed effect appears in parent history.
+    """
+    # Prepare
+    requests: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        messages = payload.get("messages", [])
+        serialized_messages = json.dumps(messages)
+        user_messages = json.dumps([
+            message for message in messages if message.get("role") == "user"
+        ])
+        if "Investigate the local Harness marker" in user_messages:
+            return backend_contract_mistral_response("Child found the marker.")
+        if "call_stateful_subagent" in serialized_messages:
+            return backend_contract_mistral_response("Parent started the subagent.")
+        if "call_find_subagent_tools" in serialized_messages:
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "call_stateful_subagent",
+                        "index": 0,
+                        "function": {
+                            "name": "run_typescript",
+                            "arguments": json.dumps({
+                                "code": (
+                                    "async function main() { return tools.agents.spawn({"
+                                    "name: 'researcher', "
+                                    "instructions: 'Investigate as asked.', "
+                                    "message: 'Investigate the local Harness marker'"
+                                    "}); }"
+                                )
+                            }),
+                        },
+                    }
+                ],
+            )
+        return backend_contract_mistral_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_find_subagent_tools",
+                    "index": 0,
+                    "function": {
+                        "name": "search_tool_functions",
+                        "arguments": json.dumps({
+                            "mode": "best_match",
+                            "query": "start a subagent",
+                        }),
+                    },
+                }
+            ],
+        )
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+
+        # Do
+        _ = [event async for event in session.act("Delegate this investigation")]
+        for _ in range(100):
+            if any(
+                "Investigate the local Harness marker"
+                in json.dumps(request.get("messages", []))
+                for request in requests
+            ):
+                break
+            await asyncio.sleep(0.01)
+
+        # Assert
+        effect = next(
+            entry
+            for entry in session.history
+            if isinstance(entry, PublicEffectEntry)
+            and isinstance(entry.detail, SubagentEffectDetail)
+        )
+        assert isinstance(effect.state, CompletedEffectState)
+        assert isinstance(effect.detail, SubagentEffectDetail)
+        assert effect.detail.child_session_id is not None
+        assert any(
+            "Investigate the local Harness marker"
+            in json.dumps(request.get("messages", []))
+            for request in requests
+        )
+        assert any(
+            isinstance(entry, PublicMessageEntry)
+            and entry.text == "Parent started the subagent."
+            for entry in session.history
+        )
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_read_file_tool_call_runs_through_the_backend(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path,
+    process_services: ProcessServices,
+) -> None:
+    target = tmp_path / "notes.txt"
+    target.write_text("from file\n", encoding="utf-8")
+    tool_arguments = {"path": str(target)}
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "read-1",
+                        "index": 0,
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps(tool_arguments),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("read done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path), enabled_tools=["read_file"], auto_approve=True
+        ),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+
+        _ = [event async for event in session.act("read notes")]
+
+        assistant = next(
+            entry
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+        )
+        effect = next(
+            entry for entry in session.history if isinstance(entry, PublicEffectEntry)
+        )
+        assert assistant.text == "read done"
+        assert isinstance(effect.state, CompletedEffectState)
+        assert backend_contract_mistral_api.call_count == 2
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_call_runs_through_the_backend(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path,
+    process_services: ProcessServices,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "bash-1",
+                        "index": 0,
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({
+                                "command": "printf shell-ok",
+                                "timeout_seconds": 5,
+                            }),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("shell done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path), enabled_tools=["bash"], auto_approve=True
+        ),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+
+        _ = [event async for event in session.act("run shell")]
+
+        assistant = next(
+            entry
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+        )
+        effect = next(
+            entry for entry in session.history if isinstance(entry, PublicEffectEntry)
+        )
+        assert assistant.text == "shell done"
+        assert isinstance(effect.state, CompletedEffectState)
+        assert backend_contract_mistral_api.call_count == 2
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_shell_tool_call_waits_for_approval(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path,
+    process_services: ProcessServices,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "bash-1",
+                        "index": 0,
+                        "function": {
+                            "name": "bash",
+                            "arguments": json.dumps({
+                                "command": "printf approved",
+                                "timeout_seconds": 5,
+                            }),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("approved done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path), enabled_tools=["bash"]),
+        capabilities=ClientCapabilities(callback_kinds=["approval"]),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+
+        callbacks = []
+        async for event in session.act("run shell with approval"):
+            if isinstance(event, CallbackRequested):
+                callbacks.append(event.callback)
+                await session.respond_to_callback(
+                    event.callback.callback_id,
+                    ApprovalCallbackOutput(
+                        decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
+                    ),
+                )
+
+        assistant = next(
+            entry
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+        )
+        effect = next(
+            entry for entry in session.history if isinstance(entry, PublicEffectEntry)
+        )
+        assert [callback.detail.kind for callback in callbacks] == ["approval"]
+        assert assistant.text == "approved done"
+        assert isinstance(effect.state, CompletedEffectState)
+        assert backend_contract_mistral_api.call_count == 2
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_outside_workdir_deny_fails_the_call_back_to_the_model_without_asking(
+    config_dir: Path,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["outside_workdir"] = "deny"
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    secret = tmp_path / "secret.txt"
+    secret.write_text("top secret\n", encoding="utf-8")
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "read-1",
+                        "index": 0,
+                        "function": {
+                            "name": "read_file",
+                            "arguments": json.dumps({"path": str(secret)}),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("stayed inside"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(work), enabled_tools=["read_file"]),
+        capabilities=ClientCapabilities(callback_kinds=["approval"]),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+
+        callbacks = []
+        async for event in session.act("read the secret"):
+            if isinstance(event, CallbackRequested):
+                callbacks.append(event.callback)
+                await session.respond_to_callback(
+                    event.callback.callback_id,
+                    ApprovalCallbackOutput(
+                        decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
+                    ),
+                )
+
+        assistant = next(
+            entry
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+        )
+        effect = next(
+            entry for entry in session.history if isinstance(entry, PublicEffectEntry)
+        )
+        assert callbacks == []
+        assert isinstance(effect.state, FailedEffectState)
+        assert "outside the working directory" in effect.state.error.message
+        assert effect.state.decision == "skip"
+        assert assistant.text == "stayed inside"
+        assert backend_contract_mistral_api.call_count == 2
+        sent = backend_contract_mistral_api.calls.last.request.content.decode()
+        assert "outside the working directory" in sent
+        assert "top secret" not in sent
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupt_closes_shell_approval_callback(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path,
+    process_services: ProcessServices,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "bash-1",
+                    "index": 0,
+                    "function": {
+                        "name": "bash",
+                        "arguments": json.dumps({
+                            "command": "printf late",
+                            "timeout_seconds": 5,
+                        }),
+                    },
+                }
+            ],
+        )
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path), enabled_tools=["bash"]),
+        capabilities=ClientCapabilities(callback_kinds=["approval"]),
+        process_services=process_services,
+    )
+    callback_id: str | None = None
+    try:
+        session = await connection.host.open_session()
+
+        async for event in session.act("run shell with approval"):
+            if isinstance(event, CallbackRequested):
+                callback_id = event.callback.callback_id
+                await session.interrupt()
+
+        assert callback_id is not None
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await session.respond_to_callback(
+                callback_id,
+                ApprovalCallbackOutput(
+                    decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
+                ),
+            )
+        assert exc_info.value.error.code is ProtocolErrorCode.CALLBACK_CLOSED
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_context_injection_adds_a_public_user_message(
+    backend_contract_session: AppServerSession,
+) -> None:
+    events = await backend_contract_session.inject_user_context(
+        "Use this detail", as_message=True, client_message_id="context-1"
+    )
+
+    assert len(events) == 1
+    entry = events[0].entry
+    assert isinstance(entry, PublicMessageEntry)
+    assert entry.id == "context-1"
+    assert entry.text == "Use this detail"
+
+
+@pytest.mark.asyncio
+async def test_turn_preserves_rich_resource_content_in_the_public_history(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("reviewed")
+    )
+    resource = UserResourceLink(
+        uri="file:///workspace/spec.md",
+        media_type="text/markdown",
+        title="Specification",
+    )
+
+    _ = [
+        event
+        async for event in backend_contract_session.act(
+            "Review this", resources=[resource], client_message_id="resource-user"
+        )
+    ]
+
+    user = next(
+        entry
+        for entry in backend_contract_session.history
+        if isinstance(entry, PublicMessageEntry) and entry.id == "resource-user"
+    )
+    assert user.text == "Review this"
+    assert any(
+        isinstance(block, ResourceContentBlock)
+        and isinstance(block.resource, UserResourceLink)
+        and block.resource.uri == resource.uri
+        and block.resource.title == resource.title
+        for block in user.content
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_is_typed_and_leaves_the_session_usable(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+            backend_contract_mistral_response("recovered"),
+        ]
+    )
+
+    with pytest.raises(AppServerTurnError) as exc_info:
+        _ = [event async for event in backend_contract_session.act("fail first")]
+
+    recovered = [event async for event in backend_contract_session.act("try again")]
+
+    assert exc_info.value.error.code == TurnErrorCode.BACKEND_ERROR
+    assert backend_contract_session.state.session.status.type == "idle"
+    assert any(isinstance(event, StatsUpdated) for event in recovered)
+    assert any(
+        isinstance(entry, PublicMessageEntry)
+        and entry.role == "assistant"
+        and entry.text == "recovered"
+        for entry in backend_contract_session.history
+    )
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_turns_list_reconstructs_and_paginates_public_turns(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(f"answer {index}") for index in range(3)
+        ]
+    )
+    for index in range(3):
+        _ = [
+            event
+            async for event in backend_contract_session.act(
+                f"message {index}", client_message_id=f"message-{index}"
+            )
+        ]
+
+    result = await backend_contract_connection.client.request(
+        "session/turns/list",
+        SessionTurnsListParams(
+            session_id=backend_contract_session.session_id, page=PageRequest(limit=2)
+        ),
+    )
+
+    response = SessionTurnsListResponse.model_validate(result)
+    assert len(response.items) == 2
+    assert all(turn.status == "completed" for turn in response.items)
+    assert response.next_cursor == response.items[0].id
+    assert response.previous_cursor is None
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_turns_list_returns_an_empty_page_for_a_stale_cursor(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(f"answer {index}") for index in range(3)
+        ]
+    )
+    for index in range(3):
+        _ = [
+            event
+            async for event in backend_contract_session.act(
+                f"message {index}", client_message_id=f"message-{index}"
+            )
+        ]
+
+    responses = [
+        await backend_contract_connection.client.request(
+            "session/turns/list",
+            SessionTurnsListParams(
+                session_id=backend_contract_session.session_id,
+                page=PageRequest(cursor="stale", limit=2, direction=direction),
+            ),
+        )
+        for direction in ("backward", "forward")
+    ]
+
+    for result in responses:
+        response = SessionTurnsListResponse.model_validate(result)
+        assert response.items == []
+        assert response.next_cursor is None
+        assert response.previous_cursor is None
+
+
+@pytest.mark.asyncio
+async def test_interrupt_terminates_an_active_public_turn(
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_session: AppServerSession,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_gated_mistral_response(
+            "unreachable", started=started, release=release
+        )
+    )
+
+    async def consume_turn() -> None:
+        _ = [event async for event in backend_contract_session.act("wait")]
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await backend_contract_session.interrupt()
+        await turn
+    finally:
+        release.set()
+        if not turn.done():
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+
+    user = next(
+        entry
+        for entry in backend_contract_session.history
+        if isinstance(entry, PublicMessageEntry) and entry.role == "user"
+    )
+    assert user.text == "wait"
+    assert backend_contract_session.state.session.status.type == "idle"
+    assert backend_contract_session.state.latest_turn is not None
+    assert backend_contract_session.state.latest_turn.status == "interrupted"
+
+
+async def _await_entry(
+    session: AppServerSession,
+    predicate: Callable[[PublicHistoryEntry], bool],
+    *,
+    timeout: float = 5.0,
+) -> PublicHistoryEntry:
+    """Poll history until an entry satisfies ``predicate``, and return it.
+
+    History entries are replaced rather than mutated, so the snapshot returned
+    here is frozen at the moment it matched. The predicate therefore has to
+    name everything the caller is about to assert on -- matching something
+    broad and asserting the detail afterwards reads whatever happened to exist
+    on the first poll.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        for entry in session.history:
+            if predicate(entry):
+                return entry
+        await asyncio.sleep(0.01)
+    raise AssertionError("the expected history entry never arrived")
+
+
+@pytest.mark.asyncio
+async def test_interrupting_a_streamed_answer_closes_it_instead_of_dropping_it(
+    backend_contract_partial_mistral_response: Callable[..., httpx.Response],
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_session: AppServerSession,
+) -> None:
+    """Both backends show a partial answer and close it when interrupted.
+
+    Two things hold while the provider is still talking: text is already on
+    screen, and the turn is still open. Interrupting there has to leave that
+    text visible and settled. The client reduces history from added/updated
+    events and is never told an entry went away, so a partial answer a backend
+    merely stops reporting spins in_progress for the rest of the session.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_partial_mistral_response(
+            "Half a sentence", started=started, release=release
+        )
+    )
+
+    async def consume_turn() -> None:
+        _ = [event async for event in backend_contract_session.act("wait")]
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        streaming = await _await_entry(
+            backend_contract_session,
+            lambda entry: (
+                isinstance(entry, PublicMessageEntry)
+                and entry.role == "assistant"
+                and entry.text == "Half a sentence"
+            ),
+        )
+        assert isinstance(streaming, PublicMessageEntry)
+        # The provider is still held open, so the answer cannot have settled.
+        assert streaming.generation_status is PublicEntryGenerationStatus.IN_PROGRESS
+
+        await backend_contract_session.interrupt()
+        await turn
+    finally:
+        release.set()
+        if not turn.done():
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+
+    assistants = [
+        entry
+        for entry in backend_contract_session.history
+        if isinstance(entry, PublicMessageEntry) and entry.role == "assistant"
+    ]
+    assert len(assistants) == 1
+    assert assistants[0].id == streaming.id
+    assert assistants[0].text == "Half a sentence"
+    assert assistants[0].generation_status is PublicEntryGenerationStatus.COMPLETED
+    assert backend_contract_session.state.latest_turn is not None
+    assert backend_contract_session.state.latest_turn.status == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_steering_adds_a_public_user_message_to_an_active_turn(
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_session: AppServerSession,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_gated_mistral_response(
+            "continued", started=started, release=release
+        )
+    )
+
+    async def consume_turn() -> None:
+        _ = [event async for event in backend_contract_session.act("wait")]
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        active_turn = backend_contract_session.state.latest_turn
+        assert active_turn is not None
+        await backend_contract_session.inject_user_context(
+            "follow up", as_message=True, client_message_id="steer-user"
+        )
+        for _ in range(20):
+            if any(
+                entry.id == "steer-user" for entry in backend_contract_session.history
+            ):
+                break
+            await asyncio.sleep(0)
+
+        steered = next(
+            entry
+            for entry in backend_contract_session.history
+            if entry.id == "steer-user"
+        )
+        assert isinstance(steered, PublicMessageEntry)
+        assert steered.text == "follow up"
+        assert steered.source == "turn_steer"
+        assert steered.turn_id == active_turn.id
+    finally:
+        release.set()
+        await turn
+
+
+@pytest.mark.asyncio
+async def test_stale_turn_control_returns_a_typed_error(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_session: AppServerSession,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_gated_mistral_response(
+            "continued", started=started, release=release
+        )
+    )
+
+    async def consume_turn() -> None:
+        _ = [event async for event in backend_contract_session.act("wait")]
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        with pytest.raises(AppServerResponseError) as exc_info:
+            await backend_contract_connection.client.request(
+                "turn/steer",
+                TurnSteerParams(
+                    session_id=backend_contract_session.session_id,
+                    expected_turn_id="stale-turn",
+                    message=[TextContentBlock(text="follow up")],
+                ),
+            )
+    finally:
+        release.set()
+        await turn
+
+    assert exc_info.value.error.code is ProtocolErrorCode.STALE_TURN
+
+
+@pytest.mark.asyncio
+async def test_reconnect_replays_turn_output_emitted_while_detached(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_session: AppServerSession,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_gated_mistral_response(
+            "Recovered output", started=started, release=release
+        )
+    )
+
+    accepted = asyncio.Event()
+
+    async def consume_turn() -> list[object]:
+        events: list[object] = []
+        async for event in backend_contract_session.act("finish while detached"):
+            events.append(event)
+            accepted.set()
+        return events
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        # The Turn runs as soon as it is accepted, possibly before its reply
+        # is sent, so detach only once the client holds that reply.
+        await asyncio.wait_for(accepted.wait(), timeout=5)
+        await backend_contract_connection.client.close()
+        release.set()
+        events = await asyncio.wait_for(turn, timeout=5)
+    finally:
+        release.set()
+        if not turn.done():
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+
+    assert any(isinstance(event, SessionSnapshot) for event in events)
+    recovered = [
+        event.entry
+        for event in events
+        if isinstance(event, HistoryEntryAdded)
+        and isinstance(event.entry, PublicMessageEntry)
+        and event.entry.role == "assistant"
+    ]
+    assert [entry.text for entry in recovered] == ["Recovered output"]

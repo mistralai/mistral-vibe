@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 from pydantic.fields import FieldInfo
@@ -22,16 +24,51 @@ class ConfigSchema(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     _origins: dict[str, str] = PrivateAttr(default_factory=dict)
-
-    def __init__(
-        self, *, origins: dict[str, str] | None = None, **data: object
-    ) -> None:
-        super().__init__(**data)
-        if origins:
-            self._origins = origins
+    _defined_entries: dict[str, dict[str, tuple[str, ...]]] = PrivateAttr(
+        default_factory=dict
+    )
 
     def origin_of(self, key: str) -> str | None:
         return self._origins.get(key)
+
+    def defined_entries_by_layer(self, key: str) -> Mapping[str, tuple[str, ...]]:
+        """The entries each layer defines in a deep-merged field, in stack order.
+
+        ``origin_of`` names only the last layer that touched the field; a
+        layer listed here defines every entry key in its tuple, in its own
+        order. An entry ``defines_entry`` rejects is not listed.
+        """
+        return self._defined_entries.get(key, {})
+
+    @classmethod
+    def defines_entry(cls, key: str, payload: Any) -> bool:
+        """Whether a layer's entry in the deep-merged field ``key`` defines it.
+
+        Every entry does by default; a schema narrows this where a layer can
+        also adjust an entry another layer defines.
+        """
+        return True
+
+    def check_layer_keys(self, layers: Sequence[tuple[str, Mapping[str, Any]]]) -> None:
+        """Look at each layer's raw keys once the merged config is valid.
+
+        The merge reads only declared keys; a schema overrides this to say
+        what it makes of the rest. ``layers`` are (layer name, raw data) pairs
+        in stack order.
+        """
+
+    @classmethod
+    def validate_merged(
+        cls,
+        data: dict[str, Any],
+        *,
+        origins: dict[str, str],
+        defined_entries: dict[str, dict[str, tuple[str, ...]]],
+    ) -> Self:
+        config = cls.model_validate(data)
+        config._origins = origins
+        config._defined_entries = defined_entries
+        return config
 
     @classmethod
     def __pydantic_on_complete__(cls) -> None:
@@ -89,7 +126,7 @@ class MergeFieldMetadata:
 
     Usage::
 
-        active_model: Annotated[str, WithReplaceMerge()] = "devstral-2"
+        active_model: Annotated[str, WithReplaceMerge()] = "mistral-medium-3-5"
         models: Annotated[list[M], WithUnionMerge(merge_key="alias")]
 
     Use the concrete subclasses (``WithReplaceMerge``, ``WithConcatMerge``, etc.)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from tests.e2e.agent_loop_characterization.support import (
     multi_tool_call_chunks,
     set_tool_denylist,
     single_tool_call_chunks,
+    tool_result_content,
     wait_for_request_count_while_draining_child_output,
 )
 from tests.e2e.common import (
@@ -21,7 +23,6 @@ from tests.e2e.common import (
     send_ctrl_c_until_quit_confirmation,
     wait_for_main_screen,
     wait_for_rendered_text,
-    wait_for_request_count,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -74,6 +75,103 @@ def _multi_tool_turn_factory(
     return assistant_text_chunks("Both todo reads completed.", created=170)
 
 
+REASONING_CONTINUATION_CALL_ID = "call_todo_reasoning_continuation"
+
+
+def _reasoning_continues_after_tool_call_factory(
+    request_index: int, _payload: ChatCompletionsRequestPayload
+) -> list[dict[str, object]]:
+    # Regression coverage for a real OpenAI-compatible backend behavior (seen
+    # with reasoning + speculative decoding, e.g. vLLM serving Qwen3):
+    # the backend keeps streaming reasoning/content deltas under the *same*
+    # completion after it already emitted a tool call, instead of stopping
+    # the stream right at the tool call. Everything below is one single
+    # streamed response (request_index == 0).
+    if request_index == 0:
+        return [
+            StreamingMockServer.build_chunk(
+                created=200,
+                delta={"role": "assistant", "reasoning_content": "Checking the todos"},
+                finish_reason=None,
+            ),
+            StreamingMockServer.build_chunk(
+                created=201,
+                delta=StreamingMockServer.build_tool_call_delta(
+                    call_id=REASONING_CONTINUATION_CALL_ID,
+                    tool_name="todo",
+                    arguments='{"action":"read"}',
+                ),
+                finish_reason=None,
+            ),
+            StreamingMockServer.build_chunk(
+                created=202,
+                delta={"reasoning_content": " and now double-checking the result"},
+                finish_reason=None,
+            ),
+            StreamingMockServer.build_chunk(
+                created=203,
+                delta={"content": "One moment while I confirm."},
+                finish_reason=None,
+            ),
+            StreamingMockServer.build_chunk(
+                created=204,
+                delta={},
+                finish_reason="tool_calls",
+                usage={"prompt_tokens": 3, "completion_tokens": 4},
+            ),
+        ]
+
+    return assistant_text_chunks("Todo check complete.", created=210)
+
+
+@pytest.mark.timeout(25)
+@pytest.mark.parametrize(
+    "streaming_mock_server",
+    [
+        pytest.param(
+            _reasoning_continues_after_tool_call_factory,
+            id="reasoning-continues-after-tool-call",
+        )
+    ],
+    indirect=True,
+)
+def test_reasoning_and_text_after_tool_call_reusing_message_id_does_not_crash_the_turn(
+    streaming_mock_server: StreamingMockServer,
+    setup_e2e_env: None,
+    e2e_workdir: Path,
+    spawned_vibe_process: SpawnedVibeProcessFixture,
+) -> None:
+    with spawned_vibe_process(e2e_workdir) as (child, captured):
+        wait_for_main_screen(child, timeout=15)
+        child.send("Check the todos")
+        child.send("\r")
+
+        wait_for_request_count_while_draining_child_output(
+            child,
+            captured,
+            lambda: len(streaming_mock_server.requests),
+            expected_count=2,
+            timeout=10,
+        )
+        wait_for_rendered_text(
+            child, captured, needle="Todo check complete.", timeout=10
+        )
+
+        send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
+        child.expect(pexpect.EOF, timeout=10)
+
+    assert_assistant_tool_call_present(
+        streaming_mock_server.requests[1],
+        call_id=REASONING_CONTINUATION_CALL_ID,
+        tool_name="todo",
+    )
+    assert_tool_result_contains(
+        streaming_mock_server.requests[1],
+        call_id=REASONING_CONTINUATION_CALL_ID,
+        expected="Retrieved 0 todos",
+    )
+
+
 @pytest.mark.timeout(25)
 @pytest.mark.parametrize(
     "streaming_mock_server",
@@ -94,8 +192,12 @@ def test_denylisted_bash_tool_does_not_run_and_is_reported_to_the_model(
         child.send("Try a denied shell command")
         child.send("\r")
 
-        wait_for_request_count(
-            lambda: len(streaming_mock_server.requests), expected_count=1, timeout=10
+        wait_for_request_count_while_draining_child_output(
+            child,
+            captured,
+            lambda: len(streaming_mock_server.requests),
+            expected_count=1,
+            timeout=10,
         )
         wait_for_request_count_while_draining_child_output(
             child,
@@ -120,6 +222,7 @@ def test_denylisted_bash_tool_does_not_run_and_is_reported_to_the_model(
 
 
 @pytest.mark.timeout(40)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_failing_bash_factory, id="failing-bash-tool")],
@@ -136,10 +239,16 @@ def test_failed_bash_tool_result_is_reported_to_the_model_and_turn_recovers(
         child.send("Run a failing shell command")
         child.send("\r")
 
-        wait_for_request_count(
-            lambda: len(streaming_mock_server.requests), expected_count=1, timeout=10
+        wait_for_request_count_while_draining_child_output(
+            child,
+            captured,
+            lambda: len(streaming_mock_server.requests),
+            expected_count=1,
+            timeout=10,
         )
-        answer_approval(child, captured, tool_name="bash", key="y")
+        # The unified runtime names builtins by their canonical route
+        # (``file_system.bash`` stands for Vibe's ``bash``).
+        answer_approval(child, captured, tool_name="file_system.bash", key="y")
         wait_for_request_count_while_draining_child_output(
             child,
             captured,
@@ -154,11 +263,15 @@ def test_failed_bash_tool_result_is_reported_to_the_model_and_turn_recovers(
         send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)
 
-    assert_tool_result_contains(
-        streaming_mock_server.requests[1],
-        call_id=FAILING_BASH_CALL_ID,
-        expected="Return code: 1",
+    # The unified runtime reports the failed shell as a structured result
+    # (JSON fields) rather than legacy's prose summary. Parse the payload
+    # instead of pinning the exact serialization.
+    shell_outcome = json.loads(
+        tool_result_content(
+            streaming_mock_server.requests[1], call_id=FAILING_BASH_CALL_ID
+        )
     )
+    assert shell_outcome["returncode"] == 1
     assert_tool_result_contains(
         streaming_mock_server.requests[1],
         call_id=FAILING_BASH_CALL_ID,

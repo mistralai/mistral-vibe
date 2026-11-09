@@ -1,0 +1,254 @@
+//! Best-effort cache for app-server values needed by the first UI frame.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::now_unix;
+use crate::server::{AgentSafety, AgentSummary, RuntimeSnapshot};
+use crate::skill::Skill;
+use crate::utils::paths;
+
+const SCHEMA_VERSION: u32 = 9;
+const FILE_NAME: &str = "ui_startup_config.json";
+const MAX_CACHED_SKILLS: usize = 256;
+/// Maximum age of a cache entry, in unix seconds.
+pub const MAX_AGE_SECONDS: i64 = 7 * 24 * 3600;
+/// Caches larger than this are ignored before parsing.
+const MAX_FILE_BYTES: usize = 1024 * 1024;
+/// Agent a fresh install starts on (the config's `default_agent` default).
+const DEFAULT_AGENT: &str = "accept-edits";
+
+/// Cycleable builtins in discovery order, used until the server's snapshot
+/// lands (the builtin agents minus the subagents).
+fn builtin_agents() -> Vec<AgentSummary> {
+    [
+        ("ask", "Ask", AgentSafety::Neutral),
+        (DEFAULT_AGENT, "Accept Edits", AgentSafety::Destructive),
+        ("smart-approve", "Smart Approve", AgentSafety::Smart),
+        ("auto-approve", "Auto Approve", AgentSafety::Yolo),
+    ]
+    .into_iter()
+    .map(|(name, display_name, safety)| AgentSummary {
+        name: name.into(),
+        display_name: display_name.into(),
+        safety,
+        ..Default::default()
+    })
+    .collect()
+}
+
+pub fn read_skills(response: &Value) -> Vec<Skill> {
+    let Some(skills) = response
+        .pointer("/runtime/skills")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    skills.iter().filter_map(Skill::from_wire).collect()
+}
+
+fn cached_skills(response: &Value) -> Vec<Skill> {
+    read_skills(response)
+        .into_iter()
+        .take(MAX_CACHED_SKILLS)
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartupConfig {
+    pub schema_version: u32,
+    pub server_version: String,
+    pub theme: String,
+    pub disable_welcome_banner_animation: bool,
+    /// Whether a mouse selection copies itself on release.
+    pub autocopy_to_clipboard: bool,
+    /// Whether the TUI captures the mouse; older caches keep capturing.
+    #[serde(default = "default_enable_mouse_capture")]
+    pub enable_mouse_capture: bool,
+    /// Whether `@` completion runs; older caches keep it on (ADR 0014).
+    #[serde(default = "default_enable_file_autocomplete")]
+    pub enable_file_autocomplete: bool,
+    /// Whether the file index watches the filesystem; older caches keep watching.
+    #[serde(default = "default_file_watcher_for_autocomplete")]
+    pub file_watcher_for_autocomplete: bool,
+    /// Main input blink preference; older caches keep the default blinking caret.
+    #[serde(default = "default_cursor_blink")]
+    pub cursor_blink: bool,
+    pub active_model: String,
+    pub active_model_display_name: String,
+    /// Whether images are supported: model vision or a backend image describer.
+    pub images_supported: bool,
+    /// Configured default used to choose the startup label from `agents`.
+    pub default_agent: String,
+    /// The cycleable agents, so Shift+Tab works before the snapshot lands.
+    pub agents: Vec<AgentSummary>,
+    /// Bounded user-invocable skill metadata for `/` completion before readiness.
+    pub skills: Vec<Skill>,
+    pub context_window: u64,
+    /// Whether the narrator requests turn summaries.
+    pub narrator_enabled: bool,
+    /// Whether update checks run (`enable_update_checks`). Additive:
+    /// entries from before this field default to checking.
+    #[serde(default = "default_enable_update_checks")]
+    pub enable_update_checks: bool,
+    /// Whether update checks use the OS trust store (ADR 0015). Additive:
+    /// entries from before this field default to the bundled roots.
+    #[serde(default = "default_enable_system_trust_store")]
+    pub enable_system_trust_store: bool,
+    /// Unix seconds when the cache was written; drives the TTL check.
+    pub cached_at: i64,
+}
+
+impl Default for StartupConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            server_version: env!("CARGO_PKG_VERSION").into(),
+            theme: "auto".into(),
+            disable_welcome_banner_animation: false,
+            autocopy_to_clipboard: true,
+            enable_mouse_capture: default_enable_mouse_capture(),
+            enable_file_autocomplete: default_enable_file_autocomplete(),
+            file_watcher_for_autocomplete: default_file_watcher_for_autocomplete(),
+            cursor_blink: default_cursor_blink(),
+            active_model: String::new(),
+            active_model_display_name: String::new(),
+            images_supported: false,
+            default_agent: DEFAULT_AGENT.into(),
+            agents: builtin_agents(),
+            skills: Vec::new(),
+            context_window: 0,
+            narrator_enabled: false,
+            enable_update_checks: true,
+            enable_system_trust_store: false,
+            cached_at: 0,
+        }
+    }
+}
+
+fn default_cursor_blink() -> bool {
+    true
+}
+
+fn default_enable_mouse_capture() -> bool {
+    true
+}
+
+fn default_enable_file_autocomplete() -> bool {
+    true
+}
+
+fn default_file_watcher_for_autocomplete() -> bool {
+    true
+}
+
+fn default_enable_update_checks() -> bool {
+    true
+}
+
+fn default_enable_system_trust_store() -> bool {
+    false
+}
+
+fn release_prefix(version: &str) -> Option<(u64, u64)> {
+    let mut parts = version.split('.');
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+impl StartupConfig {
+    pub fn load() -> Option<Self> {
+        cache_file().as_deref().and_then(Self::load_from)
+    }
+
+    fn load_from(path: &Path) -> Option<Self> {
+        let body = fs::read(path).ok()?;
+        if body.len() > MAX_FILE_BYTES {
+            return None;
+        }
+        let cache: Self = serde_json::from_slice(&body).ok()?;
+        (cache.schema_version == SCHEMA_VERSION
+            && cache.is_fresh(env!("CARGO_PKG_VERSION"), now_unix()))
+        .then_some(cache)
+    }
+
+    /// True iff the cache was written by the same `(major, minor)` release
+    /// and its stamp is within `MAX_AGE_SECONDS` of `now` in either direction
+    /// (small clock skew passes; a stamp further ahead is treated as corrupt).
+    pub fn is_fresh(&self, client_version: &str, now: i64) -> bool {
+        release_prefix(&self.server_version) == release_prefix(client_version)
+            && now.saturating_sub(self.cached_at) <= MAX_AGE_SECONDS
+            && self.cached_at.saturating_sub(now) <= MAX_AGE_SECONDS
+    }
+
+    /// True iff every field except `cached_at` matches, so a fresh stamp does
+    /// not force a rewrite of an otherwise identical on-disk entry.
+    fn same_payload(&self, other: &Self) -> bool {
+        let mut normalized = self.clone();
+        normalized.cached_at = other.cached_at;
+        normalized == *other
+    }
+
+    pub fn update_cache(&self) -> io::Result<bool> {
+        let Some(path) = cache_file() else {
+            return Ok(false);
+        };
+        self.update_at(&path)
+    }
+
+    fn update_at(&self, path: &Path) -> io::Result<bool> {
+        if let Some(existing) = Self::load_from(path) {
+            if existing.same_payload(self) {
+                return Ok(false);
+            }
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut body = serde_json::to_vec_pretty(self)?;
+        body.push(b'\n');
+        fs::write(path, body)?;
+        Ok(true)
+    }
+
+    pub fn from_runtime(server_version: &str, response: &Value) -> Option<Self> {
+        let runtime = RuntimeSnapshot::read(response)?;
+        let config = runtime.config?;
+        let model = config.active_model?;
+        let model_name = model.display_name?;
+        let thinking = model.thinking?;
+        Some(Self {
+            schema_version: SCHEMA_VERSION,
+            server_version: server_version.to_owned(),
+            cached_at: now_unix(),
+            theme: config.theme?,
+            disable_welcome_banner_animation: config.disable_welcome_banner_animation,
+            autocopy_to_clipboard: config.autocopy_to_clipboard,
+            enable_mouse_capture: config.enable_mouse_capture,
+            enable_file_autocomplete: config.enable_file_autocomplete,
+            file_watcher_for_autocomplete: config.file_watcher_for_autocomplete,
+            cursor_blink: config.cursor_blink,
+            active_model: format!("{model_name}[{thinking}]"),
+            active_model_display_name: model_name,
+            images_supported: config
+                .images_supported
+                .or(model.supports_images)
+                .unwrap_or(false),
+            default_agent: config.default_agent.unwrap_or_else(|| DEFAULT_AGENT.into()),
+            agents: runtime.agents.unwrap_or_else(builtin_agents),
+            skills: cached_skills(response),
+            context_window: runtime.context_window,
+            narrator_enabled: config.narrator_enabled,
+            enable_update_checks: config.enable_update_checks,
+            enable_system_trust_store: config.enable_system_trust_store,
+        })
+    }
+}
+
+fn cache_file() -> Option<PathBuf> {
+    paths::vibe_home().map(|home| home.join(FILE_NAME))
+}

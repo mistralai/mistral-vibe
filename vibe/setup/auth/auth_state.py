@@ -10,7 +10,7 @@ from dotenv import dotenv_values
 
 from vibe.core.config import DEFAULT_MISTRAL_API_ENV_KEY, ProviderConfig
 from vibe.core.paths import GLOBAL_ENV_FILE
-from vibe.core.utils.keyring import get_api_key_from_keyring
+from vibe.utils.keyring import get_api_key_from_keyring
 
 
 class AuthStateKind(StrEnum):

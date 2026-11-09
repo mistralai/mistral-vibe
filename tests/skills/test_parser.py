@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
+from vibe.core.skills.parser import (
+    SkillParseError,
+    parse_openai_skill_metadata,
+    parse_skill_markdown,
+)
 
 
 class TestParseSkillMarkdown:
@@ -113,3 +117,18 @@ description: No body
 
         assert frontmatter["name"] == "minimal"
         assert body.strip() == ""
+
+
+class TestParseOpenAISkillMetadata:
+    def test_accepts_upstream_product_policy(self) -> None:
+        metadata = parse_openai_skill_metadata("policy:\n  products:\n    - chatgpt\n")
+
+        assert metadata.policy is not None
+        assert metadata.policy.products == ["chatgpt"]
+        assert metadata.has_unhandled_fields is True
+
+    def test_rejects_unknown_policy_field(self) -> None:
+        with pytest.raises(SkillParseError) as exc_info:
+            parse_openai_skill_metadata("policy:\n  allow_implicit_invocaton: false\n")
+
+        assert "allow_implicit_invocaton" in str(exc_info.value)

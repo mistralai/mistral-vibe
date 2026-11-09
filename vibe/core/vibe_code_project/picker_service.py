@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from vibe.core.vibe_code_project.client import (
     VibeCodeProjectApiError,
@@ -14,17 +14,16 @@ from vibe.core.vibe_code_project.client import (
 from vibe.core.vibe_code_project.project_store import VibeProjectsStore
 from vibe.core.vibe_code_project.selection import (
     ProjectPickerContext,
+    RemoteProjectLink,
     VibeCodeProject,
-    VibeCodeProjectLink,
     is_project_linked_to_repo,
-    normalize_repo_url,
-    suggested_project_name,
 )
-from vibe.core.vibe_code_project.telemetry import count_multi_repo_matches
+from vibe.utils.repository import normalize_repo_url
 
 VIBE_CODE_PROJECT_PICKER_PAGE_LIMIT = 100
 
 if TYPE_CHECKING:
+    from vibe.core.platform_auth import PlatformCredentialProvider
     from vibe.core.teleport.git import GitRepoInfo
 
 
@@ -34,7 +33,11 @@ class VibeCodeProjectPageFetcher(Protocol):
     ) -> VibeCodeProjectPage: ...
 
     async def create_project(
-        self, *, name: str, repo_url: str, default_branch: str
+        self,
+        *,
+        name: str,
+        repo_url: str | None = None,
+        default_branch: str | None = None,
     ) -> VibeCodeProject: ...
 
 
@@ -84,21 +87,6 @@ class TeleportProjectResolution:
     stale_link_cleared: bool
 
 
-type HeadlessProjectResolutionSource = Literal[
-    "saved_link", "matched_project", "created_project"
-]
-
-
-@dataclass(frozen=True)
-class HeadlessProjectResolution:
-    project_id: str
-    source: HeadlessProjectResolutionSource
-    candidate_count_loaded: int = 0
-    multi_repo_match_count: int = 0
-    saved_project_link_cleared: bool = False
-    project_repo_remote_changed: bool = False
-
-
 class VibeCodeProjectResolverError(Exception):
     pass
 
@@ -108,14 +96,14 @@ class VibeCodeProjectPickerService:
         self,
         *,
         base_url: str,
-        api_key: str,
+        credentials: PlatformCredentialProvider | None,
         repo_root: Path,
         page_fetcher: VibeCodeProjectPageFetcher | None = None,
         project_store: VibeProjectsStore | None = None,
         timeout: float = 60.0,
     ) -> None:
         self._base_url = base_url
-        self._api_key = api_key
+        self._credentials = credentials
         self._repo_root = repo_root
         self._page_fetcher = page_fetcher
         self._project_store = project_store or VibeProjectsStore()
@@ -230,10 +218,24 @@ class VibeCodeProjectPickerService:
             project=project,
         )
 
+    async def create_import_project(
+        self,
+        *,
+        name: str,
+        repo_url: str | None = None,
+        default_branch: str | None = None,
+    ) -> VibeCodeProject:
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise VibeCodeProjectApiError("Project name cannot be empty.")
+        return await self._create_project(
+            name=normalized_name, repo_url=repo_url, default_branch=default_branch
+        )
+
     def save_project_link(
         self, *, context: ProjectPickerContext, project_id: str, project_name: str
-    ) -> VibeCodeProjectLink:
-        link = VibeCodeProjectLink(
+    ) -> RemoteProjectLink:
+        link = RemoteProjectLink(
             repo_root=context.repo_root,
             repo_url=context.repo_url,
             project_id=project_id,
@@ -245,18 +247,30 @@ class VibeCodeProjectPickerService:
     def clear_project_link(self, context: ProjectPickerContext) -> None:
         self._project_store.delete_remote_project(repo_root=context.repo_root)
 
-    async def _save_project_link_async(
-        self, *, context: ProjectPickerContext, project_id: str, project_name: str
-    ) -> VibeCodeProjectLink:
-        return await asyncio.to_thread(
-            self.save_project_link,
-            context=context,
-            project_id=project_id,
-            project_name=project_name,
-        )
+    async def find_linkable_project(
+        self, *, project_id: str, repo_url: str
+    ) -> VibeCodeProject:
+        """Fetch and validate a project the caller intends to link.
 
-    async def _clear_project_link_async(self, context: ProjectPickerContext) -> None:
-        await asyncio.to_thread(self.clear_project_link, context)
+        Mirrors the interactive picker's `select` checks so a stateless caller
+        can't persist an arbitrary link: the project must exist, be writable, and
+        be linked to the current repo. Raises VibeCodeProjectResolverError
+        otherwise.
+        """
+        projects = await self._fetch_all_projects()
+        project = next(
+            (candidate for candidate in projects if candidate.project_id == project_id),
+            None,
+        )
+        if project is None:
+            raise VibeCodeProjectResolverError(
+                f"Unknown Vibe Code project: {project_id}"
+            )
+        if project.is_read_only or not is_project_linked_to_repo(project, repo_url):
+            raise VibeCodeProjectResolverError(
+                "The selected Vibe Code project is not available for this repository"
+            )
+        return project
 
     def resolve_project_for_teleport(
         self, initial_data: VibeCodeProjectPickerInitialData
@@ -290,79 +304,6 @@ class VibeCodeProjectPickerService:
             project_id=None, initial_data=initial_data, stale_link_cleared=False
         )
 
-    async def resolve_project_for_headless_teleport(
-        self, git_info: GitRepoInfo
-    ) -> HeadlessProjectResolution:
-        context = await self._context_from_git_async(git_info)
-        saved_project_link_cleared = False
-        project_repo_remote_changed = False
-        if context.saved_link is not None:
-            if normalize_repo_url(context.saved_link.repo_url) == normalize_repo_url(
-                context.repo_url
-            ):
-                return HeadlessProjectResolution(
-                    project_id=context.saved_link.project_id, source="saved_link"
-                )
-            await self._clear_project_link_async(context)
-            saved_project_link_cleared = True
-            project_repo_remote_changed = True
-            context = ProjectPickerContext(
-                repo_root=context.repo_root,
-                repo_url=context.repo_url,
-                repo_name=context.repo_name,
-                saved_link=None,
-            )
-
-        projects = await self._fetch_all_projects()
-        multi_repo_match_count = count_multi_repo_matches(projects, context.repo_url)
-        exact_matching_projects = [
-            project
-            for project in projects
-            if not project.is_read_only
-            and is_project_linked_to_repo(project, context.repo_url)
-            and len(project.repositories) == 1
-        ]
-
-        if len(exact_matching_projects) == 1:
-            project = exact_matching_projects[0]
-            await self._save_project_link_async(
-                context=context,
-                project_id=project.project_id,
-                project_name=project.name,
-            )
-            return HeadlessProjectResolution(
-                project_id=project.project_id,
-                source="matched_project",
-                candidate_count_loaded=len(projects),
-                multi_repo_match_count=multi_repo_match_count,
-                saved_project_link_cleared=saved_project_link_cleared,
-                project_repo_remote_changed=project_repo_remote_changed,
-            )
-
-        default_branch = git_info.default_branch or git_info.branch
-        if default_branch is None:
-            raise VibeCodeProjectResolverError(
-                "Could not determine the repository default branch. "
-                "Check out a branch and try again."
-            )
-
-        project = await self._create_project(
-            name=suggested_project_name(context),
-            repo_url=context.repo_url,
-            default_branch=default_branch,
-        )
-        await self._save_project_link_async(
-            context=context, project_id=project.project_id, project_name=project.name
-        )
-        return HeadlessProjectResolution(
-            project_id=project.project_id,
-            source="created_project",
-            candidate_count_loaded=len(projects),
-            multi_repo_match_count=multi_repo_match_count,
-            saved_project_link_cleared=saved_project_link_cleared,
-            project_repo_remote_changed=project_repo_remote_changed,
-        )
-
     async def _fetch_all_projects(self) -> list[VibeCodeProject]:
         projects: list[VibeCodeProject] = []
         cursor: str | None = None
@@ -381,7 +322,7 @@ class VibeCodeProjectPickerService:
         )
 
     async def _create_project(
-        self, *, name: str, repo_url: str, default_branch: str
+        self, *, name: str, repo_url: str | None, default_branch: str | None
     ) -> VibeCodeProject:
         return await self._with_client(
             lambda client: client.create_project(
@@ -392,14 +333,14 @@ class VibeCodeProjectPickerService:
     async def _with_client[T](
         self, operation: Callable[[VibeCodeProjectPageFetcher], Awaitable[T]]
     ) -> T:
-        if not self._api_key:
-            raise VibeCodeProjectApiError("Vibe Code Web API key not set.")
-
         if self._page_fetcher is not None:
             return await operation(self._page_fetcher)
 
+        if self._credentials is None:
+            raise VibeCodeProjectApiError("Vibe Code Web API key not set.")
+
         async with VibeCodeProjectClient(
-            self._base_url, self._api_key, timeout=self._timeout
+            self._base_url, self._credentials, timeout=self._timeout
         ) as client:
             return await operation(client)
 

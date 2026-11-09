@@ -3,8 +3,6 @@ from __future__ import annotations
 from enum import StrEnum, auto
 from typing import Protocol
 
-from vibe.core.types import BaseEvent
-
 
 class NarratorState(StrEnum):
     IDLE = auto()
@@ -26,7 +24,9 @@ class NarratorManagerPort(Protocol):
 
     def on_turn_start(self, user_message: str) -> None: ...
 
-    def on_turn_event(self, event: BaseEvent) -> None: ...
+    def on_user_message(self, message_id: str) -> None: ...
+
+    def on_assistant_text(self, content: str) -> None: ...
 
     def on_turn_error(self, message: str) -> None: ...
 

@@ -1,0 +1,454 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+
+from vibe.app_server._model import validate_wire
+from vibe.app_server.client_state import ClientSessionState
+from vibe.app_server.config import ConfigView, ProxySettingsView, ThinkingLevel
+from vibe.app_server.connection import AppServerResourceConnection
+from vibe.app_server.models import (
+    AccountView,
+    AgentStatsSnapshot,
+    AgentSummary,
+    ConfigIssue,
+    ConnectorCounts,
+    IdentityView,
+    MCPState,
+    SessionLogSummary,
+    SkillSummary,
+    ToolSummary,
+)
+from vibe.app_server.protocol import (
+    AccountReadParams,
+    AccountReadResponse,
+    AgentInstallParams,
+    AgentsListParams,
+    AgentsListResponse,
+    AgentSwitchParams,
+    AppServerResponseError,
+    ConfigMutationResponse,
+    ConfigProxyReadParams,
+    ConfigProxyReadResponse,
+    ConfigProxyWriteParams,
+    ConfigReloadParams,
+    ConfigWriteOpWire,
+    ConfigWriteParams,
+    ConfigWriteResponse,
+    EmptyResponse,
+    IdentityReadParams,
+    IdentityReadResponse,
+    ModelConfigWriteParams,
+    Notification,
+    ProtocolError,
+    ProtocolErrorCode,
+    ProviderAuthReadParams,
+    ProviderAuthReadResponse,
+    RuntimeMutationResponse,
+    RuntimeMutationStatus,
+    RuntimeReadParams,
+    RuntimeReadResponse,
+    RuntimeSnapshot,
+    RuntimeUpdatedParams,
+    SessionReadyWaitParams,
+    SessionReadyWaitResponse,
+)
+from vibe.app_server.provider_auth import ProviderAuthView
+
+
+def _raise_for_write(response: ConfigWriteResponse) -> None:
+    """Turn a write the app-server declined into an error the caller sees."""
+    if response.rejected:
+        reason = f": {response.reason}" if response.reason else ""
+        raise AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.INVALID_PARAMS,
+                message=f"Invalid configuration edit{reason}",
+            )
+        )
+    if response.failures:
+        raise AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.INTERNAL_ERROR,
+                message="; ".join(response.failures),
+            )
+        )
+
+
+class ConfigResource:
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+        self._subscribers: list[Callable[[ConfigView], None]] = []
+
+    @property
+    def current(self) -> ConfigView:
+        return self._state.config
+
+    def subscribe(self, callback: Callable[[ConfigView], None]) -> Callable[[], None]:
+        self._subscribers.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._subscribers:
+                self._subscribers.remove(callback)
+
+        return unsubscribe
+
+    def publish_change(self, previous: ConfigView) -> None:
+        if previous == self.current:
+            return
+        for callback in list(self._subscribers):
+            callback(self.current)
+
+    def _apply_runtime(self, snapshot: RuntimeSnapshot) -> None:
+        previous = self.current
+        self._state.apply_runtime(snapshot)
+        self.publish_change(previous)
+
+    async def write(
+        self, ops: list[ConfigWriteOpWire], *, reason: str, reload_runtime: bool = False
+    ) -> ConfigWriteResponse:
+        client = await self._connection.connect()
+        response = validate_wire(
+            ConfigWriteResponse,
+            await client.request(
+                "config/write",
+                ConfigWriteParams(
+                    session_id=self._state.session_id,
+                    ops=ops,
+                    reason=reason,
+                    reload_runtime=reload_runtime,
+                ),
+            ),
+        )
+        if response.applied:
+            self._apply_runtime(response.runtime)
+        return response
+
+    async def write_model(
+        self,
+        *,
+        model_alias: str | None = None,
+        reasoning_effort: ThinkingLevel | None = None,
+    ) -> RuntimeMutationStatus:
+        """Pick the model, and how hard it thinks, without waiting for idle.
+
+        The typed operation: the app-server owns where these land and whether a
+        running turn can take them, so this sends the pick rather than a path.
+        `config/write` would be refused outright during a turn.
+
+        Answers whether the session is running the pick yet. A running turn
+        keeps the settings it started on, so a pick made during one is parked
+        until it ends and arrives as `runtime/updated`.
+        """
+        client = await self._connection.connect()
+        response = validate_wire(
+            ConfigWriteResponse,
+            await client.request(
+                "config/model/write",
+                ModelConfigWriteParams(
+                    session_id=self._state.session_id,
+                    model_alias=model_alias,
+                    reasoning_effort=reasoning_effort,
+                ),
+            ),
+        )
+        if response.applied:
+            self._apply_runtime(response.runtime)
+        _raise_for_write(response)
+        return response.status
+
+    async def update(
+        self,
+        changes: Mapping[str, object],
+        *,
+        target_layer: str | None = None,
+        reload_runtime: bool = False,
+    ) -> None:
+        ops = [
+            ConfigWriteOpWire.model_validate({
+                "op": "set",
+                "path": f"/{key}",
+                "value": value,
+                "target_layer": target_layer,
+            })
+            for key, value in changes.items()
+        ]
+        response = await self.write(
+            ops, reason="app-server config update", reload_runtime=reload_runtime
+        )
+        _raise_for_write(response)
+
+    async def set_thinking(self, level: ThinkingLevel) -> RuntimeMutationStatus:
+        return await self.write_model(reasoning_effort=level)
+
+    async def reload(self, *, reload_runtime: bool = True) -> int:
+        client = await self._connection.connect()
+        response = validate_wire(
+            ConfigMutationResponse,
+            await client.request(
+                "config/reload",
+                ConfigReloadParams(
+                    session_id=self._state.session_id, reload_runtime=reload_runtime
+                ),
+            ),
+        )
+        self._apply_runtime(response.runtime)
+        return response.stripped_history_images
+
+    async def read_proxy(self) -> ProxySettingsView:
+        client = await self._connection.connect()
+        response = validate_wire(
+            ConfigProxyReadResponse,
+            await client.request(
+                "config/proxy/read",
+                ConfigProxyReadParams(session_id=self._state.session_id),
+            ),
+        )
+        return response.settings
+
+    async def update_proxy(self, changes: Mapping[str, str | None]) -> None:
+        client = await self._connection.connect()
+        validate_wire(
+            EmptyResponse,
+            await client.request(
+                "config/proxy/write",
+                ConfigProxyWriteParams(
+                    session_id=self._state.session_id, changes=dict(changes)
+                ),
+            ),
+        )
+
+
+class AccountResource:
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+        self._current: AccountView | None = None
+
+    @property
+    def current(self) -> AccountView | None:
+        return self._current
+
+    async def read(self) -> AccountView:
+        self._current = None
+        client = await self._connection.connect()
+        response = validate_wire(
+            AccountReadResponse,
+            await client.request(
+                "account/read", AccountReadParams(session_id=self._state.session_id)
+            ),
+        )
+        self._current = response.account
+        return response.account
+
+
+class IdentityResource:
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+        self._current: IdentityView | None = None
+
+    @property
+    def current(self) -> IdentityView | None:
+        return self._current
+
+    async def read(self) -> IdentityView | None:
+        self._current = None
+        client = await self._connection.connect()
+        response = validate_wire(
+            IdentityReadResponse,
+            await client.request(
+                "identity/read", IdentityReadParams(session_id=self._state.session_id)
+            ),
+        )
+        self._current = response.identity
+        return response.identity
+
+
+class ProviderAuthResource:
+    """Reads the redacted active-provider auth snapshot.
+
+    Holds no cached state: the view is a snapshot taken per read, so later
+    credential changes are reflected by the next read rather than a stale one.
+    """
+
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+
+    async def read(self) -> ProviderAuthView:
+        client = await self._connection.connect()
+        response = validate_wire(
+            ProviderAuthReadResponse,
+            await client.request(
+                "providerAuth/read",
+                ProviderAuthReadParams(session_id=self._state.session_id),
+            ),
+        )
+        return response.auth
+
+
+class AgentResource:
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+
+    @property
+    def active(self) -> AgentSummary:
+        return self._state.active_agent
+
+    @property
+    def all(self) -> list[AgentSummary]:
+        return self._state.agents
+
+    def next(self, current_name: str | None = None) -> AgentSummary:
+        return self._state.next_agent(current_name)
+
+    async def read(self) -> None:
+        client = await self._connection.connect()
+        response = validate_wire(
+            AgentsListResponse,
+            await client.request(
+                "agents/list", AgentsListParams(session_id=self._state.session_id)
+            ),
+        )
+        self._state.apply_agents(response)
+
+    async def switch(self, agent_name: str) -> AgentSummary:
+        client = await self._connection.connect()
+        response = validate_wire(
+            RuntimeMutationResponse,
+            await client.request(
+                "session/agent/update",
+                AgentSwitchParams(
+                    session_id=self._state.session_id, agent_name=agent_name
+                ),
+            ),
+        )
+        self._state.apply_runtime(response.runtime)
+        return response.runtime.active_agent
+
+    async def set_installed(self, agent_name: str, *, installed: bool) -> None:
+        client = await self._connection.connect()
+        method = "agents/install" if installed else "agents/uninstall"
+        response = validate_wire(
+            AgentsListResponse,
+            await client.request(
+                method,
+                AgentInstallParams(
+                    session_id=self._state.session_id, agent_name=agent_name
+                ),
+            ),
+        )
+        self._state.apply_agents(response)
+
+
+class RuntimeResource:
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+        self._session_last_init_duration_ms: int | None = None
+
+    @property
+    def session_init_duration_ms(self) -> int | None:
+        return self._session_last_init_duration_ms
+
+    @property
+    def skills(self) -> list[SkillSummary]:
+        return self._state.skills
+
+    @property
+    def tools(self) -> list[ToolSummary]:
+        return self._state.tools
+
+    @property
+    def stats(self) -> AgentStatsSnapshot:
+        return self._state.stats
+
+    @property
+    def context_window(self) -> int:
+        return self._state.context_window
+
+    @property
+    def issues(self) -> list[ConfigIssue]:
+        return self._state.issues
+
+    @property
+    def hooks_count(self) -> int:
+        return self._state.hooks_count
+
+    @property
+    def bypass_tool_permissions(self) -> bool:
+        return self._state.bypass_tool_permissions
+
+    @property
+    def connectors(self) -> ConnectorCounts:
+        return self._state.connectors
+
+    @property
+    def mcp(self) -> MCPState:
+        return self._state.mcp
+
+    @property
+    def session_log(self) -> SessionLogSummary:
+        return self._state.session_log
+
+    @property
+    def ready(self) -> bool:
+        return self._state.ready
+
+    @property
+    def custom_skills_count(self) -> int:
+        return self._state.custom_skills_count
+
+    def get_skill(self, name: str) -> SkillSummary | None:
+        return self._state.get_skill(name)
+
+    def has_tool(self, name: str) -> bool:
+        return self._state.has_tool(name)
+
+    async def wait_until_ready(self) -> None:
+        client = await self._connection.connect()
+        response = validate_wire(
+            SessionReadyWaitResponse,
+            await client.request(
+                "session/ready/wait",
+                SessionReadyWaitParams(session_id=self._state.session_id),
+            ),
+        )
+        self._state.ready = True
+        self._session_last_init_duration_ms = response.init_duration_ms
+        await self.refresh()
+
+    async def refresh(self) -> None:
+        client = await self._connection.connect()
+        response = validate_wire(
+            RuntimeReadResponse,
+            await client.request(
+                "runtime/read", RuntimeReadParams(session_id=self._state.session_id)
+            ),
+        )
+        self._state.apply_runtime_read(response)
+
+    async def consume_notification(self, notification: Notification) -> bool:
+        if notification.method != "runtime/updated":
+            return False
+        params = validate_wire(RuntimeUpdatedParams, notification.params)
+        # Consumed either way: one for another session is a stale announcement
+        # (a background load ending as /clear or a fork replaced the session),
+        # not an event the session stream can place.
+        if params.session_id == self._state.session_id:
+            self._state.apply_runtime(params.runtime)
+        return True

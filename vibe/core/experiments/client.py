@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from http import HTTPStatus
 
-import httpx
+import httpx2
 from pydantic import ValidationError
 
 from vibe.core.experiments._constants import (
@@ -10,8 +10,8 @@ from vibe.core.experiments._constants import (
     build_eval_url,
 )
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
-from vibe.core.logger import logger
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
+from vibe.observability.logging import logger
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 
 class RemoteEvalClient:
@@ -35,7 +35,7 @@ class RemoteEvalClient:
     def _client(self) -> VibeAsyncHTTPClient:
         if self._http is None:
             self._http = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(EVAL_REQUEST_TIMEOUT_SECONDS),
+                timeout=httpx2.Timeout(EVAL_REQUEST_TIMEOUT_SECONDS),
                 verify=build_ssl_context(),
             )
         return self._http
@@ -51,7 +51,7 @@ class RemoteEvalClient:
         }
         try:
             response = await self._client.post(self._url, json=payload)
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             logger.warning("GrowthBook eval request failed: %s", exc)
             return None
 

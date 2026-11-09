@@ -1,0 +1,30 @@
+"""A paste while voice settings are open during a running turn is dropped; the panel stays usable."""
+
+from __future__ import annotations
+
+from e2e.app_server.events import (
+    assistant_msg,
+    paste,
+    turn_completed,
+    turn_started,
+    user_msg,
+)
+from e2e.app_server.scenario import Timeline
+
+screen_contains = ("Generating",)
+screen_excludes = ("should not be pasted", "Voice Settings", "Voice settings closed")
+timeline: Timeline = [
+    "first\r",
+    turn_started(),
+    user_msg("first"),
+    assistant_msg("Done."),
+    turn_completed(),
+    turn_started(),
+    {"release": 5},
+    "/voice",
+    "\r",
+    {"release": 1},
+    paste("should not be pasted"),
+    "j",
+    "\x1b",
+]

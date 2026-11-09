@@ -1,66 +1,36 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import platform
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from pydantic import BaseModel
 import pytest
 
 from tests.conftest import build_test_vibe_config
-from tests.stubs.fake_tool import FakeTool, FakeToolArgs
 from vibe import __version__
-from vibe.core.agent_loop import ToolDecision, ToolExecutionResponse
-from vibe.core.llm.format import ResolvedToolCall
+from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.telemetry.build_metadata import (
     build_base_metadata,
     build_request_metadata,
 )
-from vibe.core.telemetry.send import TelemetryClient, _extract_file_extension
+from vibe.core.telemetry.send import (
+    TelemetryClient,
+    send_unified_subagent_tool_call_finished,
+    send_unified_tool_call_finished,
+)
 from vibe.core.telemetry.types import (
     AttachmentKind,
+    ExperimentAssignment,
     LaunchContext,
     TelemetryRequestMetadata,
     TerminalEmulator,
 )
-from vibe.core.tools.base import BaseTool, ToolPermission
 from vibe.core.types import Backend
-from vibe.core.utils import get_platform_id, get_platform_version, get_user_agent
+from vibe.core.utils import get_platform_id, get_platform_version
+from vibe.utils.http import get_user_agent
 
 _original_send_telemetry_event = TelemetryClient.send_telemetry_event
-from vibe.core.tools.builtins.edit import Edit, EditArgs
-from vibe.core.tools.builtins.read_file import ReadFile, ReadFileArgs
-from vibe.core.tools.builtins.write_file import WriteFile, WriteFileArgs
-
-
-def _make_resolved_tool_call(
-    tool_name: str, args_dict: dict[str, Any]
-) -> ResolvedToolCall:
-    validated: BaseModel
-    cls: type[BaseTool]
-    match tool_name:
-        case "write_file":
-            validated = WriteFileArgs(
-                file_path=args_dict.get("file_path", "foo.txt"), content="x"
-            )
-            cls = WriteFile
-        case "edit":
-            validated = EditArgs(
-                file_path=args_dict.get("file_path", "foo.txt"),
-                old_string="a",
-                new_string="b",
-            )
-            cls = Edit
-        case "read_file":
-            validated = ReadFileArgs(file_path=args_dict.get("file_path", "foo.txt"))
-            cls = ReadFile
-        case _:
-            validated = FakeToolArgs()
-            cls = FakeTool
-    return ResolvedToolCall(
-        tool_name=tool_name, tool_class=cls, validated_args=validated, call_id="call_1"
-    )
 
 
 def _run_telemetry_tasks() -> None:
@@ -74,7 +44,11 @@ def _run_telemetry_tasks() -> None:
 def _expected_system_metadata(
     terminal_emulator: TerminalEmulator | None = None,
 ) -> dict[str, Any]:
-    metadata: dict[str, Any] = {"os": get_platform_id(), "version": __version__}
+    metadata: dict[str, Any] = {
+        "os": get_platform_id(),
+        "arch": platform.machine().lower(),
+        "version": __version__,
+    }
     if os_version := get_platform_version():
         metadata["os_version"] = os_version
     if terminal_emulator is not None:
@@ -86,6 +60,7 @@ def _assert_system_metadata(
     properties: dict[str, Any], terminal_emulator: TerminalEmulator | None = None
 ) -> None:
     assert properties["os"] == get_platform_id()
+    assert properties["arch"] == platform.machine().lower()
     assert properties["version"] == __version__
     if os_version := get_platform_version():
         assert properties["os_version"] == os_version
@@ -95,37 +70,6 @@ def _assert_system_metadata(
         assert "terminal_emulator" not in properties
         return
     assert properties["terminal_emulator"] == terminal_emulator
-
-
-class TestExtractFileExtension:
-    @pytest.mark.parametrize(
-        ("path", "expected"),
-        [
-            ("/tmp/foo.py", ".py"),
-            ("foo.TSX", ".tsx"),
-            ("/tmp/Makefile", None),
-            ("/tmp/.bashrc", None),
-            ("archive.tar.gz", ".gz"),
-            ("", None),
-        ],
-    )
-    def test_string_inputs(self, path: str, expected: str | None) -> None:
-        assert _extract_file_extension(path) == expected
-
-    @pytest.mark.parametrize(
-        ("path", "expected"),
-        [
-            (Path("/tmp/foo.py"), ".py"),
-            (Path("foo.TSX"), ".tsx"),
-            (Path("/tmp/Makefile"), None),
-        ],
-    )
-    def test_path_inputs(self, path: Path, expected: str | None) -> None:
-        assert _extract_file_extension(path) == expected
-
-    @pytest.mark.parametrize("path", [None, 42, ["foo.py"], {"path": "foo.py"}])
-    def test_non_path_like_inputs_return_none(self, path: object) -> None:
-        assert _extract_file_extension(path) is None
 
 
 class TestTelemetryClient:
@@ -143,7 +87,7 @@ class TestTelemetryClient:
         env_key = config.get_active_provider().api_key_env_var
         monkeypatch.delenv(env_key, raising=False)
         client = TelemetryClient(config_getter=lambda: config)
-        assert client._get_mistral_api_key() is None
+        assert not client.is_active()
         client._client = MagicMock()
         client._client.post = AsyncMock()
 
@@ -202,275 +146,193 @@ class TestTelemetryClient:
             },
         )
 
-    def test_send_tool_call_finished_payload_shape(
+    def test_send_unified_subagent_tool_call_finished_uses_safe_dimensions(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
+        """*Prepare*: A telemetry client with event collection enabled.
+        *Do*: Record a successful Unified subagent spawn.
+        *Assert*: Only the approved bounded dimensions are emitted, including the
+        client-level ``harness_backend`` tag.
+        """
+        # Prepare
         config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("todo", {})
-        decision = ToolDecision(
-            verdict=ToolExecutionResponse.EXECUTE, approval_type=ToolPermission.ALWAYS
+        client = TelemetryClient(
+            config_getter=lambda: config, harness_backend=ExperimentSurface.UNIFIED
         )
 
-        client.send_tool_call_finished(
-            tool_call=tool_call,
-            status="success",
-            decision=decision,
-            agent_profile_name="default",
-            model="mistral-large",
+        # Do
+        send_unified_subagent_tool_call_finished(
+            client,
+            operation="spawn",
+            outcome="success",
+            model="mistral-vibe-cli-latest",
+            caller_agent_path="/root",
+            profile_source="vibe_profile",
         )
 
+        # Assert
         assert len(telemetry_events) == 1
-        event_name = telemetry_events[0]["event_name"]
-        assert event_name == "vibe.tool_call_finished"
+        assert telemetry_events[0]["event_name"] == "vibe.tool_call_finished"
         properties = telemetry_events[0]["properties"]
-        assert properties["tool_name"] == "todo"
-        assert properties["status"] == "success"
-        assert properties["decision"] == "execute"
-        assert properties["approval_type"] == "always"
-        assert properties["agent_profile_name"] == "default"
-        assert properties["model"] == "mistral-large"
-        assert properties["nb_files_created"] == 0
-        assert properties["nb_files_modified"] == 0
-        assert properties["file_extension"] is None
-        assert properties["message_id"] is None
-
-    def test_send_tool_call_finished_with_message_id(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("todo", {})
-
-        client.send_tool_call_finished(
-            tool_call=tool_call,
-            status="success",
-            decision=None,
-            agent_profile_name="default",
-            model="mistral-large",
-            message_id="msg-123",
-        )
-
-        assert telemetry_events[0]["properties"]["message_id"] == "msg-123"
-
-    def test_send_tool_call_finished_nb_files_created_write_file(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("write_file", {"file_path": "/tmp/foo.PY"})
-
-        client.send_tool_call_finished(
-            tool_call=tool_call,
-            status="success",
-            decision=None,
-            agent_profile_name="default",
-            model="mistral-large",
-            result={},
-        )
-
-        assert telemetry_events[0]["properties"]["nb_files_created"] == 1
-        assert telemetry_events[0]["properties"]["nb_files_modified"] == 0
-        assert telemetry_events[0]["properties"]["file_extension"] == ".py"
-
-    def test_send_tool_call_finished_file_extension_edit(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call(
-            "edit", {"file_path": "/tmp/component.tsx"}
-        )
-
-        client.send_tool_call_finished(
-            tool_call=tool_call,
-            status="success",
-            decision=None,
-            agent_profile_name="default",
-            model="mistral-large",
-            result={},
-        )
-
-        assert telemetry_events[0]["properties"]["nb_files_modified"] == 1
-        assert telemetry_events[0]["properties"]["nb_files_created"] == 0
-        assert telemetry_events[0]["properties"]["file_extension"] == ".tsx"
-
-    def test_send_tool_call_finished_file_extension_read(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("read_file", {"file_path": "/tmp/lib.rs"})
-
-        client.send_tool_call_finished(
-            tool_call=tool_call,
-            status="success",
-            decision=None,
-            agent_profile_name="default",
-            model="mistral-large",
-            result={},
-        )
-
-        assert telemetry_events[0]["properties"]["nb_files_created"] == 0
-        assert telemetry_events[0]["properties"]["nb_files_modified"] == 0
-        assert telemetry_events[0]["properties"]["file_extension"] == ".rs"
-
-    def test_send_tool_call_finished_file_extension_none_when_no_suffix(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call(
-            "write_file", {"file_path": "/tmp/Makefile"}
-        )
-
-        client.send_tool_call_finished(
-            tool_call=tool_call,
-            status="success",
-            decision=None,
-            agent_profile_name="default",
-            model="mistral-large",
-            result={},
-        )
-
-        assert telemetry_events[0]["properties"]["file_extension"] is None
-
-    def test_send_tool_call_finished_file_extension_none_on_failure(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("write_file", {"file_path": "/tmp/foo.py"})
-
-        client.send_tool_call_finished(
-            tool_call=tool_call,
-            status="failure",
-            decision=None,
-            agent_profile_name="default",
-            model="mistral-large",
-            result={},
-        )
-
-        assert telemetry_events[0]["properties"]["nb_files_created"] == 0
-        assert telemetry_events[0]["properties"]["file_extension"] is None
-
-    def test_send_tool_call_finished_decision_none(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-        tool_call = _make_resolved_tool_call("todo", {})
-
-        client.send_tool_call_finished(
-            tool_call=tool_call,
-            status="skipped",
-            decision=None,
-            agent_profile_name="default",
-            model="mistral-large",
-        )
-
-        assert telemetry_events[0]["properties"]["decision"] is None
-        assert telemetry_events[0]["properties"]["approval_type"] is None
-
-    def test_send_user_copied_text_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_user_copied_text("hello world")
-
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe.user_copied_text"
-        assert telemetry_events[0]["properties"]["text_length"] == 11
-
-    def test_send_user_cancelled_action_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_user_cancelled_action("interrupt_agent")
-
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe.user_cancelled_action"
-        assert telemetry_events[0]["properties"]["action"] == "interrupt_agent"
-
-    def test_send_at_mention_inserted_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_at_mention_inserted(
-            nb_mentions=2,
-            context_types={"file": 1, "folder": 1},
-            file_extensions={".py": 1},
-            message_id="msg-123",
-        )
-
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe.at_mention_inserted"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "nb_mentions": 2,
-            "context_types": {"file": 1, "folder": 1},
-            "file_extensions": {".py": 1},
-            "message_id": "msg-123",
+        assert properties == properties | {
+            "tool_name": "subagent.spawn",
+            "status": "success",
+            "decision": None,
+            "approval_type": None,
+            "agent_profile_name": None,
+            "model": "mistral-vibe-cli-latest",
+            "nb_files_created": 0,
+            "nb_files_modified": 0,
+            "file_extension": None,
+            "message_id": None,
+            "harness_backend": "unified",
+            "subagent_operation": "spawn",
+            "subagent_outcome": "success",
+            "subagent_depth": 1,
+            "subagent_profile_source": "vibe_profile",
         }
+        assert "agent_name" not in properties
+        assert "agent_type" not in properties
+        assert "child_session_id" not in properties
+        assert "prompt" not in properties
+        assert "caller_agent_path" not in properties
 
-    def test_send_at_mention_inserted_null_file_extensions(
+    @pytest.mark.parametrize(
+        ("caller_agent_path", "depth"),
+        [("/root", 1), ("/root/research", 2), ("/root/research/check", 3)],
+    )
+    def test_send_unified_subagent_tool_call_finished_derives_depth_from_caller_path(
+        self, telemetry_events: list[dict[str, Any]], caller_agent_path: str, depth: int
+    ) -> None:
+        """*Prepare*: A telemetry client with event collection enabled.
+        *Do*: Record a subagent operation called by an agent at a given path.
+        *Assert*: ``subagent_depth`` is the depth of the level acted on (the
+        caller's depth + 1, root = 0) and the path itself is not emitted.
+        """
+        # Prepare
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(
+            config_getter=lambda: config, harness_backend=ExperimentSurface.UNIFIED
+        )
+
+        # Do
+        send_unified_subagent_tool_call_finished(
+            client,
+            operation="list_configs",
+            outcome="success",
+            model="mistral-vibe-cli-latest",
+            caller_agent_path=caller_agent_path,
+        )
+
+        # Assert
+        properties = telemetry_events[0]["properties"]
+        assert properties["subagent_depth"] == depth
+        assert properties["tool_name"] == "subagent.list_configs"
+        assert properties["subagent_operation"] == "list_configs"
+        assert caller_agent_path not in repr(properties)
+
+    @pytest.mark.parametrize("caller_agent_path", ["", "/", "root/child"])
+    def test_send_unified_subagent_tool_call_finished_rejects_non_absolute_path(
+        self, telemetry_events: list[dict[str, Any]], caller_agent_path: str
+    ) -> None:
+        """*Prepare*: A telemetry client with event collection enabled.
+        *Do*: Record a subagent operation with a malformed caller path.
+        *Assert*: It raises instead of emitting a made-up depth.
+        """
+        # Prepare
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(
+            config_getter=lambda: config, harness_backend=ExperimentSurface.UNIFIED
+        )
+
+        # Do / Assert
+        with pytest.raises(ValueError, match="not an absolute agent path"):
+            send_unified_subagent_tool_call_finished(
+                client,
+                operation="list",
+                outcome="success",
+                model="mistral-vibe-cli-latest",
+                caller_agent_path=caller_agent_path,
+            )
+        assert telemetry_events == []
+
+    def test_send_unified_tool_call_finished_carries_decision_and_approval_type(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
+        """*Prepare*: A telemetry client tagged unified.
+        *Do*: Record a unified tool call with decision=execute, approval_type=ask.
+        *Assert*: The event carries the actual decision and approval_type.
+        """
         config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
+        client = TelemetryClient(
+            config_getter=lambda: config, harness_backend=ExperimentSurface.UNIFIED
+        )
 
-        client.send_at_mention_inserted(
-            nb_mentions=1,
-            context_types={"folder": 1},
-            file_extensions=None,
-            message_id=None,
+        send_unified_tool_call_finished(
+            client,
+            tool_name="write_file",
+            status="success",
+            model="mistral-vibe-cli-latest",
+            agent_profile_name="default",
+            decision="execute",
+            approval_type="ask",
+            approval_source="user",
         )
 
         assert len(telemetry_events) == 1
-        assert telemetry_events[0]["properties"]["file_extensions"] is None
-        assert telemetry_events[0]["properties"]["message_id"] is None
+        props = telemetry_events[0]["properties"]
+        assert props["decision"] == "execute"
+        assert props["approval_type"] == "ask"
+        assert props["approval_source"] == "user"
 
-    def test_send_at_mention_inserted_multiple_files_counts_extensions(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
+    def test_harness_backend_rides_every_event_without_experiments(self) -> None:
+        """*Prepare*: A client tagged legacy with no experiment snapshot.
+        *Do*: Build the base metadata every event carries.
+        *Assert*: ``harness_backend`` is present even though experiment
+        segmentation is entirely absent.
+        """
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(
+            config_getter=lambda: config, harness_backend=ExperimentSurface.LEGACY
+        )
+
+        metadata = client.build_client_event_metadata()
+
+        assert metadata["harness_backend"] == "legacy"
+        assert "experiment_attributes" not in metadata
+
+    def test_harness_backend_absent_when_client_is_untagged(self) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
         client = TelemetryClient(config_getter=lambda: config)
 
-        client.send_at_mention_inserted(
-            nb_mentions=4,
-            context_types={"file": 3, "folder": 1},
-            file_extensions={".py": 2, ".ts": 1},
-            message_id="msg-multi",
-        )
+        assert "harness_backend" not in client.build_client_event_metadata()
 
-        props = telemetry_events[0]["properties"]
-        assert props["nb_mentions"] == 4
-        assert props["context_types"] == {"file": 3, "folder": 1}
-        assert props["file_extensions"] == {".py": 2, ".ts": 1}
+    def test_experiment_attributes_serialize_nested_enums_as_strings(self) -> None:
+        """*Prepare*: A client whose attribute snapshot carries enum fields.
+        *Do*: Build the base metadata every event carries.
+        *Assert*: Nested enums (harness, terminal_emulator) are plain strings,
+        not Python enum objects — a clean wire payload and clean debug logs.
+        """
+        from vibe.core.experiments.models import ExperimentAttributes
 
-    def test_send_at_mention_inserted_duplicate_references_reflected_in_counts(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
         config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_at_mention_inserted(
-            nb_mentions=4,
-            context_types={"file": 2, "folder": 2},
-            file_extensions={".py": 2},
-            message_id="msg-dupes",
+        attributes = ExperimentAttributes(
+            entrypoint="cli",
+            harness=ExperimentSurface.UNIFIED,
+            agent_version="1.2.3",
+            os="darwin",
+            terminal_emulator=TerminalEmulator.GHOSTTY,
+        )
+        client = TelemetryClient(
+            config_getter=lambda: config,
+            experiment_attributes_getter=lambda: attributes,
         )
 
-        props = telemetry_events[0]["properties"]
-        assert props["nb_mentions"] == 4
-        assert props["context_types"] == {"file": 2, "folder": 2}
-        assert props["file_extensions"] == {".py": 2}
+        emitted = client.build_client_event_metadata()["experiment_attributes"]
+
+        assert emitted["harness"] == "unified"
+        assert not isinstance(emitted["harness"], ExperimentSurface)
+        assert emitted["terminal_emulator"] == "ghostty"
 
     def test_send_auto_compact_triggered_payload(
         self, telemetry_events: list[dict[str, Any]]
@@ -523,22 +385,6 @@ class TestTelemetryClient:
         assert properties["reason"] == "empty_summary"
         assert properties["session_id"] == "session-id"
         assert properties["parent_session_id"] == "parent-session-id"
-
-    def test_send_slash_command_used_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_slash_command_used("help", "builtin")
-        client.send_slash_command_used("my_skill", "skill")
-
-        assert len(telemetry_events) == 2
-        assert telemetry_events[0]["event_name"] == "vibe.slash_command_used"
-        assert telemetry_events[0]["properties"]["command"] == "help"
-        assert telemetry_events[0]["properties"]["command_type"] == "builtin"
-        assert telemetry_events[1]["properties"]["command"] == "my_skill"
-        assert telemetry_events[1]["properties"]["command_type"] == "skill"
 
     def test_send_teleport_completed_payload(
         self, telemetry_events: list[dict[str, Any]]
@@ -685,7 +531,13 @@ class TestTelemetryClient:
         )
 
         client.send_new_session(
-            has_agents_md=True, nb_skills=2, nb_mcp_servers=1, nb_models=3
+            has_agents_md=True,
+            nb_skills=2,
+            nb_mcp_servers=1,
+            nb_models=3,
+            has_outside_workdir_deny=False,
+            nb_post_agent_scoped_hooks=2,
+            nb_post_agent_main_hooks=1,
         )
 
         assert len(telemetry_events) == 1
@@ -696,30 +548,57 @@ class TestTelemetryClient:
         assert properties["nb_skills"] == 2
         assert properties["nb_mcp_servers"] == 1
         assert properties["nb_models"] == 3
+        assert properties["nb_post_agent_scoped_hooks"] == 2
+        assert properties["nb_post_agent_main_hooks"] == 1
         assert properties["entrypoint"] == "cli"
+        assert properties["host_kind"] == "local"
         assert properties["client_name"] == "vscode"
         assert properties["client_version"] == "1.96.0"
         assert properties["terminal_emulator"] == "vscode"
-        assert properties["experimental_bash_tool"] is False
+        assert properties["has_outside_workdir_deny"] is False
+        assert "experimental_bash_tool" not in properties
         assert "version" in properties
         assert type(properties["terminal_emulator"]) is str
         _assert_system_metadata(properties, TerminalEmulator.VSCODE)
 
-    def test_send_new_session_payload_includes_experimental_bash_tool_flag(
+    def test_send_new_session_metadata_includes_managed_shell_experiment(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
-        config = build_test_vibe_config(
-            enable_telemetry=True, experimental_bash_tool=True
+        config = build_test_vibe_config(enable_telemetry=True)
+        assignment = ExperimentAssignment(
+            experiment_id="vibe_cli_managed_shell_tools",
+            experiment_name="vibe_cli_managed_shell_tools",
+            variation_name="managed",
+            variation_id=1,
         )
-        client = TelemetryClient(config_getter=lambda: config)
+        client = TelemetryClient(
+            config_getter=lambda: config, experiments_getter=lambda: [assignment]
+        )
 
         client.send_new_session(
-            has_agents_md=False, nb_skills=0, nb_mcp_servers=0, nb_models=1
+            has_agents_md=False,
+            nb_skills=0,
+            nb_mcp_servers=0,
+            nb_models=1,
+            has_outside_workdir_deny=True,
+            nb_post_agent_scoped_hooks=0,
+            nb_post_agent_main_hooks=0,
         )
 
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.new_session"
-        assert telemetry_events[0]["properties"]["experimental_bash_tool"] is True
+        properties = telemetry_events[0]["properties"]
+        assert "experimental_bash_tool" not in properties
+        assert properties["has_outside_workdir_deny"] is True
+        assert properties["experiments"] == {"vibe_cli_managed_shell_tools": "managed"}
+        assert properties["experiment_assignments"] == [
+            {
+                "experiment_id": "vibe_cli_managed_shell_tools",
+                "experiment_name": "vibe_cli_managed_shell_tools",
+                "variation_name": "managed",
+                "variation_id": 1,
+            }
+        ]
 
     @pytest.mark.asyncio
     async def test_send_session_closed_payload(
@@ -822,6 +701,7 @@ class TestTelemetryClient:
             parent_session_id="parent-session-456",
             call_source="vibe_code",
             call_type="secondary_call",
+            host_kind="local",
             message_id="message-456",
             user_plan="Pro",
         )
@@ -1069,6 +949,55 @@ class TestTelemetryClient:
         )
 
         assert telemetry_events[0]["properties"]["attachment_counts"] == {}
+
+    def test_send_tool_call_detected_payload(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(enable_telemetry=True)
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_tool_call_detected(
+            model="glm-5-3",
+            backend="mistral",
+            api_style="openai",
+            call_type="secondary_call",
+            reasons=["empty_tool_call_identity"],
+            nb_unusable_attempts=1,
+            nb_dropped_tool_calls=1,
+            status="success",
+            message_id="message-1",
+        )
+
+        assert len(telemetry_events) == 1
+        assert telemetry_events[0]["event_name"] == "vibe.tool_call.detected"
+        properties = telemetry_events[0]["properties"]
+        assert {
+            key: properties[key]
+            for key in (
+                "model",
+                "backend",
+                "api_style",
+                "call_source",
+                "call_type",
+                "message_id",
+                "reasons",
+                "nb_unusable_attempts",
+                "nb_dropped_tool_calls",
+                "status",
+            )
+        } == {
+            "model": "glm-5-3",
+            "backend": "mistral",
+            "api_style": "openai",
+            "call_source": "vibe_code",
+            "call_type": "secondary_call",
+            "message_id": "message-1",
+            "reasons": ["empty_tool_call_identity"],
+            "nb_unusable_attempts": 1,
+            "nb_dropped_tool_calls": 1,
+            "status": "success",
+        }
+        _assert_system_metadata(properties)
 
     def test_send_user_rating_feedback_payload(
         self, telemetry_events: list[dict[str, Any]]

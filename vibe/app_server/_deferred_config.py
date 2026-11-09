@@ -1,0 +1,204 @@
+"""Configuration a running turn cannot read, held until the next turn boundary.
+
+The Rust Core takes its settings when a turn starts, so a configuration written
+during one cannot reach it. Refusing the write would lose a choice the user has
+already made, so the Host parks the derivation here instead and settles it at
+the next boundary: the turn ending, the next turn opening, or the Harness
+promoting a queued turn.
+
+Every transition of that parked state lives in this class. Losing a race with a
+turn is one of them: a turn can start while the derivation is being computed, or
+between the check and the Session taking its own lock, and either way the change
+goes back to being parked rather than raising at the caller -- one of them is the
+event pump, where an exception ends the session's live stream.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
+import contextlib
+
+from mistralai_vibe_local_harness.vibe import (
+    HarnessConfigurationRejectedError,
+    HarnessTurnConflictError,
+)
+
+
+class DeferredConfiguration[DerivationT]:
+    """Holds the one derivation a running turn is keeping the session from."""
+
+    def __init__(
+        self,
+        *,
+        derive: Callable[[], Awaitable[DerivationT]],
+        push: Callable[[DerivationT], Awaitable[None]],
+        adopt: Callable[[DerivationT], None],
+        turn_running: Callable[[], bool],
+    ) -> None:
+        self._derive = derive
+        self._push = push
+        self._adopt = adopt
+        self._turn_running = turn_running
+        self._parked = False
+        self._applying = asyncio.Lock()
+
+    @property
+    def parked(self) -> bool:
+        """Whether a change is waiting for a turn boundary."""
+        return self._parked
+
+    def park(self) -> None:
+        """Hold the current configuration back until the next boundary."""
+        self._parked = True
+
+    def mark_applied(self) -> None:
+        """Record that a caller pushed the configuration by its own route."""
+        self._parked = False
+
+    @contextlib.asynccontextmanager
+    async def exclusive(self) -> AsyncIterator[None]:
+        """Hold off applies while the caller pushes a configuration of its own.
+
+        An agent switch derives and pushes for itself, because only part of it
+        can land mid-turn. Outside this, an apply that derived before the switch
+        can push after it and put the session back on what the user moved off.
+        """
+        async with self._applying:
+            yield
+
+    async def apply(self) -> bool:
+        """Derive and push now, parking again if a turn owns the settings.
+
+        Serialised: deriving and pushing are two awaits, so concurrent callers
+        could otherwise push in the reverse order and leave the session running
+        a configuration older than the one that is persisted. Waiting here means
+        the second caller derives after the first has pushed, and so reads the
+        configuration that won.
+        """
+        async with self._applying:
+            return await self._apply_locked()
+
+    async def _apply_locked(
+        self,
+        push: Callable[[DerivationT], Awaitable[None]] | None = None,
+        *,
+        check_turn: bool = True,
+    ) -> bool:
+        self._parked = False
+        try:
+            derivation = await self._derive()
+            if check_turn and self._turn_running():
+                self._parked = True
+                return False
+            await (push or self._push)(derivation)
+        except HarnessTurnConflictError:
+            self._parked = True
+            return False
+        except HarnessConfigurationRejectedError:
+            # Dropped, not parked: Core refuses the same configuration until
+            # the context changes, so a parked one fails every boundary after
+            # this and no queued turn ever starts. Core keeps what it runs, and
+            # the caller hears why.
+            raise
+        except BaseException:
+            # Parked until it is actually running. One caller is the event pump,
+            # whose task is cancelled when the session's stream ends, and a
+            # cancellation between clearing the flag and pushing would otherwise
+            # drop a pick the user has already made.
+            self._parked = True
+            raise
+        self._adopt(derivation)
+        return True
+
+    async def commit(
+        self,
+        build: Callable[[], Awaitable[DerivationT]],
+        *,
+        install: Callable[[], Awaitable[bool]],
+        push: Callable[[DerivationT], Awaitable[None]] | None = None,
+        check_turn: bool = True,
+    ) -> bool:
+        """Build a derivation from a config not installed yet, push it, and only
+        then ``install`` that config; all under the lock applies take.
+        ``install`` answers whether it installed.
+
+        Answers whether the session runs it: a turn that owns the settings
+        displaces it before anything is pushed or installed. What ``build`` or
+        Core refuses raises, with nothing installed. Once it lands it carries
+        everything parked, since it was built over the same config.
+        """
+        async with self._applying:
+            if check_turn and self._turn_running():
+                return False
+            derivation = await build()
+            # Building awaits: a turn can start meanwhile.
+            if check_turn and self._turn_running():
+                return False
+            try:
+                await (push or self._push)(derivation)
+            except HarnessTurnConflictError:
+                return False
+            # Core runs it either way; a config not installed stays parked so
+            # the next boundary pushes what the session's config holds.
+            try:
+                self._parked = not await install()
+            except BaseException:
+                self._parked = True
+                raise
+            self._adopt(derivation)
+            return True
+
+    async def apply_when_idle(self) -> bool:
+        """Push between turns; park during one."""
+        if self._turn_running():
+            self._parked = True
+            return False
+        return await self.apply()
+
+    async def apply_through(
+        self, push: Callable[[DerivationT], Awaitable[None]]
+    ) -> bool:
+        """Derive and push through a push of the caller's own.
+
+        A turn the Session has reserved but not started is one the Core has not
+        taken settings for, so a configuration can still land on it -- but only
+        the caller knows that, and only a push that says so is accepted. The
+        lock is what this shares with the ordinary apply.
+        """
+        async with self._applying:
+            return await self._apply_locked(push, check_turn=False)
+
+    async def settle_through(
+        self, push: Callable[[DerivationT], Awaitable[None]]
+    ) -> bool:
+        """Land what is parked through a push of the caller's own.
+
+        Takes the lock before reading the flag for the reason ``settle`` does:
+        an apply clears it before it pushes, so reading it outside would step
+        past a push still in flight -- and here that push is the one a reserved
+        turn is about to run on.
+        """
+        async with self._applying:
+            if not self._parked:
+                return False
+            return await self._apply_locked(push, check_turn=False)
+
+    async def settle(self) -> bool:
+        """Apply what is parked, if a boundary has actually been reached.
+
+        Answers whether the session moved, so the caller can announce a
+        configuration nobody has been told about: the write that parked it
+        answered ``pending`` and said nothing since.
+
+        Takes the lock before reading the flag rather than after: an apply
+        clears it before it pushes, so a settle that only read the flag would
+        return while that push was still in flight. This one is a turn asking
+        whether it may open, and it would have opened on the configuration
+        being replaced -- leaving the apply to find a turn running and park
+        what it had already taken responsibility for.
+        """
+        async with self._applying:
+            if not self._parked or self._turn_running():
+                return False
+            return await self._apply_locked()

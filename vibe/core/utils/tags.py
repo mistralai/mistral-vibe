@@ -4,11 +4,11 @@ from enum import Enum, auto
 import re
 
 from vibe.core.types import BaseEvent, ToolResultEvent
+from vibe.utils import VIBE_WARNING_TAG
 
 CANCELLATION_TAG = "user_cancellation"
 TOOL_ERROR_TAG = "tool_error"
 VIBE_STOP_EVENT_TAG = "vibe_stop_event"
-VIBE_WARNING_TAG = "vibe_warning"
 
 KNOWN_TAGS = [CANCELLATION_TAG, TOOL_ERROR_TAG, VIBE_STOP_EVENT_TAG, VIBE_WARNING_TAG]
 

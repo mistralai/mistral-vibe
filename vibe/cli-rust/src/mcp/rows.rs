@@ -1,0 +1,332 @@
+//! Option rows of the `/mcp` browser's list and detail views.
+
+use caseless::default_case_fold_str as casefold;
+
+use crate::server::{MCPSourceKind, MCPSourceStatus, MCPSourceSummary, MCPState};
+
+use super::labels::{owner_tag, pad, source_status, tool_label};
+use super::scope;
+use crate::app::MCPApp;
+
+/// One `OptionList` row; only `Source` and `Tool` rows are selectable.
+pub enum Row {
+    Header(String),
+    Blank,
+    Note(String),
+    Detail(String),
+    /// A note with one highlighted shortcut key inside it.
+    Hint {
+        before: String,
+        key: String,
+        after: String,
+    },
+    Source(SourceRow),
+    Tool(ToolRow),
+    /// `+ Add more connectors in Studio`, opening `manageConnectorsUrl`.
+    Manage,
+    /// Warns that the `shared_only` API key hides and blocks personal connectors.
+    PrivateConnectorsHidden,
+}
+
+pub const MANAGE_CONNECTORS_LABEL: &str = "+ Add more connectors in Studio";
+pub const CONNECTORS_UNAVAILABLE: &str = "Connectors could not be loaded.";
+const NO_LOCAL_SERVERS: &str = "No local MCP servers configured.";
+const NO_CONNECTORS: &str = "No connectors available.";
+pub const KEY_HINT: &str = "Run /status to see which API key is in use.";
+
+pub struct SourceRow {
+    pub name: String,
+    pub kind: MCPSourceKind,
+    /// Display name, `[transport]` tag and tool count, padded to their group's widths.
+    pub label: String,
+    pub transport: String,
+    /// `[plugin:name]` owner tag; empty when no source in the group has one.
+    pub owner: String,
+    pub tools: String,
+    pub symbol: &'static str,
+    pub connected: bool,
+    pub status: String,
+    /// What Enter starts for a source not usable yet (help reads `Connect`).
+    pub action: Option<SourceAction>,
+    /// Greyed out: the `shared_only` API key can't use a personal connection.
+    pub blocked: bool,
+}
+
+pub struct ToolRow {
+    pub name: String,
+    pub description: String,
+    pub enabled: bool,
+}
+
+impl Row {
+    pub fn selectable(&self) -> bool {
+        matches!(self, Self::Source(_) | Self::Tool(_) | Self::Manage)
+    }
+
+    /// Stable identity used to keep the highlight across a rebuild.
+    pub fn id(&self) -> Option<String> {
+        match self {
+            Self::Source(row) => Some(format!("{}:{}", row.kind.as_str(), row.name)),
+            Self::Tool(row) => Some(format!("tool:{}", row.name)),
+            Self::Manage => Some("action:manage-connectors".to_owned()),
+            _ => None,
+        }
+    }
+}
+
+/// The rows of the current view: the source list, or one source's tools.
+pub fn rows(app: &MCPApp) -> Vec<Row> {
+    match viewing_source(app) {
+        Some(source) => detail_rows(app, source),
+        None => list_rows(&app.state, &app.search.query),
+    }
+}
+
+/// The source the browser is viewing.
+pub fn viewing_source(app: &MCPApp) -> Option<&MCPSourceSummary> {
+    find_source(&app.state, app.viewing_name.as_deref()?, app.viewing_kind)
+}
+
+pub fn find_source<'a>(
+    state: &'a MCPState,
+    name: &str,
+    kind: Option<MCPSourceKind>,
+) -> Option<&'a MCPSourceSummary> {
+    let named = || state.sources.iter().filter(|source| source.name == name);
+    match kind {
+        Some(kind) => named().find(|source| source.kind == kind),
+        // Without an explicit kind a server wins over a same-named connector.
+        None => named()
+            .find(|source| source.kind == MCPSourceKind::Server)
+            .or_else(|| named().next()),
+    }
+}
+
+/// The flow that makes a source usable, started when its detail view opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceAction {
+    /// MCP OAuth for a server.
+    McpOAuth,
+    /// The connector authorization broker: an OAuth or credentials setup URL.
+    ConnectorAuth,
+    /// Create the user's connection for a no-auth connector.
+    Connect,
+}
+
+/// The pending action of a bootstrapped, unblocked source; a bootstrap error shows
+/// in the detail view instead.
+pub fn pending_action(state: &MCPState, source: &MCPSourceSummary) -> Option<SourceAction> {
+    if source.error.is_some() || scope::blocked(state, source) {
+        return None;
+    }
+    match (source.status, source.kind) {
+        (MCPSourceStatus::NeedsAuth, MCPSourceKind::Server) => Some(SourceAction::McpOAuth),
+        (MCPSourceStatus::NeedsAuth, MCPSourceKind::Connector) => Some(SourceAction::ConnectorAuth),
+        (MCPSourceStatus::NeedsConnect, _) => Some(SourceAction::Connect),
+        _ => None,
+    }
+}
+
+/// Title line: `MCP Servers[ & Connectors]`, or `MCP Server: name` in detail view.
+pub fn title(app: &MCPApp) -> String {
+    if let Some(source) = viewing_source(app) {
+        let prefix = match source.kind {
+            MCPSourceKind::Connector => "Connector",
+            MCPSourceKind::Server => "MCP Server",
+        };
+        return format!("{prefix}: {}", source.label());
+    }
+    let title = "MCP Servers & Connectors";
+    if app.refreshing {
+        format!("{title}  (refreshing)")
+    } else {
+        title.to_owned()
+    }
+}
+
+fn list_rows(state: &MCPState, query: &str) -> Vec<Row> {
+    let servers = filtered_sources(state, MCPSourceKind::Server, query);
+    let connectors = filtered_sources(state, MCPSourceKind::Connector, query);
+    let searching = !query.trim().is_empty();
+    // Kept even with no connector, which would otherwise read as "none configured".
+    let private_hidden = state.private_connectors_hidden;
+    if searching && servers.is_empty() && connectors.is_empty() && !private_hidden {
+        return vec![Row::Note(
+            "No matching MCP servers or connectors".to_owned(),
+        )];
+    }
+    // Both sections show when not searching, so an empty one reads as "none", not an error.
+    let mut rows = Vec::new();
+    if !searching || !servers.is_empty() {
+        let leads = empty_note(servers.is_empty() && !searching, NO_LOCAL_SERVERS);
+        add_source_group(&mut rows, state, "Local MCP Servers", &servers, leads);
+    }
+    if !searching || !connectors.is_empty() || private_hidden {
+        if !rows.is_empty() {
+            rows.push(Row::Blank);
+        }
+        let mut leads = Vec::new();
+        let empty = connectors.is_empty() && !searching;
+        if state.connector_error.is_some() {
+            leads.extend(empty_note(empty, CONNECTORS_UNAVAILABLE));
+        } else if !private_hidden {
+            leads.extend(empty_note(empty, NO_CONNECTORS));
+        }
+        if private_hidden {
+            leads.push(Row::PrivateConnectorsHidden);
+        }
+        if state.connector_error.is_some() || private_hidden {
+            leads.push(Row::Detail(KEY_HINT.to_owned()));
+        }
+        if state.manage_connectors_url.is_some() {
+            leads.push(Row::Manage);
+        }
+        add_source_group(&mut rows, state, "Available Connectors", &connectors, leads);
+    }
+    rows
+}
+
+fn empty_note(empty: bool, note: &str) -> Vec<Row> {
+    if empty {
+        vec![Row::Note(note.to_owned())]
+    } else {
+        Vec::new()
+    }
+}
+
+/// Sources of one kind, in menu order.
+fn sources(state: &MCPState, kind: MCPSourceKind) -> Vec<&MCPSourceSummary> {
+    let mut sources: Vec<_> = state
+        .sources
+        .iter()
+        .filter(|source| source.kind == kind)
+        .collect();
+    sources.sort_by(|a, b| {
+        a.tools
+            .is_empty()
+            .cmp(&b.tools.is_empty())
+            .then_with(|| casefold(a.label()).cmp(&casefold(b.label())))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    sources
+}
+
+fn filtered_sources<'a>(
+    state: &'a MCPState,
+    kind: MCPSourceKind,
+    query: &str,
+) -> Vec<&'a MCPSourceSummary> {
+    let ordered = sources(state, kind);
+    let query = query.trim();
+    if query.is_empty() {
+        return ordered;
+    }
+    let mut scored: Vec<_> = ordered
+        .into_iter()
+        .filter_map(|source| {
+            crate::utils::fuzzy::score(query, source.label()).map(|score| (score, source))
+        })
+        .collect();
+    scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+    scored.into_iter().map(|(_, source)| source).collect()
+}
+
+fn add_source_group(
+    rows: &mut Vec<Row>,
+    state: &MCPState,
+    title: &str,
+    sources: &[&MCPSourceSummary],
+    leads: Vec<Row>,
+) {
+    rows.push(Row::Header(title.to_owned()));
+    rows.extend(leads);
+    let max_name = sources
+        .iter()
+        .map(|s| s.label().chars().count())
+        .max()
+        .unwrap_or(0);
+    let max_transport = sources
+        .iter()
+        .map(|s| s.transport.chars().count() + 2)
+        .max()
+        .unwrap_or(0);
+    let labels: Vec<String> = sources.iter().map(|source| tool_label(source)).collect();
+    let max_tools = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let owners: Vec<String> = sources.iter().map(|source| owner_tag(source)).collect();
+    let max_owner = owners.iter().map(|o| o.chars().count()).max().unwrap_or(0);
+    for ((source, tools), owner) in sources.iter().zip(labels).zip(owners) {
+        let (symbol, connected, mut status) = source_status(source);
+        let blocked = scope::blocked(state, source);
+        if blocked {
+            status = scope::BLOCKED_STATUS.to_owned();
+        }
+        rows.push(Row::Source(SourceRow {
+            name: source.name.clone(),
+            kind: source.kind,
+            label: pad(source.label(), max_name),
+            transport: pad(&format!("[{}]", source.transport), max_transport),
+            owner: pad(&owner, max_owner),
+            tools: pad(&tools, max_tools),
+            symbol,
+            connected,
+            status,
+            action: pending_action(state, source),
+            blocked,
+        }));
+    }
+}
+
+fn detail_rows(app: &MCPApp, source: &MCPSourceSummary) -> Vec<Row> {
+    let state = &app.state;
+    if let Some(error) = &source.error {
+        return vec![
+            Row::Note("Failed to bootstrap".to_owned()),
+            Row::Detail(error.clone()),
+        ];
+    }
+    if scope::blocked(state, source) {
+        return vec![scope::blocked_hint(source)];
+    }
+    match source.status {
+        // The auth flows own these views; the browser shows no options for them.
+        MCPSourceStatus::NeedsAuth => return Vec::new(),
+        MCPSourceStatus::NeedsConnect => {
+            let note = if app.connecting.as_ref() == Some(&source.name) {
+                "Connecting..."
+            } else {
+                "Not connected"
+            };
+            return vec![Row::Note(note.to_owned())];
+        }
+        MCPSourceStatus::NeedsSetup => {
+            return vec![Row::Hint {
+                before: "Set up credentials in the Mistral dashboard, then press ".to_owned(),
+                key: "r".to_owned(),
+                after: " to refresh.".to_owned(),
+            }]
+        }
+        _ => {}
+    }
+    if source.tools.is_empty() {
+        if source.kind == MCPSourceKind::Server && source.status == MCPSourceStatus::Unavailable {
+            let mut rows = vec![Row::Note("Tool discovery failed".to_owned())];
+            if let Some(error) = state.discovery_errors.get(&source.name) {
+                rows.push(Row::Detail(error.clone()));
+            }
+            return rows;
+        }
+        return vec![Row::Note("No tools discovered".to_owned())];
+    }
+    let mut tools: Vec<_> = source.tools.iter().collect();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    tools
+        .into_iter()
+        .map(|tool| {
+            Row::Tool(ToolRow {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                enabled: tool.enabled,
+            })
+        })
+        .collect()
+}

@@ -1,0 +1,249 @@
+//! MCP OAuth bottom-app state.
+
+use std::sync::Arc;
+
+use serde_json::json;
+
+use crate::app::App;
+use crate::clipboard;
+use crate::external_url;
+use crate::hints::{self, action};
+
+use crate::server::{method, Client};
+
+/// Shortcut line of the app.
+const HELP: &[hints::Hint] = &[
+    hints::NAVIGATE,
+    hints::SELECT,
+    ("r", action::RETRY),
+    hints::BACK,
+];
+/// Indent of the three action options.
+const OPTION_PADDING: &str = "  ";
+
+/// The answer of one `mcp/login` round-trip, applied on the main thread.
+pub struct Event {
+    /// Login generation, so a retry cannot be settled by a stale attempt.
+    pub generation: u64,
+    pub error: Option<String>,
+}
+
+/// The three selectable options, in display order.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OptionId {
+    Open,
+    Copy,
+    Show,
+}
+
+/// One rendered row of the option list.
+pub enum Row {
+    Note(String),
+    Blank,
+    Action(OptionId, String),
+}
+
+impl Row {
+    pub fn selectable(&self) -> bool {
+        matches!(self, Self::Action(_, _))
+    }
+}
+
+/// Open the app for `server_name` and start its login.
+pub fn open(app: &mut App, client: &Arc<Client>, server_name: String) {
+    app.mcp.open = false;
+    app.mcp.viewing_name = None;
+    app.mcp.viewing_kind = None;
+    app.mcp_oauth.open = true;
+    app.mcp_oauth.server_name = server_name;
+    start_login(app, client);
+}
+
+/// Esc: close the app and re-open the browser.
+pub fn close(app: &mut App, client: &Arc<Client>) {
+    dismiss(app);
+    crate::mcp::reopen(app, client, false, String::new());
+}
+
+/// The login succeeded: stay up while the browser re-discovers.
+fn connect(app: &mut App, client: &Arc<Client>) {
+    app.mcp_oauth.status_message = Some("Connecting...".to_owned());
+    let server_name = app.mcp_oauth.server_name.clone();
+    crate::mcp::reopen(app, client, true, server_name);
+}
+
+/// Take the app down once the browser it handed back to has answered.
+pub fn dismiss(app: &mut App) {
+    if app.mcp_oauth.open {
+        app.mcp_oauth.open = false;
+        app.mcp_oauth.generation += 1;
+    }
+}
+
+/// `R`: start the login again unless one is already running.
+pub fn refresh(app: &mut App, client: &Arc<Client>) {
+    if app.mcp_oauth.logging_in {
+        return;
+    }
+    start_login(app, client);
+}
+
+fn start_login(app: &mut App, client: &Arc<Client>) {
+    app.mcp_oauth.auth_url = None;
+    app.mcp_oauth.auth_url_visible = false;
+    app.mcp_oauth.failed = false;
+    app.mcp_oauth.list.select(0);
+    app.mcp_oauth.logging_in = true;
+    app.mcp_oauth.status_message = Some("Preparing authentication...".to_owned());
+    app.mcp_oauth.generation += 1;
+    let generation = app.mcp_oauth.generation;
+    let name = app.mcp_oauth.server_name.clone();
+    let Some(session_id) = app.session.session_id.clone() else {
+        return;
+    };
+    let client = client.clone();
+    crate::ui_event::spawn(app, async move {
+        let error = client
+            .request(
+                method::MCP_LOGIN,
+                json!({"sessionId": session_id, "name": name}),
+            )
+            .await
+            .err()
+            .map(|error| error.to_string());
+        Event { generation, error }
+    });
+}
+
+pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
+    if app.mcp_oauth.open && event.generation == app.mcp_oauth.generation {
+        match event.error {
+            // `logging_in` stays set so `R` cannot restart a login while connecting.
+            None => connect(app, client),
+            Some(error) => {
+                app.mcp_oauth.logging_in = false;
+                on_login_failed(app, error);
+            }
+        }
+    }
+}
+
+/// The `mcp/authUrl` notification of the running login.
+pub fn on_auth_url(app: &mut App, url: &str) {
+    app.mcp_oauth.auth_url = Some(url.to_owned());
+    app.mcp_oauth.list.select(0);
+    app.mcp_oauth.status_message = Some("Waiting for browser sign-in...".to_owned());
+}
+
+fn on_login_failed(app: &mut App, message: String) {
+    app.mcp_oauth.failed = true;
+    app.mcp_oauth.status_message = Some(message);
+}
+
+/// Move the highlight, wrapping at the ends.
+pub fn navigate(app: &mut App, down: bool) {
+    let count = rows(app).iter().filter(|row| row.selectable()).count();
+    app.mcp_oauth.list.step(down, count, true, |_| true);
+}
+
+/// Enter on the highlighted option.
+pub fn select(app: &mut App) {
+    match selected_id(app) {
+        Some(OptionId::Open) => open_browser(app),
+        Some(OptionId::Copy) => copy_url(app),
+        Some(OptionId::Show) => toggle_url(app),
+        None => {}
+    }
+}
+
+fn selected_id(app: &App) -> Option<OptionId> {
+    rows(app)
+        .into_iter()
+        .filter_map(|row| match row {
+            Row::Action(id, _) => Some(id),
+            _ => None,
+        })
+        .nth(app.mcp_oauth.list.selected())
+}
+
+fn open_browser(app: &mut App) {
+    let Some(url) = app.mcp_oauth.auth_url.clone() else {
+        return;
+    };
+    external_url::open(&url);
+    app.mcp_oauth.status_message = Some("Opened in browser.".to_owned());
+}
+
+fn copy_url(app: &mut App) {
+    let Some(url) = app.mcp_oauth.auth_url.clone() else {
+        return;
+    };
+    let verified = clipboard::copy_to_clipboard(&url);
+    crate::ui::notice::copied_as(
+        app,
+        "Auth URL copied to clipboard",
+        "Auth URL copied",
+        verified,
+    );
+}
+
+fn toggle_url(app: &mut App) {
+    if app.mcp_oauth.auth_url.is_none() {
+        return;
+    }
+    app.mcp_oauth.auth_url_visible = !app.mcp_oauth.auth_url_visible;
+}
+
+/// The option rows of the current phase: starting, failed, or awaiting sign-in.
+pub fn rows(app: &App) -> Vec<Row> {
+    if app.mcp_oauth.failed {
+        return vec![Row::Note(
+            "Authentication failed. Press r to retry.".to_owned(),
+        )];
+    }
+    let Some(_) = app.mcp_oauth.auth_url.as_deref() else {
+        return vec![Row::Note("Starting OAuth login...".to_owned())];
+    };
+    vec![
+        Row::Note("This MCP server requires authentication".to_owned()),
+        Row::Blank,
+        Row::Action(
+            OptionId::Open,
+            format!("{OPTION_PADDING}Press Enter to open auth in your browser"),
+        ),
+        Row::Action(
+            OptionId::Copy,
+            format!("{OPTION_PADDING}Copy URL to clipboard"),
+        ),
+        Row::Action(
+            OptionId::Show,
+            format!("{OPTION_PADDING}Manually show the URL"),
+        ),
+    ]
+}
+
+/// The detail text under the options.
+pub fn detail(app: &App) -> String {
+    let url = app.mcp_oauth.auth_url.as_deref();
+    if app.mcp_oauth.failed || url.is_none() {
+        return String::new();
+    }
+    let mut parts: Vec<&str> = Vec::new();
+    if let (true, Some(url)) = (app.mcp_oauth.auth_url_visible, url) {
+        parts.push(url);
+        parts.push("");
+    }
+    parts.push("Once authenticated in your browser, return to Vibe");
+    parts.join("\n")
+}
+
+/// The help line, prefixed with the current status.
+pub fn help_text(app: &App) -> Vec<(String, bool)> {
+    let status = app.mcp_oauth.status_message.as_ref();
+    let status = status.map(|status| (format!("{status}  "), false));
+    let keys = hints::runs(HELP).into_iter();
+    status
+        .into_iter()
+        .chain(keys.map(|(text, is_key)| (text.to_owned(), is_key)))
+        .collect()
+}

@@ -1,0 +1,22 @@
+[
+ {
+  "method": "setup/status",
+  "params": {}
+ },
+ {
+  "method": "setup/oidc-start",
+  "params": {}
+ },
+ {
+  "method": "setup/oidc-poll",
+  "params": {
+   "attemptId": "oidc-replay"
+  }
+ },
+ {
+  "method": "setup/oidc-cancel",
+  "params": {
+   "attemptId": "oidc-replay"
+  }
+ }
+]

@@ -32,6 +32,11 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
       - name: Sync dependencies
         run: uv sync --all-extras
 
@@ -55,6 +60,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # `vibe` execs the Rust TUI, built from source in this checkout. Without
+      # voice: cpal needs ALSA/libasound, absent from the runner.
+      CARGO_BUILD_FLAGS: "--no-default-features"
 
     steps:
       - name: Checkout repository
@@ -72,8 +81,18 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
       - name: Sync dependencies
         run: uv sync --all-extras
+
+      # Built up front so the first `vibe` launch, in a test's pexpect timeout,
+      # does not pay for the release build.
+      - name: Build the Rust CLI
+        run: cargo build --release --locked --manifest-path vibe/cli-rust/Cargo.toml --bin vibe-rs $CARGO_BUILD_FLAGS
 
       - name: Verify CLI can start
         run: |
@@ -86,18 +105,67 @@ jobs:
       - name: Run tests
         shell: bash
         run: |
-          uv run pytest --ignore tests/snapshots && exit 0
+          uv run pytest && exit 0
           for attempt in 2 3; do
             echo "::warning::pytest failed; retrying last-failed tests (attempt ${attempt}/3)"
-            uv run pytest --ignore tests/snapshots --lf && exit 0
+            uv run pytest --lf && exit 0
           done
           exit 1
 
-  snapshot-tests:
-    name: Snapshot Tests
-    runs-on: ubuntu-latest
+  build-install-smoke:
+    name: "Build+install smoke: ${{ matrix.os }}-${{ matrix.arch }}${{ matrix.from_sdist && ' (sdist)' || '' }}"
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # cargo_flags mirrors release.yml: Linux builds without voice (cpal
+          # needs ALSA/libasound, absent here); macOS/Windows ship voice via
+          # CoreAudio/WASAPI. This gate builds the real wheel (non-editable, so
+          # the combined build backend bundles both native components), installs
+          # it, then launches the installed `vibe` console script, which execs
+          # the bundled Rust TUI.
+          - runner: ubuntu-22.04
+            os: linux
+            arch: x86_64
+            cargo_flags: "--no-default-features"
+          - runner: ubuntu-22.04-arm
+            os: linux
+            arch: aarch64
+            cargo_flags: "--no-default-features"
+          - runner: macos-15-intel
+            os: darwin
+            arch: x86_64
+            cargo_flags: ""
+          - runner: macos-14
+            os: darwin
+            arch: aarch64
+            cargo_flags: ""
+          - runner: windows-2022
+            os: windows
+            arch: x86_64
+            cargo_flags: ""
+          # Sdist legs: build the wheel from the sdist the way release.yml's
+          # check-sdist does, so a packaging change that only breaks the sdist
+          # path fails PR CI instead of the release publish. Keep the build
+          # command in sync with release.yml's check-sdist job.
+          - runner: ubuntu-22.04
+            os: linux
+            arch: x86_64
+            cargo_flags: "--no-default-features"
+            from_sdist: true
+          - runner: macos-14
+            os: darwin
+            arch: aarch64
+            cargo_flags: ""
+            from_sdist: true
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_BUILD_FLAGS: ${{ matrix.cargo_flags }}
+      # macOS only (ignored elsewhere): tag wheels macosx_11_0 so they install
+      # on macOS 11+ rather than only the runner's OS version.
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
 
     steps:
       - name: Checkout repository
@@ -115,25 +183,48 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Sync dependencies
-        run: uv sync --all-extras
-
-      - name: Run snapshot tests
-        id: snapshot-tests
-        run: uv run pytest tests/snapshots
-        continue-on-error: true
-
-      - name: Upload snapshot report
-        if: steps.snapshot-tests.outcome == 'failure'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          name: snapshot-report
-          path: snapshot_report.html
-          if-no-files-found: warn
-          retention-days: 3
+          toolchain: stable
 
-      - name: Fail job if snapshot tests failed
-        if: steps.snapshot-tests.outcome == 'failure'
+      - name: Build wheel
+        shell: bash
         run: |
-          echo "Snapshot tests failed, failing job."
-          exit 1
+          if [ "${{ matrix.from_sdist }}" = "true" ]; then
+            uv build --sdist --out-dir dist
+            # Pin the wheel to the interpreter the smoke venv uses, like
+            # release.yml's check-sdist: unpinned, uv builds with the runner's
+            # ambient Python and a mismatched wheel cannot be installed.
+            uv build --python ${{ env.PYTHON_VERSION }} --wheel dist/mistral_vibe-*.tar.gz --out-dir dist
+          else
+            uv build --wheel --out-dir dist
+          fi
+
+      - name: Install wheel into a clean environment
+        shell: bash
+        run: |
+          uv venv .smoke
+          wheel=$(ls dist/*.whl)
+          echo "Installing $wheel"
+          uv pip install --python .smoke "$wheel"
+
+      - name: Smoke test vibe
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            vibe=".smoke/Scripts/vibe"
+          else
+            vibe=".smoke/bin/vibe"
+          fi
+          "$vibe" --version
+
+      - name: Smoke test bundled Harness
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python=".smoke/Scripts/python.exe"
+          else
+            python=".smoke/bin/python"
+          fi
+          "$python" scripts/ci/validate-combined-wheel.py

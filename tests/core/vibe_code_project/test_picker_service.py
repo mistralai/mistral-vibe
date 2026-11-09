@@ -5,18 +5,20 @@ import threading
 
 import pytest
 
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.teleport.git import GitRepoInfo
 from vibe.core.vibe_code_project import (
     ProjectPickerContext,
     ProjectRepository,
+    RemoteProjectLink,
     TeleportProjectResolution,
     VibeCodeProject,
     VibeCodeProjectApiError,
-    VibeCodeProjectLink,
     VibeCodeProjectPage,
     VibeCodeProjectPickerInitialData,
     VibeCodeProjectPickerService,
     VibeCodeProjectPickerState,
+    VibeCodeProjectResolverError,
     VibeProjectsStore,
 )
 
@@ -25,7 +27,7 @@ class FakePageFetcher:
     def __init__(self, pages: list[VibeCodeProjectPage]) -> None:
         self.pages = pages
         self.calls: list[tuple[str | None, int | None]] = []
-        self.created: list[tuple[str, str, str]] = []
+        self.created: list[tuple[str, str | None, str | None]] = []
 
     async def list_projects(
         self, cursor: str | None = None, limit: int | None = None
@@ -34,10 +36,14 @@ class FakePageFetcher:
         return self.pages.pop(0)
 
     async def create_project(
-        self, *, name: str, repo_url: str, default_branch: str
+        self,
+        *,
+        name: str,
+        repo_url: str | None = None,
+        default_branch: str | None = None,
     ) -> VibeCodeProject:
         self.created.append((name, repo_url, default_branch))
-        return _project("created", name, repo_url)
+        return _project("created", name, repo_url or "")
 
 
 class TrackingProjectsStore(VibeProjectsStore):
@@ -47,11 +53,11 @@ class TrackingProjectsStore(VibeProjectsStore):
         self.upsert_remote_project_threads: list[int] = []
         self.delete_remote_project_threads: list[int] = []
 
-    def get_remote_project(self, *, repo_root: Path) -> VibeCodeProjectLink | None:
+    def get_remote_project(self, *, repo_root: Path) -> RemoteProjectLink | None:
         self.get_remote_project_threads.append(threading.get_ident())
         return super().get_remote_project(repo_root=repo_root)
 
-    def upsert_remote_project(self, link: VibeCodeProjectLink) -> None:
+    def upsert_remote_project(self, link: RemoteProjectLink) -> None:
         self.upsert_remote_project_threads.append(threading.get_ident())
         super().upsert_remote_project(link)
 
@@ -115,7 +121,7 @@ async def test_load_initial_builds_context_and_fetches_first_page() -> None:
     ])
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=Path("/repo/mistral-vibe"),
         page_fetcher=fetcher,
     )
@@ -134,7 +140,7 @@ async def test_load_initial_includes_saved_project_link(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     store = VibeProjectsStore(tmp_path / "projects.toml")
-    saved_link = VibeCodeProjectLink(
+    saved_link = RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/mistralai/mistral-vibe.git",
         project_id="mistral-vibe",
@@ -144,7 +150,7 @@ async def test_load_initial_includes_saved_project_link(tmp_path: Path) -> None:
     fetcher = FakePageFetcher([VibeCodeProjectPage(projects=[], next_cursor=None)])
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=repo_root,
         page_fetcher=fetcher,
         project_store=store,
@@ -164,7 +170,7 @@ async def test_load_initial_reads_saved_project_link_off_event_loop(
     repo_root.mkdir()
     store = TrackingProjectsStore(tmp_path / "projects.toml")
     store.upsert_remote_project(
-        VibeCodeProjectLink(
+        RemoteProjectLink(
             repo_root=repo_root,
             repo_url="https://github.com/mistralai/mistral-vibe.git",
             project_id="mistral-vibe",
@@ -174,7 +180,7 @@ async def test_load_initial_reads_saved_project_link_off_event_loop(
     store.reset_thread_records()
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=repo_root,
         page_fetcher=FakePageFetcher([
             VibeCodeProjectPage(projects=[], next_cursor=None)
@@ -197,7 +203,7 @@ async def test_load_initial_for_teleport_skips_fetch_with_valid_saved_link(
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     store = VibeProjectsStore(tmp_path / "projects.toml")
-    saved_link = VibeCodeProjectLink(
+    saved_link = RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/mistralai/mistral-vibe.git",
         project_id="mistral-vibe",
@@ -207,7 +213,7 @@ async def test_load_initial_for_teleport_skips_fetch_with_valid_saved_link(
     fetcher = FakePageFetcher([])
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=repo_root,
         page_fetcher=fetcher,
         project_store=store,
@@ -240,7 +246,7 @@ async def test_load_initial_for_teleport_fetches_when_no_saved_link(
     ])
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=repo_root,
         page_fetcher=fetcher,
     )
@@ -259,7 +265,7 @@ async def test_load_initial_for_teleport_fetches_when_saved_link_for_different_r
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     store = VibeProjectsStore(tmp_path / "projects.toml")
-    stale_link = VibeCodeProjectLink(
+    stale_link = RemoteProjectLink(
         repo_root=repo_root,
         repo_url="https://github.com/other/repo.git",
         project_id="other-project",
@@ -280,7 +286,7 @@ async def test_load_initial_for_teleport_fetches_when_saved_link_for_different_r
     ])
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=repo_root,
         page_fetcher=fetcher,
         project_store=store,
@@ -321,7 +327,7 @@ async def test_load_more_skips_until_new_selectable_project() -> None:
     ])
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=Path("/repo/mistral-vibe"),
         page_fetcher=fetcher,
     )
@@ -352,7 +358,7 @@ async def test_create_project_uses_git_repo_and_prepends_created_project() -> No
     fetcher = FakePageFetcher([])
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=Path("/repo/mistral-vibe"),
         page_fetcher=fetcher,
     )
@@ -380,7 +386,7 @@ async def test_create_project_uses_git_repo_and_prepends_created_project() -> No
 async def test_create_project_requires_default_branch() -> None:
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=Path("/repo/mistral-vibe"),
         page_fetcher=FakePageFetcher([]),
     )
@@ -397,7 +403,7 @@ async def test_create_project_requires_default_branch() -> None:
 def _initial_data(
     repo_root: Path,
     repo_url: str = "https://github.com/mistralai/mistral-vibe.git",
-    saved_link: VibeCodeProjectLink | None = None,
+    saved_link: RemoteProjectLink | None = None,
 ) -> VibeCodeProjectPickerInitialData:
     return VibeCodeProjectPickerInitialData(
         context=ProjectPickerContext(
@@ -414,8 +420,8 @@ def _link(
     repo_root: Path,
     repo_url: str = "https://github.com/mistralai/mistral-vibe.git",
     project_id: str = "proj-123",
-) -> VibeCodeProjectLink:
-    return VibeCodeProjectLink(
+) -> RemoteProjectLink:
+    return RemoteProjectLink(
         repo_root=repo_root,
         repo_url=repo_url,
         project_id=project_id,
@@ -433,7 +439,7 @@ def test_resolve_project_for_teleport_returns_saved_project_id_when_urls_match(
     store.upsert_remote_project(saved)
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=repo_root,
         page_fetcher=FakePageFetcher([]),
         project_store=store,
@@ -461,7 +467,7 @@ def test_resolve_project_for_teleport_clears_stale_link_when_url_differs(
     store.upsert_remote_project(stale)
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=repo_root,
         page_fetcher=FakePageFetcher([]),
         project_store=store,
@@ -487,7 +493,7 @@ def test_resolve_project_for_teleport_returns_none_when_no_saved_link(
     repo_root.mkdir()
     service = VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
         repo_root=repo_root,
         page_fetcher=FakePageFetcher([]),
     )
@@ -499,189 +505,47 @@ def test_resolve_project_for_teleport_returns_none_when_no_saved_link(
     assert resolution.initial_data.context.saved_link is None
 
 
-@pytest.mark.asyncio
-async def test_headless_resolution_uses_matching_saved_link(tmp_path: Path) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    store = VibeProjectsStore(tmp_path / "projects.toml")
-    saved = _link(repo_root)
-    store.upsert_remote_project(saved)
-    fetcher = FakePageFetcher([])
-    service = VibeCodeProjectPickerService(
+_LINK_REPO = "https://github.com/mistralai/mistral-vibe.git"
+
+
+def _link_service(projects: list[VibeCodeProject]) -> VibeCodeProjectPickerService:
+    return VibeCodeProjectPickerService(
         base_url="https://chat.example.com",
-        api_key="api-key",
-        repo_root=repo_root,
-        page_fetcher=fetcher,
-        project_store=store,
+        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
+        repo_root=Path("/repo/mistral-vibe"),
+        page_fetcher=FakePageFetcher([
+            VibeCodeProjectPage(projects=projects, next_cursor=None)
+        ]),
     )
 
-    resolution = await service.resolve_project_for_headless_teleport(_git_info())
 
-    assert resolution.project_id == "proj-123"
-    assert resolution.source == "saved_link"
-    assert fetcher.calls == []
+@pytest.mark.asyncio
+async def test_find_linkable_project_returns_validated_project() -> None:
+    service = _link_service([_project("p1", "Mistral Vibe", _LINK_REPO)])
+
+    project = await service.find_linkable_project(project_id="p1", repo_url=_LINK_REPO)
+
+    assert project.project_id == "p1"
 
 
 @pytest.mark.asyncio
-async def test_headless_resolution_uses_single_exact_matching_project_and_saves_link(
-    tmp_path: Path,
-) -> None:
-    event_loop_thread = threading.get_ident()
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    store = TrackingProjectsStore(tmp_path / "projects.toml")
-    fetcher = FakePageFetcher([
-        VibeCodeProjectPage(
-            projects=[
-                _project("other", "Other", "https://github.com/mistralai/other.git")
-            ],
-            next_cursor="next-page",
-        ),
-        VibeCodeProjectPage(
-            projects=[
-                _project(
-                    "mistral-vibe",
-                    "Mistral Vibe",
-                    "https://github.com/mistralai/mistral-vibe.git",
-                )
-            ],
-            next_cursor=None,
-        ),
+async def test_find_linkable_project_rejects_unknown_project() -> None:
+    service = _link_service([_project("p1", "Mistral Vibe", _LINK_REPO)])
+
+    with pytest.raises(VibeCodeProjectResolverError):
+        await service.find_linkable_project(project_id="missing", repo_url=_LINK_REPO)
+
+
+@pytest.mark.asyncio
+async def test_find_linkable_project_rejects_read_only_or_unlinked() -> None:
+    read_only = _link_service([
+        _project("ro", "Read only", _LINK_REPO, is_read_only=True)
     ])
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        api_key="api-key",
-        repo_root=repo_root,
-        page_fetcher=fetcher,
-        project_store=store,
-    )
+    with pytest.raises(VibeCodeProjectResolverError):
+        await read_only.find_linkable_project(project_id="ro", repo_url=_LINK_REPO)
 
-    resolution = await service.resolve_project_for_headless_teleport(_git_info())
-
-    assert resolution.project_id == "mistral-vibe"
-    assert resolution.source == "matched_project"
-    assert fetcher.calls == [(None, 100), ("next-page", 100)]
-    assert store.upsert_remote_project_threads
-    assert all(
-        thread_id != event_loop_thread
-        for thread_id in store.upsert_remote_project_threads
-    )
-    assert store.get_remote_project(repo_root=repo_root) == VibeCodeProjectLink(
-        repo_root=repo_root,
-        repo_url="https://github.com/mistralai/mistral-vibe.git",
-        project_id="mistral-vibe",
-        project_name="Mistral Vibe",
-    )
-
-
-@pytest.mark.asyncio
-async def test_headless_resolution_creates_project_when_no_match(
-    tmp_path: Path,
-) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    store = VibeProjectsStore(tmp_path / "projects.toml")
-    fetcher = FakePageFetcher([VibeCodeProjectPage(projects=[], next_cursor=None)])
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        api_key="api-key",
-        repo_root=repo_root,
-        page_fetcher=fetcher,
-        project_store=store,
-    )
-
-    resolution = await service.resolve_project_for_headless_teleport(_git_info())
-
-    assert resolution.project_id == "created"
-    assert resolution.source == "created_project"
-    assert fetcher.created == [
-        ("mistral-vibe", "https://github.com/mistralai/mistral-vibe.git", "main")
-    ]
-    assert store.get_remote_project(repo_root=repo_root) == VibeCodeProjectLink(
-        repo_root=repo_root,
-        repo_url="https://github.com/mistralai/mistral-vibe.git",
-        project_id="created",
-        project_name="mistral-vibe",
-    )
-
-
-@pytest.mark.asyncio
-async def test_headless_resolution_creates_project_for_single_multi_repo_match(
-    tmp_path: Path,
-) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    store = VibeProjectsStore(tmp_path / "projects.toml")
-    fetcher = FakePageFetcher([
-        VibeCodeProjectPage(
-            projects=[
-                _multi_repo_project(
-                    "multi",
-                    "Multi Repo",
-                    "https://github.com/mistralai/mistral-vibe.git",
-                    "https://github.com/mistralai/other.git",
-                )
-            ],
-            next_cursor=None,
-        )
+    unlinked = _link_service([
+        _project("other", "Other repo", "https://github.com/mistralai/other.git")
     ])
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        api_key="api-key",
-        repo_root=repo_root,
-        page_fetcher=fetcher,
-        project_store=store,
-    )
-
-    resolution = await service.resolve_project_for_headless_teleport(_git_info())
-
-    assert resolution.project_id == "created"
-    assert resolution.source == "created_project"
-    assert fetcher.created == [
-        ("mistral-vibe", "https://github.com/mistralai/mistral-vibe.git", "main")
-    ]
-    assert store.get_remote_project(repo_root=repo_root) == VibeCodeProjectLink(
-        repo_root=repo_root,
-        repo_url="https://github.com/mistralai/mistral-vibe.git",
-        project_id="created",
-        project_name="mistral-vibe",
-    )
-
-
-@pytest.mark.asyncio
-async def test_headless_resolution_creates_project_when_matches_are_ambiguous(
-    tmp_path: Path,
-) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    store = VibeProjectsStore(tmp_path / "projects.toml")
-    fetcher = FakePageFetcher([
-        VibeCodeProjectPage(
-            projects=[
-                _project("one", "One", "https://github.com/mistralai/mistral-vibe.git"),
-                _project("two", "Two", "https://github.com/mistralai/mistral-vibe.git"),
-            ],
-            next_cursor=None,
-        )
-    ])
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        api_key="api-key",
-        repo_root=repo_root,
-        page_fetcher=fetcher,
-        project_store=store,
-    )
-
-    resolution = await service.resolve_project_for_headless_teleport(_git_info())
-
-    assert resolution.project_id == "created"
-    assert resolution.source == "created_project"
-    assert fetcher.created == [
-        ("mistral-vibe", "https://github.com/mistralai/mistral-vibe.git", "main")
-    ]
-    assert store.get_remote_project(repo_root=repo_root) == VibeCodeProjectLink(
-        repo_root=repo_root,
-        repo_url="https://github.com/mistralai/mistral-vibe.git",
-        project_id="created",
-        project_name="mistral-vibe",
-    )
+    with pytest.raises(VibeCodeProjectResolverError):
+        await unlinked.find_linkable_project(project_id="other", repo_url=_LINK_REPO)

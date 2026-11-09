@@ -3,7 +3,6 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
 
     pyproject-nix = {
       url = "github:pyproject-nix/pyproject.nix";
@@ -22,128 +21,411 @@
       inputs.uv2nix.follows = "uv2nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    # Crane builds the Rust CLI as its own cached derivation and vendors its
+    # crate tree from the lockfile, so no hash has to be maintained for it.
+    crane.url = "github:ipetkov/crane";
   };
 
-  outputs = {
-    self,
-    nixpkgs,
-    flake-utils,
-    uv2nix,
-    pyproject-nix,
-    pyproject-build-systems,
-    ...
-  }:
-    flake-utils.lib.eachDefaultSystem (system: let
+  outputs =
+    {
+      self,
+      nixpkgs,
+      uv2nix,
+      pyproject-nix,
+      pyproject-build-systems,
+      crane,
+      ...
+    }:
+    let
       inherit (nixpkgs) lib;
 
-      workspace = uv2nix.lib.workspace.loadWorkspace {workspaceRoot = ./.;};
+      # The systems librusty_v8 is pinned for below.
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
 
-      overlay = workspace.mkPyprojectOverlay {
-        sourcePreference = "wheel"; # sdist if you want
-      };
+      # The tree minus bytecode and tool caches that local Python runs leave
+      # behind (ruff also writes .ruff_cache next to nested ruff.toml files).
+      withoutPythonCaches = lib.fileset.fromSource (
+        lib.sources.cleanSourceWith {
+          src = ./.;
+          filter =
+            path: _type:
+            !(lib.elem (baseNameOf path) [
+              "__pycache__"
+              ".pytest_cache"
+              ".ruff_cache"
+              ".mypy_cache"
+            ])
+            && !(lib.hasSuffix ".pyc" path);
+        }
+      );
 
-      pyprojectOverrides = final: prev: {
-        # NOTE: If a package complains about a missing dependency (such
-        # as setuptools), you can add it here.
-        untokenize = prev.untokenize.overrideAttrs (old: {
-          buildInputs = (old.buildInputs or []) ++ final.resolveBuildSystem {setuptools = [];};
-        });
-      };
+      perSystem =
+        system:
+        let
+          workspace = uv2nix.lib.workspace.loadWorkspace { workspaceRoot = ./.; };
 
-      pkgs = import nixpkgs {
-        inherit system;
-      };
-
-      python = pkgs.python312;
-
-      # Construct package set
-      pythonSet =
-        # Use base package set from pyproject.nix builders
-        (pkgs.callPackage pyproject-nix.build.packages {
-          inherit python;
-        }).overrideScope
-        (
-          lib.composeManyExtensions [
-            pyproject-build-systems.overlays.default
-            overlay
-            pyprojectOverrides
-          ]
-        );
-      inherit (pkgs.callPackages pyproject-nix.build.util { }) mkApplication;
-    in {
-
-      packages.default = mkApplication {
-        venv = pythonSet.mkVirtualEnv "mistralai-vibe-env" workspace.deps.default;
-        package = pythonSet.mistral-vibe;
-      };
-
-      apps = {
-        default = {
-          type = "app";
-          program = "${self.packages.${system}.default}/bin/vibe";
-        };
-      };
-
-      devShells = {
-        default = let
-          editableOverlay = workspace.mkEditablePyprojectOverlay {
-            root = "$REPO_ROOT";
+          overlay = workspace.mkPyprojectOverlay {
+            sourcePreference = "wheel"; # sdist if you want
           };
 
-          editablePythonSet = pythonSet.overrideScope (
-            lib.composeManyExtensions [
-              editableOverlay
+          pyprojectOverrides = final: prev: {
+            # NOTE: If a package complains about a missing dependency (such
+            # as setuptools), you can add it here.
+            untokenize = prev.untokenize.overrideAttrs (old: {
+              buildInputs = (old.buildInputs or [ ]) ++ final.resolveBuildSystem { setuptools = [ ]; };
+            });
 
-              # Apply fixups for building an editable package of your workspace packages
-              (final: prev: {
-                mistralai-vibe = prev.mistralai-vibe.overrideAttrs (old: {
-                  # It's a good idea to filter the sources going into an editable build
-                  # so the editable package doesn't have to be rebuilt on every change.
-                  src = lib.fileset.toSource {
-                    root = old.src;
-                    fileset = lib.fileset.unions [
-                      (old.src + "/pyproject.toml")
-                      (old.src + "/README.md")
-                    ];
-                  };
+            # cryptography 50.0.0 has no macOS x86_64 wheel. Source builds need
+            # the Python backend and vendored Rust crates inside the Nix sandbox.
+            cryptography = prev.cryptography.overrideAttrs (
+              old:
+              lib.optionalAttrs (old.passthru.format == "pyproject") {
+                cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+                  inherit (old) pname version src;
+                  # Matches cryptography 50.0.0 in nixpkgs (a7e1a760ab81).
+                  hash = "sha256-heJGLh0MgDPpksWyPLaIkZ5gVEWx8UnaJKv4GvclpmI=";
+                };
+                buildInputs =
+                  (old.buildInputs or [ ])
+                  ++ [ pkgs.openssl ]
+                  ++ lib.optionals pkgs.stdenv.isDarwin [ pkgs.libiconv ];
+                nativeBuildInputs =
+                  (old.nativeBuildInputs or [ ])
+                  ++ final.resolveBuildSystem {
+                    maturin = [ ];
+                    cffi = [ ];
+                    setuptools = [ ];
+                  }
+                  ++ [
+                    pkgs.rustPlatform.cargoSetupHook
+                    pkgs.cargo
+                    pkgs.rustc
+                    pkgs.pkg-config
+                  ];
+              }
+            );
 
-                  nativeBuildInputs =
-                    old.nativeBuildInputs
-                    ++ final.resolveBuildSystem {
-                      editables = [];
+            # The wheel override applies only where the Harness lockfile at
+            # harness/core is reachable: trees that ship it build the wheel;
+            # trees that do not never build it, so the derivation stays plain
+            # there and keeps evaluating.
+            mistral-vibe =
+              if builtins.pathExists ./harness/core/Cargo.lock then
+                prev.mistral-vibe.overrideAttrs (
+                  old:
+                  let
+                    # The v8 crate's build script downloads a prebuilt librusty_v8
+                    # archive at build time; the sandbox has no network, so fetch it
+                    # here and point RUSTY_V8_ARCHIVE at it (the script accepts local
+                    # paths). Hashes match v8 150.3.0, pinned by harness/core's
+                    # Cargo.lock; suffixes match the features the Harness enables.
+                    # Upstream release assets, so unlike the crate vendoring below
+                    # they cannot be derived from the lock; a pin check catches
+                    # the bump that makes them stale.
+                    rustyV8Archive = pkgs.fetchurl {
+                      url = "https://github.com/denoland/rusty_v8/releases/download/v150.3.0/librusty_v8_simdutf_release_${pkgs.stdenv.hostPlatform.rust.rustcTarget}.a.gz";
+                      hash =
+                        {
+                          "x86_64-linux" = "sha256-2wl+bvpVp14L3oayuhl5g9CpG76DAfRVDEkNecB9evA=";
+                          "aarch64-linux" = "sha256-WR80+czoM+IAeYduyM4gsR0Y6jGk9BL0u6EQGB3ZdrY=";
+                          "x86_64-darwin" = "sha256-fs7glB27R0inqhS4+PufsVLUhj09NCLOshbnRBc+5mI=";
+                          "aarch64-darwin" = "sha256-UfWFt8OGkwYSn/1haKjwuJqNSjhw3LBwlgwrT9fQSCU=";
+                        }
+                        .${pkgs.stdenv.hostPlatform.system}
+                          or (throw "librusty_v8 prebuilt archive not pinned for ${pkgs.stdenv.hostPlatform.system}");
                     };
-                });
-              })
-            ]
-          );
+                    # Vendored Harness crates for the Maturin build, derived from
+                    # the lockfile so harness dependency bumps never need a vendor
+                    # hash update here. crane's layout does not satisfy
+                    # cargoSetupHook's contract (it ships no lockfile to diff and
+                    # puts config.toml at the output root), so wire cargo at the
+                    # config level instead: cargo reads .cargo/config.toml from
+                    # the source root upward, which also covers the harness/core
+                    # workspace maturin builds from.
+                    harnessVendor = craneLib.vendorCargoDeps {
+                      cargoLock = ./harness/core/Cargo.lock;
+                    };
+                  in
+                  {
+                    # Only what the wheel build reads, so edits to tests, docs or
+                    # the flake itself do not rebuild the package. vibe-rs comes
+                    # from rustCli, which has its own source; vibe/whats_new stays,
+                    # since Maturin ships everything under vibe/ in the wheel.
+                    # Local cargo output under harness/core is left out, as the
+                    # backend's staging step does, and so are local Python caches.
+                    src = lib.fileset.toSource {
+                      root = ./.;
+                      fileset = lib.fileset.intersection withoutPythonCaches (
+                        lib.fileset.difference
+                          (lib.fileset.unions [
+                            ./pyproject.toml
+                            ./README.md
+                            ./LICENSE
+                            ./build_backend
+                            ./harness
+                            ./vibe
+                          ])
+                          (
+                            lib.fileset.unions [
+                              ./vibe/cli-rust
+                              (lib.fileset.maybeMissing ./vibe/_bin)
+                              (lib.fileset.maybeMissing ./harness/core/target)
+                              (lib.fileset.maybeMissing ./harness/core/.cache)
+                            ]
+                          )
+                      );
+                    };
+                    env = (old.env or { }) // {
+                      VIBE_SKIP_RUST_TUI = "1";
+                      # Without cargo on PATH, Maturin would try to rustup-install a
+                      # toolchain; fail with a clear error instead.
+                      MATURIN_NO_INSTALL_RUST = "1";
+                      RUSTY_V8_ARCHIVE = "${rustyV8Archive}";
+                    };
+                    # The Rust CLI is built by crane above and lands in the wheel
+                    # through its vibe/_bin include; VIBE_SKIP_RUST_TUI keeps the
+                    # backend from trying to rebuild it inside this derivation.
+                    prePatch = (old.prePatch or "") + ''
+                      mkdir -p vibe/_bin
+                      cp ${rustCli}/bin/vibe-rs vibe/_bin/vibe-rs
+                    '';
 
-          virtualenv = editablePythonSet.mkVirtualEnv "mistralai-vibe-dev-env" workspace.deps.all;
-        in
-          pkgs.mkShell {
-            packages = [
-              virtualenv
-              pkgs.uv
-            ];
-
-            env = {
-              # Don't create venv using uv
-              UV_NO_SYNC = "1";
-
-              # Force uv to use Python interpreter from venv
-              UV_PYTHON = "${virtualenv}/bin/python";
-
-              # Prevent uv from downloading managed Python's
-              UV_PYTHON_DOWNLOADS = "never";
-            };
-
-            shellHook = ''
-              # Undo dependency propagation by nixpkgs.
-              unset PYTHONPATH
-
-              # Get repository root using git. This is expanded at runtime by the editable `.pth` machinery.
-              export REPO_ROOT=$(git rev-parse --show-toplevel)
-            '';
+                    # Nix builds the workspace tree, not an unpacked sdist, but the
+                    # backend's sdist path is the right one in the sandbox: it skips
+                    # the manylinux compatibility tag and zig cross-compilation,
+                    # which only matter for portable wheels uploaded out of Nix.
+                    # The backend detects an sdist by a PKG-INFO at the project
+                    # root.
+                    postPatch = (old.postPatch or "") + "\ntouch PKG-INFO";
+                    preBuild = (old.preBuild or "") + ''
+                      mkdir -p .cargo
+                      cat ${harnessVendor}/config.toml >> .cargo/config.toml
+                    '';
+                    nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [
+                      pkgs.cargo
+                      pkgs.rustc
+                    ];
+                  }
+                )
+              else
+                prev.mistral-vibe;
           };
+
+          pkgs = nixpkgs.legacyPackages.${system};
+
+          python = pkgs.python314;
+
+          # Crane builds the Rust CLI (vibe-rs) as its own derivation, so editing
+          # its sources does not rebuild the Python wheel, and vice versa.
+          craneLib = crane.mkLib pkgs;
+
+          rustCli = craneLib.buildPackage {
+            # build.rs embeds the release notes from ../whats_new, above the
+            # crate. Keep both directories, build from the crate, and leave out
+            # target/ so a local cargo build does not change the source.
+            src = lib.fileset.toSource {
+              root = ./vibe;
+              fileset = lib.fileset.difference (lib.fileset.unions [
+                ./vibe/cli-rust
+                ./vibe/whats_new
+              ]) (lib.fileset.maybeMissing ./vibe/cli-rust/target);
+            };
+            # toSource names the unpacked directory "source". Building from
+            # cli-rust inside it keeps whats_new at ../whats_new, where build.rs
+            # expects it.
+            sourceRoot = "source/cli-rust";
+            # crane reads the crate metadata at evaluation time, so it cannot
+            # come from a derivation without import-from-derivation.
+            cargoToml = ./vibe/cli-rust/Cargo.toml;
+            cargoLock = ./vibe/cli-rust/Cargo.lock;
+            cargoVendorDir = craneLib.vendorCargoDeps {
+              cargoLock = ./vibe/cli-rust/Cargo.lock;
+            };
+            # The default `voice` feature pulls in cpal: its Linux backend links
+            # ALSA via pkg-config, and its macOS backend (coreaudio-sys) runs
+            # bindgen, which needs libclang. The darwin stdenv SDK resolves the
+            # CoreAudio framework on its own.
+            buildInputs = lib.optionals pkgs.stdenv.isLinux [ pkgs.alsa-lib ];
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.libclang
+            ];
+            env = {
+              LIBCLANG_PATH = "${lib.getLib pkgs.libclang}/lib";
+            };
+            cargoExtraArgs = "--locked";
+            # The wheel only bundles the binary; tests run in CI, not here.
+            doCheck = false;
+          };
+
+          # Construct package set
+          pythonSet =
+            # Use base package set from pyproject.nix builders
+            (pkgs.callPackage pyproject-nix.build.packages {
+              inherit python;
+            }).overrideScope
+              (
+                lib.composeManyExtensions [
+                  pyproject-build-systems.overlays.default
+                  overlay
+                  pyprojectOverrides
+                ]
+              );
+          inherit (pkgs.callPackages pyproject-nix.build.util { }) mkApplication;
+
+          mistral-vibe = mkApplication {
+            venv = pythonSet.mkVirtualEnv "mistralai-vibe-env" workspace.deps.default;
+            package = pythonSet.mistral-vibe.overrideAttrs (old: {
+              meta = (old.meta or { }) // {
+                description = "Minimal CLI coding agent by Mistral";
+                homepage = "https://github.com/mistralai/mistral-vibe";
+                license = lib.licenses.asl20;
+                mainProgram = "vibe";
+                platforms = systems;
+              };
+            });
+          };
+        in
+        {
+          packages = {
+            inherit mistral-vibe;
+            default = mistral-vibe;
+          };
+
+          checks = {
+            inherit mistral-vibe;
+            vibe-rs = rustCli;
+            version =
+              pkgs.runCommand "mistral-vibe-version-check"
+                {
+                  nativeBuildInputs = [ mistral-vibe ];
+                }
+                ''
+                  export HOME=$TMPDIR
+                  for bin in vibe vibe-acp; do
+                    $bin --version | grep -F ${lib.escapeShellArg mistral-vibe.version}
+                  done
+                  touch $out
+                '';
+          };
+
+          devShells = {
+            default =
+              let
+                editableOverlay = workspace.mkEditablePyprojectOverlay {
+                  root = "$REPO_ROOT";
+                };
+
+                editablePythonSet = pythonSet.overrideScope (
+                  lib.composeManyExtensions [
+                    editableOverlay
+
+                    # Apply fixups for building an editable package of your workspace packages
+                    (final: prev: {
+                      # Maturin's editable build writes the Harness extension into
+                      # the sandbox's source tree, which Nix throws away. Build vibe
+                      # as pure Python instead (VIBE_EXTERNAL_HARNESS) and take the
+                      # compiled Harness from the regular package.
+                      mistral-vibe = prev.mistral-vibe.overrideAttrs (old: {
+                        # It's a good idea to filter the sources going into an editable build
+                        # so the editable package doesn't have to be rebuilt on every change.
+                        src = lib.fileset.toSource {
+                          root = ./.;
+                          fileset = lib.fileset.unions [
+                            ./pyproject.toml
+                            ./README.md
+                            ./LICENSE
+                            ./build_backend
+                            ./vibe/__init__.py
+                          ];
+                        };
+
+                        env = {
+                          VIBE_EXTERNAL_HARNESS = "1";
+                        };
+                        prePatch = "";
+                        postPatch = "";
+                        # pyproject.nix's editable builder ignores backend-path.
+                        preBuild = ''
+                          export PYTHONPATH="$PWD/build_backend''${PYTHONPATH:+:$PYTHONPATH}"
+                        '';
+                        nativeBuildInputs = old.nativeBuildInputs ++ final.resolveBuildSystem { uv-build = [ ]; };
+
+                        postInstall = (old.postInstall or "") + ''
+                          cp -r ${pythonSet.mistral-vibe}/${python.sitePackages}/mistralai_vibe_local_harness \
+                            $out/${python.sitePackages}/
+                        '';
+                      });
+                    })
+                  ]
+                );
+
+                virtualenv = editablePythonSet.mkVirtualEnv "mistralai-vibe-dev-env" workspace.deps.all;
+              in
+              pkgs.mkShell {
+                packages = [
+                  virtualenv
+                  pkgs.uv
+                  # The shellHook resolves REPO_ROOT with git.
+                  pkgs.gitMinimal
+                  # `vibe` builds vibe-rs from the checkout on first run, and
+                  # the Makefile targets build and test it with cargo.
+                  pkgs.cargo
+                  pkgs.rustc
+                  pkgs.clippy
+                  pkgs.rustfmt
+                  pkgs.cargo-nextest
+                  # Same native inputs as rustCli.
+                  pkgs.pkg-config
+                  pkgs.libclang
+                ]
+                ++ lib.optionals pkgs.stdenv.isLinux [
+                  pkgs.alsa-lib
+                ];
+
+                env = {
+                  inherit (rustCli) LIBCLANG_PATH;
+                  # Don't create venv using uv
+                  UV_NO_SYNC = "1";
+
+                  # Force uv to use Python interpreter from venv
+                  UV_PYTHON = "${virtualenv}/bin/python";
+
+                  # Prevent uv from downloading managed Python's
+                  UV_PYTHON_DOWNLOADS = "never";
+                };
+
+                shellHook = ''
+                  # Undo dependency propagation by nixpkgs.
+                  unset PYTHONPATH
+
+                  # Get repository root using git. This is expanded at runtime by the editable `.pth` machinery.
+                  export REPO_ROOT=$(git rev-parse --show-toplevel)
+                '';
+              };
+          };
+        };
+
+      eachSystem = f: lib.genAttrs systems (system: f (perSystem system));
+    in
+    {
+      packages = eachSystem (s: s.packages);
+      checks = eachSystem (s: s.checks // { devShell = s.devShells.default; });
+      devShells = eachSystem (s: s.devShells);
+
+      overlays.default = _final: prev: {
+        mistral-vibe =
+          let
+            inherit (prev.stdenv.hostPlatform) system;
+          in
+          self.packages.${system}.mistral-vibe
+            or (throw "The mistral-vibe overlay supports ${lib.concatStringsSep ", " systems}, not ${system}");
       };
-    });
+    };
 }

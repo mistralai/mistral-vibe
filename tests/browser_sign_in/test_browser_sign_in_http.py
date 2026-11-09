@@ -6,15 +6,15 @@ from datetime import UTC, datetime, timedelta
 import logging
 from urllib.parse import urlencode
 
-import httpx
+import httpx2
 import pytest
 
-from vibe.core.utils.http import VibeAsyncHTTPClient
 from vibe.setup.auth import (
     BrowserSignInError,
     BrowserSignInErrorCode,
     HttpBrowserSignInGateway,
 )
+from vibe.utils.http import VibeAsyncHTTPClient
 
 AUTH_ORIGIN = "https://console.mistral.ai"
 AUTH_BROWSER_BASE_URL = "https://console.mistral.ai"
@@ -52,17 +52,21 @@ def build_poll_url(
 
 @asynccontextmanager
 async def build_gateway(
-    handler: Callable[[httpx.Request], httpx.Response],
+    handler: Callable[[httpx2.Request], httpx2.Response],
     *,
     origin: str = AUTH_ORIGIN,
     browser_base_url: str = AUTH_BROWSER_BASE_URL,
     api_base_url: str = AUTH_API_BASE_URL,
+    allow_origin_rewrite: bool = False,
 ):
     async with VibeAsyncHTTPClient(
-        transport=httpx.MockTransport(handler), base_url=origin
+        transport=httpx2.MockTransport(handler), base_url=origin
     ) as client:
         yield HttpBrowserSignInGateway(
-            browser_base_url=browser_base_url, api_base_url=api_base_url, client=client
+            browser_base_url=browser_base_url,
+            api_base_url=api_base_url,
+            allow_origin_rewrite=allow_origin_rewrite,
+            client=client,
         )
 
 
@@ -71,11 +75,11 @@ async def test_http_api_creates_process_with_pkce_payload() -> None:
     now = datetime(2026, 3, 16, tzinfo=UTC)
     captured_body: str | None = None
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal captured_body
         assert request.url.path == "/api/vibe/sign-in"
         captured_body = request.content.decode("utf-8")
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -98,9 +102,9 @@ async def test_http_api_creates_process_with_pkce_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_http_api_polls_process_state() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/api/vibe/sign-in/poll/poll-token-1"
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"status": "completed", "exchange_token": "exchange-1"}
         )
 
@@ -113,9 +117,9 @@ async def test_http_api_polls_process_state() -> None:
 
 @pytest.mark.asyncio
 async def test_http_api_maps_410_poll_response_to_expired_status() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/api/vibe/sign-in/poll/poll-token-1"
-        return httpx.Response(410)
+        return httpx2.Response(410)
 
     async with build_gateway(handler) as gateway:
         result = await gateway.poll(build_poll_url())
@@ -128,11 +132,11 @@ async def test_http_api_maps_410_poll_response_to_expired_status() -> None:
 async def test_http_api_exchanges_token_for_api_key() -> None:
     captured_body: str | None = None
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal captured_body
         assert request.url.path == "/api/vibe/sign-in/process-1/exchange"
         captured_body = request.content.decode("utf-8")
-        return httpx.Response(200, json={"api_key": "sk-browser-key"})
+        return httpx2.Response(200, json={"api_key": "sk-browser-key"})
 
     async with build_gateway(handler) as gateway:
         api_key = await gateway.exchange("process-1", "exchange-1", "verifier-1")
@@ -150,9 +154,9 @@ async def test_http_api_logs_exchange_failure_status_and_detail_without_secrets(
     exchange_token = "exchange-token-secret"
     code_verifier = "verifier-secret"
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/api/vibe/sign-in/process-1/exchange"
-        return httpx.Response(400, json={"detail": "Invalid exchange token."})
+        return httpx2.Response(400, json={"detail": "Invalid exchange token."})
 
     async with build_gateway(handler) as gateway:
         with caplog.at_level(logging.WARNING, logger="vibe"):
@@ -166,9 +170,42 @@ async def test_http_api_logs_exchange_failure_status_and_detail_without_secrets(
 
 
 @pytest.mark.asyncio
+async def test_http_api_explains_workspace_api_key_creation_denied_on_exchange() -> (
+    None
+):
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            403, json={"error_code": 9004, "detail": "forbidden upstream"}
+        )
+
+    async with build_gateway(handler) as gateway:
+        with pytest.raises(BrowserSignInError, match="select another workspace") as err:
+            await gateway.exchange("process-1", "exchange-1", "verifier-1")
+
+    assert err.value.code == BrowserSignInErrorCode.EXCHANGE_FAILED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx2.Response(403, json={"detail": "forbidden"}),
+        httpx2.Response(403, json={"error_code": 9015, "detail": "forbidden"}),
+        httpx2.Response(500, json={"error_code": 9004, "detail": "boom"}),
+    ],
+)
+async def test_http_api_keeps_generic_exchange_error_for_other_failures(
+    response: httpx2.Response,
+) -> None:
+    async with build_gateway(lambda _request: response) as gateway:
+        with pytest.raises(BrowserSignInError, match="exchange browser sign-in"):
+            await gateway.exchange("process-1", "exchange-1", "verifier-1")
+
+
+@pytest.mark.asyncio
 async def test_http_api_translates_transport_errors() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("boom", request=request)
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("boom", request=request)
 
     async with build_gateway(handler) as gateway:
         with pytest.raises(BrowserSignInError, match="start browser sign-in") as err:
@@ -179,8 +216,8 @@ async def test_http_api_translates_transport_errors() -> None:
 
 @pytest.mark.asyncio
 async def test_http_api_assigns_poll_failed_code_on_transport_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("boom", request=request)
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("boom", request=request)
 
     async with build_gateway(handler) as gateway:
         with pytest.raises(
@@ -193,7 +230,7 @@ async def test_http_api_assigns_poll_failed_code_on_transport_error() -> None:
 
 @pytest.mark.asyncio
 async def test_http_api_assigns_poll_failed_code_on_invalid_poll_url() -> None:
-    async with build_gateway(lambda _: httpx.Response(200)) as gateway:
+    async with build_gateway(lambda _: httpx2.Response(200)) as gateway:
         with pytest.raises(
             BrowserSignInError, match="status could not be retrieved"
         ) as err:
@@ -204,8 +241,8 @@ async def test_http_api_assigns_poll_failed_code_on_invalid_poll_url() -> None:
 
 @pytest.mark.asyncio
 async def test_http_api_translates_non_json_start_response() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="<html>not json</html>")
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="<html>not json</html>")
 
     async with build_gateway(handler) as gateway:
         with pytest.raises(BrowserSignInError, match="start browser sign-in") as err:
@@ -216,8 +253,8 @@ async def test_http_api_translates_non_json_start_response() -> None:
 
 @pytest.mark.asyncio
 async def test_http_api_translates_missing_start_fields() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -237,8 +274,8 @@ async def test_http_api_translates_missing_start_fields() -> None:
 async def test_http_api_accepts_poll_url_under_configured_api_base_url() -> None:
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -263,9 +300,9 @@ async def test_http_api_accepts_backend_poll_url_under_custom_configured_api_bas
     api_base_url = "https://browser-auth.example/custom/api"
     poll_url = f"{api_base_url}/backend-owned-poll/{TEST_POLL_TOKEN}"
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/custom/api/vibe/sign-in"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -292,8 +329,8 @@ async def test_http_api_accepts_same_origin_urls_with_explicit_default_https_por
 ):
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -322,9 +359,9 @@ async def test_http_api_accepts_same_origin_urls_with_explicit_default_https_por
 async def test_http_api_accepts_poll_url_without_explicit_default_https_port_when_base_has_one() -> (
     None
 ):
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(request: httpx2.Request) -> httpx2.Response:
         assert request.url.path == "/api/vibe/sign-in/poll/poll-token-1"
-        return httpx.Response(
+        return httpx2.Response(
             200, json={"status": "completed", "exchange_token": "exchange-1"}
         )
 
@@ -343,8 +380,8 @@ async def test_http_api_accepts_poll_url_without_explicit_default_https_port_whe
 async def test_http_api_accepts_sign_in_url_under_configured_browser_base_url() -> None:
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -364,8 +401,8 @@ async def test_http_api_accepts_sign_in_url_under_configured_browser_base_url() 
 async def test_http_api_rejects_sign_in_url_outside_browser_base_url() -> None:
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -388,8 +425,8 @@ async def test_http_api_rejects_sign_in_url_outside_browser_base_path_after_norm
 ):
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -416,8 +453,8 @@ async def test_http_api_rejects_sign_in_url_with_encoded_dot_segments_outside_br
 ):
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -442,8 +479,8 @@ async def test_http_api_rejects_sign_in_url_with_encoded_dot_segments_outside_br
 async def test_http_api_rejects_poll_url_outside_api_base_url() -> None:
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -466,8 +503,8 @@ async def test_http_api_rejects_returned_poll_url_outside_api_base_path_after_no
 ):
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -499,8 +536,8 @@ async def test_http_api_rejects_returned_poll_url_with_encoded_dot_segments_outs
 ):
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -529,7 +566,7 @@ async def test_http_api_rejects_returned_poll_url_with_encoded_dot_segments_outs
 @pytest.mark.asyncio
 async def test_http_api_rejects_poll_url_outside_api_base_path() -> None:
     async with build_gateway(
-        lambda _: httpx.Response(200, json={"status": "completed"}),
+        lambda _: httpx2.Response(200, json={"status": "completed"}),
         origin="https://console.mistral.ai",
     ) as gateway:
         with pytest.raises(
@@ -547,7 +584,7 @@ async def test_http_api_rejects_poll_url_outside_api_base_path_after_normalizati
     None
 ):
     async with build_gateway(
-        lambda _: httpx.Response(200, json={"status": "completed"}),
+        lambda _: httpx2.Response(200, json={"status": "completed"}),
         origin="https://console.mistral.ai",
     ) as gateway:
         with pytest.raises(
@@ -564,8 +601,8 @@ async def test_http_api_rejects_poll_url_outside_api_base_path_after_normalizati
 async def test_http_api_translates_invalid_returned_poll_url_port() -> None:
     now = datetime(2026, 3, 16, tzinfo=UTC)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -584,7 +621,7 @@ async def test_http_api_translates_invalid_returned_poll_url_port() -> None:
 
 @pytest.mark.asyncio
 async def test_http_api_assigns_poll_failed_code_on_invalid_poll_url_port() -> None:
-    async with build_gateway(lambda _: httpx.Response(200)) as gateway:
+    async with build_gateway(lambda _: httpx2.Response(200)) as gateway:
         with pytest.raises(
             BrowserSignInError, match="status could not be retrieved"
         ) as err:
@@ -597,8 +634,8 @@ async def test_http_api_assigns_poll_failed_code_on_invalid_poll_url_port() -> N
 
 @pytest.mark.asyncio
 async def test_http_api_translates_non_json_poll_response() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="<html>not json</html>")
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="<html>not json</html>")
 
     async with build_gateway(handler) as gateway:
         with pytest.raises(
@@ -611,8 +648,8 @@ async def test_http_api_translates_non_json_poll_response() -> None:
 
 @pytest.mark.asyncio
 async def test_http_api_translates_non_json_exchange_response() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text="<html>not json</html>")
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, text="<html>not json</html>")
 
     async with build_gateway(handler) as gateway:
         with pytest.raises(BrowserSignInError, match="exchange browser sign-in") as err:
@@ -630,8 +667,8 @@ async def test_http_api_does_not_log_sign_in_or_poll_secrets_on_start_validation
     state = "state-secret"
     poll_token = "poll-token-secret"
 
-    def handler(_: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    def handler(_: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "process_id": TEST_PROCESS_ID,
@@ -655,6 +692,156 @@ async def test_http_api_does_not_log_sign_in_or_poll_secrets_on_start_validation
     assert poll_token not in caplog.text
 
 
+# Split-horizon deployment (e.g. a reverse proxy / connector): the browser
+# reaches the console directly while the CLI can only reach a connector host.
+SPLIT_CONSOLE = "https://console.example.com"
+SPLIT_CONNECTOR = "https://connector.example:443"
+SPLIT_CONNECTOR_API = "https://connector.example:443/api"
+
+
+@pytest.mark.asyncio
+async def test_http_api_rewrites_poll_url_origin_to_api_base_when_enabled() -> None:
+    now = datetime(2026, 3, 16, tzinfo=UTC)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "process_id": TEST_PROCESS_ID,
+                "sign_in_url": build_sign_in_url(base_url=SPLIT_CONSOLE),
+                "poll_url": build_poll_url(api_base_url=f"{SPLIT_CONSOLE}/api"),
+                "expires_at": _iso(now + timedelta(minutes=5)),
+            },
+        )
+
+    async with build_gateway(
+        handler,
+        origin=SPLIT_CONNECTOR,
+        browser_base_url=SPLIT_CONSOLE,
+        api_base_url=SPLIT_CONNECTOR_API,
+        allow_origin_rewrite=True,
+    ) as gateway:
+        process = await gateway.create_process("challenge-123")
+
+    # Browser keeps the console URL; CLI polls via the connector host.
+    assert process.sign_in_url == build_sign_in_url(base_url=SPLIT_CONSOLE)
+    assert process.poll_url == build_poll_url(api_base_url=SPLIT_CONNECTOR_API)
+
+
+@pytest.mark.asyncio
+async def test_http_api_rewrites_sign_in_url_origin_to_browser_base_when_enabled() -> (
+    None
+):
+    now = datetime(2026, 3, 16, tzinfo=UTC)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "process_id": TEST_PROCESS_ID,
+                "sign_in_url": build_sign_in_url(base_url="https://internal.private"),
+                "poll_url": build_poll_url(api_base_url="https://internal.private/api"),
+                "expires_at": _iso(now + timedelta(minutes=5)),
+            },
+        )
+
+    async with build_gateway(
+        handler,
+        origin=SPLIT_CONNECTOR,
+        browser_base_url=SPLIT_CONSOLE,
+        api_base_url=SPLIT_CONNECTOR_API,
+        allow_origin_rewrite=True,
+    ) as gateway:
+        process = await gateway.create_process("challenge-123")
+
+    assert process.sign_in_url == build_sign_in_url(base_url=SPLIT_CONSOLE)
+    assert process.poll_url == build_poll_url(api_base_url=SPLIT_CONNECTOR_API)
+
+
+@pytest.mark.asyncio
+async def test_http_api_poll_rewrites_origin_to_api_base_when_enabled() -> None:
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen_hosts.append(request.url.host)
+        assert request.url.path == "/api/vibe/sign-in/poll/poll-token-1"
+        return httpx2.Response(
+            200, json={"status": "completed", "exchange_token": "exchange-1"}
+        )
+
+    async with build_gateway(
+        handler,
+        origin=SPLIT_CONNECTOR,
+        browser_base_url=SPLIT_CONSOLE,
+        api_base_url=SPLIT_CONNECTOR_API,
+        allow_origin_rewrite=True,
+    ) as gateway:
+        result = await gateway.poll(build_poll_url(api_base_url=f"{SPLIT_CONSOLE}/api"))
+
+    assert result.status == "completed"
+    assert seen_hosts == ["connector.example"]
+
+
+@pytest.mark.asyncio
+async def test_http_api_rejects_path_traversal_even_when_origin_rewrite_enabled() -> (
+    None
+):
+    now = datetime(2026, 3, 16, tzinfo=UTC)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "process_id": TEST_PROCESS_ID,
+                "sign_in_url": build_sign_in_url(base_url=SPLIT_CONSOLE),
+                "poll_url": build_poll_url(api_base_url=f"{SPLIT_CONSOLE}/api/.."),
+                "expires_at": _iso(now + timedelta(minutes=5)),
+            },
+        )
+
+    async with build_gateway(
+        handler,
+        origin=SPLIT_CONNECTOR,
+        browser_base_url=SPLIT_CONSOLE,
+        api_base_url=SPLIT_CONNECTOR_API,
+        allow_origin_rewrite=True,
+    ) as gateway:
+        with pytest.raises(BrowserSignInError, match="start browser sign-in") as err:
+            await gateway.create_process("challenge-123")
+
+    assert err.value.code is BrowserSignInErrorCode.START_FAILED
+
+
+@pytest.mark.asyncio
+async def test_http_api_rejects_invalid_returned_poll_url_port_even_when_rewrite_enabled() -> (
+    None
+):
+    now = datetime(2026, 3, 16, tzinfo=UTC)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            json={
+                "process_id": TEST_PROCESS_ID,
+                "sign_in_url": build_sign_in_url(base_url=SPLIT_CONSOLE),
+                "poll_url": f"{SPLIT_CONSOLE}:99999/api/vibe/sign-in/poll/poll-token-1",
+                "expires_at": _iso(now + timedelta(minutes=5)),
+            },
+        )
+
+    async with build_gateway(
+        handler,
+        origin=SPLIT_CONNECTOR,
+        browser_base_url=SPLIT_CONSOLE,
+        api_base_url=SPLIT_CONNECTOR_API,
+        allow_origin_rewrite=True,
+    ) as gateway:
+        with pytest.raises(BrowserSignInError, match="start browser sign-in") as err:
+            await gateway.create_process("challenge-123")
+
+    assert err.value.code is BrowserSignInErrorCode.START_FAILED
+
+
 @pytest.mark.asyncio
 async def test_http_api_does_not_log_poll_secret_on_poll_url_validation_failure(
     caplog: pytest.LogCaptureFixture,
@@ -662,7 +849,7 @@ async def test_http_api_does_not_log_poll_secret_on_poll_url_validation_failure(
     poll_token = "poll-token-secret"
 
     async with build_gateway(
-        lambda _: httpx.Response(200, json={"status": "completed"}),
+        lambda _: httpx2.Response(200, json={"status": "completed"}),
         origin="https://console.mistral.ai",
     ) as gateway:
         with caplog.at_level(logging.WARNING, logger="vibe"):

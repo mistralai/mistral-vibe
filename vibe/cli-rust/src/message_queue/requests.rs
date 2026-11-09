@@ -1,0 +1,242 @@
+//! Client-to-server prompt-queue requests: enqueue, replace and remove.
+
+use std::sync::Arc;
+
+use serde_json::json;
+
+use super::prompt::{entry, prepare, request};
+use super::{drop_item, merge_edit_images, replacement, QueueEvent, QueueItem};
+use crate::app::{App, Status};
+use crate::commands::submission::new_message_id;
+use crate::server::{method, Client, ImageAttachment, TurnEnqueueParams, TurnQueueRemoveParams};
+use crate::transcript::local;
+
+/// Mount a prompt as queued, then let the server decide when it becomes a turn.
+pub fn enqueue_prompt(app: &mut App, client: &Arc<Client>, text: String) {
+    enqueue_prompt_with_images(app, client, text, Vec::new());
+}
+
+pub(super) fn enqueue_prompt_with_images(
+    app: &mut App,
+    client: &Arc<Client>,
+    text: String,
+    images: Vec<ImageAttachment>,
+) {
+    let images = app.chat_input.pasted_images.attach(&text, images);
+    let message_id = new_message_id();
+    // Idle with nothing queued: the server promotes this prompt straight away.
+    let optimistic =
+        app.queue.is_empty() && matches!(app.session.status, Status::Ready) && !app.compacting;
+    if images.is_empty() {
+        match optimistic {
+            true => local::add_message(&mut app.view.transcript, &message_id, "user", &text),
+            false => local::add_pending_prompt(&mut app.view.transcript, &message_id, &text),
+        }
+    } else {
+        local::add_prompt(
+            &mut app.view.transcript,
+            &message_id,
+            &text,
+            &images,
+            !optimistic,
+        );
+    }
+    if let Some(display) = app.chat_input.collapsed_pastes.display(&text) {
+        app.view.transcript.patch_local(&message_id, |entry| {
+            entry["userDisplayContent"] = display;
+        });
+    }
+    let merge_target = (!optimistic)
+        .then(|| app.queue.items.first())
+        .flatten()
+        .filter(|item| {
+            !app.queue.is_consumed(&item.server_message_id)
+                || app.queue.replacement_in_flight(&item.server_message_id)
+        })
+        // A prompt never joins a turn the user already interrupted.
+        .filter(|_| !super::interrupt_pending(app))
+        .map(|item| (item.server_message_id.clone(), item.queue_item_id.clone()));
+    let (server_message_id, queue_item_id) = merge_target
+        .clone()
+        .unwrap_or_else(|| (message_id.clone(), None));
+    app.queue.items.push(QueueItem {
+        queue_item_id,
+        message_id: message_id.clone(),
+        server_message_id: server_message_id.clone(),
+        text: text.clone(),
+        images,
+        mentions: None,
+        // Unsent until the enqueue or replace containing this content lands.
+        sent: false,
+        ever_sent: false,
+        revision: 0,
+        replacing: false,
+    });
+    app.queue.revise_group(&server_message_id);
+    match merge_target {
+        Some((_, Some(_))) => replacement::replace_group(app, client, &server_message_id),
+        Some((_, None)) => {}
+        None => send(app, client, message_id, text),
+    }
+}
+
+/// Send prompts held until the session is ready.
+pub fn flush_pending(app: &mut App, client: &Arc<Client>) {
+    let unsent: Vec<(String, String)> = app
+        .queue
+        .items
+        .iter()
+        .filter(|item| !item.sent && item.message_id == item.server_message_id)
+        .map(|item| (item.message_id.clone(), item.text.clone()))
+        .collect();
+    for (message_id, text) in unsent {
+        send(app, client, message_id, text);
+    }
+}
+
+/// Release a queue the server paused.
+pub fn resume(app: &mut App, client: &Arc<Client>) {
+    if !app.queue.paused {
+        return;
+    }
+    app.queue.paused = false;
+    let Some(session_id) = app.session.session_id.clone() else {
+        return;
+    };
+    let client = client.clone();
+    crate::work::spawn(async move {
+        let _ = request(
+            &client,
+            method::TURN_QUEUE_RESUME,
+            json!({"sessionId": session_id}),
+        )
+        .await;
+    });
+}
+
+/// Remove the highlighted prompt.
+pub fn remove_selected(app: &mut App, client: &Arc<Client>) {
+    if let Some(index) = app.queue.selected_position() {
+        remove_at(app, client, index);
+    }
+}
+
+/// Whether Ctrl+C removes a prompt shown as queued; the loading hint shares it.
+pub fn has_removable(app: &App) -> bool {
+    app.queue
+        .items
+        .last()
+        .is_some_and(|item| app.view.transcript.is_pending(&item.message_id))
+}
+
+/// Remove the newest queued prompt, the Ctrl+C step of the quit ladder.
+pub fn pop_last(app: &mut App, client: &Arc<Client>) -> bool {
+    if !has_removable(app) {
+        return false;
+    }
+    if super::mutation_in_flight(app) {
+        return true;
+    }
+    remove_at(app, client, app.queue.len() - 1);
+    true
+}
+
+fn remove_at(app: &mut App, client: &Arc<Client>, index: usize) {
+    let item = drop_item(app, index);
+    app.view.transcript.remove(&item.message_id);
+    super::events::settle_completion(app);
+    let (Some(session_id), Some(queue_item_id)) =
+        (app.session.session_id.clone(), item.queue_item_id)
+    else {
+        return;
+    };
+    if app
+        .queue
+        .items
+        .iter()
+        .any(|remaining| remaining.server_message_id == item.server_message_id)
+    {
+        app.queue.revise_group(&item.server_message_id);
+        replacement::replace_group(app, client, &item.server_message_id);
+        return;
+    }
+    let client = client.clone();
+    crate::work::spawn(async move {
+        let params = TurnQueueRemoveParams {
+            session_id,
+            queue_item_id,
+        };
+        let _ = request(&client, method::TURN_QUEUE_REMOVE, params).await;
+    });
+}
+
+/// Prepare the prompt then enqueue it.
+fn send(app: &mut App, client: &Arc<Client>, message_id: String, text: String) {
+    let Some(session_id) = app.session.session_id.clone() else {
+        return;
+    };
+    if matches!(app.session.status, Status::Starting | Status::Failed) {
+        return;
+    }
+    app.session.incomplete_stream_retries = 0;
+    let existing_images = if let Some(index) = app.queue.position(&message_id) {
+        app.queue.items[index].mark_sent();
+        app.queue.items[index].images.clone()
+    } else {
+        Vec::new()
+    };
+    if matches!(app.session.status, Status::Ready) && !app.compacting {
+        app.set_status(Status::Generating {
+            since: crate::clock::now(),
+        });
+    }
+    let client = client.clone();
+    let pastes = app.chat_input.collapsed_pastes.clone();
+    crate::ui_event::spawn(app, async move {
+        match prepare(&client, &session_id, &text, &existing_images).await {
+            Ok(mut prepared) => {
+                merge_edit_images(&mut prepared, &existing_images, &text);
+                let images = prepared.images.clone();
+                let mentions = prepared.mentions.clone();
+                let params = TurnEnqueueParams {
+                    idempotency_key: message_id.clone(),
+                    session_id: session_id.clone(),
+                    entries: vec![entry(message_id.clone(), &prepared, &text, &pastes)],
+                };
+                match serde_json::to_value(params) {
+                    Ok(value) => match client.request(method::TURN_ENQUEUE, value).await {
+                        Ok(accepted) => match accepted
+                            .get("queueItemId")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_owned)
+                        {
+                            Some(queue_item_id) => QueueEvent::Accepted {
+                                message_id,
+                                queue_item_id,
+                                session_id,
+                                images,
+                                mentions,
+                            },
+                            None => QueueEvent::Rejected {
+                                message_id,
+                                error: None,
+                            },
+                        },
+                        Err(error) => QueueEvent::Rejected {
+                            message_id,
+                            error: Some(format!("{error:#}")),
+                        },
+                    },
+                    Err(error) => QueueEvent::Rejected {
+                        message_id,
+                        error: Some(error.to_string()),
+                    },
+                }
+            }
+            Err(error) => QueueEvent::Rejected {
+                message_id,
+                error: Some(error),
+            },
+        }
+    });
+}

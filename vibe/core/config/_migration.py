@@ -1,8 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Set as AbstractSet
 from typing import Any
 
+from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.config._defaults import SHELL_TOOLS
+from vibe.core.config._retry import retry_on_conflict
 from vibe.core.config.layer import (
     ConfigLayer,
     EmptyLayerError,
@@ -11,7 +14,10 @@ from vibe.core.config.layer import (
     UntrustedLayerError,
 )
 from vibe.core.config.layers._base import BaseTomlConfigLayer
+from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLayer
 from vibe.core.config.patch import ConfigPatch, ReplaceOperationPatch
+from vibe.core.config.types import ConcurrencyConflictError
+from vibe.core.utils import name_matches
 
 # One-shot id: syncs an existing bash allowlist up to the current default
 # read-only commands once, so users keep the ability to remove any of them.
@@ -21,49 +27,152 @@ BASH_READ_ONLY_MIGRATION = "bash_read_only_defaults_v1"
 # existing user configs keyed by the old names need their settings moved over.
 RENAMED_TOOLS: dict[str, str] = {"read": "read_file", "search_replace": "edit"}
 
+RENAMED_AGENTS: dict[str, str] = {"default": "ask"}
+
+# The value older versions wrote for an unset ``auto_compact_threshold``.
+UNSET_AUTO_COMPACT_THRESHOLD = -1
+
 # Options on the old tool that have no equivalent on the new one; dropped on migrate.
 DROPPED_TOOL_OPTIONS: dict[str, tuple[str, ...]] = {
     "edit": ("max_content_size", "create_backup")
 }
 
+# Until July 2026 Vibe's first run wrote every tool default into config.toml,
+# which left `[tools.bash] default_timeout = 300` without a maximum. A shell
+# timeout set without its maximum is now a config error, so that seeded value
+# is dropped and the shell keeps Vibe's own default and maximum. Only the user
+# config was seeded, and a 300 that another file pairs with a maximum is kept.
+SEEDED_SHELL_DEFAULT_TIMEOUT = 300
+
 
 async def migrate_config_layers(layers: Iterable[ConfigLayer[RawConfig]]) -> None:
+    loaded: list[
+        tuple[BaseTomlConfigLayer | SuppliedUserConfigLayer, dict[str, Any]]
+    ] = []
     for layer in layers:
-        if not isinstance(layer, BaseTomlConfigLayer):
+        if not isinstance(layer, (BaseTomlConfigLayer, SuppliedUserConfigLayer)):
             continue
 
         try:
             data = (await layer.load()).model_dump()
         except (EmptyLayerError, UntrustedLayerError):
             continue
+        loaded.append((layer, data))
 
-        if not migrate_config(data):
-            continue
+    # A complete entry in any file fills same-alias sparse entries at merge
+    # time; stamping identity here would shadow it in a higher-precedence file.
+    complete_aliases = {
+        key
+        for _, data in loaded
+        for key, model in _model_entries(data)
+        if key and model.get("name") and model.get("provider")
+    }
+    # Only the user file was seeded, and a 300 that any file pairs with a
+    # maximum is a real setting: the merge sets both.
+    shells_with_max = {
+        name
+        for _, data in loaded
+        for name in SHELL_TOOLS
+        if _sets_shell_maximum(data, name)
+    }
 
-        fingerprint = layer.fingerprint
-        if fingerprint is None:
-            raise LayerNotLoadedError(layer.name)
-
-        await layer.apply(
-            ConfigPatch(
-                ReplaceOperationPatch(path="", value=data),
-                fingerprint=fingerprint,
-                reason="config migration",
-            )
+    for layer, _ in loaded:
+        seeded_shells = (
+            frozenset[str](SHELL_TOOLS) - shells_with_max
+            if isinstance(layer, (UserConfigLayer, SuppliedUserConfigLayer))
+            else frozenset()
+        )
+        await _migrate_layer(
+            layer, complete_aliases=complete_aliases, seeded_shells=seeded_shells
         )
 
 
-def migrate_config(data: dict[str, Any]) -> bool:
+async def _migrate_layer(
+    layer: BaseTomlConfigLayer | SuppliedUserConfigLayer,
+    *,
+    complete_aliases: AbstractSet[str],
+    seeded_shells: AbstractSet[str],
+) -> None:
+    async def write() -> list[BaseException]:
+        try:
+            data = (await layer.load()).model_dump()
+        except (EmptyLayerError, UntrustedLayerError):
+            return []
+        if not migrate_config(
+            data, complete_aliases=complete_aliases, seeded_shells=seeded_shells
+        ):
+            return []
+        fingerprint = layer.fingerprint
+        if fingerprint is None:
+            raise LayerNotLoadedError(layer.name)
+        try:
+            await layer.apply(
+                ConfigPatch(
+                    ReplaceOperationPatch(path="", value=data),
+                    fingerprint=fingerprint,
+                    reason="config migration",
+                )
+            )
+        except ConcurrencyConflictError as exc:
+            # Another session saved since the load: the next attempt migrates what it wrote.
+            await layer.refresh()
+            return [exc]
+        return []
+
+    await retry_on_conflict(write, description=f"migrating {layer.name}")
+
+
+def migrate_config(
+    data: dict[str, Any],
+    *,
+    complete_aliases: AbstractSet[str] = frozenset(),
+    seeded_shells: AbstractSet[str] = frozenset(),
+) -> bool:
     """Apply every config migration in order, mutating ``data`` in place.
 
     Returns whether anything changed, so the caller can decide to persist.
+    ``complete_aliases`` lists model aliases that some config file defines
+    completely; completion migrations must not stamp those (see
+    ``_migrate_removed_local``). ``seeded_shells`` lists the shell tools
+    whose ``default_timeout = 300`` alone is the first run's seeded value
+    (see ``_migrate_seeded_shell_default_timeout``).
     """
     changed = False
     changed |= _migrate_bash_allowlist(data)
     changed |= _migrate_bash_read_only(data)
     changed |= _migrate_model_renames(data)
+    changed |= _migrate_removed_devstral_small(data)
+    changed |= _migrate_removed_local(data, complete_aliases=complete_aliases)
     changed |= _migrate_renamed_tools(data)
+    changed |= _migrate_renamed_agents(data)
+    changed |= _migrate_seeded_shell_default_timeout(data, seeded_shells)
+    changed |= _migrate_unset_auto_compact_threshold(data)
+    changed |= _migrate_removed_tool_paths(data)
+    changed |= _migrate_renamed_worktree_copy_on_write(data)
     return changed
+
+
+def _model_entries(data: dict[str, Any]) -> list[tuple[str | None, dict[str, Any]]]:
+    """Model entries as ``(alias key, payload)`` pairs.
+
+    Layers normalize ``models`` into an alias map on load; the list shape only
+    appears in malformed files and is keyed by each entry's own ``alias``.
+    """
+    models = data.get("models")
+    if isinstance(models, dict):
+        return [
+            (key, model) for key, model in models.items() if isinstance(model, dict)
+        ]
+    if isinstance(models, list):
+        return [
+            (model.get("alias"), model) for model in models if isinstance(model, dict)
+        ]
+    return []
+
+
+def _resolved_alias(key: str | None, model: dict[str, Any]) -> str | None:
+    """A model entry's merge key: its map key, or its own ``alias``."""
+    return key or model.get("alias")
 
 
 def _migrate_bash_allowlist(data: dict[str, Any]) -> bool:
@@ -108,16 +217,9 @@ def _migrate_bash_read_only(data: dict[str, Any]) -> bool:
 def _migrate_model_renames(data: dict[str, Any]) -> bool:
     """Rename devstral-2 to mistral-medium-3.5 and update its config."""
     changed = False
-    models = data.get("models", [])
-    model_entries: Iterable[dict[str, Any]]
-    if isinstance(models, dict):
-        model_entries = [model for model in models.values() if isinstance(model, dict)]
-    elif isinstance(models, list):
-        model_entries = [model for model in models if isinstance(model, dict)]
-    else:
-        model_entries = []
+    models = data.get("models")
 
-    for model in model_entries:
+    for _, model in _model_entries(data):
         if (
             model.get("name") == "mistral-vibe-cli-latest"
             and model.get("alias") == "devstral-2"
@@ -149,12 +251,133 @@ def _migrate_model_renames(data: dict[str, Any]) -> bool:
     return changed
 
 
+def _migrate_removed_devstral_small(data: dict[str, Any]) -> bool:
+    """Drop incomplete ``devstral-small`` overrides left behind by its removal.
+
+    Sparse entries (missing ``name``/``provider``) relied on the default layer
+    to fill in identity; without it they fail validation on load. Complete
+    entries are kept. Pins are left to the load-time fallback, which warns
+    and resolves unknown pins.
+    """
+    alias = "devstral-small"
+    name = "devstral-small-latest"
+
+    def is_devstral_small(model: dict[str, Any], *, key: str | None = None) -> bool:
+        resolved = _resolved_alias(key, model)
+        return resolved == alias or model.get("name") == name
+
+    models = data.get("models")
+    dropped = False
+    for key, model in _model_entries(data):
+        if not is_devstral_small(model, key=key) or not _is_sparse_model(model):
+            continue
+        dropped = True
+        if isinstance(models, dict):
+            del models[key]
+        elif isinstance(models, list):
+            models.remove(model)
+
+    if dropped and not models:
+        del data["models"]
+    return dropped
+
+
+def _migrate_removed_local(
+    data: dict[str, Any], *, complete_aliases: AbstractSet[str]
+) -> bool:
+    """Complete sparse ``local`` overrides into standalone user models.
+
+    The built-in is gone from the defaults but the model still runs through
+    llamacpp, so a sparse override (missing ``name``/``provider``) — which
+    would fail validation without the default layer — is completed with the
+    built-in's identity instead of dropping the user's settings. Entries keyed
+    ``local`` are skipped when another file defines that alias completely: the
+    merge fills them from that definition, and stamping a higher-precedence
+    file would shadow it. Entries under other aliases are always completed:
+    the guard covers only the removed built-in's alias, and shadowing between
+    custom aliases is out of scope for this removal.
+
+    Pins are never cleared: layers migrate one file at a time, so this file
+    cannot see whether another layer still defines ``local``. The load-time
+    fallback handles unknown pins.
+    """
+    changed = False
+    for key, model in _model_entries(data):
+        if not _is_local_entry(model, key=key):
+            continue
+        if _resolved_alias(key, model) == "local" and "local" in complete_aliases:
+            continue
+        if not model.get("name"):
+            model["name"] = "devstral"
+            changed = True
+        if not model.get("provider"):
+            model["provider"] = "llamacpp"
+            changed = True
+
+    return changed
+
+
+def _is_local_entry(model: Any, *, key: str | None = None) -> bool:
+    """Match the removed built-in: keyed/aliased ``local``, or named devstral."""
+    if not isinstance(model, dict):
+        return False
+    return _resolved_alias(key, model) == "local" or model.get("name") == "devstral"
+
+
+def _is_sparse_model(model: Any) -> bool:
+    """A model entry missing name or provider; cannot stand alone without defaults."""
+    return isinstance(model, dict) and not (model.get("name") and model.get("provider"))
+
+
 def _rekey_model_entry(
     models: dict[str, Any], *, old_alias: str, new_alias: str
 ) -> None:
     if old_alias not in models or old_alias == new_alias:
         return
     models[new_alias] = models.pop(old_alias)
+
+
+def _migrate_unset_auto_compact_threshold(data: dict[str, Any]) -> bool:
+    """Drop the old ``auto_compact_threshold = -1`` "unset" marker.
+
+    Older versions wrote ``-1`` to mean "no threshold"; removing the key keeps
+    that meaning: each model's default threshold. ``0`` meant "compaction off",
+    which no longer exists, so it stays in the file and fails validation with
+    an error that names the setting.
+    """
+    changed = _drop_unset_threshold(data)
+    for _, model in _model_entries(data):
+        changed |= _drop_unset_threshold(model)
+    return changed
+
+
+def _drop_unset_threshold(entry: dict[str, Any]) -> bool:
+    value = entry.get("auto_compact_threshold")
+    if isinstance(value, bool) or value != UNSET_AUTO_COMPACT_THRESHOLD:
+        return False
+    del entry["auto_compact_threshold"]
+    return True
+
+
+def _migrate_removed_tool_paths(data: dict[str, Any]) -> bool:
+    """Drop ``tool_paths``, which only listed custom Python tools.
+
+    Vibe no longer loads custom Python tools. The folders it listed stay on
+    disk, so their tools can still be migrated to skills.
+    """
+    return data.pop("tool_paths", None) is not None
+
+
+def _migrate_renamed_worktree_copy_on_write(data: dict[str, Any]) -> bool:
+    """Rename ``experimental_worktree_copy_on_write`` and keep its value.
+
+    The setting is now on by default, so an old ``false`` is kept as an opt-out.
+    """
+    if "experimental_worktree_copy_on_write" not in data:
+        return False
+    value = data.pop("experimental_worktree_copy_on_write")
+    data.setdefault("worktree_copy_on_write", value)
+    return True
 
 
 def _migrate_renamed_tools(data: dict[str, Any]) -> bool:
@@ -184,4 +407,73 @@ def _migrate_renamed_tools(data: dict[str, Any]) -> bool:
             data[list_key] = renamed
             changed = True
 
+    return changed
+
+
+def _migrate_renamed_agents(data: dict[str, Any]) -> bool:
+    changed = False
+
+    default_agent = data.get("default_agent")
+    if isinstance(default_agent, str) and default_agent in RENAMED_AGENTS:
+        data["default_agent"] = RENAMED_AGENTS[default_agent]
+        changed = True
+
+    for list_key in ("enabled_agents", "disabled_agents", "installed_agents"):
+        names = data.get(list_key)
+        if not isinstance(names, list):
+            continue
+        renamed = [
+            RENAMED_AGENTS.get(name, name) if isinstance(name, str) else name
+            for name in names
+        ]
+        if renamed != names:
+            data[list_key] = renamed
+            changed = True
+
+    if "default_agent" not in data:
+        ask = RENAMED_AGENTS["default"]
+        if _agent_filters_exclude(
+            data, BuiltinAgentName.ACCEPT_EDITS
+        ) and not _agent_filters_exclude(data, ask):
+            data["default_agent"] = ask
+            changed = True
+
+    return changed
+
+
+def _agent_filters_exclude(data: dict[str, Any], agent: str) -> bool:
+    enabled = data.get("enabled_agents")
+    if isinstance(enabled, list) and enabled:
+        return not name_matches(agent, enabled)
+    disabled = data.get("disabled_agents")
+    if isinstance(disabled, list):
+        return name_matches(agent, disabled)
+    return False
+
+
+def _sets_shell_maximum(data: dict[str, Any], name: str) -> bool:
+    """Whether this file sets the shell tool's ``max_timeout_seconds``."""
+    tools = data.get("tools")
+    shell = tools.get(name) if isinstance(tools, dict) else None
+    return isinstance(shell, dict) and shell.get("max_timeout_seconds") is not None
+
+
+def _migrate_seeded_shell_default_timeout(
+    data: dict[str, Any], seeded_shells: AbstractSet[str]
+) -> bool:
+    """Drop the seeded ``default_timeout = 300`` of each shell in ``seeded_shells``."""
+    tools = data.get("tools")
+    if not isinstance(tools, dict):
+        return False
+
+    changed = False
+    for name in seeded_shells:
+        shell = tools.get(name)
+        if (
+            isinstance(shell, dict)
+            and shell.get("default_timeout") == SEEDED_SHELL_DEFAULT_TIMEOUT
+            and shell.get("max_timeout_seconds") is None
+        ):
+            del shell["default_timeout"]
+            changed = True
     return changed

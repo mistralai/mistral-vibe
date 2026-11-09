@@ -1,0 +1,715 @@
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator, Mapping, Sequence
+from contextlib import aclosing
+from html import escape
+import json
+import re
+from typing import Any, cast
+
+import httpx2
+from mistralai.client import Mistral
+from mistralai.client.models.chatcompletionstreamrequest import (
+    ChatCompletionStreamRequestMessageTypedDict,
+)
+from mistralai.client.models.completionevent import CompletionEvent
+from mistralai.client.utils.retries import BackoffStrategy, RetryConfig
+
+from mistralai_vibe_local_harness.protocol import (
+    JsonObject,
+    RustAssistantMessage,
+    RustCompletionFinishReason,
+    RustCompletionResult,
+    RustCompletionResultPart,
+    RustCompletionResultToolCallPart,
+    RustEmbeddedResourceContentBlock,
+    RustImageContentBlock,
+    RustMessage,
+    RustModelToolCallPart,
+    RustReasoningContent,
+    RustReasoningPart,
+    RustReasoningTextContent,
+    RustResourceLinkContentBlock,
+    RustSystemMessage,
+    RustTextContentBlock,
+    RustTextResourceContents,
+    RustToolDefinition,
+    RustToolMessage,
+    RustUserMessage,
+    tool_call_wire_arguments,
+)
+from mistralai_vibe_local_harness.vibe._credentials import ProviderCredentialSnapshot
+from mistralai_vibe_local_harness.vibe._http_transport import (
+    env_proxy_transport,
+    keepalive_socket_options,
+)
+from mistralai_vibe_local_harness.vibe._runtime_config import (
+    LocalModelRoute,
+    LocalRuntimeAdapterConfig,
+    ProviderDeltaObserver,
+    ProviderRetryObserver,
+    ProviderStreamDelta,
+)
+from mistralai_vibe_local_harness.vibe._ssl import build_ssl_context
+from mistralai_vibe_local_harness.vibe.adapters._correlation import correlation_hook
+from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
+    IncompleteProviderStream,
+    is_read_timeout,
+    until_connection_lost,
+)
+from mistralai_vibe_local_harness.vibe.adapters._reply_usage import (
+    has_reply_usage,
+    reply_token_usage,
+)
+from mistralai_vibe_local_harness.vibe.adapters._request_log import (
+    log_completion_request,
+)
+from mistralai_vibe_local_harness.vibe.adapters._retry import (
+    RetryNotices,
+    call_with_retries,
+)
+from mistralai_vibe_local_harness.vibe.adapters._tool_call_finish import (
+    CompletionSource,
+    MalformedToolCalls,
+    align_finish_reason,
+)
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    WireFormat,
+    finish_reason as map_finish_reason,
+    reasoning_wire_value,
+    takes_reasoning_input,
+)
+
+# Mistral's in-band signal that it aborted a generation part way.
+_ABORTED_FINISH_REASON = "error"
+# Retries run in call_with_retries, which announces each backoff before sleeping
+# and covers reading the stream, not only opening it.
+_NO_SDK_RETRIES = RetryConfig(
+    strategy="none", backoff=BackoffStrategy(0, 0, 0, 0), retry_connection_errors=False
+)
+
+
+async def execute_mistral_completion(
+    messages: list[RustMessage],
+    tools: list[RustToolDefinition],
+    config: LocalRuntimeAdapterConfig,
+    credential: ProviderCredentialSnapshot,
+    route: LocalModelRoute,
+    *,
+    stream: bool = True,
+    metadata: Mapping[str, str] | None = None,
+    on_retry: ProviderRetryObserver | None = None,
+    on_delta: ProviderDeltaObserver | None = None,
+    malformed: MalformedToolCalls | None = None,
+) -> RustCompletionResult:
+    """Run one completion against the Mistral API.
+
+    The route's reasoning setting, or the request's own, goes out as
+    ``reasoning_effort``; off goes out only to a model known to reason, since a
+    model without adjustable reasoning may reject it. Earlier reasoning goes back
+    only to a model that takes it, so a switch from a reasoning model works.
+    """
+    notices = RetryNotices(on_retry)
+    read_timeout_s = config.stream_guard().read_timeout_seconds
+    async with httpx2.AsyncClient(
+        timeout=httpx2.Timeout(config.timeout_s, read=read_timeout_s),
+        transport=env_proxy_transport(
+            verify=build_ssl_context(
+                use_system_trust_store=config.enable_system_trust_store
+            ),
+            socket_options=keepalive_socket_options(),
+        ),
+        follow_redirects=credential.follow_redirects,
+        headers=dict(credential.headers),
+        # Capture the provider correlation id at the transport level so both the
+        # streaming and non-streaming paths report it; the parsed complete_async
+        # response drops headers.
+        event_hooks={"response": [correlation_hook(config), notices.clear_on_success]},
+    ) as http_client:
+        client = Mistral(
+            api_key=credential.token,
+            server_url=_server_url_from_api_base(config.base_url),
+            async_client=http_client,
+            retry_config=_NO_SDK_RETRIES,
+            # The SDK applies this one timeout to every phase of a request.
+            timeout_ms=int(read_timeout_s * 1000),
+        )
+        replay_reasoning = takes_reasoning_input(
+            WireFormat.MISTRAL, route.thinking, route.reasoning, route.request_thinking
+        )
+        kwargs: dict[str, Any] = {
+            "model": route.model,
+            "messages": [
+                _message_payload(message, replay_reasoning=replay_reasoning)
+                for message in messages
+            ],
+            "temperature": route.temperature,
+        }
+        if (thinking := route.reasoning_setting(WireFormat.MISTRAL)) is not None:
+            kwargs["reasoning_effort"] = reasoning_wire_value(
+                WireFormat.MISTRAL, thinking
+            )
+        if route.top_p is not None:
+            kwargs["top_p"] = route.top_p
+        if (max_tokens := config.output_token_cap(route)) is not None:
+            kwargs["max_tokens"] = max_tokens
+        if metadata:
+            kwargs["metadata"] = dict(metadata)
+        if headers := config.request_headers():
+            kwargs["http_headers"] = headers
+        if tools:
+            kwargs["tools"] = [_tool_payload(tool) for tool in tools]
+            kwargs["parallel_tool_calls"] = True
+        log_completion_request(
+            config.provider,
+            route.model,
+            WireFormat.MISTRAL,
+            route.reasoning_setting(WireFormat.MISTRAL),
+        )
+        source = CompletionSource(provider=config.provider, model=route.model)
+        if stream:
+
+            async def stream_once() -> RustCompletionResult:
+                opened = False
+
+                # The guard watches the request from the start, so silence before
+                # the response headers ends at the first-output wait, like silence
+                # after them. A read timeout before the headers stays an ordinary
+                # failure: only one after them is a stall.
+                async def open_events() -> AsyncGenerator[CompletionEvent]:
+                    nonlocal opened
+                    async with await client.chat.stream_async(**kwargs) as events:
+                        opened = True
+                        async for event in events:
+                            yield event
+
+                async with aclosing(open_events()) as events:
+                    return await _read_stream(
+                        config.stream_guard().watch(
+                            events,
+                            starts_output=_carries_model_output,
+                            is_read_timeout=lambda error: (
+                                opened and is_read_timeout(error)
+                            ),
+                        ),
+                        on_delta,
+                        emits_finish_reason=config.emits_finish_reason,
+                        source=source,
+                        record=malformed,
+                    )
+
+            return await call_with_retries(
+                stream_once,
+                max_elapsed_time_s=config.retry_max_elapsed_time_s,
+                notices=notices,
+            )
+
+        # Reading the response is part of the attempt, so a response with only
+        # unusable tool calls is retried like a failed request.
+        async def complete_once() -> RustCompletionResult:
+            return _read_completion(
+                await client.chat.complete_async(**kwargs),
+                source=source,
+                record=malformed,
+            )
+
+        return await call_with_retries(
+            complete_once,
+            max_elapsed_time_s=config.retry_max_elapsed_time_s,
+            notices=notices,
+        )
+
+
+def _read_completion(
+    response: Any, *, source: CompletionSource, record: MalformedToolCalls | None = None
+) -> RustCompletionResult:
+    choice = _first_choice(response)
+    if choice is None:
+        raise ValueError("Completion response has no choices")
+    message = _read_field(choice, "message")
+    content = _read_field(message, "content")
+    parts: list[RustCompletionResultPart] = []
+    if isinstance(content, str):
+        if content:
+            parts.append(RustTextContentBlock(text=content))
+    elif isinstance(content, list):
+        reasoning, reasoning_meta = _extract_reasoning(content)
+        if reasoning:
+            parts.append(
+                RustReasoningPart(content=reasoning, _meta=reasoning_meta or None)
+            )
+        text = _delta_text(content)
+        if text:
+            parts.append(RustTextContentBlock(text=text))
+    tool_calls = _read_field(message, "tool_calls")
+    tool_call_parts = _message_tool_call_parts(tool_calls)
+    parts.extend(tool_call_parts)
+    reason = _read_field(choice, "finish_reason")
+    finish_reason = align_finish_reason(
+        map_finish_reason(WireFormat.MISTRAL, reason)
+        if isinstance(reason, str)
+        else None,
+        kept_tool_calls=len(tool_call_parts),
+        dropped_tool_calls=(len(tool_calls) if isinstance(tool_calls, list) else 0)
+        - len(tool_call_parts),
+        source=source,
+        record=record,
+    )
+    if not parts:
+        raise ValueError("Completion response has no content")
+    return RustCompletionResult(
+        parts=parts,
+        finish_reason=finish_reason,
+        usage=reply_token_usage(WireFormat.MISTRAL, _read_field(response, "usage")),
+    )
+
+
+def _carries_model_output(event: Any) -> bool:
+    """Whether a stream event holds model output rather than a preamble.
+
+    The first event often carries only the assistant role and empty content.
+    """
+    choice = _first_choice(_event_data(event))
+    if choice is None:
+        return False
+    delta = _read_field(choice, "delta")
+    content = _read_field(delta, "content")
+    return bool(
+        _delta_text(content)
+        or _delta_reasoning(content)[0]
+        or _read_field(delta, "tool_calls")
+    )
+
+
+async def _read_stream(
+    stream: Any,
+    on_delta: ProviderDeltaObserver | None = None,
+    *,
+    emits_finish_reason: bool,
+    source: CompletionSource,
+    record: MalformedToolCalls | None = None,
+) -> RustCompletionResult:
+    text_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    reasoning_meta: JsonObject = {}
+    tool_calls: dict[int, dict[str, str]] = {}
+    # The usage the stream reports last; Mistral sends it on the final chunk.
+    raw_usage: object = None
+    finish_reason: RustCompletionFinishReason | None = None
+    async for event in until_connection_lost(
+        # Read when the stream fails, so it must see the latest chunk.
+        stream,
+        complete=lambda: (
+            finish_reason is not None  # noqa: B023
+            and has_reply_usage(WireFormat.MISTRAL, raw_usage)  # noqa: B023
+        ),
+    ):
+        chunk = _event_data(event)
+        if (reported := _read_field(chunk, "usage")) is not None:
+            raw_usage = reported
+        choice = _first_choice(chunk)
+        if choice is None:
+            continue
+        delta = _read_field(choice, "delta")
+        delta_content = _read_field(delta, "content")
+        delta_text = _delta_text(delta_content)
+        if delta_text:
+            text_parts.append(delta_text)
+        delta_reasoning, delta_meta = _delta_reasoning(delta_content)
+        if delta_reasoning:
+            reasoning_parts.append(delta_reasoning)
+        if delta_meta:
+            reasoning_meta.update(delta_meta)
+        delta_tool_call = _collect_tool_call_deltas(
+            tool_calls, _read_field(delta, "tool_calls")
+        )
+        if isinstance(reason := _read_field(choice, "finish_reason"), str):
+            if reason == _ABORTED_FINISH_REASON:
+                raise IncompleteProviderStream(
+                    "Model stream ended with the error finish reason."
+                )
+            finish_reason = map_finish_reason(WireFormat.MISTRAL, reason)
+        if on_delta is not None and (delta_text or delta_reasoning or delta_tool_call):
+            await on_delta(
+                ProviderStreamDelta(
+                    text=delta_text,
+                    reasoning=delta_reasoning,
+                    tool_call=delta_tool_call,
+                )
+            )
+    if finish_reason is None and emits_finish_reason:
+        # The last chunk of a complete stream carries a finish reason, and the
+        # SDK also ends iteration when the body closes early.
+        raise IncompleteProviderStream("Model stream ended without a finish reason.")
+    tool_call_parts = _tool_call_parts(tool_calls)
+    return RustCompletionResult(
+        parts=_streamed_parts(
+            reasoning="".join(reasoning_parts),
+            reasoning_meta=reasoning_meta,
+            text="".join(text_parts),
+            tool_call_parts=tool_call_parts,
+        ),
+        finish_reason=align_finish_reason(
+            finish_reason,
+            kept_tool_calls=len(tool_call_parts),
+            dropped_tool_calls=len(tool_calls) - len(tool_call_parts),
+            source=source,
+            record=record,
+        ),
+        usage=reply_token_usage(WireFormat.MISTRAL, raw_usage),
+    )
+
+
+def _streamed_parts(
+    *,
+    reasoning: str,
+    reasoning_meta: JsonObject,
+    text: str,
+    tool_call_parts: list[RustCompletionResultToolCallPart],
+) -> list[RustCompletionResultPart]:
+    parts: list[RustCompletionResultPart] = []
+    if reasoning:
+        parts.append(
+            RustReasoningPart(
+                content=[RustReasoningTextContent(text=reasoning)],
+                _meta=reasoning_meta or None,
+            )
+        )
+    if text:
+        parts.append(RustTextContentBlock(text=text))
+    parts.extend(tool_call_parts)
+    if not parts:
+        parts.append(RustTextContentBlock(text=" "))
+    return parts
+
+
+def _delta_text(content: object) -> str:
+    """Read the visible assistant text out of one streaming delta.
+
+    Mistral types delta content as ``str | list[ContentChunk]``. A model asked
+    for ``reasoning_effort`` answers in the list arm, mixing ``text`` chunks
+    with ``thinking`` chunks inside a single delta, and it may switch arms
+    mid-stream. Reading only the ``str`` arm dropped whichever visible tokens
+    rode in a list-shaped delta -- typically the first ones, right after the
+    reasoning block closed.
+
+    Chunks are discriminated on their ``type`` field rather than against SDK
+    models, so both mappings and SDK objects are accepted, matching the rest
+    of this module.
+
+    ``thinking`` chunks are extracted by ``_delta_reasoning`` and carried as a
+    ``RustReasoningPart``. ``_message_payload`` replays them back to the API on
+    subsequent turns so the model sees its own reasoning history.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    chunks: list[str] = []
+    for chunk in cast(list[object], content):
+        if _read_field(chunk, "type") != "text":
+            continue
+        if isinstance(text := _read_field(chunk, "text"), str):
+            chunks.append(text)
+    return "".join(chunks)
+
+
+def _delta_reasoning(content: object) -> tuple[str, JsonObject]:
+    """Extract reasoning text and continuation metadata from one streaming delta."""
+    if not isinstance(content, list):
+        return "", {}
+    parts: list[str] = []
+    meta: JsonObject = {}
+    for chunk in cast(list[object], content):
+        if _read_field(chunk, "type") != "thinking":
+            continue
+        thinking = _read_field(chunk, "thinking")
+        if isinstance(thinking, list):
+            for inner in cast(list[object], thinking):
+                if (text := _thinking_inner_text(inner)) is not None:
+                    parts.append(text)
+        if chunk_meta := _thinking_meta(chunk):
+            meta.update(chunk_meta)
+    return "".join(parts), meta
+
+
+def _extract_reasoning(
+    content: list[object],
+) -> tuple[list[RustReasoningContent], JsonObject]:
+    """Extract reasoning and continuation metadata from a non-streaming response."""
+    parts: list[RustReasoningContent] = []
+    meta: JsonObject = {}
+    for chunk in content:
+        if _read_field(chunk, "type") != "thinking":
+            continue
+        thinking = _read_field(chunk, "thinking")
+        if isinstance(thinking, list):
+            for inner in cast(list[object], thinking):
+                if (text := _thinking_inner_text(inner)) is not None:
+                    parts.append(RustReasoningTextContent(text=text))
+        if chunk_meta := _thinking_meta(chunk):
+            meta.update(chunk_meta)
+    return parts, meta
+
+
+def _thinking_inner_text(inner: object) -> str | None:
+    """Read text from one ``thinking`` inner item, accepting both dicts and raw strings."""
+    if isinstance(inner, str):
+        return inner
+    if isinstance(text := _read_field(inner, "text"), str):
+        return text
+    return None
+
+
+def _thinking_meta(chunk: object) -> JsonObject:
+    """Extract continuation metadata (signature, closed) from a thinking chunk."""
+    meta: JsonObject = {}
+    if isinstance(signature := _read_field(chunk, "signature"), str):
+        meta["signature"] = signature
+    if isinstance(closed := _read_field(chunk, "closed"), bool):
+        meta["closed"] = closed
+    return meta
+
+
+def _server_url_from_api_base(api_base: str) -> str | None:
+    if match := re.match(r"(https?://.+)(/v\d+.*)", api_base):
+        return match.group(1)
+    return api_base.rstrip("/") or None
+
+
+def _message_payload(
+    message: RustMessage, *, replay_reasoning: bool = True
+) -> ChatCompletionStreamRequestMessageTypedDict:
+    if isinstance(message, RustSystemMessage | RustUserMessage):
+        return cast(
+            ChatCompletionStreamRequestMessageTypedDict,
+            {"role": message.role, "content": _content(message.content)},
+        )
+    if isinstance(message, RustAssistantMessage):
+        # Replay reasoning as structured ``thinking`` chunks so the API
+        # receives the model's own reasoning history, matching the legacy
+        # backend's ``ThinkChunk`` replay.
+        reasoning_chunks: list[dict[str, Any]] = []
+        for block in message.content:
+            if replay_reasoning and isinstance(block, RustReasoningPart):
+                thinking_items = [
+                    {"type": "text", "text": item.text}
+                    for item in block.content
+                    if isinstance(item, RustReasoningTextContent)
+                ]
+                if thinking_items:
+                    reasoning_chunks.append({
+                        "type": "thinking",
+                        "thinking": thinking_items,
+                    })
+        text_content = _text(message.content)
+        if reasoning_chunks:
+            all_chunks = reasoning_chunks.copy()
+            if text_content:
+                all_chunks.append({"type": "text", "text": text_content})
+            payload: dict[str, Any] = {"role": "assistant", "content": all_chunks}
+        else:
+            payload = {
+                "role": "assistant",
+                "content": _content(message.content) or None,
+            }
+        tool_calls = [
+            _assistant_tool_call_payload(part)
+            for part in message.content
+            if isinstance(part, RustModelToolCallPart)
+        ]
+        if tool_calls:
+            payload["tool_calls"] = tool_calls
+        return cast(ChatCompletionStreamRequestMessageTypedDict, payload)
+    if isinstance(message, RustToolMessage):
+        # Tool results may carry image blocks; the API accepts chunked
+        # content on tool messages, so pass the blocks through unchanged
+        # instead of flattening to text.
+        return cast(
+            ChatCompletionStreamRequestMessageTypedDict,
+            {
+                "role": "tool",
+                "tool_call_id": message.tool_call_id,
+                "name": message.name,
+                "content": _content(message.content),
+            },
+        )
+    raise TypeError(f"Unsupported message type: {type(message).__name__}")
+
+
+def _content(content: Sequence[Any]) -> str | list[dict[str, Any]]:
+    if not any(isinstance(block, RustImageContentBlock) for block in content):
+        return _text(content)
+
+    parts: list[dict[str, Any]] = []
+    for block in content:
+        if (text := _block_text(block)) is not None:
+            parts.append({"type": "text", "text": text})
+        elif isinstance(block, RustImageContentBlock):
+            parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{block.mime_type};base64,{block.data}"},
+            })
+    return parts
+
+
+def _text(content: Sequence[Any]) -> str:
+    parts: list[str] = []
+    for block in content:
+        if (text := _block_text(block)) is not None:
+            parts.append(text)
+    return "\n\n".join(parts)
+
+
+def _block_text(block: Any) -> str | None:
+    if isinstance(block, RustTextContentBlock):
+        return block.text
+    if isinstance(block, RustEmbeddedResourceContentBlock) and isinstance(
+        block.resource, RustTextResourceContents
+    ):
+        return _resource_text(block.resource)
+    if isinstance(block, RustEmbeddedResourceContentBlock):
+        # Embedded file data has no text form; the model gets its link.
+        return f"[resource: {block.resource.uri}]"
+    if isinstance(block, RustResourceLinkContentBlock):
+        return f"[resource: {block.uri}]"
+    return None
+
+
+def _resource_text(resource: RustTextResourceContents) -> str:
+    uri = escape(resource.uri, quote=True)
+    fence = "````"
+    while fence in resource.text:
+        fence += "`"
+    return f"Resource: {uri}\n{fence}\n{resource.text}\n{fence}"
+
+
+def _assistant_tool_call_payload(part: RustModelToolCallPart) -> dict[str, Any]:
+    return {
+        "id": part.id,
+        "type": "function",
+        "function": {
+            "name": part.name,
+            "arguments": tool_call_wire_arguments(part.arguments),
+        },
+    }
+
+
+def _tool_payload(tool: RustToolDefinition) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        },
+    }
+
+
+def _collect_tool_call_deltas(
+    tool_calls: dict[int, dict[str, str]], deltas: object
+) -> bool:
+    """Merge a chunk's tool call fragments; whether the chunk carried any."""
+    if not isinstance(deltas, list):
+        return False
+    for delta in deltas:
+        raw_index = _read_field(delta, "index")
+        index = raw_index if isinstance(raw_index, int) else len(tool_calls)
+        current = tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+        if (
+            isinstance(identifier := _read_field(delta, "id"), str)
+            and identifier != "null"
+        ):
+            current["id"] = _merge_streamed_value(current["id"], identifier)
+        function = _read_field(delta, "function")
+        if isinstance(name := _read_field(function, "name"), str) and name:
+            current["name"] += name
+        if isinstance(arguments := _read_field(function, "arguments"), str):
+            current["arguments"] += arguments
+    return bool(deltas)
+
+
+def _merge_streamed_value(current: str, fragment: str) -> str:
+    if not current or fragment.startswith(current):
+        return fragment
+    if current.endswith(fragment):
+        return current
+    return current + fragment
+
+
+def _tool_call_parts(
+    tool_calls: dict[int, dict[str, str]],
+) -> list[RustCompletionResultToolCallPart]:
+    return [
+        RustCompletionResultToolCallPart(
+            id=values["id"] or f"tool_call_{index}",
+            name=values["name"],
+            arguments_json=values["arguments"] or "{}",
+        )
+        for index, values in sorted(tool_calls.items())
+        if values["name"]
+    ]
+
+
+def _message_tool_call_parts(
+    tool_calls: object,
+) -> list[RustCompletionResultToolCallPart]:
+    """Convert a non-streaming message's ``tool_calls`` array to result parts.
+
+    The streaming path accumulates deltas into ``{index: {id, name, arguments}}``
+    and renders them through :func:`_tool_call_parts`. The non-streaming response
+    carries complete tool calls under ``message.tool_calls`` with ``id`` and
+    ``function.name``/``function.arguments`` fields; this maps that shape to the
+    same result parts so both paths produce equivalent ``RustCompletionResult``
+    values.
+    """
+    if not isinstance(tool_calls, list):
+        return []
+    parts: list[RustCompletionResultToolCallPart] = []
+    for index, call in enumerate(tool_calls):
+        identifier = _read_field(call, "id")
+        function = _read_field(call, "function")
+        name = _read_field(function, "name")
+        arguments = _read_field(function, "arguments")
+        if not isinstance(name, str) or not name:
+            continue
+        # The SDK types arguments as dict | str; serialise object-shaped
+        # arguments so the payload is not silently dropped.
+        if isinstance(arguments, str):
+            arguments_json = arguments or "{}"
+        elif isinstance(arguments, dict):
+            arguments_json = json.dumps(arguments, separators=(",", ":"))
+        else:
+            arguments_json = "{}"
+        parts.append(
+            RustCompletionResultToolCallPart(
+                id=identifier
+                if isinstance(identifier, str) and identifier
+                else f"tool_call_{index}",
+                name=name,
+                arguments_json=arguments_json,
+            )
+        )
+    return parts
+
+
+def _event_data(event: object) -> object:
+    return getattr(event, "data", event)
+
+
+def _read_field(value: object, name: str) -> object:
+    if isinstance(value, dict):
+        return value.get(name)
+    return getattr(value, name, None)
+
+
+def _first_choice(chunk: object) -> object | None:
+    choices = _read_field(chunk, "choices")
+    if isinstance(choices, list) and not choices:
+        return None
+    if not isinstance(choices, list):
+        raise ValueError("provider chunk has no first choice")
+    return choices[0]
+
+
+__all__ = ["execute_mistral_completion"]

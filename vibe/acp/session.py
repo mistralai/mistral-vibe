@@ -1,98 +1,70 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Coroutine
-from contextlib import asynccontextmanager
+from collections.abc import Coroutine
+from pathlib import Path
 from typing import Any
 
-from vibe.acp.commands import AcpCommandRegistry
-from vibe.acp.exceptions import InvalidRequestError
-from vibe.core.agent_loop import AgentLoop
+from vibe.acp.commands.registry import AcpCommandRegistry
+from vibe.app_server.session import AppServerSession
+from vibe.observability.logging import logger
 
 
-class AcpSessionLoop:
-    """Holds the state for a single ACP session.
-
-    All session-scoped async work (background updates, the prompt task)
-    is tracked internally.  ``close`` cancels everything;
-    ``cancel_prompt`` cancels only the active prompt.
-    """
-
+class AcpSession:
     def __init__(
-        self, *, id: str, agent_loop: AgentLoop, command_registry: AcpCommandRegistry
+        self,
+        *,
+        session_id: str,
+        app_server: AppServerSession,
+        cwd: Path,
+        commands: AcpCommandRegistry,
     ) -> None:
-        self.id = id
-        self.agent_loop = agent_loop
-        self.command_registry = command_registry
+        self.id = session_id
+        self.app_server = app_server
+        self.cwd = cwd
+        self.commands = commands
+        self._accepting_tasks = True
         self._closed = False
+        self._close_lock = asyncio.Lock()
         self._tasks: set[asyncio.Task[None]] = set()
-        self._prompt_task: asyncio.Task[None] | None = None
-        self._mutation_lock = asyncio.Lock()
 
-    # -- public API ------------------------------------------------------------
-
-    @property
-    def prompt_task(self) -> asyncio.Task[None] | None:
-        return self._prompt_task
-
-    @asynccontextmanager
-    async def mutating(self, operation: str) -> AsyncIterator[None]:
-        """Run a session-mutating operation under the session lock, rejecting
-        it while a prompt turn is in flight (the turn does not hold the lock).
-        """
-        async with self._mutation_lock:
-            if self._prompt_task is not None and not self._prompt_task.done():
-                raise InvalidRequestError(
-                    f"Cannot {operation} while the agent loop is running"
-                )
-            yield
-
-    @asynccontextmanager
-    async def reading(self) -> AsyncIterator[None]:
-        """Serialize a read against mutating operations without rejecting it
-        while a prompt turn is in flight.
-        """
-        async with self._mutation_lock:
-            yield
-
-    def spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None] | None:
-        """Launch a background coroutine tied to this session."""
-        if self._closed:
-            coro.close()
+    def spawn(self, coroutine: Coroutine[Any, Any, None]) -> asyncio.Task[None] | None:
+        if not self._accepting_tasks:
+            coroutine.close()
             return None
-        task = asyncio.create_task(coro)
+        task = asyncio.create_task(coroutine)
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        return task
-
-    def set_prompt_task(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
-        """Create the prompt task. Only one may be active at a time."""
-        task = asyncio.create_task(coro)
-        self._prompt_task = task
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        task.add_done_callback(lambda _: self._clear_prompt_task(task))
+        task.add_done_callback(self._task_finished)
         return task
 
     async def cancel_prompt(self) -> None:
-        """Cancel the active prompt task, if any."""
-        task = self._prompt_task
-        if task is None or task.done():
+        if not self.app_server.turn_active:
             return
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        await self.app_server.interrupt()
 
     async def close(self) -> None:
-        """Cancel all tasks (prompt + background) and mark session closed."""
-        self._closed = True
-        for t in self._tasks:
-            t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        self._tasks.clear()
-        self._prompt_task = None
+        async with self._close_lock:
+            if self._closed:
+                return
+            self._accepting_tasks = False
+            current = asyncio.current_task()
+            tasks = [task for task in self._tasks if task is not current]
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            self._tasks.clear()
+            await self.app_server.close()
+            self._closed = True
 
-    # -- private ---------------------------------------------------------------
-
-    def _clear_prompt_task(self, task: asyncio.Task[None]) -> None:
-        if self._prompt_task is task:
-            self._prompt_task = None
+    def _task_finished(self, task: asyncio.Task[None]) -> None:
+        self._tasks.discard(task)
+        if task.cancelled():
+            return
+        if error := task.exception():
+            logger.error(
+                "ACP background task failed session_id=%s error=%s",
+                self.id,
+                error,
+                exc_info=error,
+            )

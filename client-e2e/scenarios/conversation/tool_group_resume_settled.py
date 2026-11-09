@@ -1,0 +1,40 @@
+"""A resumed history ending on tool calls settles its folded group instead of spinning."""
+
+from __future__ import annotations
+
+from e2e.app_server.events import bash, user_msg
+from e2e.app_server.scenario import AppServerEvent, Timeline
+
+_RESUMED_SESSION = "00000000-0000-4000-8000-000000000004"
+
+
+def _history_entry(event: AppServerEvent) -> dict[str, object]:
+    """Repoint a builder's entry at the resumed session's static history."""
+    entry = event["params"]["entry"]
+    entry["sessionId"] = _RESUMED_SESSION
+    entry["turnId"] = None
+    return entry
+
+
+# The persisted history ends on tool calls (the CLI was killed mid-turn), so
+# the trailing group has no later entry to finalize it: the client must still
+# settle it once the resume rebuild mounts the history.
+_HISTORY = [
+    _history_entry(user_msg("run the flaky command")),
+    _history_entry(bash("echo ok", "ok")),
+    _history_entry(bash("echo done", "done")),
+]
+
+handshake = {
+    "session/resume": {"state": {"history": _HISTORY}},
+    "session/read": {"state": {"history": _HISTORY}},
+}
+
+client_args = ("--continue",)
+capture_startup = False
+
+screen_contains = ("⏵ Ran 2 commands",)
+screen_excludes = ("Running 2 commands",)
+
+
+timeline: Timeline = ["x"]

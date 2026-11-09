@@ -1,0 +1,645 @@
+"""Anthropic Messages API adapter."""
+
+from __future__ import annotations
+
+import base64
+import binascii
+from collections.abc import Sequence
+from functools import cache
+import json
+import logging
+import re
+from typing import Any, ClassVar
+
+from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
+    ProviderStreamError,
+)
+from mistralai_vibe_local_harness.vibe.adapters.generic._base import (
+    APIAdapter,
+    PreparedRequest,
+)
+from mistralai_vibe_local_harness.vibe.adapters.generic._image import to_base64
+from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
+    AvailableTool,
+    FunctionCall,
+    LLMChunk,
+    LLMMessage,
+    Role,
+    StopInfo,
+    StrToolChoice,
+    ToolCall,
+)
+from mistralai_vibe_local_harness.vibe.adapters.generic._provider import ProviderView
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    ANTHROPIC_VERSION,
+    REQUIRED_MAX_TOKENS_FALLBACK,
+    ReasoningSetting,
+    ReasoningSupport,
+    anthropic_thinking_fields,
+    binds_thinking_blocks,
+)
+
+logger = logging.getLogger(__name__)
+
+# With thinking on, and only on a model that takes it (binds_thinking_blocks), a
+# replayed thinking block whose earlier context changed is dropped instead of
+# failing the request. The field needs this beta.
+THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+THINKING_BLOCK_BINDING: dict[str, Any] = {"prefix_mismatch_behavior": "drop_block"}
+
+
+def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
+    if reason is None and not isinstance(raw, dict):
+        return None
+    details = raw if isinstance(raw, dict) else {}
+    return StopInfo.model_validate({"reason": reason, **details})
+
+
+def _text_blocks(text: str | None) -> list[dict[str, Any]]:
+    # The Messages API rejects a text block holding only whitespace with HTTP
+    # 400, and a history that contains one fails every later request.
+    if text is None or not text.strip():
+        return []
+    return [{"type": "text", "text": text}]
+
+
+REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+# With thinking on, the Messages API refuses a lower ``top_p`` than this.
+THINKING_MIN_TOP_P = 0.95
+
+# With adaptive thinking, the Messages API can return the text Claude writes for
+# the user before a tool call as a ``thinking`` block instead of a ``text``
+# block. Only the block's signature tells the two apart: its decoded header
+# names the block kind, ``thinking`` or ``narration``. The encoding is not
+# documented, so a signature that does not carry this marker keeps its block as
+# reasoning.
+_NARRATION_KIND_MARKER = b"\x42\x09narration"
+# The base64 decoded to find the marker: 48 bytes, about twice the offset the
+# marker ends at, so the check survives a few more header fields. A multiple of
+# four decodes without padding.
+_SIGNATURE_HEADER_CHARS = 64
+
+
+def _is_narration(block: dict[str, Any]) -> bool:
+    signature = block.get("signature")
+    if block.get("type") != "thinking" or not isinstance(signature, str):
+        return False
+    try:
+        header = base64.b64decode(signature[:_SIGNATURE_HEADER_CHARS], validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return _NARRATION_KIND_MARKER in header
+
+
+def _thinking_text(
+    blocks: Sequence[dict[str, Any]] | None, *, narration: bool | None = None
+) -> str:
+    """The thinking text of the reply's blocks in stream order.
+
+    ``narration`` keeps only the narration blocks, or only the others; ``None``
+    keeps every block.
+    """
+    return "".join(
+        text
+        for block in blocks or []
+        if (narration is None or _is_narration(block) == narration)
+        and isinstance(text := block.get("thinking"), str)
+    )
+
+
+def _narration_text(blocks: Sequence[dict[str, Any]] | None) -> str:
+    return _thinking_text(blocks, narration=True)
+
+
+def _with_narration_as_text(message: LLMMessage) -> LLMMessage:
+    """Show narration as the reply's text rather than as its reasoning.
+
+    The reasoning is rebuilt from the other thinking blocks only when the
+    blocks account for all of it; otherwise the message is left as it is. The
+    narration block stays in ``reasoning_payloads``, so the next request sends
+    it back unchanged with its signature, and the replay drops the copy this
+    adds to the text.
+    """
+    blocks = message.reasoning_payloads
+    narration = _narration_text(blocks)
+    if not narration or _thinking_text(blocks) != (message.reasoning_content or ""):
+        return message
+    return message.model_copy(
+        update={
+            "content": narration + (message.content or ""),
+            "reasoning_content": _thinking_text(blocks, narration=False) or None,
+        }
+    )
+
+
+def _image_blocks(msg: LLMMessage) -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": att.mime_type,
+                "data": to_base64(att),
+            },
+        }
+        for att in msg.images or []
+    ]
+
+
+class AnthropicMapper:
+    """Shared mapper for converting messages to/from Anthropic API format."""
+
+    def prepare_messages(
+        self, messages: Sequence[LLMMessage]
+    ) -> tuple[str | None, list[dict[str, Any]]]:
+        system_prompt: str | None = None
+        converted: list[dict[str, Any]] = []
+
+        for msg in messages:
+            match msg.role:
+                case Role.system:
+                    system_prompt = msg.content or ""
+                case Role.user:
+                    user_content: list[dict[str, Any]] = []
+                    if msg.content:
+                        user_content.append({"type": "text", "text": msg.content})
+                    user_content.extend(_image_blocks(msg))
+                    converted.append({"role": "user", "content": user_content or ""})
+                case Role.assistant:
+                    if assistant := self._convert_assistant_message(msg):
+                        converted.append(assistant)
+                case Role.tool:
+                    self._append_tool_result(converted, msg)
+
+        return system_prompt, converted
+
+    def _sanitize_tool_call_id(self, tool_id: str | None) -> str:
+        return re.sub(r"[^a-zA-Z0-9_-]", "_", tool_id or "")
+
+    def _convert_assistant_message(self, msg: LLMMessage) -> dict[str, Any] | None:
+        """Convert an assistant message, or return ``None`` when nothing is left to send.
+
+        A reply without output still occupies a turn in the history. The API
+        rejects it as empty content, and the consecutive user messages left when
+        it is omitted are accepted as one user turn. Only assistant messages are
+        omitted: dropping a user message could end the request on an assistant
+        message, which the API treats as a prefill, or make two replies adjacent.
+        """
+        content: list[dict[str, Any]] = [
+            block
+            for block in msg.reasoning_payloads or []
+            if block.get("type") in REASONING_BLOCK_TYPES
+        ]
+        # Narration already travels in its own block above.
+        content.extend(
+            _text_blocks(
+                (msg.content or "").removeprefix(
+                    _narration_text(msg.reasoning_payloads)
+                )
+            )
+        )
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                content.append(self._convert_tool_call(tc))
+        if not content:
+            return None
+        return {"role": "assistant", "content": content}
+
+    def _convert_tool_call(self, tc: ToolCall) -> dict[str, Any]:
+        # Redundant with ``tool_call_wire_arguments`` on the replay path, but kept: a
+        # provider rejecting these strands the session rather than failing a single turn.
+        try:
+            tool_input = json.loads(tc.function.arguments or "{}")
+        except json.JSONDecodeError:
+            tool_input = {}
+        if not isinstance(tool_input, dict):
+            tool_input = {}
+        return {
+            "type": "tool_use",
+            "id": self._sanitize_tool_call_id(tc.id),
+            "name": tc.function.name,
+            "input": tool_input,
+        }
+
+    def _append_tool_result(
+        self, converted: list[dict[str, Any]], msg: LLMMessage
+    ) -> None:
+        content: str | list[dict[str, Any]] = msg.content or ""
+        if msg.images:
+            # A tool result takes text and image blocks; blank text blocks are
+            # rejected, so text is sent only when there is some.
+            content = [
+                *(
+                    [{"type": "text", "text": msg.content}]
+                    if msg.content and msg.content.strip()
+                    else []
+                ),
+                *_image_blocks(msg),
+            ]
+        tool_result = {
+            "type": "tool_result",
+            "tool_use_id": self._sanitize_tool_call_id(msg.tool_call_id),
+            "content": content,
+        }
+
+        if not converted or converted[-1]["role"] != "user":
+            converted.append({"role": "user", "content": [tool_result]})
+            return
+
+        existing_content = converted[-1]["content"]
+        if isinstance(existing_content, str):
+            converted[-1]["content"] = [
+                {"type": "text", "text": existing_content},
+                tool_result,
+            ]
+        else:
+            converted[-1]["content"].append(tool_result)
+
+    def prepare_tools(
+        self, tools: list[AvailableTool] | None
+    ) -> list[dict[str, Any]] | None:
+        if not tools:
+            return None
+        return [
+            {
+                "name": tool.function.name,
+                "description": tool.function.description,
+                "input_schema": tool.function.parameters,
+            }
+            for tool in tools
+        ]
+
+    def prepare_tool_choice(
+        self, tool_choice: StrToolChoice | AvailableTool | None
+    ) -> dict[str, Any] | None:
+        if tool_choice is None:
+            return None
+        if isinstance(tool_choice, str):
+            match tool_choice:
+                case "none":
+                    return {"type": "none"}
+                case "auto":
+                    return {"type": "auto"}
+                case "any" | "required":
+                    return {"type": "any"}
+                case _:
+                    return None
+        return {"type": "tool", "name": tool_choice.function.name}
+
+    def parse_response(self, data: dict[str, Any]) -> LLMChunk:
+        content_blocks = data.get("content", [])
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        reasoning_payloads: list[dict[str, Any]] = []
+        tool_calls: list[ToolCall] = []
+
+        for idx, block in enumerate(content_blocks):
+            block_type = block.get("type")
+            if block_type == "text":
+                text_parts.append(block.get("text", ""))
+            elif block_type in REASONING_BLOCK_TYPES:
+                reasoning_payloads.append(block)
+                thinking_parts.append(block.get("thinking", ""))
+            elif block_type == "tool_use":
+                tool_calls.append(
+                    ToolCall(
+                        id=block.get("id"),
+                        index=idx,
+                        function=FunctionCall(
+                            name=block.get("name"),
+                            arguments=json.dumps(block.get("input", {})),
+                        ),
+                    )
+                )
+
+        # The executor reads usage from the raw reply through the format's table.
+        return LLMChunk(
+            message=LLMMessage(
+                role=Role.assistant,
+                content="".join(text_parts) or None,
+                reasoning_content="".join(thinking_parts) or None,
+                reasoning_payloads=reasoning_payloads or None,
+                tool_calls=tool_calls if tool_calls else None,
+            ),
+            stop=_parse_stop_info(data.get("stop_reason"), data.get("stop_details")),
+        )
+
+
+STREAMING_EVENT_TYPES = {
+    "message_start",
+    "message_delta",
+    "message_stop",
+    "content_block_start",
+    "content_block_delta",
+    "content_block_stop",
+    "ping",
+    "error",
+}
+
+
+def _thinks(payload: dict[str, Any]) -> bool:
+    """Whether the request thinks: it has a thinking field that is not disabled."""
+    thinking = payload.get("thinking")
+    return isinstance(thinking, dict) and thinking.get("type") != "disabled"
+
+
+@cache
+def _warn_top_p_left_off(top_p: float) -> None:
+    logger.warning(
+        "Leaving top_p=%s off the Anthropic request: with thinking on, the API "
+        "takes only a top_p of %s or more",
+        top_p,
+        THINKING_MIN_TOP_P,
+    )
+
+
+class AnthropicAdapter(APIAdapter):
+    endpoint: ClassVar[str] = "/v1/messages"
+    API_VERSION = ANTHROPIC_VERSION
+    BETA_FEATURES = (
+        "interleaved-thinking-2025-05-14,"
+        "fine-grained-tool-streaming-2025-05-14,"
+        "prompt-caching-2024-07-31,"
+        "context-1m-2025-08-07"
+    )
+
+    def __init__(self) -> None:
+        self._mapper = AnthropicMapper()
+        # Reasoning blocks arrive across several streaming events, so they are
+        # reassembled here and emitted once complete. This state is per-response,
+        # which is why the adapter is built per request rather than shared.
+        self._open_reasoning_blocks: dict[int, dict[str, Any]] = {}
+
+    @staticmethod
+    def _build_system_blocks(system_prompt: str | None) -> list[dict[str, Any]]:
+        blocks: list[dict[str, Any]] = []
+        if system_prompt:
+            blocks.append({
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            })
+        return blocks
+
+    @staticmethod
+    def _add_cache_control_to_last_user_message(messages: list[dict[str, Any]]) -> None:
+        if not messages:
+            return
+        last_message = messages[-1]
+        if last_message.get("role") != "user":
+            return
+        content = last_message.get("content")
+        if not isinstance(content, list) or not content:
+            return
+        last_block = content[-1]
+        if last_block.get("type") in {"text", "image", "tool_result"}:
+            last_block["cache_control"] = {"type": "ephemeral"}
+
+    def _apply_thinking_config(
+        self,
+        payload: dict[str, Any],
+        *,
+        max_tokens: int | None,
+        thinking: ReasoningSetting | None,
+        reasoning_support: ReasoningSupport | None = None,
+    ) -> None:
+        wire_max_tokens = (
+            max_tokens if max_tokens is not None else REQUIRED_MAX_TOKENS_FALLBACK
+        )
+        payload["max_tokens"] = wire_max_tokens
+        payload.update(
+            anthropic_thinking_fields(thinking, reasoning_support, wire_max_tokens)
+        )
+
+    def _apply_top_p(self, payload: dict[str, Any], top_p: float | None) -> None:
+        """Put ``top_p`` on a payload whose thinking config is already set."""
+        if top_p is None:
+            return
+        if _thinks(payload) and top_p < THINKING_MIN_TOP_P:
+            _warn_top_p_left_off(top_p)
+            return
+        payload["top_p"] = top_p
+
+    def _build_payload(
+        self,
+        *,
+        model_name: str,
+        system_prompt: str | None,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int | None,
+        tool_choice: dict[str, Any] | None,
+        stream: bool,
+        thinking: ReasoningSetting | None,
+        top_p: float | None,
+        reasoning_support: ReasoningSupport | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"model": model_name, "messages": messages}
+
+        self._apply_thinking_config(
+            payload,
+            max_tokens=max_tokens,
+            thinking=thinking,
+            reasoning_support=reasoning_support,
+        )
+        self._apply_top_p(payload, top_p)
+
+        if system_blocks := self._build_system_blocks(system_prompt):
+            payload["system"] = system_blocks
+
+        if tools:
+            payload["tools"] = tools
+
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
+
+        if stream:
+            payload["stream"] = True
+
+        self._add_cache_control_to_last_user_message(messages)
+
+        return payload
+
+    def prepare_request(  # noqa: PLR0913 - one keyword per request setting
+        self,
+        *,
+        model_name: str,
+        messages: Sequence[LLMMessage],
+        temperature: float,
+        tools: list[AvailableTool] | None,
+        max_tokens: int | None,
+        tool_choice: StrToolChoice | AvailableTool | None,
+        enable_streaming: bool,
+        provider: ProviderView,
+        api_key: str | None = None,
+        thinking: ReasoningSetting | None = None,
+        top_p: float | None = None,
+        reasoning_support: ReasoningSupport | None = None,
+    ) -> PreparedRequest:
+        system_prompt, converted_messages = self._mapper.prepare_messages(messages)
+        converted_tools = self._mapper.prepare_tools(tools)
+        converted_tool_choice = self._mapper.prepare_tool_choice(tool_choice)
+
+        payload = self._build_payload(
+            model_name=model_name,
+            system_prompt=system_prompt,
+            messages=converted_messages,
+            tools=converted_tools,
+            max_tokens=max_tokens,
+            tool_choice=converted_tool_choice,
+            stream=enable_streaming,
+            thinking=thinking,
+            top_p=top_p,
+            reasoning_support=reasoning_support,
+        )
+
+        beta_features = self.BETA_FEATURES
+        if _thinks(payload) and binds_thinking_blocks(model_name):
+            payload["thinking"]["block_binding"] = dict(THINKING_BLOCK_BINDING)
+            beta_features = f"{beta_features},{THINKING_BINDING_BETA}"
+
+        headers = {
+            "Content-Type": "application/json",
+            "anthropic-version": self.API_VERSION,
+            "anthropic-beta": beta_features,
+        }
+
+        if api_key:
+            headers["x-api-key"] = api_key
+
+        body = json.dumps(payload).encode("utf-8")
+        return PreparedRequest(self.endpoint, headers, body)
+
+    def parse_response(
+        self, data: dict[str, Any], provider: ProviderView | None = None
+    ) -> LLMChunk:
+        event_type = data.get("type")
+        if event_type in STREAMING_EVENT_TYPES:
+            return self._parse_streaming_event(data)
+        return self._mapper.parse_response(data)
+
+    def finish_message(self, message: LLMMessage) -> LLMMessage:
+        # A block's kind is known only once its signature has streamed in.
+        return _with_narration_as_text(message)
+
+    def _parse_streaming_event(self, data: dict[str, Any]) -> LLMChunk:
+        event_type = data.get("type", "")
+        empty_chunk = LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
+
+        if event_type == "message_start":
+            return self._parse_message_start(data)
+        if event_type == "content_block_start":
+            return self._parse_content_block_start(data) or empty_chunk
+        if event_type == "content_block_delta":
+            return self._parse_content_block_delta(data)
+        if event_type == "content_block_stop":
+            return self._parse_content_block_stop(data)
+        if event_type == "message_delta":
+            return self._parse_message_delta(data)
+        if event_type == "error":
+            error = data.get("error", {})
+            error_type = error.get("type", "unknown_error")
+            error_message = error.get("message", "Unknown streaming error")
+            raise ProviderStreamError(
+                f"Anthropic stream error ({error_type}): {error_message}", None
+            )
+        return empty_chunk
+
+    def _parse_message_start(self, data: dict[str, Any]) -> LLMChunk:
+        # The executor reads the start's usage from the raw event.
+        self._open_reasoning_blocks.clear()
+        return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
+
+    def _parse_content_block_start(self, data: dict[str, Any]) -> LLMChunk | None:
+        content_block = data.get("content_block", {})
+        index = data.get("index", 0)
+        block_type = content_block.get("type")
+
+        if block_type in REASONING_BLOCK_TYPES:
+            self._open_reasoning_blocks[index] = dict(content_block)
+            if block_type == "redacted_thinking":
+                return None
+            return LLMChunk(
+                message=LLMMessage(
+                    role=Role.assistant,
+                    reasoning_content=content_block.get("thinking", ""),
+                )
+            )
+        if block_type == "tool_use":
+            return LLMChunk(
+                message=LLMMessage(
+                    role=Role.assistant,
+                    tool_calls=[
+                        ToolCall(
+                            index=index,
+                            id=content_block.get("id"),
+                            function=FunctionCall(
+                                name=content_block.get("name"), arguments=""
+                            ),
+                        )
+                    ],
+                )
+            )
+        return None
+
+    def _parse_content_block_delta(self, data: dict[str, Any]) -> LLMChunk:
+        delta = data.get("delta", {})
+        delta_type = delta.get("type", "")
+        index = data.get("index", 0)
+
+        match delta_type:
+            case "text_delta":
+                return LLMChunk(
+                    message=LLMMessage(
+                        role=Role.assistant, content=delta.get("text", "")
+                    )
+                )
+            case "thinking_delta":
+                thinking = delta.get("thinking", "")
+                if block := self._open_reasoning_blocks.get(index):
+                    block["thinking"] = block.get("thinking", "") + thinking
+                return LLMChunk(
+                    message=LLMMessage(role=Role.assistant, reasoning_content=thinking)
+                )
+            case "signature_delta":
+                if block := self._open_reasoning_blocks.get(index):
+                    block["signature"] = block.get("signature", "") + delta.get(
+                        "signature", ""
+                    )
+                return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
+            case "input_json_delta":
+                return LLMChunk(
+                    message=LLMMessage(
+                        role=Role.assistant,
+                        tool_calls=[
+                            ToolCall(
+                                index=index,
+                                function=FunctionCall(
+                                    arguments=delta.get("partial_json", "")
+                                ),
+                            )
+                        ],
+                    )
+                )
+            case _:
+                return LLMChunk(message=LLMMessage(role=Role.assistant, content=None))
+
+    def _parse_content_block_stop(self, data: dict[str, Any]) -> LLMChunk:
+        block = self._open_reasoning_blocks.pop(data.get("index", 0), None)
+        return LLMChunk(
+            message=LLMMessage(
+                role=Role.assistant,
+                content=None,
+                reasoning_payloads=[block] if block else None,
+            )
+        )
+
+    def _parse_message_delta(self, data: dict[str, Any]) -> LLMChunk:
+        delta = data.get("delta", {})
+        return LLMChunk(
+            message=LLMMessage(role=Role.assistant, content=None),
+            stop=_parse_stop_info(delta.get("stop_reason"), delta.get("stop_details")),
+        )
+
+
+__all__ = ["REASONING_BLOCK_TYPES", "AnthropicAdapter", "AnthropicMapper"]

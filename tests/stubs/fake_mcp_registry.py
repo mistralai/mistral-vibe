@@ -18,6 +18,9 @@ _BROKEN_SERVER_NAME = "broken-server"
 
 
 class FakeMCPRegistry(MCPRegistry):
+    def clone_configuration(self) -> MCPRegistry:
+        return type(self)()
+
     async def get_tools_async(
         self, servers: list[MCPServer]
     ) -> dict[str, type[BaseTool]]:
@@ -29,7 +32,7 @@ class FakeMCPRegistry(MCPRegistry):
         self.sync_active_servers(servers)
         for srv in servers:
             key = self._server_key(srv)
-            self._cache[key] = dict(tools)
+            self._store_cache_entry(key, srv.name, dict(tools))
 
     def get_tools(self, servers: list[MCPServer]) -> dict[str, type[BaseTool]]:
         result: dict[str, type[BaseTool]] = {}
@@ -53,7 +56,7 @@ class FakeMCPRegistry(MCPRegistry):
                         raise ValueError(
                             f"FakeMCPRegistry: unsupported transport {srv.transport!r}"
                         )
-                self._cache[key] = {proxy.get_name(): proxy}
+                self._store_cache_entry(key, srv.name, {proxy.get_name(): proxy})
             result.update(self._cache[key])
         return result
 

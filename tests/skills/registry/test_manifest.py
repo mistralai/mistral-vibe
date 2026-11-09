@@ -17,6 +17,17 @@ def test_upsert_replaces_by_name() -> None:
     assert m.skills[0].version == 2
 
 
+def test_upsert_replaces_by_skill_id_when_name_changed() -> None:
+    # A re-pin whose resolved name changed upstream must not leave the old pin
+    # for the same skill_id behind.
+    m = SkillManifest()
+    m.upsert(ManifestEntry(name="old-name", skill_id="x", version=1))
+    m.upsert(ManifestEntry(name="new-name", skill_id="x", version=2))
+    assert len(m.skills) == 1
+    assert m.skills[0].name == "new-name"
+    assert m.skills[0].version == 2
+
+
 def test_remove() -> None:
     m = SkillManifest(skills=[ManifestEntry(name="a", skill_id="x", version=1)])
     assert m.remove("a") is True

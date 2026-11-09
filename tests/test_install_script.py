@@ -27,6 +27,7 @@ set -euo pipefail
 
 tool_bin_dir="${UV_TOOL_BIN_DIR:?UV_TOOL_BIN_DIR must be set}"
 
+# install.sh pins the GIL build of Python 3.14 with `--python cpython-3.14+gil`.
 case "$*" in
   "--version")
     echo "uv 0.test"
@@ -34,7 +35,7 @@ case "$*" in
   "tool dir --bin")
     echo "$tool_bin_dir"
     ;;
-  "tool install mistral-vibe"|"tool upgrade mistral-vibe")
+  "tool install --python cpython-3.14+gil mistral-vibe"|"tool upgrade --python cpython-3.14+gil mistral-vibe")
     mkdir -p "$tool_bin_dir"
     cat >"$tool_bin_dir/vibe" <<'VIBE'
 #!/usr/bin/env bash
@@ -211,7 +212,7 @@ def test_install_fails_when_vibe_not_in_uv_tool_dir(tmp_path: Path) -> None:
         case "$*" in
           "--version") echo "uv 0.test" ;;
           "tool dir --bin") echo "$tool_bin_dir" ;;
-          "tool install mistral-vibe") mkdir -p "$tool_bin_dir" ;;
+          "tool install --python cpython-3.14+gil mistral-vibe") mkdir -p "$tool_bin_dir" ;;
           *) echo "unexpected: $*" >&2; exit 1 ;;
         esac
         """,
@@ -244,3 +245,106 @@ def test_update_succeeds_when_vibe_is_already_on_path(tmp_path: Path) -> None:
         "Installing mistral-vibe from GitHub repository using uv..."
         not in result.stdout
     )
+
+
+def _write_recording_uv(path: Path, *, fail_install_until_seeded: bool) -> None:
+    """A fake uv that records every invocation to UV_FAKE_INVOCATIONS_LOG.
+
+    With `fail_install_until_seeded`, the pinned `tool install` fails until
+    `python install cpython-3.14` has run — uv cannot download a `+gil`
+    request, so install.sh must seed a managed GIL build and retry.
+    """
+    fail_when = (
+        '[[ -n "$state" && ! -f "$state" ]]' if fail_install_until_seeded else "false"
+    )
+    _write_executable(
+        path,
+        f"""\
+        #!/usr/bin/env bash
+        set -euo pipefail
+        tool_bin_dir="${{UV_TOOL_BIN_DIR:?UV_TOOL_BIN_DIR must be set}}"
+        log="${{UV_FAKE_INVOCATIONS_LOG:?UV_FAKE_INVOCATIONS_LOG must be set}}"
+        state="${{UV_FAKE_SEED_STATE:-}}"
+
+        echo "$*" >>"$log"
+
+        case "$*" in
+          "--version") echo "uv 0.test" ;;
+          "tool dir --bin") echo "$tool_bin_dir" ;;
+          "python install cpython-3.14") touch "$state" ;;
+          "tool install --python cpython-3.14+gil mistral-vibe")
+            if {fail_when}; then
+              echo "error: No interpreter found for cpython-3.14+gil-any-any-any" >&2
+              exit 1
+            fi
+            mkdir -p "$tool_bin_dir"
+            cat >"$tool_bin_dir/vibe" <<'VIBE'
+#!/usr/bin/env bash
+exit 0
+VIBE
+            chmod +x "$tool_bin_dir/vibe"
+            cat >"$tool_bin_dir/vibe-acp" <<'VIBE_ACP'
+#!/usr/bin/env bash
+exit 0
+VIBE_ACP
+            chmod +x "$tool_bin_dir/vibe-acp"
+            ;;
+          *) echo "unexpected uv invocation: $*" >&2; exit 1 ;;
+        esac
+        """,
+    )
+
+
+def test_install_pins_the_gil_build_of_python_314(tmp_path: Path) -> None:
+    """install.sh forces the GIL-enabled build of Python 3.14 through uv."""
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "fake-bin"
+    home.mkdir()
+    fake_bin.mkdir()
+    log = tmp_path / "uv-invocations.log"
+    _write_recording_uv(fake_bin / "uv", fail_install_until_seeded=False)
+
+    result = _run_install_script(
+        home,
+        [fake_bin],
+        {"UV_TOOL_BIN_DIR": str(fake_bin), "UV_FAKE_INVOCATIONS_LOG": str(log)},
+    )
+
+    assert result.returncode == 0
+    invocations = log.read_text().splitlines()
+    assert "tool install --python cpython-3.14+gil mistral-vibe" in invocations
+
+
+def test_install_seeds_a_managed_gil_python_when_the_pinned_request_fails(
+    tmp_path: Path,
+) -> None:
+    """uv cannot download a `+gil` request: install.sh seeds a managed GIL
+    3.14 with `uv python install cpython-3.14` and retries.
+    """
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "fake-bin"
+    home.mkdir()
+    fake_bin.mkdir()
+    state = tmp_path / "seeded"
+    log = tmp_path / "uv-invocations.log"
+    _write_recording_uv(fake_bin / "uv", fail_install_until_seeded=True)
+
+    result = _run_install_script(
+        home,
+        [fake_bin],
+        {
+            "UV_TOOL_BIN_DIR": str(fake_bin),
+            "UV_FAKE_SEED_STATE": str(state),
+            "UV_FAKE_INVOCATIONS_LOG": str(log),
+        },
+    )
+
+    assert result.returncode == 0
+    assert "Installation completed successfully!" in result.stdout
+    invocations = log.read_text().splitlines()
+    install = "tool install --python cpython-3.14+gil mistral-vibe"
+    seed = "python install cpython-3.14"
+    first = invocations.index(install)
+    assert invocations[first + 1] == seed
+    assert invocations[first + 2] == install
+    assert state.exists()

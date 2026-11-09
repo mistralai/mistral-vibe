@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from itertools import count
 
 from vibe.core.config.types import ConfigChangeCallback, ConfigChangeEvent
 
@@ -18,7 +17,7 @@ class Subscription:
 class EventBus:
     def __init__(self) -> None:
         self._subscribers: dict[int, Subscription] = {}
-        self._subscription_ids = count()
+        self._next_subscription_id = 0
 
     def subscribe(
         self, callback: ConfigChangeCallback, *, keys: set[str] | None = None
@@ -28,7 +27,10 @@ class EventBus:
         keys filters delivery to slash-separated config paths (ancestor and
         descendant paths match); None subscribes to every change (wildcard).
         """
-        subscription_id = next(self._subscription_ids)
+        # A plain int, not itertools.count: count lost deepcopy support in
+        # Python 3.14 and the orchestrator holding this bus is deepcopied on fork.
+        subscription_id = self._next_subscription_id
+        self._next_subscription_id += 1
         frozen_keys = frozenset(keys) if keys is not None else None
         self._subscribers[subscription_id] = Subscription(
             callback=callback, keys=frozen_keys

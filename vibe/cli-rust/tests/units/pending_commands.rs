@@ -1,0 +1,233 @@
+//! Slash commands submitted during `Status::Starting` are deferred and replayed
+//! once `apply_ready` settles.
+
+use tokio::sync::mpsc;
+
+use vibe_rs::app::{App, Status};
+use vibe_rs::commands::submission;
+use vibe_rs::commands::CommandEvent;
+use vibe_rs::{completion_manager, config};
+
+use crate::support::{stub, with_status};
+
+/// A `/whoami` submitted while the session is still starting is stored in
+/// `pending_commands` instead of firing RPCs against an unready session.
+#[tokio::test]
+async fn slash_command_during_starting_is_deferred() {
+    let mut app = with_status(Status::Starting);
+    app.chat_input.load_full_text("/whoami".to_owned());
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    submission::submit(&mut app, &stub(), &config_tx);
+
+    assert_eq!(app.pending_commands.len(), 1);
+    assert_eq!(app.pending_commands[0], "/whoami");
+    assert!(app.chat_input.input.is_empty(), "input should be cleared");
+}
+
+/// Multiple commands during `Starting` are deferred in order.
+#[tokio::test]
+async fn multiple_commands_during_starting_are_deferred_in_order() {
+    let mut app = with_status(Status::Starting);
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+    let client = stub();
+
+    app.chat_input.load_full_text("/help".to_owned());
+    submission::submit(&mut app, &client, &config_tx);
+    app.chat_input.load_full_text("/status".to_owned());
+    submission::submit(&mut app, &client, &config_tx);
+
+    assert_eq!(app.pending_commands.len(), 2);
+    assert_eq!(app.pending_commands[0], "/help");
+    assert_eq!(app.pending_commands[1], "/status");
+}
+
+/// A regular prompt (not a slash command) during `Starting` goes through the
+/// message queue, not the pending-commands list.
+#[tokio::test]
+async fn regular_prompt_during_starting_is_not_deferred() {
+    let mut app = with_status(Status::Starting);
+    app.chat_input.input = "hello world".to_owned();
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    submission::submit(&mut app, &stub(), &config_tx);
+
+    assert!(app.pending_commands.is_empty(), "prompts are not deferred");
+    assert!(!app.queue.is_empty(), "prompt should be queued");
+}
+
+/// Commands are not deferred when the session is already `Ready`.
+#[tokio::test]
+async fn command_during_ready_is_not_deferred() {
+    let mut app = with_status(Status::Ready);
+    app.chat_input.load_full_text("/help".to_owned());
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    submission::submit(&mut app, &stub(), &config_tx);
+
+    assert!(
+        app.pending_commands.is_empty(),
+        "command should not be deferred when Ready"
+    );
+}
+
+/// `flush_pending` actually executes the deferred commands: `/help` adds its
+/// output to the transcript, proving the replay path works end-to-end.
+#[tokio::test]
+async fn flush_pending_executes_deferred_help() {
+    let mut app = with_status(Status::Ready);
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    app.pending_commands.push("/help".to_owned());
+    let before = app.view.transcript.revision();
+    submission::flush_pending(&mut app, &stub(), &config_tx);
+
+    assert!(
+        app.pending_commands.is_empty(),
+        "pending commands should be flushed"
+    );
+    assert!(
+        app.view.transcript.revision() > before,
+        "the deferred /help should have added entries to the transcript"
+    );
+}
+
+/// Side-channel commands (e.g. `/help`) are deferred during `Starting` too —
+/// the gate covers every slash command, not just the non-side-channel ones,
+/// and holds them before classification.
+#[tokio::test]
+async fn side_channel_command_during_starting_is_deferred() {
+    let mut app = with_status(Status::Starting);
+    app.chat_input.load_full_text("/help".to_owned());
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    submission::submit(&mut app, &stub(), &config_tx);
+
+    assert_eq!(app.pending_commands.len(), 1);
+    assert_eq!(app.pending_commands[0], "/help");
+    assert!(app.chat_input.input.is_empty(), "input should be cleared");
+}
+
+/// A deferred RPC command replayed against a stub client fails gracefully: the
+/// background read is dispatched and returns `None`, with no panic left behind.
+#[tokio::test]
+async fn flush_pending_replay_against_stub_does_not_panic() {
+    let mut app = with_status(Status::Ready);
+    app.session.session_id = Some("rs-test".to_owned());
+    let (command_tx, mut command_rx) = mpsc::channel::<CommandEvent>(8);
+    app.command_tx = Some(command_tx);
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    app.pending_commands.push("/whoami".to_owned());
+    submission::flush_pending(&mut app, &stub(), &config_tx);
+
+    assert!(
+        app.pending_commands.is_empty(),
+        "pending commands should be flushed"
+    );
+    let answer = tokio::time::timeout(std::time::Duration::from_secs(5), command_rx.recv()).await;
+    assert!(
+        matches!(answer, Ok(Some(CommandEvent::Whoami { .. }))),
+        "the deferred /whoami should dispatch its background identity read"
+    );
+}
+
+/// A deferred `/exit` replays through `flush_pending` which must return true so
+/// the event loop quits (Bugbot: deferred exit command never quits).
+#[tokio::test]
+async fn flush_pending_propagates_deferred_exit() {
+    let mut app = with_status(Status::Ready);
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    app.pending_commands.push("/exit".to_owned());
+    let exit = submission::flush_pending(&mut app, &stub(), &config_tx);
+
+    assert!(exit, "deferred /exit should signal quit");
+    assert!(app.pending_commands.is_empty());
+}
+
+/// A busy reject preserves a newer draft while later side-channel commands run.
+#[tokio::test]
+async fn flush_pending_preserves_in_progress_input() {
+    let mut app = App::default();
+    app.session.status = Status::Generating {
+        since: vibe_rs::clock::now(),
+    };
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    app.pending_commands.push("/clear".to_owned());
+    app.pending_commands.push("/help".to_owned());
+    app.chat_input.input = "unfinished thought".to_owned();
+    let before = app.view.transcript.revision();
+    let exit = submission::flush_pending(&mut app, &stub(), &config_tx);
+
+    assert!(!exit);
+    assert_eq!(app.chat_input.input, "unfinished thought");
+    assert!(app.view.transcript.revision() > before);
+}
+
+/// A busy reject restores the command, reopens completions, and keeps replaying.
+#[tokio::test]
+async fn flush_pending_rejects_non_side_channel_while_generating() {
+    let mut app = App::default();
+    app.session.status = Status::Generating {
+        since: vibe_rs::clock::now(),
+    };
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    app.pending_commands.push("/clear".to_owned());
+    app.pending_commands.push("/help".to_owned());
+    let before = app.view.transcript.revision();
+    let exit = submission::flush_pending(&mut app, &stub(), &config_tx);
+
+    assert!(!exit);
+    assert_eq!(app.chat_input.full_text(), "/clear");
+    assert_eq!(app.chat_input.cursor, 0);
+    assert!(completion_manager::is_open(&app));
+    assert!(app.view.transcript.revision() > before);
+}
+
+/// A deferred teleport rejected at flush time goes back into the input.
+#[tokio::test]
+async fn flush_pending_restores_a_rejected_teleport() {
+    let mut app = App::default();
+    app.session.status = Status::Generating {
+        since: vibe_rs::clock::now(),
+    };
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    app.pending_commands.push("&ship it".to_owned());
+    let exit = submission::flush_pending(&mut app, &stub(), &config_tx);
+
+    assert!(!exit);
+    assert_eq!(app.chat_input.full_text(), "&ship it");
+    assert_eq!(app.chat_input.cursor, 0);
+    assert!(app.teleport.is_none());
+}
+
+/// `flush_pending` with nothing deferred keeps a dismissed completion popup
+/// closed: a Ready event alone must not reset the user's completion state
+/// (Bugbot: ready resets open completions).
+#[tokio::test]
+async fn flush_pending_without_commands_preserves_dismissed_completions() {
+    let mut app = with_status(Status::Ready);
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+
+    app.chat_input.load_full_text("/he".to_owned());
+    completion_manager::input_changed(&mut app);
+    assert!(completion_manager::is_open(&app), "popup should be open");
+    assert!(completion_manager::dismiss(&mut app));
+    assert!(
+        !completion_manager::is_open(&app),
+        "popup should be dismissed"
+    );
+
+    submission::flush_pending(&mut app, &stub(), &config_tx);
+
+    assert!(
+        !completion_manager::is_open(&app),
+        "a Ready with no deferred commands must not reopen the dismissed popup"
+    );
+    assert_eq!(app.chat_input.full_text(), "/he");
+    assert!(app.pending_commands.is_empty());
+}

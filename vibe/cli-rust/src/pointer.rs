@@ -1,0 +1,135 @@
+//! Mouse pointer shape (Kitty OSC 22).
+
+use std::io::Write;
+
+use crate::app::App;
+use crate::selection;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Shape {
+    #[default]
+    Default,
+    /// Hand: something a click acts on.
+    Pointer,
+    /// I-beam: editable or selectable text.
+    Text,
+    /// Closed hand while the transcript scrollbar thumb is being dragged.
+    Grabbing,
+}
+
+impl Shape {
+    fn name(self) -> &'static str {
+        match self {
+            Shape::Default => "default",
+            Shape::Pointer => "pointer",
+            Shape::Text => "text",
+            Shape::Grabbing => "grabbing",
+        }
+    }
+}
+
+/// Emit the shape the cell under the mouse asks for, when it changed.
+pub fn sync(app: &mut App) {
+    let shape = shape(app);
+    if shape == app.view.pointer_shape {
+        return;
+    }
+    app.view.pointer_shape = shape;
+    emit(shape);
+}
+
+pub fn emit(shape: Shape) {
+    let mut out = std::io::stdout();
+    let _ = write!(out, "\x1b]22;{}\x07", shape.name());
+    let _ = out.flush();
+}
+
+/// The shape for the current hover, following what a click there would do.
+pub fn shape(app: &App) -> Shape {
+    if app.view.mouse.is_dragging_scrollbar() {
+        return Shape::Grabbing;
+    }
+    // A drag in flight owns the pointer.
+    if app.selection.drag.is_some() {
+        return Shape::Text;
+    }
+    let Some(at) = app.view.mouse_position else {
+        return Shape::Default;
+    };
+    let Some(target) = crate::mouse::target_at(app, at) else {
+        return Shape::Default;
+    };
+    if target == crate::mouse::MouseTarget::Composer {
+        return if crate::ui::composer_title::model_at(app, at) {
+            Shape::Pointer
+        } else if selection::in_input(app, at) {
+            Shape::Text
+        } else {
+            Shape::Default
+        };
+    }
+    if target == crate::mouse::MouseTarget::JumpToBottom {
+        return Shape::Pointer;
+    }
+    if target == crate::mouse::MouseTarget::BottomBar {
+        let clickable = crate::ui::bottom_bar::link_at(app, at).is_some();
+        return if clickable {
+            Shape::Pointer
+        } else {
+            Shape::Default
+        };
+    }
+    if target == crate::mouse::MouseTarget::Trust {
+        let at = crate::trust_folders::selection_position(app, at);
+        return if app.view.selection_region.contains(at) {
+            Shape::Text
+        } else {
+            Shape::Default
+        };
+    }
+    if target == crate::mouse::MouseTarget::RemoteProject {
+        if crate::mouse::scrollbar_at(app, at) {
+            return Shape::Default;
+        }
+        let project = &app.vibe_code_project;
+        let position = at.into();
+        if project.search_area.contains(position) || project.branch_area.contains(position) {
+            return Shape::Text;
+        }
+        return if project.list.index_at(at).is_some() {
+            Shape::Pointer
+        } else if app.view.bottom_app_selection_region.contains(at) {
+            Shape::Text
+        } else {
+            Shape::Default
+        };
+    }
+    if !matches!(
+        target,
+        crate::mouse::MouseTarget::Transcript | crate::mouse::MouseTarget::OnboardingLinks
+    ) {
+        return Shape::Default;
+    }
+    if app.view.link_hitmap.iter().any(|link| link.contains(at)) {
+        return Shape::Pointer;
+    }
+    if expandable_at(app, at) {
+        return Shape::Pointer;
+    }
+    Shape::Default
+}
+
+/// Whether `at` sits on a transcript entry a click would fold or unfold.
+fn expandable_at(app: &App, at: (u16, u16)) -> bool {
+    if !app.view.selection_region.contains(at) {
+        return false;
+    }
+    // The child view swaps its transcript in only at render time; the hit
+    // test follows the viewed child so its group headers show the hand too.
+    let (transcript, _) = crate::subagents::active_transcript(app);
+    app.view
+        .entry_hitmap
+        .iter()
+        .find(|(top, bottom, _, _)| at.1 >= *top && at.1 < *bottom)
+        .is_some_and(|(_, _, _, id)| transcript.is_expandable(id))
+}

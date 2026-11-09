@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from tests.mock.utils import mock_llm_chunk
-from tests.stubs.fake_backend import FakeBackend
 from vibe.core.tools.base import ToolPermission
 from vibe.core.tools.permissions import (
     ApprovedRule,
@@ -13,7 +9,7 @@ from vibe.core.tools.permissions import (
     PermissionStore,
     RequiredPermission,
 )
-from vibe.core.types import ApprovalResponse, FunctionCall, ToolCall, ToolResultEvent
+from vibe.permissions import PathGrantScope, path_grant_pattern
 
 
 class TestPermissionStore:
@@ -72,97 +68,88 @@ class TestPermissionStore:
 
         assert store.get_tool_permission("bash") == ToolPermission.ALWAYS
 
-
-class TestAgentLoopSharesStore:
-    @pytest.mark.asyncio
-    async def test_subagent_inherits_parent_session_rules(self):
+    @pytest.mark.parametrize(
+        ("scope", "covered", "not_covered"),
+        [
+            (
+                PathGrantScope.EXACT,
+                "/outside/shared/config[prod].json",
+                "/outside/shared/other.json",
+            ),
+            (
+                PathGrantScope.DIRECTORY_RECURSIVE,
+                "/outside/shared/private/notes.txt",
+                "/outside/sibling/notes.txt",
+            ),
+        ],
+    )
+    def test_outside_path_scopes_do_not_overgrant(
+        self, scope: PathGrantScope, covered: str, not_covered: str
+    ) -> None:
         store = PermissionStore()
-        parent = build_test_agent_loop(permission_store=store)
-        subagent = build_test_agent_loop(permission_store=store)
-
-        await parent.approve_always(
-            "bash",
-            [
-                RequiredPermission(
-                    scope=PermissionScope.COMMAND_PATTERN,
-                    invocation_pattern="npm install foo",
-                    session_pattern="npm install *",
-                    label="npm install *",
-                )
-            ],
+        grant_path = (
+            "/outside/shared/config[prod].json"
+            if scope is PathGrantScope.EXACT
+            else "/outside/shared"
+        )
+        store.add_rule(
+            ApprovedRule(
+                tool_name="read_file",
+                scope=PermissionScope.OUTSIDE_DIRECTORY,
+                session_pattern=path_grant_pattern(grant_path, scope),
+            )
         )
 
-        rp = RequiredPermission(
-            scope=PermissionScope.COMMAND_PATTERN,
-            invocation_pattern="npm install bar",
-            session_pattern="npm install *",
-            label="npm install *",
-        )
-        assert subagent._permission_store.covers("bash", rp)
+        def permission(path: str) -> RequiredPermission:
+            return RequiredPermission(
+                scope=PermissionScope.OUTSIDE_DIRECTORY,
+                invocation_pattern=path,
+                session_pattern=path_grant_pattern(path, PathGrantScope.EXACT),
+                label=path,
+            )
 
-    @pytest.mark.asyncio
-    async def test_subagent_inherits_parent_tool_permission(self):
+        assert store.covers("read_file", permission(covered))
+        assert not store.covers("read_file", permission(not_covered))
+        assert not store.covers("write_file", permission(covered))
+
+    def test_outside_path_scope_normalizes_traversal_and_windows_case(self) -> None:
         store = PermissionStore()
-        parent = build_test_agent_loop(permission_store=store)
-        subagent = build_test_agent_loop(permission_store=store)
-
-        await parent.approve_always("bash", None)
-
-        assert (
-            subagent._permission_store.get_tool_permission("bash")
-            == ToolPermission.ALWAYS
+        store.add_rule(
+            ApprovedRule(
+                tool_name="read_file",
+                scope=PermissionScope.OUTSIDE_DIRECTORY,
+                session_pattern=path_grant_pattern(
+                    r"C:\Users\Me\Shared", PathGrantScope.DIRECTORY_RECURSIVE
+                ),
+            )
+        )
+        permission = RequiredPermission(
+            scope=PermissionScope.OUTSIDE_DIRECTORY,
+            invocation_pattern=r"c:\users\me\shared\private\..\notes.txt",
+            session_pattern="unused",
+            label="unused",
         )
 
-    @pytest.mark.asyncio
-    async def test_subagent_applies_parent_tool_permission_before_resolution(self):
+        assert store.covers("read_file", permission)
+
+    def test_reset_drops_path_scope_rules(self) -> None:
         store = PermissionStore()
-        parent = build_test_agent_loop(permission_store=store)
-        await parent.approve_always("bash", None)
-        approval_requested = False
-
-        async def approval_callback(
-            tool_name: str,
-            args: BaseModel,
-            tool_call_id: str,
-            required_permissions: list[RequiredPermission] | None,
-        ) -> tuple[ApprovalResponse, str | None]:
-            nonlocal approval_requested
-            approval_requested = True
-            return ApprovalResponse.NO, None
-
-        tool_call = ToolCall(
-            id="call_1",
-            index=0,
-            function=FunctionCall(name="bash", arguments='{"command":"true"}'),
+        permission = RequiredPermission(
+            scope=PermissionScope.OUTSIDE_DIRECTORY,
+            invocation_pattern="/outside/file.txt",
+            session_pattern=path_grant_pattern(
+                "/outside/file.txt", PathGrantScope.EXACT
+            ),
+            label="unused",
         )
-        subagent = build_test_agent_loop(
-            config=build_test_vibe_config(enabled_tools=["bash"]),
-            backend=FakeBackend([
-                [mock_llm_chunk(content="Running it.", tool_calls=[tool_call])],
-                [mock_llm_chunk(content="Done.")],
-            ]),
-            permission_store=store,
+        store.add_rule(
+            ApprovedRule(
+                tool_name="read_file",
+                scope=permission.scope,
+                session_pattern=permission.session_pattern,
+            )
         )
-        subagent.set_approval_callback(approval_callback)
 
-        events = [event async for event in subagent.act("run true")]
-        tool_results = [event for event in events if isinstance(event, ToolResultEvent)]
+        store.reset()
 
-        assert not approval_requested
-        assert len(tool_results) == 1
-        assert tool_results[0].skipped is False
-        assert "permission" not in subagent.config.tools.get("bash", {})
-
-    def test_default_store_is_per_loop_when_not_shared(self):
-        a = build_test_agent_loop()
-        b = build_test_agent_loop()
-
-        assert a._permission_store is not b._permission_store
-        assert a._permission_store.lock is not b._permission_store.lock
-
-    def test_subagent_shares_parent_approval_lock(self):
-        store = PermissionStore()
-        parent = build_test_agent_loop(permission_store=store)
-        subagent = build_test_agent_loop(permission_store=store)
-
-        assert parent._permission_store.lock is subagent._permission_store.lock
+        assert not store.covers("read_file", permission)

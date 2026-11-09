@@ -9,7 +9,7 @@ from typing import Any
 
 import tomli_w
 
-from vibe.core.logger import logger
+from vibe.observability.logging import logger
 
 LEGACY_BASE_DISABLED_KEY = "base_disabled"
 

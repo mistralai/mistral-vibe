@@ -1,0 +1,211 @@
+"""Core already shows a model without image input something in place of the
+pixels: ``[Image]``, plus the file's link for a file-backed image. Describing
+an image is Vibe's own feature on top of that, and unlike Core's projection it
+is a provider call that takes seconds and can fail. So the Host substitutes at
+the turn-input seam, where mentioned files are already inlined and an await
+with a failure path is available. What is substituted once is what Core
+stores, compacts and resumes.
+
+An image no describer can reach is left as is, and Core hands the model
+``[Image]`` in its place, with the file's link for a file-backed one. That
+says nothing about the image, so ``images_supported`` promises nothing on its
+strength (see ``project_config_view``). Only the Unified backend describes images; the
+legacy ``AgentLoop`` keeps rejecting attachments its model cannot read.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from vibe.app_server._turn_input import image_attachment_from_session_block
+from vibe.app_server._workspace import PromptPreparationError
+from vibe.app_server.models import (
+    ImageContentBlock,
+    SessionImageContentBlock,
+    SessionTextContentBlock,
+    TextContentBlock,
+)
+from vibe.core.llm.completion import CompletionTransport
+from vibe.core.types import ImageAttachment as CoreImageAttachment
+from vibe.core.vision import ImageDescriber, complete_vision
+from vibe.utils.images import MAX_IMAGES_PER_MESSAGE
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from typing import Any
+
+    from mistralai_vibe_local_harness.vibe import (
+        ProviderCredentialProvider,
+        UtilityReply,
+    )
+    from vibe.app_server.models import (
+        ContentBlock,
+        ImageAttachment,
+        SessionContentBlock,
+    )
+    from vibe.core.config import ModelConfig, VibeConfigSchema
+    from vibe.core.types import LLMMessage
+    from vibe.core.vision import DescribeReport
+
+__all__ = ["SessionImageDescriber"]
+
+UNREADABLE_IMAGE = (
+    "The image could not be analyzed. Ask the user to describe what it shows."
+)
+
+# The event VIBE-3692 registered for this fallback, extended with the sidecar's
+# own dimensions rather than duplicated. Never carries image bytes, prompts,
+# descriptions or provider error text.
+FALLBACK_EVENT = "vibe.multimodal_fallback_switch"
+
+
+class SessionImageDescriber:
+    def __init__(
+        self,
+        config: Callable[[], VibeConfigSchema],
+        *,
+        notice: Callable[[str], None],
+        session_id: Callable[[], str | None],
+        record_event: Callable[[str, dict[str, Any]], None],
+        credentials: Callable[[str], ProviderCredentialProvider] | None = None,
+    ) -> None:
+        self._config = config
+        self._notice = notice
+        self._session_id = session_id
+        self._record_event = record_event
+        # The session's credential for a provider by name; None reads the key.
+        self._credentials = credentials
+        self._describer = ImageDescriber(self._complete)
+
+    async def described_blocks(self, blocks: list[ContentBlock]) -> list[ContentBlock]:
+        images = [block for block in blocks if isinstance(block, ImageContentBlock)]
+        if not images:
+            return blocks
+        _reject_beyond_limit(len(images))
+        model = self._config().get_vision_fallback_model()
+        if model is None:
+            return blocks
+        self._report(
+            await self._describer.describe_all(
+                [_core_attachment(image.attachment) for image in images],
+                model=model,
+                instruction=" ".join(
+                    block.text
+                    for block in blocks
+                    if isinstance(block, TextContentBlock)
+                ),
+            ),
+            model,
+        )
+        return [
+            TextContentBlock(text=self._image_text(_core_attachment(block.attachment)))
+            if isinstance(block, ImageContentBlock)
+            else block
+            for block in blocks
+        ]
+
+    async def described_session_blocks(
+        self, blocks: list[SessionContentBlock]
+    ) -> list[SessionContentBlock]:
+        # Conversion is deferred past the model check: it parses the block's
+        # URI and rejects anything non-local, which must not turn a queued
+        # image this session was never going to describe into a failed send.
+        images = [
+            block for block in blocks if isinstance(block, SessionImageContentBlock)
+        ]
+        if not images:
+            return blocks
+        _reject_beyond_limit(len(images))
+        model = self._config().get_vision_fallback_model()
+        if model is None:
+            return blocks
+        self._report(
+            await self._describer.describe_all(
+                [_session_core_attachment(image) for image in images],
+                model=model,
+                instruction=" ".join(
+                    block.text
+                    for block in blocks
+                    if isinstance(block, SessionTextContentBlock)
+                ),
+            ),
+            model,
+        )
+        return [
+            SessionTextContentBlock(
+                text=self._image_text(_session_core_attachment(block))
+            )
+            if isinstance(block, SessionImageContentBlock)
+            else block
+            for block in blocks
+        ]
+
+    def _report(self, report: DescribeReport, model: ModelConfig) -> None:
+        # The agent is handed a placeholder either way, so without this the
+        # user only sees it claim it cannot see an image it was never shown.
+        for failure in report.failures:
+            self._notice(
+                f"{model.alias} could not describe {failure.alias}: {failure.reason}"
+            )
+        self._record(report, model)
+
+    def _record(self, report: DescribeReport, model: ModelConfig) -> None:
+        try:
+            blind = self._config().get_active_model().alias
+        except ValueError:
+            blind = None
+        self._record_event(
+            FALLBACK_EVENT,
+            {
+                "from": blind,
+                "to": model.alias,
+                "provider": model.provider,
+                "outcome": report.outcome,
+                "nb_images_described": report.described,
+                "nb_images_cached": report.cached,
+                "nb_images_failed": len(report.failures),
+                "nb_prompt_tokens": report.prompt_tokens,
+                "nb_completion_tokens": report.completion_tokens,
+                "duration_ms": report.duration_ms,
+            },
+        )
+
+    def _image_text(self, attachment: CoreImageAttachment) -> str:
+        body = self._describer.cached(attachment) or UNREADABLE_IMAGE
+        return f'<image alias="{attachment.alias}">\n{body}\n</image>'
+
+    async def _complete(
+        self, *, model: ModelConfig, messages: Sequence[LLMMessage]
+    ) -> UtilityReply:
+        config = self._config()
+        provider = config.get_provider_for_model(model)
+        return await complete_vision(
+            model=model,
+            provider=provider,
+            messages=messages,
+            transport=CompletionTransport.from_config(config),
+            session_id=self._session_id(),
+            credentials=self._credentials(provider.name) if self._credentials else None,
+        )
+
+
+def _reject_beyond_limit(count: int) -> None:
+    # The CLI and ACP both cap a message here, but the app-server protocol
+    # accepts an unbounded block list: without this, one turn/start can order
+    # arbitrarily many provider calls.
+    if count > MAX_IMAGES_PER_MESSAGE:
+        raise PromptPreparationError(
+            f"Too many image attachments (got {count}, max {MAX_IMAGES_PER_MESSAGE})."
+        )
+
+
+def _core_attachment(attachment: ImageAttachment) -> CoreImageAttachment:
+    # by_alias=False: protocol models serialize to camelCase, core types read
+    # snake_case.
+    return CoreImageAttachment.model_validate(
+        attachment.model_dump(mode="json", by_alias=False)
+    )
+
+
+def _session_core_attachment(block: SessionImageContentBlock) -> CoreImageAttachment:
+    return _core_attachment(image_attachment_from_session_block(block))

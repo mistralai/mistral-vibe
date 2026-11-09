@@ -1,0 +1,324 @@
+"""Native Windows pseudo-terminal backend using pywinpty."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+import importlib
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import time
+from typing import Protocol, cast
+
+from mistralai_vibe_local_harness.vibe._processes._backend import (
+    ManagedTerminal,
+    ProcessCommandEnvironment,
+    PtyBackend,
+    TerminalBackendError,
+    stop_terminals_by_signals,
+)
+
+_POWERSHELL_SHELLS = ("pwsh.exe", "powershell.exe")
+# Windows PowerShell writes redirected output and decodes native command output
+# in the console's OEM code page, and pipes text to native commands as ASCII.
+# Callers decode output as UTF-8, so switch both directions before the command.
+_POWERSHELL_UTF8_PRELUDE = (
+    "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); "
+    "$OutputEncoding = [Console]::OutputEncoding; "
+)
+# ConPTY can deliver the last output shortly after every process has exited.
+_EXIT_OUTPUT_SETTLE_SECONDS = 0.1
+
+
+class ProcessJob(Protocol):
+    def adopt(self, process_id: int) -> None: ...
+
+    def active_processes(self) -> int: ...
+
+    def terminate(self) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class WindowsTerminal:
+    def __init__(self, process: object, backend: PtyBackend, job: ProcessJob) -> None:
+        self._process = process
+        self._backend = backend
+        self.job = job
+        self._read_buffer = bytearray()
+        self._returncode: int | None = None
+        self._quiet_since: float | None = None
+
+    @property
+    def pid(self) -> int | None:
+        value = getattr(self._process, "pid", None)
+        return value if isinstance(value, int) else None
+
+    @property
+    def pty_backend(self) -> PtyBackend:
+        return cast(PtyBackend, self._backend)
+
+    @property
+    def returncode(self) -> int | None:
+        return self._returncode
+
+    def poll(self) -> int | None:
+        if self._returncode is not None:
+            return self._returncode
+        if bool(self._process.isalive()):  # type: ignore[attr-defined]
+            return None
+        value = self._process.get_exitstatus()  # type: ignore[attr-defined]
+        self._returncode = value if isinstance(value, int) else 1
+        return self._returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            if (returncode := self.poll()) is not None:
+                return returncode
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("Windows PTY", timeout or 0)
+            time.sleep(0.05)
+
+    def group_is_alive(self) -> bool:
+        return self.poll() is None or self.job.active_processes() > 0
+
+    def wait_for_group_exit(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while self.group_is_alive():
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+        return True
+
+    def wait_readable(self, timeout_seconds: float) -> bool:
+        if self._read_buffer:
+            return True
+        deadline = time.monotonic() + max(timeout_seconds, 0)
+        while True:
+            try:
+                output = self._process.read(blocking=False)  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    reached_eof = bool(self._process.iseof())  # type: ignore[attr-defined]
+                except Exception:
+                    reached_eof = False
+                if not reached_eof and self.poll() is None:
+                    raise
+                output = ""
+            if isinstance(output, str) and output:
+                self._read_buffer.extend(output.encode("utf-8"))
+                self._quiet_since = None
+                return True
+            # Once the whole job has exited and its output has settled, the
+            # terminal is at end-of-file: readable, with read() returning b"".
+            if self._output_settled():
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+
+    def _output_settled(self) -> bool:
+        if self._quiet_since is None:
+            if self.group_is_alive():
+                return False
+            self._quiet_since = time.monotonic()
+        return time.monotonic() - self._quiet_since >= _EXIT_OUTPUT_SETTLE_SECONDS
+
+    def read(self, size: int) -> bytes:
+        if not self._read_buffer and not self.wait_readable(0):
+            return b""
+        chunk = bytes(self._read_buffer[:size])
+        del self._read_buffer[:size]
+        return chunk
+
+    def write(self, data: bytes) -> int:
+        text = data.decode("utf-8")
+        self._process.write(text)  # type: ignore[attr-defined]
+        return len(data)
+
+    def close(self) -> None:
+        try:
+            self._process.cancel_io()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.job.close()
+
+
+class WindowsTerminalBackend:
+    def __init__(self, command_environment: str) -> None:
+        if command_environment not in {"git_bash", "powershell"}:
+            raise ValueError("Windows terminal requires Git Bash or PowerShell")
+        self.command_environment: ProcessCommandEnvironment = cast(
+            ProcessCommandEnvironment, command_environment
+        )
+
+    def resolve_shell(self, configured: str | None, env: dict[str, str]) -> str:
+        if configured is not None:
+            resolved = _resolve_executable(configured, env)
+            if resolved is None or _shell_family(resolved) != self.command_environment:
+                raise TerminalBackendError(
+                    "configured shell is missing or has the wrong family"
+                )
+            return resolved
+        if self.command_environment == "git_bash":
+            if resolved := _find_git_bash(env):
+                return resolved
+            raise TerminalBackendError("no Git Bash shell found")
+        for candidate in _POWERSHELL_SHELLS:
+            if resolved := shutil.which(
+                candidate, path=_windows_env(env, "PATH") or ""
+            ):
+                return resolved
+        raise TerminalBackendError("no PowerShell shell found")
+
+    def command_argv(self, shell: str, command: str, *, interactive: bool) -> list[str]:
+        """Return the argv that runs ``command`` once in ``shell``.
+
+        PowerShell bypasses the execution policy so ``.ps1`` command shims such as
+        ``npm.ps1`` run, and a non-interactive command fails on a prompt instead of
+        waiting for input that never comes.
+        """
+        if self.command_environment == "git_bash":
+            return [shell, "-c", command]
+        prompt_flags = [] if interactive else ["-NonInteractive"]
+        return [
+            shell,
+            "-NoLogo",
+            "-NoProfile",
+            *prompt_flags,
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            _POWERSHELL_UTF8_PRELUDE + command,
+        ]
+
+    def start_terminal(
+        self, *, shell: str | None, command: str, cwd: Path, env: dict[str, str]
+    ) -> WindowsTerminal:
+        if shell is None:
+            raise TerminalBackendError("no shell was resolved")
+        winpty = importlib.import_module("winpty")
+        enums = importlib.import_module("winpty.enums")
+        argv = self.command_argv(shell, command, interactive=True)
+        environment = "\0".join(f"{key}={value}" for key, value in env.items()) + "\0"
+        job = _new_job()
+        try:
+            for backend_name, backend_value in (
+                ("ConPTY", enums.Backend.ConPTY),
+                ("WinPTY", enums.Backend.WinPTY),
+            ):
+                try:
+                    process = winpty.PTY(120, 40, backend=backend_value)
+                except Exception:
+                    continue
+                command_line = " " + subprocess.list2cmdline(argv[1:])
+                try:
+                    spawned = process.spawn(
+                        argv[0], cmdline=command_line, cwd=str(cwd), env=environment
+                    )
+                except Exception as error:
+                    process.cancel_io()
+                    raise TerminalBackendError("Windows PTY spawn failed") from error
+                if spawned:
+                    _adopt(job, process)
+                    return WindowsTerminal(process, cast(PtyBackend, backend_name), job)
+                process.cancel_io()
+            raise TerminalBackendError("no Windows PTY backend could start the process")
+        except BaseException:
+            job.close()
+            raise
+
+    def stop_terminals(
+        self, terminals: Sequence[ManagedTerminal], grace_seconds: float
+    ) -> list[bool]:
+        # A console process tree has no termination it may handle: kill it.
+        return stop_terminals_by_signals(
+            terminals, [self.force_termination], grace_seconds
+        )
+
+    def force_termination(self, terminal: ManagedTerminal) -> None:
+        if not isinstance(terminal, WindowsTerminal):
+            raise TerminalBackendError("Windows backend received a foreign terminal")
+        try:
+            terminal.job.terminate()
+        except OSError as error:
+            raise TerminalBackendError(
+                "the Windows Job Object could not be terminated"
+            ) from error
+
+    def close(self) -> None:
+        return
+
+
+def _adopt(job: ProcessJob, process: object) -> None:
+    pid = getattr(process, "pid", None)
+    try:
+        if not isinstance(pid, int):
+            raise OSError("Windows PTY has no process ID")
+        job.adopt(pid)
+    except OSError as error:
+        process.cancel_io()  # type: ignore[attr-defined]
+        raise TerminalBackendError(
+            "the Windows PTY process could not join a Job Object"
+        ) from error
+
+
+def _new_job() -> ProcessJob:
+    from mistralai_vibe_local_harness.vibe._processes._windows_job import WindowsJob
+
+    return WindowsJob()
+
+
+def _resolve_executable(candidate: str, env: dict[str, str]) -> str | None:
+    expanded = Path(candidate).expanduser()
+    path_like = (
+        os.sep in candidate
+        or (os.altsep is not None and os.altsep in candidate)
+        or ":" in candidate
+    )
+    if path_like:
+        return str(expanded) if expanded.is_file() else None
+    return shutil.which(candidate, path=_windows_env(env, "PATH") or "")
+
+
+def _find_git_bash(env: dict[str, str]) -> str | None:
+    search_path = _windows_env(env, "PATH") or ""
+    if candidate := shutil.which("bash.exe", path=search_path):
+        normalized = candidate.replace("\\", "/").lower()
+        if (
+            "/system32/bash.exe" not in normalized
+            and "/windowsapps/bash.exe" not in normalized
+        ):
+            return candidate
+    git = shutil.which("git.exe", path=search_path)
+    if git is not None:
+        git_root = Path(git).parent.parent
+        for relative in ("bin/bash.exe", "usr/bin/bash.exe"):
+            candidate = git_root / relative
+            if candidate.is_file():
+                return str(candidate)
+    for variable in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        root = _windows_env(env, variable)
+        if root is None:
+            continue
+        for relative in ("Git/bin/bash.exe", "Programs/Git/bin/bash.exe"):
+            candidate = Path(root) / relative
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def _windows_env(env: dict[str, str], name: str) -> str | None:
+    folded = name.casefold()
+    return next((value for key, value in env.items() if key.casefold() == folded), None)
+
+
+def _shell_family(path: str) -> str:
+    name = Path(path).name.casefold()
+    if name in {"bash", "bash.exe"}:
+        return "git_bash"
+    if name in {"pwsh", "pwsh.exe", "powershell", "powershell.exe"}:
+        return "powershell"
+    return "unknown"

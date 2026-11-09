@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from vibe.cli.turn_summary.port import TurnSummaryPort, TurnSummaryResult
-from vibe.core.types import BaseEvent
 
 
 class NoopTurnSummary(TurnSummaryPort):
@@ -22,7 +21,10 @@ class NoopTurnSummary(TurnSummaryPort):
     def start_turn(self, user_message: str) -> None:
         pass
 
-    def track(self, event: BaseEvent) -> None:
+    def track_user_message(self, message_id: str) -> None:
+        pass
+
+    def track_assistant_text(self, content: str) -> None:
         pass
 
     def set_error(self, message: str) -> None:

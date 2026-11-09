@@ -3,90 +3,46 @@ from __future__ import annotations
 from datetime import datetime
 import json
 from pathlib import Path
-from unittest.mock import patch
 
+import httpx2
 import pytest
 
-from tests.conftest import ConfigBuilder, OrchestratorLoader
-from tests.stubs.fake_backend import FakeBackend
 from tests.stubs.fake_client import FakeClient
-from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
-from vibe.core.agent_loop import AgentLoop
-from vibe.core.config import ModelConfig, SessionLoggingConfig, VibeConfigSchema
-from vibe.core.types import LLMChunk, LLMMessage, LLMUsage, Role
+from vibe.acp.agent import SessionStarter, VibeAcpAgent
+from vibe.app_server import connector_catalog
+from vibe.utils.http import VibeAsyncHTTPClient
 
 
-@pytest.fixture
-def backend() -> FakeBackend:
-    backend = FakeBackend(
-        LLMChunk(
-            message=LLMMessage(role=Role.assistant, content="Hi"),
-            usage=LLMUsage(prompt_tokens=1, completion_tokens=1),
-        )
+def _create_acp_agent(session_starter: SessionStarter | None = None) -> VibeAcpAgent:
+    agent = (
+        VibeAcpAgent(session_starter=session_starter)
+        if session_starter
+        else VibeAcpAgent()
     )
-    return backend
-
-
-def _create_acp_agent() -> VibeAcpAgentLoop:
-    vibe_acp_agent = VibeAcpAgentLoop()
     client = FakeClient()
-
-    vibe_acp_agent.on_connect(client)
-    client.on_connect(vibe_acp_agent)
-
-    return vibe_acp_agent  # pyright: ignore[reportReturnType]
+    agent.on_connect(client)
+    client.on_connect(agent)
+    return agent
 
 
-@pytest.fixture
-def acp_agent_loop(backend: FakeBackend) -> VibeAcpAgentLoop:
-    class PatchedAgent(AgentLoop):
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **kwargs, backend=backend)
+@pytest.fixture(autouse=True)
+def _no_connector_bootstrap_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every session start resolves the connector catalog, and each test's
+    fresh VIBE_HOME has no cached copy: with the mock key that would be a real
+    request to api.mistral.ai, with a 30 s timeout, and its DNS lookup, which
+    cancellation cannot stop, holds the closing test loop until it returns.
+    Fail it at once, as offline.
+    """
 
-    patch("vibe.acp.acp_agent_loop.AgentLoop", side_effect=PatchedAgent).start()
-    return _create_acp_agent()
+    def refuse(request: httpx2.Request) -> httpx2.Response:
+        raise httpx2.ConnectError("connector bootstrap is not mocked", request=request)
 
+    def offline_client() -> VibeAsyncHTTPClient:
+        return VibeAsyncHTTPClient(transport=httpx2.MockTransport(refuse))
 
-@pytest.fixture
-def acp_agent_with_session_config(
-    backend: FakeBackend,
-    temp_session_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    build_config: ConfigBuilder,
-    load_orchestrator: OrchestratorLoader[VibeConfigSchema],
-) -> tuple[VibeAcpAgentLoop, FakeClient]:
-    session_config = SessionLoggingConfig(
-        save_dir=str(temp_session_dir), session_prefix="session", enabled=True
+    monkeypatch.setattr(
+        connector_catalog, "_build_bootstrap_http_client", offline_client
     )
-    orchestrator = load_orchestrator(
-        build_config(
-            active_model="devstral-latest",
-            models=[
-                ModelConfig(
-                    name="devstral-latest", provider="mistral", alias="devstral-latest"
-                )
-            ],
-            session_logging=session_config,
-        )
-    )
-
-    class PatchedAgentLoop(AgentLoop):
-        def __init__(self, *args, **kwargs) -> None:
-            super().__init__(*args, **{**kwargs, "backend": backend})
-            self.agent_manager.invalidate_config()
-
-    async def _load_orchestrator(self: VibeAcpAgentLoop):
-        return orchestrator
-
-    monkeypatch.setattr("vibe.acp.acp_agent_loop.AgentLoop", PatchedAgentLoop)
-    monkeypatch.setattr(VibeAcpAgentLoop, "_load_orchestrator", _load_orchestrator)
-
-    vibe_acp_agent = VibeAcpAgentLoop()
-    client = FakeClient()
-    vibe_acp_agent.on_connect(client)
-    client.on_connect(vibe_acp_agent)
-
-    return vibe_acp_agent, client
 
 
 @pytest.fixture

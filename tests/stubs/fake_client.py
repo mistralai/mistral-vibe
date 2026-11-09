@@ -41,6 +41,7 @@ class FakeClient(Client):
 
     def __init__(self) -> None:
         self._session_updates = []
+        self.ext_notifications: list[tuple[str, dict[str, Any]]] = []
 
     async def session_update(
         self,
@@ -132,7 +133,7 @@ class FakeClient(Client):
         raise NotImplementedError()
 
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
-        raise NotImplementedError()
+        self.ext_notifications.append((method, params))
 
     async def close(self) -> None:
         raise NotImplementedError()

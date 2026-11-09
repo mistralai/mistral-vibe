@@ -1,12 +1,53 @@
 [default]
-extend-ignore-re = ["(?m)^.*(#|//)\\s*typos:disable-line$", "datas"]
+# "mis-aligned LINKEDIT string pool" is a verbatim macOS dyld error message
+# quoted in CHANGELOG.md, not a misspelling of "miss".
+# Permission-policy test fixtures in
+# harness/core/src/core/features/permissions/policy/tests.rs: glob character
+# classes in front of "lient" ("[c]lient.ecko") and a deliberately mistyped
+# tool name ("inventory.delte_item").
+extend-ignore-re = [
+  "(?m)^.*(#|//)\\s*typos:disable-line$",
+  "datas",
+  "mis-aligned LINKEDIT string pool",
+  "\\[[^\\]]+\\]lient\\.ecko",
+  "inventory\\.delte_item",
+]
 
 [default.extend-words]
+# Rust TUI crate (vibe/cli-rust/); not the dish "ratatouille".
+ratatui = "ratatui"
 iterm = "iterm"
 ITERM = "ITERM"
 asend = "asend"
+certifi = "certifi"
+# Additive Increase / Multiplicative Decrease — congestion-control acronym,
+# not the word "aimed".
+AIMD = "AIMD"
+# E2E fixture string: "abcd" with 'c' deleted, not the word "and".
+abd = "abd"
+# French fixture names ("veille-presse-cdc", "rde-veille-collecte") in
+# harness/core/src/tests/skills.rs and harness/core/src/core/helpers/strings.rs;
+# "presse" and "collecte" are intentional, not misspellings of
+# "press"/"collective".
+presse = "presse"
+collecte = "collecte"
+# Deliberate API term in the Harness Python runtime
+# (mistralai_vibe_local_harness/vibe/_mcp_models.py), not a misspelling of
+# "unparsable".
+unparseable = "unparseable"
 
 [default.extend-identifiers]
 # macOS pasteboard four-char-code for the PNG flavor — required verbatim
 # by AppleScript syntax (`the clipboard as «class PNGf»`).
 PNGf = "PNGf"
+# Plural of PNG in harness/core/src/core/features/large_output/mod.rs; typos
+# otherwise splits it into "PN" + "Gs".
+PNGs = "PNGs"
+
+[files]
+# SVG snapshot goldens embed rendered pixels as path data; excluded so
+# config-driven typos runs match pre-commit exactly.
+extend-exclude = [
+  "__snapshots__/**/*.svg",
+  "client-e2e/goldens/**/*.svg",
+]

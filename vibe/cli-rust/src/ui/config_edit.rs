@@ -1,0 +1,268 @@
+//! Nested config editor with disjoint, content-sized regions.
+
+mod layout;
+mod persistence;
+
+use ratatui::layout::{Margin, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::Frame;
+
+use super::{composer_layout::ComposerLayout, scrollbar, tab_cells::cells, theme};
+use crate::app::App;
+use crate::config_edit::{self, ConfigEdit};
+use crate::hints::{self, action, key};
+pub(super) use layout::draw_too_small;
+use layout::{height, paragraph, Layout};
+
+pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
+    let Some(edit) = app.config_screen.edit.as_mut() else {
+        return;
+    };
+    let values = config_edit::choices(&edit.field);
+    let choices: Vec<_> = values
+        .iter()
+        .map(|choice| config_edit::choice_label(&edit.field, choice))
+        .collect();
+    let Some(layout) = Layout::new(edit, &choices, area) else {
+        draw_too_small(
+            app,
+            f,
+            area,
+            "Enlarge terminal to edit this setting. Esc cancel",
+        );
+        return;
+    };
+    let bg = theme::surface();
+    f.render_widget(Clear, layout.modal);
+    f.buffer_mut()
+        .set_style(layout.modal, Style::default().bg(bg));
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme::primary()).bg(bg))
+            .title(Line::from(vec![
+                Span::raw("─ "),
+                Span::styled(
+                    edit.field.name.as_str(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+            ])),
+        layout.modal,
+    );
+    let mut description = edit.field.description.clone();
+    if choices.is_empty() && config_edit::is_multiline(&edit.field) {
+        if !description.is_empty() {
+            description.push('\n');
+        }
+        description.push_str(if edit.field.kind == "list" {
+            "One item per line."
+        } else {
+            "Edit as JSON."
+        });
+    }
+    f.render_widget(
+        paragraph(&description).style(theme::dim(theme::muted())),
+        Rect::new(
+            layout.main.x,
+            layout.main.y,
+            layout.main.width,
+            layout.description_height,
+        ),
+    );
+    let editor = layout.editor();
+    let scrollbar = if choices.is_empty() {
+        input(f, editor, edit);
+        None
+    } else {
+        draw_choices(f, editor, edit, &choices)
+    };
+    persistence::inspector(f, layout.side, &edit.field);
+    f.render_widget(
+        Paragraph::new("─".repeat(usize::from(layout.targets.width)))
+            .style(Style::default().fg(theme::muted())),
+        Rect::new(
+            layout.targets.x,
+            layout.targets.y - 2,
+            layout.targets.width,
+            1,
+        ),
+    );
+    persistence::targets(f, layout.targets, &app.config_screen.targets, edit.target);
+    help(
+        f,
+        layout.help,
+        !choices.is_empty(),
+        config_edit::is_multiline(&edit.field),
+    );
+    if let Some(error) = &edit.error {
+        f.render_widget(
+            Paragraph::new(error.as_str()).style(Style::default().fg(theme::error())),
+            Rect::new(
+                layout.targets.x,
+                layout.targets.y - 3,
+                layout.targets.width,
+                1,
+            ),
+        );
+    }
+    crate::mouse::register_region(app, layout.modal, crate::mouse::MouseTarget::Blocked);
+    if !choices.is_empty() {
+        crate::mouse::register_region(app, editor, crate::mouse::MouseTarget::ConfigEditor);
+    }
+    if let Some((track, total, offset)) = scrollbar {
+        scrollbar::draw_large(
+            app,
+            f,
+            crate::mouse::MouseTarget::ConfigEditor,
+            track,
+            total,
+            usize::from(editor.height),
+            offset,
+        );
+    }
+}
+
+fn input(f: &mut Frame, mut area: Rect, edit: &mut ConfigEdit) {
+    if !config_edit::is_multiline(&edit.field) {
+        area.height = area.height.min(3);
+    }
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::primary()));
+    let inner = layout::input_inner(area);
+    edit.input_width = Some(inner.width);
+    f.render_widget(block, area);
+    let cursor_style = theme::block_caret(Style::default());
+    let layout = ComposerLayout::hard_wrapped(&edit.draft, edit.cursor, inner.width);
+    let offset = layout.viewport_top(edit.scroll, usize::from(inner.height));
+    edit.scroll = offset;
+    let rows = layout
+        .rows()
+        .skip(offset)
+        .take(usize::from(inner.height))
+        .map(|row| {
+            let Some(at) = layout.caret_in(row) else {
+                return Line::raw(row.shown(..));
+            };
+            let (lo, hi) = cells(row.text, row.column)
+                .map(|cell| (cell.byte, cell.byte + cell.symbol.len()))
+                .find(|&(_, hi)| hi > at)
+                .unwrap_or((at, at));
+            Line::from(vec![
+                Span::raw(row.shown(..lo)),
+                Span::styled(
+                    if lo == hi {
+                        " ".to_owned()
+                    } else {
+                        row.shown(lo..hi)
+                    },
+                    cursor_style,
+                ),
+                Span::raw(row.shown(hi..)),
+            ])
+        })
+        .collect::<Vec<_>>();
+    f.render_widget(
+        Paragraph::new(rows).style(Style::default().fg(theme::foreground())),
+        inner,
+    );
+}
+
+pub fn vertical_cursor(edit: &ConfigEdit, down: bool) -> usize {
+    let Some(width) = edit.input_width else {
+        return edit.cursor;
+    };
+    ComposerLayout::hard_wrapped(&edit.draft, edit.cursor, width)
+        .vertical_offset(down)
+        .0
+}
+
+fn draw_choices(
+    f: &mut Frame,
+    area: Rect,
+    edit: &mut ConfigEdit,
+    choices: &[String],
+) -> Option<(Rect, usize, usize)> {
+    let mut content = area.inner(Margin::new(1, 0));
+    let visible = usize::from(area.height);
+    if choices
+        .iter()
+        .map(|label| usize::from(height(label, content.width)))
+        .sum::<usize>()
+        > visible
+    {
+        content.width = content.width.saturating_sub(2);
+    }
+    let heights: Vec<usize> = choices
+        .iter()
+        .map(|label| usize::from(height(label, content.width)))
+        .collect();
+    let lines: Vec<_> = heights
+        .iter()
+        .enumerate()
+        .flat_map(|(index, count)| std::iter::repeat_n(Some(index), *count))
+        .collect();
+    let total = lines.len();
+    let offset = edit.list.layout(&lines, content);
+    let selected = edit.list.selected();
+    let mut row = 0;
+    for (index, (label, count)) in choices.iter().zip(heights).enumerate() {
+        let end = row + count;
+        let start = row.max(offset);
+        let bottom = end.min(offset + visible);
+        if start < bottom {
+            let rect = Rect::new(
+                content.x,
+                content.y + (start - offset) as u16,
+                content.width,
+                (bottom - start) as u16,
+            );
+            let (style, _) = super::list_cursor::styles_on(index == selected, theme::surface());
+            if index == selected {
+                f.buffer_mut().set_style(
+                    Rect::new(rect.x, rect.y, area.width - 2, rect.height),
+                    style,
+                );
+            }
+            f.render_widget(
+                paragraph(label)
+                    .scroll(((start - row) as u16, 0))
+                    .style(style),
+                rect,
+            );
+        }
+        row = end;
+        if row >= offset + visible {
+            break;
+        }
+    }
+    (total > visible).then_some((
+        Rect::new(area.right() - 2, area.y, 1, area.height),
+        total,
+        offset,
+    ))
+}
+
+fn help(f: &mut Frame, area: Rect, choices: bool, multiline: bool) {
+    let narrow = area.width < 60;
+    let save = match (choices, multiline) {
+        (true, _) => hints::SELECT,
+        (false, true) => (key::CTRL_S, action::SAVE),
+        _ => (key::ENTER, action::SAVE),
+    };
+    let layer = if narrow {
+        action::LAYER
+    } else {
+        action::CHANGE_LAYER
+    };
+    let mut list = Vec::new();
+    if choices && !narrow {
+        list.push(hints::NAVIGATE);
+    }
+    list.extend([save, hints::CANCEL, (key::TAB, layer)]);
+    super::hint_line::draw_clipped(f, area.x, area.y, area.width, &list);
+}

@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+import ssl
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+import respx
+
+from vibe.core.config.admin_config import (
+    MANAGED_CONFIG_PATH,
+    MANAGED_CONFIG_RETRY_TRIES,
+    ManagedConfig,
+    fetch_managed_config,
+)
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
+
+_URL = f"http://test{MANAGED_CONFIG_PATH}"
+
+
+def _key() -> ApiKeyPlatformCredentialProvider:
+    # Fresh per call: a provider remembers the credential a 401 rejected.
+    return ApiKeyPlatformCredentialProvider.from_api_key("api-key")
+
+
+@pytest.fixture
+def no_retry_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("vibe.core.utils.retry.asyncio.sleep", AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_returns_enabled_config(respx_mock: respx.MockRouter) -> None:
+    route = respx_mock.get(_URL).mock(
+        return_value=httpx.Response(
+            200, json={"state": "enabled", "toml": 'active_model = "x"'}
+        )
+    )
+
+    result = await fetch_managed_config("http://test", _key())
+
+    assert route.called
+    assert route.calls.last.request.headers["Authorization"] == "Bearer api-key"
+    assert result.error is None
+    assert result.config is not None
+    assert result.config.is_enabled is True
+    assert result.config.toml == 'active_model = "x"'
+
+
+@pytest.mark.asyncio
+async def test_disabled_state_is_not_enabled(respx_mock: respx.MockRouter) -> None:
+    respx_mock.get(_URL).mock(
+        return_value=httpx.Response(200, json={"state": "disabled"})
+    )
+
+    result = await fetch_managed_config("http://test", _key())
+
+    assert result.error is None
+    assert result.config is not None
+    assert result.config.is_enabled is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403, 404])
+async def test_non_retryable_status_reports_error(
+    respx_mock: respx.MockRouter, status_code: int
+) -> None:
+    route = respx_mock.get(_URL).mock(return_value=httpx.Response(status_code))
+
+    result = await fetch_managed_config("http://test", _key())
+
+    assert result.config is None
+    assert result.error == f"HTTP {status_code}"
+    assert route.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [500, 502, 503, 504, 429])
+async def test_retryable_status_retries_then_reports_error(
+    respx_mock: respx.MockRouter, status_code: int, no_retry_sleep: None
+) -> None:
+    route = respx_mock.get(_URL).mock(return_value=httpx.Response(status_code))
+
+    result = await fetch_managed_config("http://test", _key())
+
+    assert result.config is None
+    assert result.error == f"HTTP {status_code}"
+    assert route.call_count == MANAGED_CONFIG_RETRY_TRIES
+
+
+@pytest.mark.asyncio
+async def test_retryable_status_succeeds_on_retry(
+    respx_mock: respx.MockRouter, no_retry_sleep: None
+) -> None:
+    route = respx_mock.get(_URL).mock(
+        side_effect=[
+            httpx.Response(503),
+            httpx.Response(
+                200, json={"state": "enabled", "toml": 'active_model = "x"'}
+            ),
+        ]
+    )
+
+    result = await fetch_managed_config("http://test", _key())
+
+    assert result.error is None
+    assert result.config is not None
+    assert result.config.is_enabled is True
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_network_error_retries_then_reports_error(
+    respx_mock: respx.MockRouter, no_retry_sleep: None
+) -> None:
+    route = respx_mock.get(_URL).mock(side_effect=httpx.ConnectError("boom"))
+
+    result = await fetch_managed_config("http://test", _key())
+
+    assert result.config is None
+    assert result.error is not None
+    assert route.call_count == MANAGED_CONFIG_RETRY_TRIES
+
+
+@pytest.mark.asyncio
+async def test_network_error_succeeds_on_retry(
+    respx_mock: respx.MockRouter, no_retry_sleep: None
+) -> None:
+    route = respx_mock.get(_URL).mock(
+        side_effect=[
+            httpx.ConnectError("boom"),
+            httpx.Response(
+                200, json={"state": "enabled", "toml": 'active_model = "x"'}
+            ),
+        ]
+    )
+
+    result = await fetch_managed_config("http://test", _key())
+
+    assert result.error is None
+    assert result.config is not None
+    assert result.config.is_enabled is True
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_bad_json_reports_error(respx_mock: respx.MockRouter) -> None:
+    respx_mock.get(_URL).mock(return_value=httpx.Response(200, text="not json"))
+
+    result = await fetch_managed_config("http://test", _key())
+
+    assert result.config is None
+    assert result.error is not None
+
+
+@pytest.mark.asyncio
+async def test_failure_before_the_wire_reports_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trust store that will not build never reaches httpx, and the promise
+    that any failure leaves the admin layer empty has to cover it: every caller
+    fails open on an error result and none of them can answer an exception.
+    """
+
+    def _unbuildable() -> ssl.SSLContext:
+        raise ssl.SSLError("trust store unavailable")
+
+    monkeypatch.setattr(
+        "vibe.core.platform_auth._mistral.build_ssl_context", _unbuildable
+    )
+
+    result = await fetch_managed_config("http://test", _key())
+
+    assert result.config is None
+    assert result.error is not None
+
+
+def test_is_enabled_requires_toml() -> None:
+    assert ManagedConfig(state="enabled", toml=None).is_enabled is False
+    assert ManagedConfig(state="enabled", toml="").is_enabled is False

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 import time
 
 import pexpect
@@ -20,7 +19,6 @@ from tests.e2e.agent_loop_characterization.support import (
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
-    strip_ansi,
     wait_for_main_screen,
     wait_for_rendered_text,
 )
@@ -34,81 +32,105 @@ RESUME_RESUMED_TURN_RESPONSE = "Resumed turn saw prior tool history."
 RESUME_TODO_RESULT_TEXT = "Updated 1 todos"
 
 
-def _load_latest_session_messages() -> list[dict[str, object]]:
-    session_root = Path(os.environ["VIBE_HOME"]) / "logs" / "session"
-    messages_paths = list(session_root.glob("session_*/messages.jsonl"))
-    if not messages_paths:
-        return []
+def _load_latest_session_entries() -> tuple[str, list[dict[str, object]]] | None:
+    """Read the latest unified session's persisted public history entries.
 
-    messages_path = max(messages_paths, key=lambda path: path.stat().st_mtime)
-    messages: list[dict[str, object]] = []
+    The unified store keeps one directory per session under
+    ``logs/session/unified/<uuid>``; the durable public history lives in the
+    latest generation's projection-state chunks (referenced from its
+    manifest).
+    """
+    session_root = Path(os.environ["VIBE_HOME"]) / "logs" / "session" / "unified"
+    session_dirs = [d for d in session_root.glob("*") if d.is_dir()]
+    if not session_dirs:
+        return None
+    latest = max(session_dirs, key=lambda d: d.stat().st_mtime)
     try:
-        for line in messages_path.read_text(encoding="utf-8").splitlines():
-            messages.append(json.loads(line))
+        metadata = json.loads((latest / "meta.json").read_text(encoding="utf-8"))
+        manifests = sorted(latest.glob("generations/*/manifest.json"))
+        if not manifests:
+            return None
+        # The generation naming contract lives in the runtime package; pick
+        # the most recently written manifest rather than assuming the
+        # directory names sort chronologically.
+        manifest_path = max(
+            manifests, key=lambda path: (path.stat().st_mtime, path.name)
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return []
-    return messages
+        return None
+    session_id = metadata.get("session_id")
+    if not isinstance(session_id, str):
+        return None
+    entries: list[dict[str, object]] = []
+    for chunk in manifest.get("projection_state", {}).get("chunks", []):
+        try:
+            entries.extend(
+                json.loads(
+                    (latest / "chunks" / f"{chunk}.json").read_text(encoding="utf-8")
+                )
+            )
+        except (OSError, json.JSONDecodeError):
+            return None
+    return session_id, entries
 
 
 def _has_message_content(
-    messages: list[dict[str, object]], *, role: str, expected: str
+    entries: list[dict[str, object]], *, role: str, expected: str
 ) -> bool:
     return any(
-        message.get("role") == role and expected in str(message.get("content", ""))
-        for message in messages
+        entry.get("type") == "message"
+        and entry.get("role") == role
+        and expected in json.dumps(entry.get("content", []))
+        for entry in entries
     )
 
 
-def _has_assistant_tool_call(
-    messages: list[dict[str, object]], *, call_id: str
-) -> bool:
-    return any(
-        message.get("role") == "assistant"
-        and call_id in json.dumps(message.get("tool_calls", []))
-        for message in messages
-    )
+def _has_tool_effect(entries: list[dict[str, object]], *, expected: str) -> bool:
+    """The unified projection persists a tool call as an ``effect`` entry.
 
-
-def _has_tool_result(
-    messages: list[dict[str, object]], *, call_id: str, expected: str
-) -> bool:
+    The model-facing call id is not part of the public projection (the
+    resumed-request assertions below cover the id replay); the entry carries
+    the tool input and its result instead.
+    """
     return any(
-        message.get("role") == "tool"
-        and message.get("tool_call_id") == call_id
-        and expected in str(message.get("content", ""))
-        for message in messages
+        entry.get("type") == "effect" and expected in json.dumps(entry)
+        for entry in entries
     )
 
 
 def _wait_for_persisted_resume_history(
     *,
     user_prompt: str,
-    assistant_tool_call_id: str,
     tool_result_text: str,
     final_assistant_text: str,
     timeout: float,
-) -> None:
+) -> str:
     start = time.monotonic()
     while time.monotonic() - start < timeout:
-        messages = _load_latest_session_messages()
+        persisted_session = _load_latest_session_entries()
+        if persisted_session is None:
+            time.sleep(0.05)
+            continue
+        session_id, entries = persisted_session
         if (
-            _has_message_content(messages, role="user", expected=user_prompt)
-            and _has_assistant_tool_call(messages, call_id=assistant_tool_call_id)
-            and _has_tool_result(
-                messages, call_id=assistant_tool_call_id, expected=tool_result_text
-            )
+            _has_message_content(entries, role="user", expected=user_prompt)
+            and _has_tool_effect(entries, expected=tool_result_text)
             and _has_message_content(
-                messages, role="assistant", expected=final_assistant_text
+                entries, role="assistant", expected=final_assistant_text
             )
         ):
-            return
+            return session_id
         time.sleep(0.05)
 
-    persisted_roles = [
-        message.get("role") for message in _load_latest_session_messages()
-    ]
+    persisted_session = _load_latest_session_entries()
+    persisted_types = (
+        [entry.get("type") for entry in persisted_session[1]]
+        if persisted_session is not None
+        else []
+    )
     raise AssertionError(
-        f"Timed out waiting for persisted resume history. Persisted roles: {persisted_roles}"
+        f"Timed out waiting for persisted resume history. Persisted types: {persisted_types}"
     )
 
 
@@ -138,7 +160,8 @@ def _resume_tool_history_factory(
     return assistant_text_chunks(RESUME_RESUMED_TURN_RESPONSE, created=60)
 
 
-@pytest.mark.timeout(35)
+@pytest.mark.timeout(45)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_resume_tool_history_factory, id="resume-tool-history")],
@@ -165,9 +188,8 @@ def test_resumed_session_sends_prior_tool_call_and_result_history_to_the_model(
         wait_for_rendered_text(
             child, captured, needle=RESUME_FIRST_TURN_RESPONSE, timeout=10
         )
-        _wait_for_persisted_resume_history(
+        session_id = _wait_for_persisted_resume_history(
             user_prompt=RESUME_INITIAL_PROMPT,
-            assistant_tool_call_id=RESUME_TODO_CALL_ID,
             tool_result_text=RESUME_TODO_RESULT_TEXT,
             final_assistant_text=RESUME_FIRST_TURN_RESPONSE,
             timeout=10,
@@ -175,11 +197,6 @@ def test_resumed_session_sends_prior_tool_call_and_result_history_to_the_model(
 
         send_ctrl_c_until_quit_confirmation(child, captured, timeout=5)
         child.expect(pexpect.EOF, timeout=10)
-
-    first_output = strip_ansi(captured.getvalue())
-    resume_match = re.search(r"Or: vibe --resume ([0-9a-f-]+)", first_output)
-    assert resume_match is not None
-    session_id = resume_match.group(1)
 
     with spawned_vibe_process(e2e_workdir, extra_args=["--resume", session_id]) as (
         resumed_child,
@@ -194,7 +211,7 @@ def test_resumed_session_sends_prior_tool_call_and_result_history_to_the_model(
             resumed_captured,
             lambda: len(streaming_mock_server.requests),
             expected_count=3,
-            timeout=10,
+            timeout=20,
         )
         wait_for_rendered_text(
             resumed_child,

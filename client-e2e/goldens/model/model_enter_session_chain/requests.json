@@ -1,0 +1,30 @@
+[
+ {
+  "method": "config/write",
+  "params": {
+   "ops": [
+    {
+     "op": "set",
+     "path": "/active_model",
+     "targetLayer": null,
+     "value": "mistral-medium-3.5"
+    },
+    {
+     "op": "set",
+     "path": "/active_model",
+     "targetLayer": "overrides",
+     "value": "mistral-medium-3.5"
+    },
+    {
+     "op": "set",
+     "path": "/models/mistral-medium-3.5/thinking",
+     "targetLayer": "overrides",
+     "value": "medium"
+    }
+   ],
+   "reason": "app-server config update",
+   "reloadRuntime": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

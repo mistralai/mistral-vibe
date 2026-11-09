@@ -1,0 +1,33 @@
+"""A consumed queued edit shows a visible warning confirmation."""
+
+from __future__ import annotations
+
+from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
+from e2e.app_server.scenario import Timeline
+
+_UP = "\x1b[A"
+_WARNING = "This message was already processed"
+
+screen_contains = (_WARNING,)
+capture_steps = {10}
+
+timeline: Timeline = [
+    "first\r",
+    turn_started(),
+    user_msg("first"),
+    assistant_msg("Working on it."),
+    turn_completed(),
+    {"release": 4},
+    "second\r",
+    turn_started(),
+    user_msg("second"),
+    assistant_msg("Processing second."),
+    "third\r",
+    _UP,
+    _UP,
+    "\r",
+    " edited",
+    {"release": 1},
+    {"release": 2},
+    "\r",
+]

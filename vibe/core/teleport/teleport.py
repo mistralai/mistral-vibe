@@ -7,11 +7,10 @@ from pathlib import Path
 import types
 from uuid import uuid4
 
-import httpx
+import httpx2
 import zstandard
 
-from vibe.core.config import VibeConfigSchema
-from vibe.core.session.session_logger import SessionLogger
+from vibe.core.platform_auth import PlatformCredentialProvider
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.git import GitRepoInfo, GitRepository
 from vibe.core.teleport.nuage import (
@@ -34,27 +33,23 @@ from vibe.core.teleport.types import (
     TeleportStartingWorkflowEvent,
     TeleportYieldEvent,
 )
-from vibe.core.utils.http import VibeAsyncHTTPClient, build_ssl_context
 from vibe.core.vibe_code_project import VibeProjectsStore, is_saved_project_stale_error
+from vibe.utils.http import VibeAsyncHTTPClient, build_ssl_context
 
 
 class TeleportService:
     def __init__(
         self,
-        session_logger: SessionLogger,
         vibe_code_sessions_base_url: str,
-        vibe_code_api_key: str,
+        credentials: PlatformCredentialProvider | None,
         workdir: Path | None = None,
         *,
-        vibe_config: VibeConfigSchema | None = None,
         client: VibeAsyncHTTPClient | None = None,
         project_store: VibeProjectsStore | None = None,
         timeout: float = 60.0,
     ) -> None:
-        self._session_logger = session_logger
         self._vibe_code_sessions_base_url = vibe_code_sessions_base_url
-        self._vibe_code_api_key = vibe_code_api_key
-        self._vibe_config = vibe_config
+        self._credentials = credentials
         self._git = GitRepository(workdir)
         self._client = client
         self._project_store = project_store or VibeProjectsStore()
@@ -65,13 +60,14 @@ class TeleportService:
     async def __aenter__(self) -> TeleportService:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
-        self._nuage_client_instance = NuageClient(
-            self._vibe_code_sessions_base_url,
-            self._vibe_code_api_key,
-            client=self._client,
-        )
+        if self._credentials is not None:
+            self._nuage_client_instance = NuageClient(
+                self._vibe_code_sessions_base_url,
+                self._credentials,
+                client=self._client,
+            )
         await self._git.__aenter__()
         return self
 
@@ -90,7 +86,7 @@ class TeleportService:
     def _http_client(self) -> VibeAsyncHTTPClient:
         if self._client is None:
             self._client = VibeAsyncHTTPClient(
-                timeout=httpx.Timeout(self._timeout), verify=build_ssl_context()
+                timeout=httpx2.Timeout(self._timeout), verify=build_ssl_context()
             )
             self._owns_client = True
         return self._client
@@ -98,9 +94,11 @@ class TeleportService:
     @property
     def _nuage_client(self) -> NuageClient:
         if self._nuage_client_instance is None:
+            if self._credentials is None:
+                raise ServiceTeleportError("Mistral API key not set.")
             self._nuage_client_instance = NuageClient(
                 self._vibe_code_sessions_base_url,
-                self._vibe_code_api_key,
+                self._credentials,
                 client=self._http_client,
             )
         return self._nuage_client_instance
@@ -117,6 +115,7 @@ class TeleportService:
         *,
         project_id: str | None = None,
         message_context: TeleportMessageContext | None = None,
+        conversation_id: str | None = None,
     ) -> AsyncGenerator[TeleportYieldEvent, TeleportSendEvent]:
         if not prompt:
             raise ServiceTeleportError("Teleport requires a non-empty prompt.")
@@ -158,6 +157,7 @@ class TeleportService:
                 git_info=git_info,
                 project_id=resolved_project_id,
                 message_context=message_context,
+                conversation_id=conversation_id,
             )
             result = await self._nuage_client.start(request)
         except ServiceTeleportError as e:
@@ -175,13 +175,8 @@ class TeleportService:
             raise ServiceTeleportError(f"Failed to push current branch to {remote}.")
 
     def _validate_config(self) -> None:
-        if not self._vibe_code_api_key:
-            env_var = (
-                self._vibe_config.vibe_code_api_key_env_var
-                if self._vibe_config
-                else "MISTRAL_API_KEY"
-            )
-            raise ServiceTeleportError(f"{env_var} not set.")
+        if self._credentials is None:
+            raise ServiceTeleportError("Mistral API key not set.")
 
     def _build_nuage_request(
         self,
@@ -190,6 +185,7 @@ class TeleportService:
         git_info: GitRepoInfo,
         project_id: str,
         message_context: TeleportMessageContext | None = None,
+        conversation_id: str | None = None,
     ) -> NuageRequest:
         compressed = self._compress_diff(git_info.diff)
         diff = (
@@ -215,6 +211,7 @@ class TeleportService:
         return NuageRequest(
             project_id=project_id,
             idempotency_key=idempotency_key,
+            conversation_id=conversation_id,
             message=message,
             context=context,
         )

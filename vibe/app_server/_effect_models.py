@@ -1,0 +1,387 @@
+from __future__ import annotations
+
+from enum import StrEnum, auto
+from typing import Annotated, ClassVar, Literal, Self, cast
+
+from pydantic import BaseModel, Field, JsonValue, model_validator
+
+from vibe.app_server._model import ProtocolModel
+from vibe.questions import UserQuestionRequest
+from vibe.utils.tool_presentation import EffectCallDisplay, ToolEffectKind
+
+# The ``tool_name`` on the effect behind a manual `!<command>`. A model's shell
+# call carries the real tool's name (``bash``, ``git_bash``, ``powershell``), so
+# this is what tells a user's own shell output apart from the agent's -- the
+# ``SHELL`` effect kind alone covers both.
+MANUAL_SHELL_TOOL_NAME = "shell"
+
+
+class ShellEffectInput(ProtocolModel):
+    command: str
+
+
+class ShellEffectOutput(ProtocolModel):
+    stdout: str
+    stderr: str
+    # Arrival-ordered transcript; empty for producers that never streamed.
+    output: str = ""
+    truncated: bool = False
+
+    @property
+    def transcript(self) -> str:
+        if self.output:
+            return self.output
+        # Separate captures: concatenating them bare would fabricate a line.
+        if self.stdout and self.stderr and not self.stdout.endswith("\n"):
+            return f"{self.stdout}\n{self.stderr}"
+        return self.stdout + self.stderr
+
+
+class FileEditEffectInput(ProtocolModel):
+    file_path: str
+    old_string: str
+    new_string: str
+    replace_all: bool = False
+
+
+class FileEditEffectChange(ProtocolModel):
+    old_string: str
+    new_string: str
+    replace_all: bool = False
+
+
+class FileEditEffectBatchInput(ProtocolModel):
+    file_path: str
+    changes: list[FileEditEffectChange] = Field(min_length=1)
+
+
+class FileEditEffectOccurrence(ProtocolModel):
+    start_line: int | None = None
+    # Where the replaced text sits once this occurrence's own replacement
+    # has been applied: reversal anchors here, not on ``start_line``.
+    new_start_line: int | None = None
+    old_text: str
+    new_text: str
+
+
+class FileEditEffectOutput(ProtocolModel):
+    file: str
+    old_string: str | None = None
+    new_string: str | None = None
+    occurrences: list[FileEditEffectOccurrence] = Field(default_factory=list)
+    # The file's whole pre-edit text when the harness carried it: an exact
+    # before-state for restore paths, superseding positional reversal.
+    previous_content: str | None = None
+
+    @model_validator(mode="after")
+    def validate_diff_content(self) -> Self:
+        has_legacy_pair = self.old_string is not None and self.new_string is not None
+        if (self.old_string is None) != (self.new_string is None):
+            raise ValueError("old_string and new_string must be provided together")
+        if not has_legacy_pair and not self.occurrences:
+            raise ValueError("file edit output requires a diff pair or occurrences")
+        return self
+
+
+class FileSearchEffectInput(ProtocolModel):
+    pattern: str
+    path: str = "."
+    max_matches: int | None = None
+
+
+class FileSearchEffectMatch(ProtocolModel):
+    path: str
+    line: int | None = None
+
+
+class FileSearchEffectOutput(ProtocolModel):
+    matches: str
+    match_count: int
+    was_truncated: bool
+    parsed_matches: list[FileSearchEffectMatch] = Field(default_factory=list)
+
+
+class FileReadEffectInput(ProtocolModel):
+    DEFAULT_LIMIT: ClassVar[int] = 2000
+
+    file_path: str
+    offset: int | None = None
+    limit: int | None = DEFAULT_LIMIT
+
+
+class FileReadEffectOutput(ProtocolModel):
+    file_path: str
+    content: str
+    num_lines: int
+    start_line: int
+    requested_offset: int | None = None
+    requested_limit: int | None = FileReadEffectInput.DEFAULT_LIMIT
+    total_lines: int | None = None
+    was_truncated: bool = False
+
+
+class TodoEffectStatus(StrEnum):
+    PENDING = auto()
+    IN_PROGRESS = auto()
+    COMPLETED = auto()
+    CANCELLED = auto()
+
+
+class TodoEffectPriority(StrEnum):
+    LOW = auto()
+    MEDIUM = auto()
+    HIGH = auto()
+
+
+class TodoEffectItem(ProtocolModel):
+    id: str
+    content: str
+    status: TodoEffectStatus = TodoEffectStatus.PENDING
+    priority: TodoEffectPriority = TodoEffectPriority.MEDIUM
+
+
+class TodoEffectInput(ProtocolModel):
+    action: str
+    todos: list[TodoEffectItem] | None = None
+
+
+class TodoEffectOutput(ProtocolModel):
+    todos: list[TodoEffectItem] = Field(default_factory=list)
+
+
+class FileWriteEffectInput(ProtocolModel):
+    file_path: str
+    content: str
+
+
+class FileWriteEffectOutput(ProtocolModel):
+    file_path: str
+    content: str
+    # A reader diffs an overwrite from these. `previous_content` is absent when
+    # the Runtime could not read the file back as text. `file_existed` defaults
+    # only for the legacy `write_file` builtin, whose result does not carry it;
+    # the Unified Harness path always states it (`_WriteResult`).
+    file_existed: bool = False
+    previous_content: str | None = None
+
+
+class WebSearchEffectInput(ProtocolModel):
+    query: str
+
+
+class WebSearchEffectSource(ProtocolModel):
+    title: str
+    url: str
+
+
+class WebSearchEffectOutput(ProtocolModel):
+    query: str
+    answer: str
+    sources: list[WebSearchEffectSource] = Field(default_factory=list)
+
+
+class WebFetchEffectInput(ProtocolModel):
+    url: str
+    timeout: int | None = None
+
+
+class WebFetchEffectOutput(ProtocolModel):
+    url: str
+    content: str
+    content_type: str
+    was_truncated: bool = False
+
+
+class SkillEffectInput(ProtocolModel):
+    name: str
+
+
+class SkillEffectOutput(ProtocolModel):
+    name: str
+    content: str
+    skill_dir: str | None = None
+
+
+class SubagentEffectInput(ProtocolModel):
+    task: str
+    agent: str
+
+
+class SubagentEffectOutput(ProtocolModel):
+    response: str
+    turns_used: int
+    completed: bool
+
+
+# The path is carried alongside the name because a managed worktree lives under
+# $VIBE_HOME rather than beside the repo, so the name alone does not tell the
+# user where on disk the directory landed.
+class WorktreeEffectInput(ProtocolModel):
+    name: str
+    branch: str
+    path: str
+
+
+# Replaced by patch while the worktree is being prepared. File counts are set
+# only while checking out, and only once git has reported them.
+class WorktreeEffectProgress(ProtocolModel):
+    phase: Literal["naming", "fetching", "checking_out"]
+    completed_files: int | None = None
+    total_files: int | None = None
+
+
+class _EffectDetailBase(ProtocolModel):
+    tool_name: str
+    display: EffectCallDisplay
+
+
+class McpAppReference(ProtocolModel):
+    """The MCP App that renders a connector tool's calls.
+
+    Clients load ``resource_uri`` and call the app's tools through the
+    connector, so the connector id is the one the connectors API knows.
+    """
+
+    resource_uri: str
+    connector_id: str
+    connector_name: str
+    connector_display_name: str
+
+
+class GenericEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.TOOL] = ToolEffectKind.TOOL
+    input: JsonValue = None
+    mcp_app: McpAppReference | None = None
+
+
+class ShellEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.SHELL] = ToolEffectKind.SHELL
+    input: ShellEffectInput | None = None
+
+
+class FileEditEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.FILE_EDIT] = ToolEffectKind.FILE_EDIT
+    input: FileEditEffectInput | FileEditEffectBatchInput | None = None
+
+
+class FileSearchEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.FILE_SEARCH] = ToolEffectKind.FILE_SEARCH
+    input: FileSearchEffectInput | None = None
+
+
+class FileReadEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.FILE_READ] = ToolEffectKind.FILE_READ
+    input: FileReadEffectInput | None = None
+
+
+class TodoEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.TODO] = ToolEffectKind.TODO
+    input: TodoEffectInput | None = None
+
+
+class FileWriteEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.FILE_WRITE] = ToolEffectKind.FILE_WRITE
+    input: FileWriteEffectInput | None = None
+
+
+class UserQuestionEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.USER_QUESTION] = ToolEffectKind.USER_QUESTION
+    input: UserQuestionRequest | None = None
+
+
+class WebSearchEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.WEB_SEARCH] = ToolEffectKind.WEB_SEARCH
+    input: WebSearchEffectInput | None = None
+
+
+class WebFetchEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.WEB_FETCH] = ToolEffectKind.WEB_FETCH
+    input: WebFetchEffectInput | None = None
+
+
+class SkillEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.SKILL] = ToolEffectKind.SKILL
+    input: SkillEffectInput | None = None
+
+
+# The card is built when the call starts -- before its arguments finish
+# streaming and before a child session exists -- then filled in by patch. `None`
+# here means "not known yet", not "this shape carries no such field".
+class SubagentEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.SUBAGENT] = ToolEffectKind.SUBAGENT
+    input: SubagentEffectInput | None = None
+    child_session_id: str | None = None
+    # `input.agent` is the profile a spawn ran, not the name it gave the child.
+    agent_name: str | None = None
+
+
+class WorktreeEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.WORKTREE] = ToolEffectKind.WORKTREE
+    input: WorktreeEffectInput | None = None
+    progress: WorktreeEffectProgress | None = None
+
+
+class ProcessEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.PROCESS] = ToolEffectKind.PROCESS
+    input: JsonValue = None
+
+
+class ScratchpadListInput(ProtocolModel):
+    action: Literal["list"] = "list"
+
+
+class ScratchpadReadInput(ProtocolModel):
+    action: Literal["read"] = "read"
+    path: str
+
+
+class ScratchpadWriteInput(ProtocolModel):
+    action: Literal["write"] = "write"
+    path: str
+    content: str
+
+
+# A list names no file, a read names one, and a write carries the note it saved.
+ScratchpadEffectInput = Annotated[
+    ScratchpadListInput | ScratchpadReadInput | ScratchpadWriteInput,
+    Field(discriminator="action"),
+]
+
+
+# A write or read carries the note's text, a list the scratchpad's file names.
+class ScratchpadEffectOutput(ProtocolModel):
+    path: str | None = None
+    content: str | None = None
+    files: list[str] = Field(default_factory=list)
+
+
+class ScratchpadEffectDetail(_EffectDetailBase):
+    kind: Literal[ToolEffectKind.SCRATCHPAD] = ToolEffectKind.SCRATCHPAD
+    input: ScratchpadEffectInput
+
+
+EffectDetail = Annotated[
+    GenericEffectDetail
+    | ShellEffectDetail
+    | FileEditEffectDetail
+    | FileSearchEffectDetail
+    | FileReadEffectDetail
+    | TodoEffectDetail
+    | FileWriteEffectDetail
+    | UserQuestionEffectDetail
+    | WebSearchEffectDetail
+    | WebFetchEffectDetail
+    | SkillEffectDetail
+    | SubagentEffectDetail
+    | WorktreeEffectDetail
+    | ProcessEffectDetail
+    | ScratchpadEffectDetail,
+    Field(discriminator="kind"),
+]
+
+
+def effect_input_json(detail: EffectDetail) -> JsonValue:
+    value = detail.input
+    if not isinstance(value, BaseModel):
+        return value
+    return cast(JsonValue, value.model_dump(mode="json", by_alias=True))

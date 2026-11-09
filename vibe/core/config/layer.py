@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import asyncio
+from collections.abc import Sequence
+from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass, replace
-from typing import Any
+from pathlib import Path
+from typing import Any, ClassVar
 
 from jsonpatch import JsonPatchException, apply_patch
 from jsonpointer import JsonPointerException
@@ -45,15 +48,6 @@ class EmptyLayerError(ConfigLayerError):
         super().__init__(layer_name, f"Layer '{layer_name}' has no data after load")
 
 
-class TrustNotResolvedError(ConfigLayerError):
-    """Raised when grant_trust/revoke_trust is called before trust has been resolved."""
-
-    def __init__(self, layer_name: str) -> None:
-        super().__init__(
-            layer_name, f"Layer '{layer_name}': trust has not been resolved yet"
-        )
-
-
 class LayerNotLoadedError(ConfigLayerError):
     """Raised when a layer operation requires cached data and fingerprint."""
 
@@ -88,21 +82,28 @@ class LayerImplementationError(ConfigLayerError):
         self.method_name = method_name
 
 
+class ConfigStorageError(ConfigLayerError):
+    """Raised when a config file cannot be read from or written to.
+
+    Wraps the underlying ``OSError`` (e.g. a read-only ``config.toml``) so
+    callers can surface a clear message without catching raw ``OSError``,
+    which other subsystems also raise.
+    """
+
+    def __init__(self, layer_name: str, path: Path, operation: str) -> None:
+        super().__init__(
+            layer_name,
+            f"Layer '{layer_name}': cannot {operation} config file at {path}",
+        )
+        self.path = path
+        self.operation = operation
+
+
 @dataclass(frozen=True, slots=True)
 class _LayerState[S: BaseModel]:
     is_trusted: bool | None = None
     data: S | None = None
     fingerprint: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _GrantTrust:
-    pass
-
-
-@dataclass(frozen=True, slots=True)
-class _RevokeTrust:
-    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +132,9 @@ class ConfigLayer[S: BaseModel](ABC):
     dictionary of configuration values.
     """
 
+    # Other processes can write the store, so patches apply to a fresh read of it.
+    shared_store: ClassVar[bool] = False
+
     def __init__(self, *, name: str, output_schema: type[S] = RawConfig) -> None:
         self.name = name
         self.output_schema = output_schema
@@ -139,6 +143,14 @@ class ConfigLayer[S: BaseModel](ABC):
         self._lock = asyncio.Lock()
 
     # --- Overridable ---
+
+    def check_lower_layers(self, lower: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        """Raise when this layer cannot apply over ``lower``, the loaded layers
+        below it as ``(name, data)``, lowest first. Every build calls it.
+
+        Accepts any by default.
+        """
+        del lower
 
     async def _check_trust(self) -> bool:
         """Resolve whether this layer should be trusted.
@@ -160,14 +172,6 @@ class ConfigLayer[S: BaseModel](ABC):
         """
         ...
 
-    async def _on_trust_changed(self, old: bool | None, new: bool | None) -> None:
-        """Called when the trust status changes.
-
-        Override to persist trust status or react to trust transitions.
-        Default is a no-op.
-        """
-        return
-
     @abstractmethod
     async def _save_to_store(self, _next_config: S) -> str:
         """Persist full layer data and return the store's new fingerprint.
@@ -176,16 +180,11 @@ class ConfigLayer[S: BaseModel](ABC):
         """
         ...
 
-    # --- Internal ---
+    def _store_lock(self) -> AbstractAsyncContextManager[object]:
+        """Exclusive access to the backing store across a read, check, and save."""
+        return nullcontext()
 
-    async def _notify_trust_change(self, old: bool | None, new: bool | None) -> None:
-        """Call ``_on_trust_changed`` and wrap any error."""
-        if old == new:
-            return
-        try:
-            await self._on_trust_changed(old, new)
-        except Exception as e:
-            raise LayerImplementationError(self.name, "_on_trust_changed") from e
+    # --- Internal ---
 
     async def _resolve_check_trust(self) -> bool:
         """Call ``_check_trust`` and wrap any error."""
@@ -204,10 +203,6 @@ class ConfigLayer[S: BaseModel](ABC):
             )
 
             match action:
-                case _GrantTrust():
-                    new_state = await self._handle_grant_trust(state)
-                case _RevokeTrust():
-                    new_state = await self._handle_revoke_trust(state)
                 case _ResolveTrust():
                     new_state = await self._handle_resolve_trust(state)
                 case _Load(force=force):
@@ -225,34 +220,8 @@ class ConfigLayer[S: BaseModel](ABC):
 
             return new_state
 
-    async def _handle_grant_trust(self, state: _LayerState[S]) -> _LayerState[S]:
-        if state.is_trusted is None:
-            raise TrustNotResolvedError(self.name)
-
-        if state.is_trusted is True:
-            return state
-
-        await self._notify_trust_change(state.is_trusted, True)
-
-        return _LayerState(
-            is_trusted=True, data=state.data, fingerprint=state.fingerprint
-        )
-
-    async def _handle_revoke_trust(self, state: _LayerState[S]) -> _LayerState[S]:
-        if state.is_trusted is None:
-            raise TrustNotResolvedError(self.name)
-
-        if state.is_trusted is False:
-            return state
-
-        await self._notify_trust_change(state.is_trusted, False)
-
-        return _LayerState(is_trusted=False, data=None, fingerprint=None)
-
     async def _handle_resolve_trust(self, state: _LayerState[S]) -> _LayerState[S]:
         is_trusted = await self._resolve_check_trust()
-
-        await self._notify_trust_change(state.is_trusted, is_trusted)
 
         return _LayerState(
             is_trusted=is_trusted,
@@ -266,8 +235,6 @@ class ConfigLayer[S: BaseModel](ABC):
         else:
             is_trusted = await self._resolve_check_trust()
 
-        await self._notify_trust_change(state.is_trusted, is_trusted)
-
         if not is_trusted:
             return _LayerState(is_trusted=is_trusted, data=None, fingerprint=None)
 
@@ -276,21 +243,19 @@ class ConfigLayer[S: BaseModel](ABC):
         )
 
         if next_state.data is None or force:
-            try:
-                snapshot = await self._build_config_snapshot()
-                next_state = _LayerState(
-                    is_trusted=next_state.is_trusted,
-                    data=self.validate_output(snapshot.data),
-                    fingerprint=snapshot.fingerprint,
-                )
-            except ConcurrencyConflictError:
-                raise
-            except Exception as e:
-                raise LayerImplementationError(
-                    self.name, "_build_config_snapshot"
-                ) from e
+            data, fingerprint = await self._read_store()
+            next_state = replace(next_state, data=data, fingerprint=fingerprint)
 
         return next_state
+
+    async def _read_store(self) -> tuple[S, str]:
+        try:
+            snapshot = await self._build_config_snapshot()
+            return self.validate_output(snapshot.data), snapshot.fingerprint
+        except (ConcurrencyConflictError, ConfigStorageError):
+            raise
+        except Exception as e:
+            raise LayerImplementationError(self.name, "_build_config_snapshot") from e
 
     async def _handle_invalidate_cache(self, state: _LayerState[S]) -> _LayerState[S]:
         return _LayerState(is_trusted=state.is_trusted, data=None, fingerprint=None)
@@ -299,35 +264,39 @@ class ConfigLayer[S: BaseModel](ABC):
         self, state: _LayerState[S], patch: ConfigPatch, on_conflict: ConflictStrategy
     ) -> _LayerState[S]:
 
-        if state.data is None or state.fingerprint is None:
+        data, fingerprint = state.data, state.fingerprint
+        if data is None or fingerprint is None:
             raise LayerNotLoadedError(self.name)
+        async with self._store_lock():
+            if self.shared_store:
+                data, fingerprint = await self._read_store()
 
-        match on_conflict:
-            case ConflictStrategy.CANCEL:
-                if patch.fingerprint != state.fingerprint:
-                    raise ConcurrencyConflictError(
-                        expected_fp=patch.fingerprint, actual_fp=state.fingerprint
-                    )
-            case ConflictStrategy.REPLACE:
-                pass
-            case _:
-                raise ValueError(f"Unsupported conflict strategy: {on_conflict!r}")
+            match on_conflict:
+                case ConflictStrategy.CANCEL:
+                    if patch.fingerprint != fingerprint:
+                        raise ConcurrencyConflictError(
+                            expected_fp=patch.fingerprint, actual_fp=fingerprint
+                        )
+                case ConflictStrategy.REPLACE:
+                    pass
+                case _:
+                    raise ValueError(f"Unsupported conflict strategy: {on_conflict!r}")
 
-        try:
-            new_data = apply_patch(
-                ensure_parent_paths(state.data.model_dump(), patch.operations),
-                patch.to_json_patch(),
-            )
-            validated_new_data = self.validate_output(new_data)
-        except (JsonPatchException, JsonPointerException, ValidationError) as e:
-            raise ConfigPatchApplicationError(self.name) from e
+            try:
+                new_data = apply_patch(
+                    ensure_parent_paths(data.model_dump(), patch.operations),
+                    patch.to_json_patch(),
+                )
+                validated_new_data = self.validate_output(new_data)
+            except (JsonPatchException, JsonPointerException, ValidationError) as e:
+                raise ConfigPatchApplicationError(self.name) from e
 
-        try:
-            new_fingerprint = await self._save_to_store(validated_new_data)
-        except NotImplementedError:
-            raise
-        except Exception as e:
-            raise LayerImplementationError(self.name, "_save_to_store") from e
+            try:
+                new_fingerprint = await self._save_to_store(validated_new_data)
+            except (NotImplementedError, ConfigStorageError):
+                raise
+            except Exception as e:
+                raise LayerImplementationError(self.name, "_save_to_store") from e
         return replace(state, data=validated_new_data, fingerprint=new_fingerprint)
 
     # --- Public ---
@@ -346,17 +315,14 @@ class ConfigLayer[S: BaseModel](ABC):
 
         return state.is_trusted
 
-    async def grant_trust(self) -> None:
-        """Explicitly mark this layer as trusted."""
-        await self._dispatch(_GrantTrust())
-
-    async def revoke_trust(self) -> None:
-        """Explicitly mark this layer as untrusted and clear cached data."""
-        await self._dispatch(_RevokeTrust())
-
     async def invalidate_cache(self) -> None:
         """Clear the in-memory cache so the next ``load()`` re-reads."""
         await self._dispatch(_InvalidateCache())
+
+    async def refresh(self) -> None:
+        """Re-read a shared store, so the next patch builds on what it holds now."""
+        if self.shared_store:
+            await self._dispatch(_Load(force=True))
 
     async def load(self, *, force: bool = False) -> S:
         """Load data from this layer, enforcing trust and caching the result.
@@ -380,6 +346,11 @@ class ConfigLayer[S: BaseModel](ABC):
     def fingerprint(self) -> str | None:
         """Cached opaque fingerprint token for this layer. ``None`` if unresolved."""
         return self._state.fingerprint
+
+    @property
+    def cached_data(self) -> S | None:
+        """Last loaded sparse data, if any. Reads the cache without I/O."""
+        return self._state.data
 
     async def apply(
         self,

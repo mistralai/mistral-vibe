@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from vibe.core.tts.tts_client_port import TTSResult
+from vibe.cli.tts.tts_client_port import TTSResult
 
 
 class FakeTTSClient:

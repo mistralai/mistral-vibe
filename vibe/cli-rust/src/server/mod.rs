@@ -1,0 +1,77 @@
+//! App-server JSON-RPC transport: wire types + concrete process client.
+// The wire types are a `pub` surface in the library build, but the `vibe-rs`
+// bin declares `mod server;` privately and only uses a subset of the fields.
+// Suppress dead-code linting for this subtree so the bin compiles clean.
+#![allow(dead_code)]
+
+pub mod callback;
+pub mod child;
+pub mod connect;
+pub mod connector_web;
+pub mod effect;
+pub mod effect_output;
+pub mod frames;
+pub mod images;
+pub mod lines;
+pub mod multiplex;
+mod pending;
+pub mod process;
+pub mod proto_agents;
+pub mod proto_approval;
+pub mod proto_artifacts;
+pub mod proto_callback;
+pub mod proto_children;
+pub mod proto_context;
+pub mod proto_entry;
+pub mod proto_fork;
+pub mod proto_mcp;
+pub mod proto_plugins;
+pub mod proto_projects;
+pub mod proto_proxy;
+pub mod proto_questions;
+pub mod proto_runtime;
+pub mod proto_stats;
+pub mod proto_subagents;
+pub mod proto_teleport;
+pub mod proto_trust;
+pub mod proto_turn;
+pub mod reader;
+pub mod request_error;
+pub mod signal;
+pub mod stderr;
+pub mod types;
+pub mod web_output;
+#[cfg(windows)]
+mod windows_job;
+
+pub use child::{ChildHandle, SHUTDOWN_GRACE};
+pub use connect::{Connect, Connected, Connection};
+pub use effect::*;
+pub use effect_output::*;
+pub use images::*;
+pub use multiplex::{ChannelCloser, ChannelGuard, MuxClient};
+pub use process::{
+    ActiveSession, Client, Launch, Notification, Pending, RequestFailure, DEFAULT_APP_SERVER_ARGS,
+    UV_PYTHON_REQUEST,
+};
+pub use proto_agents::*;
+pub use proto_approval::*;
+pub use proto_artifacts::*;
+pub use proto_callback::*;
+pub use proto_children::*;
+pub use proto_context::*;
+pub use proto_entry::*;
+pub use proto_fork::*;
+pub use proto_mcp::*;
+pub use proto_plugins::*;
+pub use proto_questions::*;
+pub use proto_runtime::*;
+pub use proto_stats::*;
+pub use proto_subagents::*;
+pub use proto_trust::*;
+pub use proto_turn::*;
+pub use types::*;
+
+// Explicit re-exports so `crate::server::method` etc. resolve regardless of
+// how glob re-exports treat pub submodules.
+pub use types::{method, notification, server_method, CALLBACK_KINDS};

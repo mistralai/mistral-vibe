@@ -2,24 +2,35 @@
 
 ## Decision
 
-Configuration is layered, validated, and model-driven. Defaults, user config, project config, harness files, agents, tools, MCP servers, connectors, experiments, and runtime overrides merge through schema-aware config models.
+`VibeConfigSchema` defines one validated effective configuration. Fields have
+explicit defaults, validation and merge strategies. Product layers and
+experiment assignments resolve before values reach Runtime/Core.
 
-External config data should be parsed with Pydantic validation and explicit merge rules rather than ad-hoc dictionary walks.
+Keep persisted preferences, trusted project policy and session overrides
+distinct. Admin policy retains its enforced precedence. Untrusted project
+configuration does not participate in the merge. Forks and children receive
+independent session configuration.
+
+Writes validate prospective configuration and use atomic replacement for each
+TOML file. Multiple target layers are not one transaction. Public `ConfigView`
+is redacted and does not define writable paths. The
+[configuration reference](../reference/configuration.md) describes the layer
+stack, model pins, mutation application and API.
 
 ## Rationale
 
-Vibe must be configurable at user, project, agent, and integration levels. Schema-driven layering keeps behavior predictable and lets UI, programmatic mode, and tests reason about the same effective config.
+Deterministic resolution preserves user intent and enforced policy without
+making clients understand private config objects or persistence.
 
 ## Agent Guidance
 
-- Add config fields to the relevant Pydantic model with explicit defaults and validation.
-- Preserve deterministic layer precedence and merge behavior.
-- Keep reloadable config separate from state that should live only for a session.
-- Avoid making startup load optional integrations unless the config requires them.
-- Keep config migration and backward compatibility near the config models.
+- Add fields with explicit merge behavior and compatible persisted defaults.
+- Map experiments through config layers instead of branching on assignments.
+- Distinguish an accepted write from its application to active execution.
+- Return authoritative public state and keep secrets out of projections.
 
 ## Flag To User When
 
-- A feature needs hidden global state instead of config or session state.
-- A config value is parsed manually in multiple places.
-- A new config path would make startup slower for users who do not use the feature.
+- A write needs atomicity across layers, provenance or conflict semantics the
+  current configuration substrate cannot provide.
+- A change alters enforced precedence or treats untrusted config as authoritative.

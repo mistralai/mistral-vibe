@@ -1,0 +1,46 @@
+[
+ {
+  "method": "setup/status",
+  "params": {}
+ },
+ {
+  "method": "setup/oidc-start",
+  "params": {}
+ },
+ {
+  "method": "setup/oidc-poll",
+  "params": {
+   "attemptId": "oidc-replay"
+  }
+ },
+ {
+  "method": "setup/oidc-cancel",
+  "params": {
+   "attemptId": "oidc-replay"
+  }
+ },
+ {
+  "method": "setup/store-credential",
+  "params": {
+   "apiKey": "synthetic-gateway-key",
+   "customDomain": false,
+   "provider": "internal-ai-gateway"
+  }
+ },
+ {
+  "method": "setup/submit-choices",
+  "params": {
+   "consoleBaseUrl": "https://console.gateway.invalid",
+   "provider": {
+    "apiBase": "https://internal-ai-gateway.mistralai.com",
+    "apiKeyEnvVar": "GATEWAY_API_KEY",
+    "browserAuthAllowOriginRewrite": false,
+    "browserAuthApiBaseUrl": null,
+    "browserAuthBaseUrl": null,
+    "name": "internal-ai-gateway"
+   },
+   "theme": "atom-one-dark",
+   "vibeBaseUrl": "https://chat.gateway.invalid"
+  }
+ }
+]

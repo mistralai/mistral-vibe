@@ -6,11 +6,12 @@ from types import SimpleNamespace
 from pydantic import ValidationError
 import pytest
 
-from vibe.core.types import LLMMessage, Role, UserDisplayContentMetadata
+from vibe.core.types import LLMMessage, Role
+from vibe.user_content import UserDisplayContent
 
 
-def _metadata() -> UserDisplayContentMetadata:
-    return UserDisplayContentMetadata(
+def _metadata() -> UserDisplayContent:
+    return UserDisplayContent(
         version="1.0.0",
         host="mistral-vscode",
         content=[
@@ -26,7 +27,7 @@ def _metadata() -> UserDisplayContentMetadata:
 
 
 def test_accepts_valid_metadata_and_preserves_host_owned_content() -> None:
-    metadata = UserDisplayContentMetadata.model_validate({
+    metadata = UserDisplayContent.model_validate({
         "version": "1.0.0",
         "host": "mistral-vscode",
         "content": [
@@ -58,7 +59,7 @@ def test_accepts_valid_metadata_and_preserves_host_owned_content() -> None:
 
 
 def test_strips_metadata_strings_without_stripping_host_owned_content() -> None:
-    metadata = UserDisplayContentMetadata.model_validate({
+    metadata = UserDisplayContent.model_validate({
         "version": " 1.0.0 ",
         "host": " mistral-vscode ",
         "content": [{"type": "text", "text": " keep spaces "}],
@@ -97,7 +98,7 @@ def test_strips_metadata_strings_without_stripping_host_owned_content() -> None:
 )
 def test_rejects_invalid_metadata(payload: object) -> None:
     with pytest.raises(ValidationError):
-        UserDisplayContentMetadata.model_validate(payload)
+        UserDisplayContent.model_validate(payload)
 
 
 def test_llm_message_round_trips_user_display_content() -> None:

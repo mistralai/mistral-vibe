@@ -5,7 +5,47 @@ from pathlib import Path
 import pytest
 
 from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.paths import VIBE_HOME
 from vibe.core.trusted_folders import trusted_folders_manager
+
+
+class TestCwdIsUserConfigHome:
+    def test_true_when_cwd_is_user_home(self) -> None:
+        mgr = HarnessFilesManager(
+            sources=("user", "project"), cwd=VIBE_HOME.path.parent
+        )
+        assert mgr.cwd_is_user_config_home is True
+
+    def test_false_for_regular_project(self, tmp_path: Path) -> None:
+        mgr = HarnessFilesManager(sources=("user", "project"), cwd=tmp_path)
+        assert mgr.cwd_is_user_config_home is False
+
+    def test_trusted_workdir_none_when_cwd_is_home(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
+        mgr = HarnessFilesManager(
+            sources=("user", "project"), cwd=VIBE_HOME.path.parent
+        )
+        assert mgr._trusted_workdir is None
+
+    def test_hook_files_not_duplicated_when_cwd_is_home(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
+        mgr = HarnessFilesManager(
+            sources=("user", "project"), cwd=VIBE_HOME.path.parent
+        )
+        assert mgr.hook_files == [VIBE_HOME.path / "hooks.toml"]
+
+    def test_config_file_is_user_config_when_cwd_is_home(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(trusted_folders_manager, "is_trusted", lambda _: True)
+        mgr = HarnessFilesManager(
+            sources=("user", "project"), cwd=VIBE_HOME.path.parent
+        )
+        assert mgr.config_file == VIBE_HOME.path / "config.toml"
 
 
 class TestTrustedWorkdir:

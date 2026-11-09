@@ -8,7 +8,7 @@ import keyring
 from keyring.errors import KeyringError
 import pytest
 
-from vibe.acp.acp_agent_loop import VibeAcpAgentLoop
+from vibe.acp.agent import VibeAcpAgent as VibeAcpAgentLoop
 from vibe.acp.exceptions import InternalError, InvalidRequestError
 from vibe.core.config import (
     DEFAULT_MISTRAL_API_ENV_KEY,
@@ -17,7 +17,7 @@ from vibe.core.config import (
 )
 from vibe.core.types import Backend
 from vibe.setup.auth import AuthStateKind
-from vibe.setup.onboarding.context import OnboardingContext
+from vibe.setup.auth.onboarding_context import OnboardingContext
 
 
 @pytest.fixture(autouse=True)
@@ -82,7 +82,28 @@ class TestACPAuthStatus:
             "authenticated": False,
             "authState": AuthStateKind.SIGNED_OUT.value,
             "signOutAvailable": False,
+            "customDomain": None,
+            "customDomainLocked": False,
         }
+
+    @pytest.mark.asyncio
+    async def test_auth_status_loads_the_onboarding_context_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv(DEFAULT_MISTRAL_API_ENV_KEY, raising=False)
+        loads = 0
+
+        def counting_loader() -> OnboardingContext:
+            nonlocal loads
+            loads += 1
+            return OnboardingContext(provider=build_mistral_provider())
+
+        acp_agent_loop = VibeAcpAgentLoop(onboarding_context_loader=counting_loader)
+
+        before = loads
+        await acp_agent_loop.ext_method("auth/status", {})
+
+        assert loads - before == 1
 
     @pytest.mark.asyncio
     async def test_returns_sign_out_available_for_default_dotenv_key(
@@ -98,6 +119,8 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.VIBE_HOME_ENV_FILE.value,
             "signOutAvailable": True,
+            "customDomain": None,
+            "customDomainLocked": False,
         }
 
     @pytest.mark.asyncio
@@ -120,6 +143,8 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.VIBE_HOME_ENV_FILE.value,
             "signOutAvailable": True,
+            "customDomain": None,
+            "customDomainLocked": False,
         }
 
     @pytest.mark.asyncio
@@ -135,6 +160,8 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.PROCESS_ENV.value,
             "signOutAvailable": False,
+            "customDomain": None,
+            "customDomainLocked": False,
         }
 
     @pytest.mark.asyncio
@@ -151,6 +178,8 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.PROCESS_ENV.value,
             "signOutAvailable": False,
+            "customDomain": None,
+            "customDomainLocked": False,
         }
 
     @pytest.mark.asyncio
@@ -169,6 +198,8 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.OS_KEYRING.value,
             "signOutAvailable": True,
+            "customDomain": None,
+            "customDomainLocked": False,
         }
 
     @pytest.mark.asyncio
@@ -186,6 +217,8 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.AUTH_NOT_REQUIRED.value,
             "signOutAvailable": False,
+            "customDomain": None,
+            "customDomainLocked": False,
         }
 
     @pytest.mark.asyncio
@@ -202,6 +235,8 @@ class TestACPAuthStatus:
             "authenticated": True,
             "authState": AuthStateKind.UNSUPPORTED_PROVIDER.value,
             "signOutAvailable": False,
+            "customDomain": None,
+            "customDomainLocked": False,
         }
 
 
@@ -227,6 +262,8 @@ class TestACPAuthSignOut:
             "authenticated": False,
             "authState": AuthStateKind.SIGNED_OUT.value,
             "signOutAvailable": False,
+            "customDomain": None,
+            "customDomainLocked": False,
         }
 
     @pytest.mark.asyncio

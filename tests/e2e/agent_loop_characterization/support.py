@@ -1,20 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 import io
 import json
 from pathlib import Path
-import time
 import tomllib
 from typing import Any
 
 import pexpect
 import tomli_w
 
-from tests.e2e.common import strip_ansi, wait_for_rendered_text
+from tests.e2e.common import (
+    wait_for_dialog_to_accept_keys,
+    wait_for_request_count_while_draining_child_output as wait_for_request_count_while_draining_child_output,
+)
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
-
-APPROVAL_INPUT_GRACE_PERIOD_S = 0.65
 
 
 def assistant_text_chunks(text: str, *, created: int = 100) -> list[dict[str, object]]:
@@ -93,9 +92,8 @@ def _messages(payload: ChatCompletionsRequestPayload) -> list[dict[str, Any]]:
     return [dict(message) for message in raw_messages]
 
 
-def assert_tool_result_contains(
-    payload: ChatCompletionsRequestPayload, *, call_id: str, expected: str
-) -> None:
+def tool_result_content(payload: ChatCompletionsRequestPayload, *, call_id: str) -> str:
+    """The string content of one tool-result message, asserted unique."""
     matching_messages = [
         message
         for message in _messages(payload)
@@ -104,6 +102,13 @@ def assert_tool_result_contains(
     assert len(matching_messages) == 1
     content = matching_messages[0].get("content")
     assert isinstance(content, str)
+    return content
+
+
+def assert_tool_result_contains(
+    payload: ChatCompletionsRequestPayload, *, call_id: str, expected: str
+) -> None:
+    content = tool_result_content(payload, call_id=call_id)
     assert expected in content, content
 
 
@@ -136,37 +141,18 @@ def assert_message_content_present(
     )
 
 
-def wait_for_request_count_while_draining_child_output(
-    child: pexpect.spawn,
-    captured: io.StringIO,
-    request_count_getter: Callable[[], int],
-    *,
-    expected_count: int,
-    timeout: float,
-) -> None:
-    start = time.monotonic()
-    while time.monotonic() - start < timeout:
-        if request_count_getter() >= expected_count:
-            return
-        try:
-            child.expect(r"\S", timeout=0.05)
-        except pexpect.TIMEOUT:
-            pass
-    rendered_tail = strip_ansi(captured.getvalue())[-1200:]
-    raise AssertionError(
-        f"Timed out waiting for {expected_count} backend request(s).\n\n"
-        f"Rendered tail:\n{rendered_tail}"
-    )
-
-
 def answer_approval(
     child: pexpect.spawn, captured: io.StringIO, *, tool_name: str, key: str
 ) -> None:
-    wait_for_rendered_text(
-        child, captured, needle=f"Permission for the {tool_name} tool", timeout=10
+    """Answer a tool approval prompt.
+
+    ``tool_name`` is the name the prompt title displays: the unified runtime
+    names builtin tools by their canonical route (``file_system.bash`` stands
+    for Vibe's ``bash``).
+    """
+    wait_for_dialog_to_accept_keys(
+        child, captured, needle=f"Permission for the {tool_name} tool"
     )
-    wait_for_rendered_text(child, captured, needle="Deny", timeout=10)
-    time.sleep(APPROVAL_INPUT_GRACE_PERIOD_S)
     child.send(key)
     child.send("\r")
 

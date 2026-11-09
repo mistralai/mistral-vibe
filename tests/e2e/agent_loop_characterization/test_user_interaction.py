@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-import time
 
 import pexpect
 import pytest
 
 from tests.e2e.agent_loop_characterization.support import (
-    APPROVAL_INPUT_GRACE_PERIOD_S,
     assert_tool_result_contains,
     assistant_text_chunks,
     single_tool_call_chunks,
@@ -17,9 +15,9 @@ from tests.e2e.agent_loop_characterization.support import (
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
+    wait_for_dialog_to_accept_keys,
     wait_for_main_screen,
     wait_for_rendered_text,
-    wait_for_request_count,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -28,9 +26,7 @@ QUESTION_TEXT = "Which mode should Vibe use?"
 
 
 def _answer_first_question_option(child: pexpect.spawn, captured: io.StringIO) -> None:
-    wait_for_rendered_text(child, captured, needle=QUESTION_TEXT, timeout=10)
-    wait_for_rendered_text(child, captured, needle="Fast", timeout=10)
-    time.sleep(APPROVAL_INPUT_GRACE_PERIOD_S)
+    wait_for_dialog_to_accept_keys(child, captured, needle=QUESTION_TEXT)
     child.send("\r")
 
 
@@ -38,6 +34,9 @@ def _ask_user_question_factory(
     request_index: int, _payload: ChatCompletionsRequestPayload
 ) -> list[dict[str, object]]:
     if request_index == 0:
+        # The unified runtime validates against the declared input schema,
+        # which serializes multi-word fields with their camelCase aliases
+        # (``hideOther``); the question and option fields are single words.
         return single_tool_call_chunks(
             call_id=QUESTION_CALL_ID,
             tool_name="ask_user_question",
@@ -50,7 +49,7 @@ def _ask_user_question_factory(
                             {"label": "Fast", "description": "Move quickly"},
                             {"label": "Careful", "description": "Add checks"},
                         ],
-                        "hide_other": True,
+                        "hideOther": True,
                     }
                 ]
             },
@@ -61,6 +60,7 @@ def _ask_user_question_factory(
 
 
 @pytest.mark.timeout(25)
+@pytest.mark.unified_default
 @pytest.mark.parametrize(
     "streaming_mock_server",
     [pytest.param(_ask_user_question_factory, id="ask-user-question")],
@@ -77,8 +77,12 @@ def test_ask_user_question_waits_for_answer_and_reports_it_to_the_model(
         child.send("Ask me for a mode")
         child.send("\r")
 
-        wait_for_request_count(
-            lambda: len(streaming_mock_server.requests), expected_count=1, timeout=10
+        wait_for_request_count_while_draining_child_output(
+            child,
+            captured,
+            lambda: len(streaming_mock_server.requests),
+            expected_count=1,
+            timeout=10,
         )
         _answer_first_question_option(child, captured)
         wait_for_request_count_while_draining_child_output(

@@ -1,0 +1,150 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from nturl2path import url2pathname as windows_url2pathname
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
+import re
+from urllib.parse import unquote, urlparse
+
+from vibe.utils.platform import is_windows
+
+# fullmatch + DOTALL: a "$" anchor would match before a trailing newline and drop it.
+_MSYS_DRIVE = re.compile(r"/([A-Za-z])([/\\].*)?", re.DOTALL)
+
+
+class UnanchoredWindowsPathError(ValueError):
+    """A Windows path that names a drive or a root, but not both."""
+
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+        super().__init__(
+            f"'{raw}' is not anchored: a Windows path must give both a drive and "
+            "a root ('C:\\Users\\...') or neither ('src/main.py'). Windows would "
+            f"resolve '{raw}' against the current directory of whichever drive is "
+            "active and silently use the wrong location. Use a drive-qualified "
+            "path such as 'C:\\Users\\...', a Git Bash path such as "
+            "'/c/Users/...', or a path relative to the working directory."
+        )
+
+
+def file_uri_to_path(uri: str) -> str:
+    """Convert a file URI into a path using the current platform's rules."""
+    parsed = urlparse(uri)
+    if parsed.scheme != "file":
+        raise ValueError(f"Expected a file URI: {uri!r}")
+
+    encoded_path = parsed.path
+    if parsed.netloc and parsed.netloc != "localhost":
+        encoded_path = f"//{parsed.netloc}{encoded_path}"
+    if is_windows():
+        return windows_url2pathname(encoded_path)
+    return unquote(encoded_path)
+
+
+def normalize_windows_path(raw: str) -> str:
+    """Fold a Git Bash / MSYS drive path (``/c/Users``) into ``C:/Users``."""
+    raw = raw.strip()
+    if not is_windows() or not (match := _MSYS_DRIVE.fullmatch(raw)):
+        return raw
+
+    suffix = (match[2] or "/").replace("\\", "/")
+    return f"{match[1].upper()}:{suffix}"
+
+
+def to_git_bash_path(raw: str) -> str:
+    """Spell a drive-qualified Windows path (``C:\\Users``) as ``/c/Users``.
+
+    Paths without both a drive letter and a root, such as UNC shares or
+    drive-relative ``C:file``, are returned unchanged.
+    """
+    path = PureWindowsPath(raw)
+    if not path.root or not re.fullmatch(r"[A-Za-z]:", path.drive):
+        return raw
+
+    suffix = "/".join(path.parts[1:])
+    return f"/{path.drive[0].lower()}/{suffix}"
+
+
+def target_pure_path(raw: str) -> PurePath:
+    """Read a path by the target platform's rules; ``Path`` follows the host's."""
+    return PureWindowsPath(raw) if is_windows() else PurePosixPath(raw)
+
+
+def normalize_windows_input_path(raw: str) -> str:
+    """Normalize a model-supplied path, rejecting one Windows cannot anchor."""
+    normalized = normalize_windows_path(raw)
+    if not is_windows():
+        return normalized
+
+    path = PureWindowsPath(normalized)
+    if bool(path.root) != bool(path.drive):
+        raise UnanchoredWindowsPathError(raw)
+
+    return normalized
+
+
+def resolves_within(path: Path, roots: Sequence[Path]) -> bool:
+    """Is ``path`` inside one of ``roots`` once symlinks are resolved?
+
+    A link inside a folder a write targets could otherwise redirect the write
+    anywhere on the machine.
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            if resolved.is_relative_to(root.resolve()):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+class GlobalPath:
+    def __init__(self, resolver: Callable[[], Path]) -> None:
+        self._resolver = resolver
+
+    @property
+    def path(self) -> Path:
+        return self._resolver()
+
+
+def is_dangerous_directory(path: Path | str = ".") -> tuple[bool, str]:
+    """Check if the current directory is a dangerous folder that would cause
+    issues if we were to run the tool there.
+
+    Args:
+        path: Path to check (defaults to current directory)
+
+    Returns:
+        tuple[bool, str]: (is_dangerous, reason) where reason explains why it's dangerous
+    """
+    path = Path(path).resolve()
+
+    home_dir = Path.home()
+
+    dangerous_paths = {
+        home_dir: "home directory",
+        home_dir / "Documents": "Documents folder",
+        home_dir / "Desktop": "Desktop folder",
+        home_dir / "Downloads": "Downloads folder",
+        home_dir / "Pictures": "Pictures folder",
+        home_dir / "Movies": "Movies folder",
+        home_dir / "Music": "Music folder",
+        home_dir / "Library": "Library folder",
+        Path("/Applications"): "Applications folder",
+        Path("/System"): "System folder",
+        Path("/Library"): "System Library folder",
+        Path("/usr"): "System usr folder",
+        Path("/private"): "System private folder",
+    }
+
+    for dangerous_path, description in dangerous_paths.items():
+        try:
+            if path == dangerous_path:
+                return True, f"You are in the {description}"
+        except (OSError, ValueError):
+            continue
+    return False, ""

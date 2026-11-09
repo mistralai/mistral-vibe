@@ -1,0 +1,83 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from vibe.core.model_catalog.cache import store_cached_model_catalog
+from vibe.core.model_catalog.client import ModelCatalogClient
+from vibe.core.model_catalog.models import ModelCatalogResponse
+from vibe.core.model_catalog.wait import mark_model_catalog_failed
+from vibe.observability.logging import logger
+
+if TYPE_CHECKING:
+    from vibe.core.config import VibeConfigSchema
+    from vibe.core.platform_auth import PlatformCredentialFactory
+
+
+async def refresh_model_catalog(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> ModelCatalogResponse | None:
+    """Fetch the catalog once, gated on the experimental flag and a Mistral
+    credential — never on the active model's provider.
+
+    Returns None when the feature is disabled, no Mistral credential is held,
+    or the fetch failed; the caller then keeps whatever it already has. A
+    failed fetch is also recorded for the process, so no later session waits
+    for the catalog (``vibe.core.model_catalog.wait``).
+    """
+    if not config.experimental_enable_model_catalog:
+        logger.debug("Model catalog fetch skipped: experimental flag off")
+        return None
+    from vibe.core.platform_auth._mistral import mistral_credentials
+
+    mistral = mistral_credentials(config, credentials)
+    if mistral is None:
+        logger.debug("Model catalog fetch skipped: no Mistral credential")
+        return None
+    client = ModelCatalogClient.from_provider(mistral.provider)
+    try:
+        response = await client.fetch(mistral.credentials)
+    except Exception:
+        mark_model_catalog_failed()
+        raise
+    finally:
+        await client.aclose()
+    # Recorded only past the skips above: a user who adds a credential later
+    # in the process must still wait for the catalog.
+    if response is None:
+        mark_model_catalog_failed()
+    return response
+
+
+async def fetch_and_cache_model_catalog(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> ModelCatalogResponse | None:
+    """Fetch the catalog and persist it; the single session-start step both
+    harnesses run. Fail-open: never raises, returns None on skip or failure.
+
+    A successful response — including an empty one — is authoritative and
+    overwrites the on-disk cache.
+    """
+    from vibe.core.telemetry.send import resolve_credential_cache_key
+
+    if not config.experimental_enable_model_catalog:
+        return None
+    cache_key = await resolve_credential_cache_key(config, credentials)
+    try:
+        response = await refresh_model_catalog(config, credentials)
+    except Exception:
+        logger.exception("Model catalog fetch failed unexpectedly")
+        return None
+    if response is None:
+        return None
+    logger.info(
+        "Model catalog fetched: %d models, recommended=%s",
+        len(response.models),
+        next((entry.id for entry in response.models if entry.recommended), "none"),
+    )
+    try:
+        store_cached_model_catalog(
+            config, response, fetched_for=cache_key, credentials=credentials
+        )
+    except Exception:
+        logger.exception("Failed to cache the model catalog")
+    return response

@@ -1,53 +1,152 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import TYPE_CHECKING
+import copy
+from typing import TYPE_CHECKING, Final
 
-from vibe.core.agents._migration import migrate_agent_profile_files
 from vibe.core.agents.diagnostics import excluded_agent_message
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
+    REMOVED_BUILTIN_AGENTS,
     AgentProfile,
+    AgentSafety,
     AgentType,
     BuiltinAgentName,
 )
-from vibe.core.config.harness_files import get_harness_files_manager
+from vibe.core.agents.registry import (
+    AgentLoadFailure,
+    AgentRegistry,
+    apply_profile_overrides,
+    refuse_profile_shell_timeouts_over_the_users,
+)
+from vibe.core.config.builder import InvalidConfigError
+from vibe.core.config.harness_files import (
+    HarnessFilesManager,
+    get_harness_files_manager,
+)
+from vibe.core.config.layers.admin import AdminConfigLayer, admin_layer
+from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.logger import logger
-from vibe.core.paths import dedup_paths
 from vibe.core.utils import name_matches
+from vibe.observability.logging import logger
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
+
+# The modes a session falls back to, in order, after the default.
+FALLBACK_AGENTS: Final = (BuiltinAgentName.ACCEPT_EDITS, BuiltinAgentName.ASK)
 
 
 class AgentManager:
     def __init__(
         self,
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
-        initial_agent: str = BuiltinAgentName.DEFAULT,
+        initial_agent: str | None = BuiltinAgentName.ACCEPT_EDITS,
         allow_subagent: bool = False,
+        harness_files: HarnessFilesManager | None = None,
     ) -> None:
+        """``initial_agent=None`` starts the session's ``default_agent``."""
         self._orchestrator = orchestrator
-        self._search_paths = self._compute_search_paths(self._config)
-        self._migrate_agent_profiles()
-        self._discovered: dict[str, AgentProfile] = self._discover_agents()
+        self._registry = AgentRegistry(
+            orchestrator, harness_files or get_harness_files_manager()
+        )
+        # Agents chosen explicitly at startup (e.g. --smart-approve) stay in the
+        # picker/cycle for the whole session even when the rollout gate would hide
+        # them, so cycling away and back still returns to them.
+        self._forced_agents: set[str] = set()
 
         if custom_names := [n for n in self._discovered if n not in BUILTIN_AGENTS]:
             logger.info(
                 "Discovered custom agents %s in %s",
                 " ".join(custom_names),
-                " ".join(str(p) for p in self._search_paths),
+                " ".join(str(p) for p in self._registry.search_paths),
             )
 
+        self.excluded_agent: str | None = None
+        """The ``initial_agent`` the org config excludes, if the manager started
+        another mode instead. An excluded default is not recorded: it would
+        repeat every session, and the mode indicator already shows the mode."""
+        self.active_profile = self._start_profile(
+            initial_agent, allow_subagent=allow_subagent
+        )
+        self._install_profile(self.active_profile)
+
+    def _start_profile(
+        self, requested: str | None, *, allow_subagent: bool
+    ) -> AgentProfile:
+        """The profile to start in; the org config's agent rules never stop it.
+
+        The org config and the default-agent rollout are data the user cannot
+        fix, so a mode they make unavailable starts another one instead: the
+        session's default (the org's, when it sets one) when it can, else a
+        builtin. That covers a server-chosen default this checkout cannot start
+        (a custom agent that exists only in another checkout, or a mode the
+        local config disables), and a default or requested mode the org
+        excludes (``org_excludes``). Any other failure keeps its loud error: a
+        typo, or a subagent, asked for or saved as the default.
+        """
+        default = self.config.default_agent
+        default_origin = self.config.origin_of("default_agent")
+        chosen_default = default_origin != GrowthbookLayer.NAME
+        desired = requested if requested is not None else default
+        starting = self._replace_removed_default_agent(desired)
+        try:
+            return self._profile_for(
+                starting,
+                allow_subagent=allow_subagent,
+                opt_in=requested is not None or chosen_default,
+            )
+        except ValueError as exc:
+            server_default = requested is None and default_origin in {
+                AdminConfigLayer.NAME,
+                GrowthbookLayer.NAME,
+            }
+            excluded_mode = self._is_primary(starting) and self.org_excludes(starting)
+            if not (server_default or excluded_mode):
+                raise
+            error = exc
+        for candidate in (default, *FALLBACK_AGENTS):
+            if candidate in {desired, starting}:
+                continue
+            try:
+                profile = self._profile_for(
+                    candidate, allow_subagent=False, opt_in=chosen_default
+                )
+            except ValueError as exc:
+                error = exc
+                continue
+            logger.info(
+                "Agent '%s' (%s) is unavailable; starting '%s'",
+                desired,
+                "requested" if requested is not None else default_origin,
+                profile.name,
+            )
+            self.excluded_agent = requested
+            return profile
+        # Every fallback excluded too: a broken configuration, kept loud.
+        raise error
+
+    def _profile_for(
+        self, initial_agent: str, *, allow_subagent: bool, opt_in: bool
+    ) -> AgentProfile:
+        initial_agent = self._replace_removed_default_agent(initial_agent)
         profile = self.available_agents.get(initial_agent)
+        if (
+            profile is None
+            and opt_in
+            and initial_agent == BuiltinAgentName.SMART_APPROVE
+            and not self.org_excludes(initial_agent)
+        ):
+            # Asking for smart-approve (--smart-approve / --agent, or a
+            # default_agent a person or org set) is a deliberate opt-in that
+            # bypasses the picker rollout gate, though not the org's agent
+            # lists. A default the experiment set is no opt-in. Remember the
+            # opt-in so it keeps offering the mode for the rest of the session.
+            profile = self._discovered.get(initial_agent)
+            if profile is not None:
+                self._forced_agents.add(initial_agent)
         if profile is None:
             if initial_agent in self._discovered:
-                raise ValueError(
-                    excluded_agent_message(
-                        initial_agent, self._config, self._discovered
-                    )
-                )
+                raise ValueError(self._unavailable_message(initial_agent))
             raise ValueError(f"Agent '{initial_agent}' not found.")
         if not allow_subagent and profile.agent_type != AgentType.AGENT:
             raise ValueError(
@@ -55,11 +154,37 @@ class AgentManager:
                 f" as the primary agent. Only agents of type 'agent' can be selected"
                 f" with --agent."
             )
-        self.active_profile = profile
-        self._cached_config: VibeConfigSchema | None = None
+        return profile
+
+    def _is_primary(self, name: str) -> bool:
+        profile = self._discovered.get(name)
+        return profile is not None and profile.agent_type == AgentType.AGENT
+
+    def _replace_removed_default_agent(self, name: str) -> str:
+        replacement = REMOVED_BUILTIN_AGENTS.get(name)
+        if (
+            replacement is None
+            or name != self.config.default_agent
+            or name in self._discovered
+        ):
+            return name
+        logger.warning(
+            "default_agent '%s' is no longer a builtin agent; starting on '%s'",
+            name,
+            replacement,
+        )
+        return replacement
 
     @property
-    def _config(self) -> VibeConfigSchema:
+    def _discovered(self) -> dict[str, AgentProfile]:
+        return self._registry.discovered
+
+    @property
+    def load_failures(self) -> tuple[AgentLoadFailure, ...]:
+        return self._registry.failures
+
+    @property
+    def config(self) -> VibeConfigSchema:
         return self._orchestrator.config
 
     @property
@@ -70,88 +195,89 @@ class AgentManager:
             if self._is_agent_available(name, profile)
         }
 
-    def _is_agent_available(self, name: str, profile: AgentProfile) -> bool:
-        if profile.install_required and name not in self._config.installed_agents:
-            return False
-        if enabled := self._config.enabled_agents:
-            return name_matches(name, enabled)
-        return not name_matches(name, self._config.disabled_agents)
+    def org_excludes(self, name: str) -> bool:
+        """Whether the org config itself leaves ``name`` out: its own
+        ``enabled_agents``/``disabled_agents``, or ``enable_auto_approve =
+        false`` for an agent with the ``yolo`` safety level.
+        """
+        if _org_lists_exclude(self._orchestrator, name):
+            return True
+        profile = self._discovered.get(name)
+        return (
+            profile is not None
+            and profile.safety is AgentSafety.YOLO
+            and _org_forbids_auto_approve(self._orchestrator)
+        )
 
-    @property
-    def config(self) -> VibeConfigSchema:
-        if self._cached_config is None:
-            self._cached_config = self.active_profile.apply_to_config(
-                self._orchestrator.config
-            )
-        return self._cached_config
+    def _is_agent_available(self, name: str, profile: AgentProfile) -> bool:
+        if self.org_excludes(name) or (
+            not self.config.enable_auto_approve and profile.safety is AgentSafety.YOLO
+        ):
+            # The org's own lists are checked apart from the merged lists below,
+            # which also hold the user's entries: a local enabled_agents would
+            # widen the org's. enable_auto_approve = false forbids the
+            # auto-approve (YOLO) mode outright, keyed on the safety level so
+            # custom yolo agents are covered too.
+            return False
+        if name in self._forced_agents:
+            # An explicit startup selection keeps the agent in the picker/cycle for
+            # the whole session, regardless of the rollout gate.
+            return True
+        if (
+            name == BuiltinAgentName.SMART_APPROVE
+            and not self.config.smart_approve_available
+        ):
+            # Smart approve ships dark: it enters the picker/cycle only for a cohort
+            # the experiment (or config) has opted in. Explicit selection bypasses this
+            # in __init__.
+            return False
+        if profile.install_required and name not in self.config.installed_agents:
+            return False
+        if enabled := self.config.enabled_agents:
+            return name_matches(name, enabled)
+        return not name_matches(name, self.config.disabled_agents)
+
+    def under(self, orchestrator: ConfigOrchestrator[VibeConfigSchema]) -> AgentManager:
+        """The same agents read against ``orchestrator``, a candidate config:
+        switching there touches neither this manager nor its config.
+        """
+        view = copy.copy(self)
+        view._orchestrator = orchestrator
+        view._forced_agents = set(self._forced_agents)
+        return view
 
     def switch_profile(self, name: str) -> None:
-        self.active_profile = self.get_agent(name)
-        self._cached_config = None
+        profile = self.get_agent(name)
+        # A refused profile leaves the session on the one it was running.
+        self._install_profile(profile)
+        self.active_profile = profile
 
-    def preview_config(self, name: str) -> VibeConfigSchema:
-        return self.get_agent(name).apply_to_config(self._config)
+    def _install_profile(self, profile: AgentProfile) -> None:
+        if profile.config_error is not None:
+            raise InvalidConfigError(
+                f"Agent '{profile.name}' in {profile.source_path}:"
+                f" {profile.config_error}"
+            )
+        refuse_profile_shell_timeouts_over_the_users(self._orchestrator, profile)
+        apply_profile_overrides(
+            self._orchestrator, profile.overrides, profile_name=profile.name
+        )
 
-    def register_agent(self, profile: AgentProfile) -> None:
-        self._discovered[profile.name] = profile
-        self._cached_config = None
-
-    def invalidate_config(self) -> None:
-        self._cached_config = None
-
-    @staticmethod
-    def _compute_search_paths(config: VibeConfigSchema) -> list[Path]:
-        mgr = get_harness_files_manager()
-        return dedup_paths([
-            *(p for p in config.agent_paths if p.is_dir()),
-            *mgr.project_agents_dirs,
-            *mgr.user_agents_dirs,
-        ])
-
-    def _discover_agents(self) -> dict[str, AgentProfile]:
-        agents: dict[str, AgentProfile] = dict(BUILTIN_AGENTS)
-
-        for base in self._search_paths:
-            if not base.is_dir():
-                continue
-            for agent_file in base.glob("*.toml"):
-                if not agent_file.is_file():
-                    continue
-                if (agent := self._try_load_agent(agent_file)) is not None:
-                    if agent.name in BUILTIN_AGENTS:
-                        logger.info(
-                            "Custom agent '%s' overrides builtin agent", agent.name
-                        )
-                    elif agent.name in agents:
-                        logger.debug(
-                            "Skipping duplicate agent '%s' at %s",
-                            agent.name,
-                            agent_file,
-                        )
-                        continue
-                    agents[agent.name] = agent
-
-        return agents
-
-    def _try_load_agent(self, agent_file: Path) -> AgentProfile | None:
-        try:
-            agent = AgentProfile.from_toml(agent_file)
-            agent.apply_to_config(self._config)
-            return agent
-        except Exception as e:
-            logger.warning("Failed to load agent at %s: %s", agent_file, e)
-            return None
-
-    def _migrate_agent_profiles(self) -> None:
-        try:
-            migrate_agent_profile_files(self._search_paths)
-        except Exception as exc:
-            logger.warning("Failed to migrate agent profiles", exc_info=exc)
+    def is_known_agent(self, name: str) -> bool:
+        return name in self._discovered
 
     def get_agent(self, name: str) -> AgentProfile:
         if agent := self.available_agents.get(name):
             return agent
+        if name in self._discovered:
+            raise ValueError(self._unavailable_message(name))
         raise ValueError(f"Agent '{name}' not found")
+
+    def _unavailable_message(self, name: str) -> str:
+        # Advice to edit the agent lists cannot help against the org's own.
+        if self.org_excludes(name):
+            return f"Agent '{name}' is disabled by your organization."
+        return excluded_agent_message(name, self.config, self._discovered)
 
     def get_subagents(self) -> list[AgentProfile]:
         return [
@@ -162,9 +288,9 @@ class AgentManager:
 
     def get_agent_order(self) -> list[str]:
         builtin_order: list[str] = [
-            BuiltinAgentName.DEFAULT,
-            BuiltinAgentName.PLAN,
+            BuiltinAgentName.ASK,
             BuiltinAgentName.ACCEPT_EDITS,
+            BuiltinAgentName.SMART_APPROVE,
             BuiltinAgentName.AUTO_APPROVE,
         ]
         primary_agents = [
@@ -180,3 +306,33 @@ class AgentManager:
         order = self.get_agent_order()
         idx = order.index(current.name) if current.name in order else -1
         return self.available_agents[order[(idx + 1) % len(order)]]
+
+
+def _org_lists_exclude(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], name: str
+) -> bool:
+    """Whether the org config's own ``enabled_agents``/``disabled_agents``
+    leave ``name`` out.
+    """
+    enabled = _org_agent_list(orchestrator, "enabled_agents")
+    if enabled and not name_matches(name, enabled):
+        return True
+    return name_matches(name, _org_agent_list(orchestrator, "disabled_agents"))
+
+
+def _org_forbids_auto_approve(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+) -> bool:
+    return _org_value(orchestrator, "enable_auto_approve") is False
+
+
+def _org_agent_list(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], key: str
+) -> list[str]:
+    value = _org_value(orchestrator, key)
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _org_value(orchestrator: ConfigOrchestrator[VibeConfigSchema], key: str) -> object:
+    layer = admin_layer(orchestrator)
+    return layer.snapshot().get(key) if layer is not None else None

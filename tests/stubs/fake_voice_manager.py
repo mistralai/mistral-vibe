@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 from tests.stubs.fake_audio_recorder import FakeAudioRecorder
-from vibe.cli.voice_manager import VoiceToggleResult
+from vibe.cli.audio_recorder import AudioRecorderPort
+from vibe.cli.audio_recorder.audio_recorder_port import RecordingMode
 from vibe.cli.voice_manager.voice_manager_port import (
     TranscribeState,
     VoiceManagerListener,
 )
-from vibe.core.audio_recorder import AudioRecorderPort
-from vibe.core.audio_recorder.audio_recorder_port import RecordingMode
 
 
 class FakeVoiceManager:
@@ -34,13 +33,12 @@ class FakeVoiceManager:
     def peak(self) -> float:
         return self._audio_recorder.peak
 
-    def toggle_voice_mode(self) -> VoiceToggleResult:
-        self._enabled = not self._enabled
+    def apply_enabled(self, enabled: bool) -> None:
+        self._enabled = enabled
         if not self._enabled:
             self.cancel_recording()
         for listener in self._listeners:
             listener.on_voice_mode_change(self._enabled)
-        return VoiceToggleResult(enabled=self._enabled)
 
     def start_recording(self, mode: RecordingMode = RecordingMode.STREAM) -> None:
         self._set_state(TranscribeState.RECORDING)

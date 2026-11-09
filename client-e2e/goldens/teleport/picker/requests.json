@@ -1,0 +1,28 @@
+[
+ {
+  "method": "vibeCode/projects/open",
+  "params": {
+   "prompt": "ship it",
+   "purpose": "teleport",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "vibeCode/projects/select",
+  "params": {
+   "pickerId": "picker-1",
+   "projectId": "exact",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "vibeCode/teleport/start",
+  "params": {
+   "operationId": "<client-message-id>",
+   "pickerId": "picker-1",
+   "projectId": "exact",
+   "prompt": "ship it",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

@@ -110,6 +110,18 @@ class ApplyErrorLayer(FakeLayer):
         raise self._error
 
 
+class ConflictOnceLayer(RawWritableLayer):
+    def __init__(self, *, name: str, data: dict[str, Any]) -> None:
+        super().__init__(name=name, data=data)
+        self.conflicts = 1
+
+    async def apply(self, *args: Any, **kwargs: Any) -> None:
+        if self.conflicts:
+            self.conflicts -= 1
+            raise ConcurrencyConflictError(expected_fp="before", actual_fp="after")
+        await super().apply(*args, **kwargs)
+
+
 class ParallelSaveBarrier:
     def __init__(self, expected_starts: int) -> None:
         self.expected_starts = expected_starts
@@ -131,6 +143,10 @@ class SimpleSchema(ConfigSchema):
 class MultiValueSchema(ConfigSchema):
     first: Annotated[str, WithReplaceMerge()] = "default-first"
     second: Annotated[str, WithReplaceMerge()] = "default-second"
+
+
+class ListSchema(ConfigSchema):
+    values: Annotated[list[str], WithReplaceMerge()] = Field(default_factory=list)
 
 
 class ToolsFragment(ConfigFragment):
@@ -182,6 +198,7 @@ async def test_create_builds_config() -> None:
         schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
     )
     assert orch.config.model_dump() == {"value": "hello"}
+    assert orch.config.origin_of("value") == "test"
 
 
 @pytest.mark.asyncio
@@ -191,6 +208,38 @@ async def test_get_layer_returns_named_layer() -> None:
         schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
     )
     assert orch.get_layer("my-layer") is layer
+
+
+@pytest.mark.asyncio
+async def test_insert_layer_takes_effect_after_reload() -> None:
+    base = FakeLayer(name="base", data={"value": "base"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[base], default_layer_resolver=lambda: base
+    )
+    assert orch.config.value == "base"
+
+    orch.insert_layer(FakeLayer(name="top", data={"value": "top"}), 1)
+    await orch.reload()
+
+    assert orch.config.value == "top"
+    assert [layer.name for layer in orch.layers] == ["base", "top"]
+
+
+@pytest.mark.asyncio
+async def test_remove_layer_takes_effect_after_reload() -> None:
+    base = FakeLayer(name="base", data={"value": "base"})
+    top = FakeLayer(name="top", data={"value": "top"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[base, top], default_layer_resolver=lambda: base
+    )
+    assert orch.config.value == "top"
+
+    removed = orch.remove_layer(1)
+    await orch.reload()
+
+    assert removed is top
+    assert orch.config.value == "base"
+    assert [layer.name for layer in orch.layers] == ["base"]
 
 
 @pytest.mark.asyncio
@@ -257,9 +306,8 @@ async def test_apply_patch_rejects_invalid_schema_result_before_routing() -> Non
             reason="test invalid patch",
         )
 
-    assert exc_info.value.args == (
-        "Config patch failed preflight validation against the merged config; fix the patch payload and retry",
-    )
+    # The schema's issue, so the caller can say what to change.
+    assert exc_info.value.args == ("value: Input should be a valid string",)
     assert isinstance(exc_info.value.__cause__, ValidationError)
 
 
@@ -312,6 +360,163 @@ async def test_set_field_uses_default_layer_resolver() -> None:
 
     assert result == []
     assert orch.config.value == "updated-normalized"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_preflight_sees_merged_candidate_before_write() -> None:
+    writable = RawWritableLayer(name="user-toml", data={})
+    higher_priority = FakeLayer(name="environment", data={"value": "masked"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema,
+        layers=[writable, higher_priority],
+        default_layer_resolver=lambda: writable,
+    )
+    seen: list[str] = []
+
+    async def preflight(candidate: SimpleSchema) -> None:
+        seen.append(candidate.value)
+        assert writable._data == {}
+
+    result = await orch.set_field(
+        "/value", "persisted", reason="preflight candidate", preflight=preflight
+    )
+
+    assert result == []
+    assert seen == ["masked"]
+    assert writable._data == {"value": "persisted"}
+    assert orch.config.value == "masked"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_preflight_rejection_prevents_persistence() -> None:
+    class RejectedCandidate(Exception):
+        pass
+
+    layer = RawWritableLayer(name="user-toml", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+
+    async def reject(candidate: SimpleSchema) -> None:
+        assert candidate.value == "updated"
+        raise RejectedCandidate
+
+    with pytest.raises(RejectedCandidate):
+        await orch.set_field("/value", "updated", preflight=reject)
+
+    assert layer._data == {"value": "original"}
+    assert orch.config.value == "original"
+
+
+@pytest.mark.asyncio
+async def test_reload_preflight_rejection_keeps_the_previous_snapshot() -> None:
+    """*Prepare*: A loaded config whose backing layer changes to a rejected value.
+    *Do*: Reload with a preflight that rejects the rebuilt candidate.
+    *Assert*: The orchestrator keeps serving the previously accepted snapshot.
+    """
+
+    class RejectedCandidate(Exception):
+        pass
+
+    # Prepare
+    layer = RawWritableLayer(name="user-toml", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    layer._data = {"value": "rejected"}
+
+    async def reject(candidate: SimpleSchema) -> None:
+        assert candidate.value == "rejected"
+        raise RejectedCandidate
+
+    # Do / Assert
+    with pytest.raises(RejectedCandidate):
+        await orch.reload(preflight=reject)
+
+    assert orch.config.value == "original"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_serializes_preflight_through_persistence() -> None:
+    layer = RawWritableLayer(name="user-toml", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_preflight(candidate: SimpleSchema) -> None:
+        assert candidate.value == "first"
+        first_entered.set()
+        await release_first.wait()
+
+    async def second_preflight(candidate: SimpleSchema) -> None:
+        assert candidate.value == "second"
+        second_entered.set()
+
+    first = asyncio.create_task(
+        orch.set_field("/value", "first", preflight=first_preflight)
+    )
+    await asyncio.wait_for(first_entered.wait(), timeout=1)
+    second = asyncio.create_task(
+        orch.set_field("/value", "second", preflight=second_preflight)
+    )
+    await asyncio.sleep(0)
+    assert not second_entered.is_set()
+
+    release_first.set()
+    assert await first == []
+    assert await second == []
+    assert second_entered.is_set()
+    assert layer._data == {"value": "second"}
+    assert orch.config.value == "second"
+
+
+@pytest.mark.asyncio
+async def test_mutate_field_serializes_read_modify_write_with_preflight() -> None:
+    layer = RawWritableLayer(name="user-toml", data={"values": []})
+    orch = await ConfigOrchestrator.create(
+        schema=ListSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def first_preflight(candidate: ListSchema) -> None:
+        assert candidate.values == ["first"]
+        first_entered.set()
+        await release_first.wait()
+
+    async def second_preflight(candidate: ListSchema) -> None:
+        assert candidate.values == ["first", "second"]
+        second_entered.set()
+
+    first = asyncio.create_task(
+        orch.mutate_field(
+            "/values",
+            lambda values: [*values, "first"],
+            default=[],
+            preflight=first_preflight,
+        )
+    )
+    await asyncio.wait_for(first_entered.wait(), timeout=1)
+    second = asyncio.create_task(
+        orch.mutate_field(
+            "/values",
+            lambda values: [*values, "second"],
+            default=[],
+            preflight=second_preflight,
+        )
+    )
+    await asyncio.sleep(0)
+    assert not second_entered.is_set()
+
+    release_first.set()
+    assert (await first).failures == []
+    assert (await second).failures == []
+    assert layer._data == {"values": ["first", "second"]}
+    assert orch.config.values == ["first", "second"]
 
 
 @pytest.mark.asyncio
@@ -536,6 +741,65 @@ async def test_apply_patch_returns_layer_apply_error_in_failures(
 
 
 @pytest.mark.asyncio
+async def test_apply_patch_retries_when_ops_name_the_default_layer_both_ways() -> None:
+    layer = ConflictOnceLayer(name="user", data={"first": "one", "second": "two"})
+    orch = await ConfigOrchestrator.create(
+        schema=MultiValueSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+
+    result = await orch.apply_patch(
+        [
+            ReplaceOperationPatch(path="/first", value="updated-one"),
+            ReplaceOperationPatch(
+                path="/second", value="updated-two", target_layer_name="user"
+            ),
+        ],
+        reason="test update",
+    )
+
+    assert result == []
+    assert layer._data == {"first": "updated-one", "second": "updated-two"}
+
+
+class CountingApplyLayer(RawWritableLayer):
+    def __init__(self, *, name: str, data: dict[str, Any]) -> None:
+        super().__init__(name=name, data=data)
+        self.applies = 0
+
+    async def apply(self, *args: Any, **kwargs: Any) -> None:
+        self.applies += 1
+        await super().apply(*args, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_across_layers_retries_only_the_conflicting_layer() -> None:
+    conflicting = ConflictOnceLayer(name="user", data={"first": "one"})
+    other = CountingApplyLayer(name="session", data={"second": "two"})
+    orch = await ConfigOrchestrator.create(
+        schema=MultiValueSchema,
+        layers=[conflicting, other],
+        default_layer_resolver=lambda: conflicting,
+    )
+
+    result = await orch.apply_patch(
+        [
+            ReplaceOperationPatch(
+                path="/first", value="updated-one", target_layer_name="user"
+            ),
+            ReplaceOperationPatch(
+                path="/second", value="updated-two", target_layer_name="session"
+            ),
+        ],
+        reason="test update",
+    )
+
+    assert result == []
+    assert conflicting._data == {"first": "updated-one"}
+    assert other._data == {"second": "updated-two"}
+    assert other.applies == 1
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_returns_unloaded_layer_error_in_failures() -> None:
     loaded_layer = FakeLayer(name="loaded", data={"value": "hello"})
     target_layer = FakeLayer(name="target", data={"value": "hello"})
@@ -641,6 +905,41 @@ deprecated_setting = true
 
 
 @pytest.mark.asyncio
+async def test_persisted_active_model_reads_the_pinned_value(
+    tmp_working_directory: Path,
+) -> None:
+    toml_path = tmp_working_directory / "config.toml"
+    toml_path.write_text(
+        'active_model = "target-testing-model-alias"\n', encoding="utf-8"
+    )
+    user_layer = UserConfigLayer(path=toml_path)
+    orch = await ConfigOrchestrator.create(
+        schema=ToolSchema,
+        layers=[user_layer],
+        default_layer_resolver=lambda: user_layer,
+    )
+
+    assert orch.persisted_active_model() == "target-testing-model-alias"
+
+
+@pytest.mark.asyncio
+async def test_persisted_active_model_empty_when_not_pinned(
+    tmp_working_directory: Path,
+) -> None:
+    toml_path = tmp_working_directory / "config.toml"
+    # No active_model key persisted: the user is on the unpinned default.
+    toml_path.write_text("tools = {}\n", encoding="utf-8")
+    user_layer = UserConfigLayer(path=toml_path)
+    orch = await ConfigOrchestrator.create(
+        schema=ToolSchema,
+        layers=[user_layer],
+        default_layer_resolver=lambda: user_layer,
+    )
+
+    assert orch.persisted_active_model() == ""
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_creates_user_file_when_it_is_missing(
     tmp_working_directory: Path,
 ) -> None:
@@ -694,7 +993,7 @@ async def test_apply_patch_end_to_end_falls_back_to_user_layer_when_no_target_is
     monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
 ) -> None:
     toml_path = tmp_working_directory / "config.toml"
-    toml_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+    toml_path.write_text('default_agent = "ask"\n', encoding="utf-8")
     monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
 
     user_layer = UserConfigLayer(path=toml_path)
@@ -728,7 +1027,7 @@ async def test_apply_patch_end_to_end_respects_explicit_target_layer(
     monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
 ) -> None:
     toml_path = tmp_working_directory / "config.toml"
-    toml_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+    toml_path.write_text('default_agent = "ask"\n', encoding="utf-8")
     monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
 
     user_layer = UserConfigLayer(path=toml_path)
@@ -812,7 +1111,7 @@ async def test_apply_patch_end_to_end_routes_default_writes_to_project_layer(
     workspace.mkdir()
     project_config_path = workspace / ".vibe" / "config.toml"
     project_config_path.parent.mkdir(parents=True, exist_ok=True)
-    project_config_path.write_text('default_agent = "plan"\n', encoding="utf-8")
+    project_config_path.write_text('default_agent = "ask"\n', encoding="utf-8")
 
     user_config_path = tmp_working_directory / "user.toml"
     user_config_path.write_text('default_agent = "accept-edits"\n', encoding="utf-8")
@@ -839,7 +1138,7 @@ async def test_apply_patch_end_to_end_routes_default_writes_to_project_layer(
 
     assert project_layer.is_file_discovered is True
     assert orch.config.active_model == "env-model"
-    assert orch.config.default_agent == "plan"
+    assert orch.config.default_agent == "ask"
     assert orch.config.enabled_tools == ["read"]
 
     result = await orch.apply_patch(
@@ -906,3 +1205,26 @@ async def test_orchestrator_deepcopies_and_stays_functional() -> None:
 
     assert forked.config.value == "forked"
     assert orch.config.value == "hello"
+
+
+@pytest.mark.asyncio
+async def test_reload_layer_reports_a_schema_break_as_a_config_error() -> None:
+    """*Prepare*: A loaded config; one layer then breaks the schema.
+    *Do*: Re-read that layer alone.
+    *Assert*: The readable config error, as ``reload`` raises, and the
+    previous snapshot is kept.
+    """
+    from vibe.core.config.builder import InvalidConfigError
+
+    # Prepare
+    layer = FakeLayer(name="admin", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    layer._data = {"value": 42}
+
+    # Do / Assert
+    with pytest.raises(InvalidConfigError):
+        await orch.reload_layer("admin")
+
+    assert orch.config.value == "original"

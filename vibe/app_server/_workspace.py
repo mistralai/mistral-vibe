@@ -1,0 +1,300 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Sequence
+from pathlib import Path
+from typing import cast
+
+from vibe.app_server.models import (
+    ContentBlock,
+    ImageAttachment,
+    MentionStats,
+    PreparedPrompt,
+    ResourceContentBlock,
+    WorkspaceTrustDecision,
+    WorkspaceTrustDetails,
+)
+from vibe.app_server.protocol import (
+    WorkspaceTrustStatusResponse,
+    WorkspaceUntrustedConfigResponse,
+)
+from vibe.core.autocompletion.path_prompt import (
+    PathPromptPayload,
+    PathResource,
+    build_path_prompt_payload,
+)
+from vibe.core.autocompletion.path_prompt_adapter import extract_image_resources
+from vibe.core.paths import TRUSTED_FOLDERS_FILE
+from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image
+from vibe.core.trusted_folders import (
+    TrustedFoldersManager,
+    WorkspaceTrustDecision as CoreWorkspaceTrustDecision,
+    WorkspaceTrustPrompt,
+    apply_workspace_trust_decision,
+    available_workspace_trust_decisions,
+    find_untrusted_config_dirs,
+    maybe_build_workspace_trust_prompt,
+)
+from vibe.user_content import UserTextResource
+from vibe.utils.images import MAX_IMAGES_PER_MESSAGE
+from vibe.utils.io import BoundedReadResult, read_lines_safe, read_lines_safe_async
+
+_MENTIONED_FILE_MAX_BYTES = 64_000
+_MENTIONED_FILE_LINE_LIMIT = 2000
+_MENTIONED_FILE_MAX_FILES = 8
+_TRUNCATED_FILE_NOTE = "\n\n[File mention truncated to fit context limits.]"
+
+
+class PromptPreparationError(ValueError):
+    pass
+
+
+class WorkspaceTrustError(ValueError):
+    pass
+
+
+def is_trust_grant(decision: WorkspaceTrustDecision) -> bool:
+    """Grants reload config and re-derive the runtime; a decline does not."""
+    return decision in {"trust_repo", "trust_cwd"}
+
+
+def require_trust_session_id(session_id: str | None) -> str:
+    """A trust decision is a persistent write, so it must name its session."""
+    if session_id is None:
+        raise WorkspaceTrustError(
+            "Active workspace trust decisions require a session ID"
+        )
+    return session_id
+
+
+def resolve_session_trust_target(
+    session_cwd: Path | str, requested: str | None
+) -> Path:
+    """The directory a session-scoped trust decision may target.
+
+    A trust decision is a persistent write to the trust store, so a
+    caller-supplied ``requested`` path may only be the session's own working
+    directory, after ``~`` and symlink resolution.
+    """
+    target = Path(session_cwd).expanduser().resolve()
+    if requested is None:
+        return target
+    resolved = Path(requested).expanduser().resolve()
+    if resolved != target:
+        raise WorkspaceTrustError(
+            "Workspace trust decisions must target the session's working directory"
+        )
+    return resolved
+
+
+def read_workspace_trust(
+    cwd: Path, trust_store: TrustedFoldersManager
+) -> WorkspaceTrustStatusResponse:
+    resolved = cwd.expanduser().resolve()
+    status = trust_store.trust_status(resolved)
+    if status != "untrusted":
+        return WorkspaceTrustStatusResponse(status=status.value)
+
+    prompt = maybe_build_workspace_trust_prompt(
+        resolved, include_explicitly_untrusted=True, manager=trust_store
+    )
+    return WorkspaceTrustStatusResponse(
+        status=status.value,
+        details=_workspace_trust_details(prompt) if prompt is not None else None,
+    )
+
+
+def decide_workspace_trust(
+    cwd: Path, decision: WorkspaceTrustDecision, trust_store: TrustedFoldersManager
+) -> WorkspaceTrustStatusResponse:
+    resolved = cwd.expanduser().resolve()
+    prompt = maybe_build_workspace_trust_prompt(
+        resolved, include_explicitly_untrusted=True, manager=trust_store
+    )
+    if prompt is None:
+        raise WorkspaceTrustError("No workspace trust decision is available")
+
+    core_decision = CoreWorkspaceTrustDecision(decision)
+    available = available_workspace_trust_decisions(prompt, include_session=False)
+    if core_decision not in available:
+        raise WorkspaceTrustError(f"Unsupported trust decision: {decision}")
+
+    apply_workspace_trust_decision(prompt, core_decision, manager=trust_store)
+    return read_workspace_trust(resolved, trust_store)
+
+
+def read_untrusted_config_dirs(
+    cwd: Path, trust_store: TrustedFoldersManager
+) -> WorkspaceUntrustedConfigResponse:
+    resolved = cwd.expanduser().resolve()
+    dirs = find_untrusted_config_dirs(resolved, manager=trust_store)
+    return WorkspaceUntrustedConfigResponse(
+        dirs=[str(d) for d in dirs], settings_path=str(TRUSTED_FOLDERS_FILE.path)
+    )
+
+
+def _workspace_trust_details(prompt: WorkspaceTrustPrompt) -> WorkspaceTrustDetails:
+    return WorkspaceTrustDetails(
+        cwd=str(prompt.cwd.resolve()),
+        repo_root=str(prompt.repo_root.resolve()) if prompt.repo_root else None,
+        detected_files=prompt.detected_files,
+        repo_detected_files=prompt.repo_detected_files,
+        repo_explicitly_untrusted=prompt.repo_explicitly_untrusted,
+        settings_path=str(TRUSTED_FOLDERS_FILE.path),
+        available_decisions=[
+            cast(WorkspaceTrustDecision, decision.value)
+            for decision in available_workspace_trust_decisions(
+                prompt, include_session=False
+            )
+        ],
+    )
+
+
+def prepare_prompt_from_context(
+    message: str, *, cwd: Path, session_dir: Path | None
+) -> PreparedPrompt:
+    payload = build_path_prompt_payload(message, base_dir=cwd)
+    images = _snapshot_images(session_dir, payload)
+    # The title is left unset here; it is generated in the background by the
+    # agent loop once there is a transcript to summarize.
+    return PreparedPrompt(
+        display_text=message,
+        prompt_text=message,
+        images=images,
+        auto_title=None,
+        mentions=_mention_stats(payload),
+    )
+
+
+def mentioned_file_content_blocks(
+    message: str, *, base_dir: Path, workspace_roots: Sequence[Path] = ()
+) -> list[ContentBlock]:
+    blocks: list[ContentBlock] = []
+    for resource in _mentioned_file_resources(
+        message, base_dir=base_dir, workspace_roots=workspace_roots
+    ):
+        try:
+            result = read_lines_safe(
+                resource.path,
+                limit=_MENTIONED_FILE_LINE_LIMIT,
+                max_bytes=_MENTIONED_FILE_MAX_BYTES,
+            )
+        except OSError as exc:
+            raise PromptPreparationError(
+                f"Failed to attach file {resource.alias}: {exc}"
+            ) from exc
+        blocks.append(_mentioned_file_content_block(resource.path, result))
+    return blocks
+
+
+async def mentioned_file_content_blocks_async(
+    message: str, *, base_dir: Path, workspace_roots: Sequence[Path] = ()
+) -> list[ContentBlock]:
+    if "@" not in message:
+        return []
+    resources = await asyncio.to_thread(
+        _mentioned_file_resources,
+        message,
+        base_dir=base_dir,
+        workspace_roots=workspace_roots,
+    )
+    blocks: list[ContentBlock] = []
+    for resource in resources:
+        try:
+            result = await read_lines_safe_async(
+                resource.path,
+                limit=_MENTIONED_FILE_LINE_LIMIT,
+                max_bytes=_MENTIONED_FILE_MAX_BYTES,
+            )
+        except OSError as exc:
+            raise PromptPreparationError(
+                f"Failed to attach file {resource.alias}: {exc}"
+            ) from exc
+        blocks.append(_mentioned_file_content_block(resource.path, result))
+    return blocks
+
+
+def _mentioned_file_resources(
+    message: str, *, base_dir: Path, workspace_roots: Sequence[Path] = ()
+) -> list[PathResource]:
+    """The mentioned files inside the workspace roots, in mention order.
+
+    Inlining skips the read tool's prompt, so it keeps to those roots. A
+    mention outside them stays plain text for the read tool to ask about,
+    rather than failing the whole message.
+    """
+    root = base_dir.expanduser().resolve()
+    roots = _attachable_roots(root, workspace_roots)
+    payload = build_path_prompt_payload(message, base_dir=root)
+    resources = [
+        resource
+        for resource in payload.resources
+        if resource.kind == "file" and _is_within_roots(resource.path, roots)
+    ]
+    if len(resources) > _MENTIONED_FILE_MAX_FILES:
+        raise PromptPreparationError(
+            f"Too many file mentions: {_MENTIONED_FILE_MAX_FILES} maximum"
+        )
+    return resources
+
+
+def _attachable_roots(cwd: Path, workspace_roots: Sequence[Path]) -> tuple[Path, ...]:
+    roots = [root.expanduser().resolve() for root in workspace_roots]
+    if cwd not in roots:
+        roots.insert(0, cwd)
+    return tuple(roots)
+
+
+def _is_within_roots(path: Path, roots: Sequence[Path]) -> bool:
+    resolved = path.expanduser().resolve()
+    return any(resolved.is_relative_to(root) for root in roots)
+
+
+def _mentioned_file_content_block(
+    path: Path, result: BoundedReadResult
+) -> ResourceContentBlock:
+    text = "\n".join(result.lines)
+    if result.was_truncated:
+        text += _TRUNCATED_FILE_NOTE
+    return ResourceContentBlock(resource=UserTextResource(uri=path.as_uri(), text=text))
+
+
+def _snapshot_images(
+    session_dir: Path | None, payload: PathPromptPayload
+) -> list[ImageAttachment]:
+    resources = extract_image_resources(payload)
+    if len(resources) > MAX_IMAGES_PER_MESSAGE:
+        raise PromptPreparationError(
+            f"Too many image attachments (got {len(resources)}, "
+            f"max {MAX_IMAGES_PER_MESSAGE})."
+        )
+    attachments: list[ImageAttachment] = []
+    for resource in resources:
+        try:
+            attachment = snapshot_image(
+                resource.path, alias=resource.alias, session_dir=session_dir
+            )
+        except ImageSnapshotError as exc:
+            raise PromptPreparationError(
+                f"Failed to attach image {resource.alias}: {exc}"
+            ) from exc
+        attachments.append(
+            ImageAttachment.model_validate(attachment.model_dump(mode="json"))
+        )
+    return attachments
+
+
+def _mention_stats(payload: PathPromptPayload) -> MentionStats:
+    context_types: dict[str, int] = {}
+    file_extensions: dict[str, int] = {}
+    for resource in payload.all_resources:
+        context_types[resource.kind] = context_types.get(resource.kind, 0) + 1
+        if resource.kind != "file":
+            continue
+        extension = resource.path.suffix
+        file_extensions[extension] = file_extensions.get(extension, 0) + 1
+    return MentionStats(
+        count=len(payload.all_resources),
+        context_types=context_types,
+        file_extensions=file_extensions,
+    )

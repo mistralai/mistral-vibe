@@ -1,0 +1,130 @@
+"""MCP handshake builders for scenarios."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+
+def tool(name: str, description: str = "", *, enabled: bool = True) -> dict[str, Any]:
+    """One discovered MCP tool."""
+    return {"name": name, "description": description, "enabled": enabled}
+
+
+def server(
+    name: str,
+    *,
+    transport: str = "stdio",
+    status: str = "connected",
+    tools: Sequence[Mapping[str, Any]] = (),
+    error: str | None = None,
+    plugin_name: str | None = None,
+) -> dict[str, Any]:
+    """One locally configured MCP server."""
+    source = _source(name, "server", transport, status, tools, error)
+    if plugin_name is not None:
+        source["pluginName"] = plugin_name
+    return source
+
+
+def connector(
+    name: str,
+    *,
+    transport: str = "connector",
+    status: str = "connected",
+    tools: Sequence[Mapping[str, Any]] = (),
+    error: str | None = None,
+    display_name: str | None = None,
+) -> dict[str, Any]:
+    """One workspace connector."""
+    source = _source(name, "connector", transport, status, tools, error)
+    if display_name is not None:
+        source["displayName"] = display_name
+    return source
+
+
+def sample_sources() -> list[dict[str, Any]]:
+    """Local servers and workspace connectors covering every status column."""
+    return [
+        server(
+            "filesystem",
+            tools=[
+                tool("read_file", "Read a file from disk"),
+                tool("write_file", "Write a file to disk", enabled=False),
+            ],
+        ),
+        server("weather", transport="http", status="needs_auth"),
+        server("broken", status="unavailable"),
+        connector("github", tools=[tool("create_issue", "Open a GitHub issue")]),
+        connector("gmail", status="disabled"),
+    ]
+
+
+def authenticated_sources() -> list[dict[str, Any]]:
+    """The sample catalog once `weather` finished its OAuth login."""
+    return [
+        server("weather", transport="http", tools=[tool("forecast", "Read a forecast")])
+        if source["name"] == "weather"
+        else source
+        for source in sample_sources()
+    ]
+
+
+SAMPLE_DISCOVERY_ERRORS = {"broken": "spawn failed: command not found"}
+
+
+def handshake(
+    sources: Sequence[Mapping[str, Any]],
+    *,
+    discovery_errors: Mapping[str, str] | None = None,
+    connector_error: str | None = None,
+    toggled: Sequence[Mapping[str, Any]] | None = None,
+    manage_connectors_url: str | None = None,
+    private_connectors_hidden: bool = False,
+) -> dict[str, Any]:
+    """Publish `sources` as the MCP state; `toggled` is what `mcp/toggle` answers."""
+    state = _state(sources, discovery_errors, connector_error)
+    overrides: dict[str, Any] = {"runtime/read": {"runtime": {"mcp": state}}}
+    # Like the real server, only the connector catalog read carries these fields.
+    catalog: dict[str, Any] = {}
+    if manage_connectors_url is not None:
+        catalog["manageUrl"] = manage_connectors_url
+    if private_connectors_hidden:
+        catalog["privateConnectorsHidden"] = True
+    if catalog:
+        overrides["connector_catalog/read"] = catalog
+    if toggled is not None:
+        overrides["mcp/toggle"] = {
+            "runtime": {"mcp": _state(toggled, discovery_errors, connector_error)}
+        }
+    return overrides
+
+
+def _source(
+    name: str,
+    kind: str,
+    transport: str,
+    status: str,
+    tools: Sequence[Mapping[str, Any]],
+    error: str | None,
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "kind": kind,
+        "transport": transport,
+        "status": status,
+        "tools": list(tools),
+        "error": error,
+    }
+
+
+def _state(
+    sources: Sequence[Mapping[str, Any]],
+    discovery_errors: Mapping[str, str] | None,
+    connector_error: str | None,
+) -> dict[str, Any]:
+    return {
+        "sources": list(sources),
+        "discoveryErrors": dict(discovery_errors or {}),
+        "connectorError": connector_error,
+    }

@@ -1,0 +1,13 @@
+[
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.user_copied_text",
+   "properties": {
+    "text_length": 5
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

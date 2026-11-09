@@ -1,0 +1,751 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+import contextlib
+import json
+from pathlib import Path
+from typing import Any
+
+import httpx
+import pytest
+import respx
+
+from tests.app_server.backend_contract.conftest import connect_backend_contract_host
+from vibe.app_server._process_services import ProcessServices
+from vibe.app_server.models import PublicMessageEntry
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ClientCapabilities,
+    ProtocolErrorCode,
+    SessionOptions,
+)
+from vibe.app_server.session import AppServerSession, AppServerTurnError
+
+pytestmark = pytest.mark.both_paths
+
+
+def _texts(session: AppServerSession) -> list[str]:
+    return [
+        entry.text for entry in session.history if isinstance(entry, PublicMessageEntry)
+    ]
+
+
+def _user_entry_id(session: AppServerSession, text: str) -> str:
+    for entry in session.history:
+        if (
+            isinstance(entry, PublicMessageEntry)
+            and entry.role == "user"
+            and entry.text == text
+        ):
+            return entry.id
+    raise AssertionError(f"No user history entry with text {text!r}: {_texts(session)}")
+
+
+async def _act(session: AppServerSession, prompt: str, client_message_id: str) -> None:
+    _ = [
+        event
+        async for event in session.act(prompt, client_message_id=client_message_id)
+    ]
+
+
+def _last_prompt(route: respx.Route) -> list[str]:
+    """The non-system turns of the conversation the last model call was sent."""
+    payload = json.loads(route.calls.last.request.content)
+    texts: list[str] = []
+    for message in payload["messages"]:
+        if message["role"] == "system":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+            continue
+        for block in content or []:
+            if block.get("type") == "text":
+                texts.append(block["text"])
+    return texts
+
+
+@pytest.mark.asyncio
+async def test_in_place_rewind_of_the_only_message_returns_it_and_keeps_the_session(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("First answer")
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    session_id = backend_contract_persistent_session.session_id
+    entry_id = _user_entry_id(backend_contract_persistent_session, "First")
+
+    paths = await backend_contract_persistent_session.resources.sessions.rewind_preview(
+        entry_id
+    )
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        entry_id, restore_files=False, inplace=True
+    )
+
+    assert paths == []
+    assert result.message == "First"
+    assert result.restore_errors == []
+    assert backend_contract_persistent_session.session_id == session_id
+    assert result.state.session.id == session_id
+    assert _texts(backend_contract_persistent_session) == []
+
+
+@pytest.mark.asyncio
+async def test_in_place_rewind_leaves_the_session_usable_for_the_next_turn(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+        ]
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    session_id = backend_contract_persistent_session.session_id
+
+    # A rewind is issued the moment the client sees the turn complete, so the
+    # backend must not reject it for a turn that is only still winding down.
+    await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "First"),
+        restore_files=False,
+        inplace=True,
+    )
+    await _act(backend_contract_persistent_session, "Second", "user-2")
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "Second"),
+        restore_files=False,
+        inplace=True,
+    )
+
+    assert result.message == "Second"
+    assert backend_contract_persistent_session.session_id == session_id
+    assert _texts(backend_contract_persistent_session) == []
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_in_place_rewind_past_the_latest_turn_leaves_no_earlier_turn_outcome(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # The rewind drops the latest Turn. The failed Turn before it must not
+    # come back as the latest Turn: the Session is idle, as a fresh read
+    # shows, and the next Turn's updates apply to what the client was given.
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("Third answer"),
+        ]
+    )
+    session = backend_contract_persistent_session
+    with pytest.raises(AppServerTurnError):
+        await _act(session, "First", "user-1")
+    await _act(session, "Second", "user-2")
+
+    result = await session.resources.sessions.rewind(
+        "user-2", restore_files=False, inplace=True
+    )
+
+    assert result.state.session.status.type == "idle"
+    assert result.state.latest_turn is None
+    assert session.state.session.status.type == "idle"
+    assert session.state.latest_turn is None
+    reread = await session.resources.sessions.get_session_history(session.session_id)
+    assert [entry.id for entry in reread] == [entry.id for entry in session.history]
+
+    await _act(session, "Third", "user-3")
+
+    assert session.state.session.status.type == "idle"
+    latest = session.state.latest_turn
+    assert latest is not None
+    assert latest.status == "completed"
+    assert _texts(session) == ["First", "Third", "Third answer"]
+
+
+@pytest.mark.asyncio
+async def test_the_turn_that_replaces_a_rewound_turn_is_answered_by_the_model(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # A rewind hands the backend a conversation rebuilt from history, and the
+    # turns of a rebuilt conversation are numbered from the beginning again. The
+    # turn that takes over a rewound turn's number must still be put to the
+    # model rather than answered from what that number once resolved to.
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("Third answer"),
+        ]
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    await _act(backend_contract_persistent_session, "Second", "user-2")
+
+    await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "Second"),
+        restore_files=False,
+        inplace=True,
+    )
+    await _act(backend_contract_persistent_session, "Third", "user-3")
+
+    assert _last_prompt(backend_contract_mistral_api) == [
+        "First",
+        "First answer",
+        "Third",
+    ]
+    assert _texts(backend_contract_persistent_session) == [
+        "First",
+        "First answer",
+        "Third",
+        "Third answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_two_sequential_in_place_rewinds_leave_the_abandoned_turns_behind(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # Rewinding twice without a turn in between walks the same numbering back
+    # over itself, so the turn resumed from the second rewind lands on a number
+    # that two abandoned turns have already used.
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("Weather answer"),
+            backend_contract_mistral_response("Fourth answer"),
+        ]
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    await _act(backend_contract_persistent_session, "Second", "user-2")
+    await _act(backend_contract_persistent_session, "Weather", "user-3")
+
+    await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "Weather"),
+        restore_files=False,
+        inplace=True,
+    )
+    await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "Second"),
+        restore_files=False,
+        inplace=True,
+    )
+    await _act(backend_contract_persistent_session, "Fourth", "user-4")
+
+    assert _last_prompt(backend_contract_mistral_api) == [
+        "First",
+        "First answer",
+        "Fourth",
+    ]
+    assert _texts(backend_contract_persistent_session) == [
+        "First",
+        "First answer",
+        "Fourth",
+        "Fourth answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_kept_by_a_rewind_can_be_rewound_onto_after_the_next_turn(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # An in-place rewind rebuilds the conversation from its own transcript, and
+    # the turns it keeps go on being published under the ids already recorded
+    # for them. Those ids have to survive the rebuild, or the next rewind onto
+    # one of the kept turns has nothing left to anchor to.
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("Third answer"),
+            backend_contract_mistral_response("Fourth answer"),
+        ]
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    await _act(backend_contract_persistent_session, "Second", "user-2")
+
+    await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "Second"),
+        restore_files=False,
+        inplace=True,
+    )
+    await _act(backend_contract_persistent_session, "Third", "user-3")
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "First"),
+        restore_files=False,
+        inplace=True,
+    )
+    await _act(backend_contract_persistent_session, "Fourth", "user-4")
+
+    assert result.message == "First"
+    assert _last_prompt(backend_contract_mistral_api) == ["Fourth"]
+    assert _texts(backend_contract_persistent_session) == ["Fourth", "Fourth answer"]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_can_be_rewound_after_an_earlier_turn_was_interrupted(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # Interrupting a turn cancels the request that started it, and a rewind
+    # needs the session settled enough to be read back from storage. Ending a
+    # turn early has to leave it as settled as letting it finish would.
+    started = asyncio.Event()
+    release = asyncio.Event()
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_gated_mistral_response(
+                "unreachable", started=started, release=release
+            ),
+        ]
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    session_id = backend_contract_persistent_session.session_id
+
+    async def consume_turn() -> None:
+        await _act(backend_contract_persistent_session, "Second", "user-2")
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await backend_contract_persistent_session.interrupt()
+        await turn
+    finally:
+        release.set()
+        if not turn.done():
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "First"),
+        restore_files=False,
+        inplace=True,
+    )
+
+    assert result.message == "First"
+    assert backend_contract_persistent_session.session_id == session_id
+    assert _texts(backend_contract_persistent_session) == []
+
+
+@pytest.mark.asyncio
+async def test_a_turn_can_be_rewound_after_the_session_was_renamed_between_turns(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # A title lands once the turn that prompted it is over, the automatic one
+    # included. Writing it down must not leave the session looking busy to the
+    # rewind that follows.
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("First answer")
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    await backend_contract_persistent_session.resources.sessions.rename("Renamed")
+
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "First"),
+        restore_files=False,
+        inplace=True,
+    )
+
+    assert result.message == "First"
+    assert result.state.session.title == "Renamed"
+    assert _texts(backend_contract_persistent_session) == []
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_rewind_rejects_an_entry_that_is_not_a_rewindable_message(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("First answer")
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+
+    with pytest.raises(AppServerResponseError) as exc_info:
+        await backend_contract_persistent_session.resources.sessions.rewind(
+            "missing-entry", restore_files=False, inplace=True
+        )
+
+    assert exc_info.value.error.code is ProtocolErrorCode.NOT_FOUND
+    assert _texts(backend_contract_persistent_session) == ["First", "First answer"]
+
+
+@pytest.mark.asyncio
+async def test_fork_rewind_attaches_a_truncated_child_and_keeps_the_source_whole(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+    process_services: ProcessServices,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+        ]
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    await _act(backend_contract_persistent_session, "Second", "user-2")
+    source_session_id = backend_contract_persistent_session.session_id
+    entry_id = _user_entry_id(backend_contract_persistent_session, "Second")
+
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        entry_id, restore_files=False, inplace=False
+    )
+
+    assert result.message == "Second"
+    assert backend_contract_persistent_session.session_id != source_session_id
+    assert result.state.session.id == backend_contract_persistent_session.session_id
+    assert result.state.session.parent_session_id == source_session_id
+    assert _texts(backend_contract_persistent_session) == ["First", "First answer"]
+
+    # The source is no longer attached, so it is read the way a session picker
+    # would read it: from storage, once this connection has let go of it.
+    await backend_contract_persistent_session.close()
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        source = await connection.host.read_session(source_session_id)
+    finally:
+        await connection.host.close()
+
+    assert [
+        entry.text
+        for entry in source.history or []
+        if isinstance(entry, PublicMessageEntry)
+    ] == ["First", "First answer", "Second", "Second answer"]
+
+
+@pytest.mark.asyncio
+async def test_a_forked_child_can_be_rewound_in_place_onto_an_inherited_turn(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # The turns a fork inherits are republished under the child's own entry ids,
+    # and those ids are all a second rewind has to work with. The anchor has to
+    # resolve against history the child was handed rather than history it
+    # recorded itself.
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("Third answer"),
+        ]
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    await _act(backend_contract_persistent_session, "Second", "user-2")
+    await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "Second"),
+        restore_files=False,
+        inplace=False,
+    )
+    child_session_id = backend_contract_persistent_session.session_id
+
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "First"),
+        restore_files=False,
+        inplace=True,
+    )
+    await _act(backend_contract_persistent_session, "Third", "user-3")
+
+    assert result.message == "First"
+    assert backend_contract_persistent_session.session_id == child_session_id
+    assert _texts(backend_contract_persistent_session) == ["Third", "Third answer"]
+
+
+@pytest.mark.asyncio
+async def test_a_forked_child_can_be_forked_again_onto_an_inherited_turn(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("Third answer"),
+        ]
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    await _act(backend_contract_persistent_session, "Second", "user-2")
+    await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "Second"),
+        restore_files=False,
+        inplace=False,
+    )
+    child_session_id = backend_contract_persistent_session.session_id
+
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "First"),
+        restore_files=False,
+        inplace=False,
+    )
+    await _act(backend_contract_persistent_session, "Third", "user-3")
+
+    assert result.message == "First"
+    assert backend_contract_persistent_session.session_id != child_session_id
+    assert result.state.session.parent_session_id == child_session_id
+    assert _texts(backend_contract_persistent_session) == ["Third", "Third answer"]
+
+
+@pytest.mark.asyncio
+async def test_fork_rewind_of_the_only_message_yields_an_empty_child(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+        ]
+    )
+    await _act(backend_contract_persistent_session, "First", "user-1")
+    source_session_id = backend_contract_persistent_session.session_id
+
+    result = await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "First"),
+        restore_files=False,
+        inplace=False,
+    )
+    await _act(backend_contract_persistent_session, "Second", "user-2")
+
+    assert result.message == "First"
+    assert backend_contract_persistent_session.session_id != source_session_id
+    assert _texts(backend_contract_persistent_session) == ["Second", "Second answer"]
+
+
+def _write_file_tool_call(
+    target: Path, content: str, *, call_id: str = "call_write"
+) -> dict[str, Any]:
+    """One model write of ``target``, in the backend's own tool vocabulary."""
+    name = "write_file"
+    path_key = "path"
+    return {
+        "id": call_id,
+        "index": 0,
+        "function": {
+            "name": name,
+            "arguments": json.dumps({path_key: str(target), "content": content}),
+        },
+    }
+
+
+def _overwrite_tool_call(target: Path, content: str) -> dict[str, Any]:
+    """One model overwrite of ``target``."""
+    name = "write_file"
+    arguments: dict[str, Any] = {"path": str(target), "content": content}
+    return {
+        "id": "call_overwrite",
+        "index": 0,
+        "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_in_place_rewind_restores_a_file_the_rewound_turn_created(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    target = tmp_path / "created.txt"
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "", tool_calls=[_write_file_tool_call(target, "created")]
+            ),
+            backend_contract_mistral_response("Done."),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        await _act(session, "create the file", "user-1")
+        assert target.read_text(encoding="utf-8") == "created"
+        entry_id = _user_entry_id(session, "create the file")
+
+        paths = await session.resources.sessions.rewind_preview(entry_id)
+        result = await session.resources.sessions.rewind(
+            entry_id, restore_files=True, inplace=True
+        )
+
+        assert paths == [str(target.resolve())]
+        assert result.restored_paths == [str(target.resolve())]
+        assert result.restore_errors == []
+        assert not target.exists()
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_in_place_rewind_restores_a_file_the_rewound_turn_overwrote(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    target = tmp_path / "config.yaml"
+    target.write_text("key: original", encoding="utf-8")
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "", tool_calls=[_overwrite_tool_call(target, "key: overwritten")]
+            ),
+            backend_contract_mistral_response("Done."),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        await _act(session, "overwrite the config", "user-1")
+        assert target.read_text(encoding="utf-8") == "key: overwritten"
+
+        changes = await session.resources.sessions.rewind_has_file_changes(
+            _user_entry_id(session, "overwrite the config")
+        )
+        result = await session.resources.sessions.rewind(
+            _user_entry_id(session, "overwrite the config"),
+            restore_files=True,
+            inplace=True,
+        )
+
+        assert changes
+        assert result.restored_paths == [str(target.resolve())]
+        assert target.read_text(encoding="utf-8") == "key: original"
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_a_fork_restores_files_of_the_turns_it_inherited(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    inherited = tmp_path / "inherited.txt"
+    rewound = tmp_path / "rewound.txt"
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "", tool_calls=[_write_file_tool_call(inherited, "first")]
+            ),
+            backend_contract_mistral_response("Done."),
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _write_file_tool_call(rewound, "second", call_id="call_second")
+                ],
+            ),
+            backend_contract_mistral_response("Done."),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        await _act(session, "create the first file", "user-1")
+        await _act(session, "create the second file", "user-2")
+        await session.resources.sessions.rewind(
+            _user_entry_id(session, "create the second file"),
+            restore_files=False,
+            inplace=False,
+        )
+        entry_id = _user_entry_id(session, "create the first file")
+
+        paths = await session.resources.sessions.rewind_preview(entry_id)
+        result = await session.resources.sessions.rewind(
+            entry_id, restore_files=True, inplace=True
+        )
+
+        assert paths == [str(inherited.resolve())]
+        assert result.restored_paths == [str(inherited.resolve())]
+        assert not inherited.exists()
+        # The fork never recorded the turn it rewound past.
+        assert rewound.read_text(encoding="utf-8") == "second"
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_after_rewinding_past_a_compaction_is_answered_below_its_message(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    # The rewind rebuilds the conversation from its compacted transcript. The
+    # next answer must not replace one kept from before the compaction.
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_mistral_response("Third answer"),
+            backend_contract_mistral_response("Fourth answer"),
+            backend_contract_mistral_response("<summary>Four turns</summary>"),
+            backend_contract_mistral_response("Fifth answer"),
+            backend_contract_mistral_response("Sixth answer"),
+        ]
+    )
+    for index, prompt in enumerate(("First", "Second", "Third", "Fourth"), start=1):
+        await _act(backend_contract_persistent_session, prompt, f"user-{index}")
+    await backend_contract_persistent_session.compact()
+    await _act(backend_contract_persistent_session, "Fifth", "user-5")
+
+    await backend_contract_persistent_session.resources.sessions.rewind(
+        _user_entry_id(backend_contract_persistent_session, "Fifth"),
+        restore_files=False,
+        inplace=True,
+    )
+    await _act(backend_contract_persistent_session, "Sixth", "user-6")
+
+    assert _texts(backend_contract_persistent_session) == [
+        "First",
+        "First answer",
+        "Second",
+        "Second answer",
+        "Third",
+        "Third answer",
+        "Fourth",
+        "Fourth answer",
+        "Sixth",
+        "Sixth answer",
+    ]

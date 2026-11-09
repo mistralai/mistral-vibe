@@ -1,0 +1,114 @@
+//! Swapping the picker's preview against the transcript Esc restores.
+
+use crate::app::App;
+use crate::commands::submission;
+use crate::server::PublicSessionState;
+use crate::transcript::local;
+
+/// Re-anchor an open picker on the session the handshake finally started: it
+/// becomes what Esc restores, while the preview stays on screen. Loading it
+/// without putting the preview back would blank the transcript for a frame.
+pub fn rebase(app: &mut App, state: &PublicSessionState) {
+    let preview = app.view.transcript.snapshot();
+    app.view.transcript.load_snapshot(state);
+    app.resume_picker.transcript = Some(app.view.transcript.snapshot());
+    app.view.transcript.restore(preview);
+}
+
+/// Settle an in-flight resume exactly once; false means it was cancelled and its
+/// answer must be dropped.
+pub(super) fn finish_resume(app: &mut App) -> bool {
+    if !std::mem::take(&mut app.resume_picker.resuming) {
+        return false;
+    }
+    true
+}
+
+pub(super) fn scroll_to_bottom(app: &mut App) {
+    app.view.scroll = 0;
+    app.view.scroll_target = 0;
+    app.view.last_total = 0;
+    app.view.scroll_to_entry = None;
+    crate::selection::cancel_drag(app);
+    app.selection.region = None;
+}
+
+pub(crate) fn load_history(app: &mut App, state: &PublicSessionState) {
+    scroll_to_bottom(app);
+    app.view.transcript.load_snapshot(state);
+    app.view
+        .transcript_cache
+        .start_history(app.view.transcript.entry_count());
+    app.expand_rebuilt_tools();
+}
+
+const PREVIEW_ERROR_ID: &str = "rs-resume-preview-error";
+
+/// The picker stays open on a failed preview; the error replaces the last preview.
+pub(super) fn preview_failed(app: &mut App) {
+    scroll_to_bottom(app);
+    app.view.transcript.remove(PREVIEW_ERROR_ID);
+    clear_attempts(app);
+    let notices = local::preserve(&app.view.transcript);
+    app.view.transcript.clear();
+    local::restore(&mut app.view.transcript, notices);
+    app.view
+        .transcript_cache
+        .start_history(app.view.transcript.entry_count());
+    local::add_command_error(
+        &mut app.view.transcript,
+        PREVIEW_ERROR_ID,
+        "Failed to load session preview.",
+    );
+}
+
+/// Show a loaded preview, dropping the failure notice a previous one left.
+pub(super) fn show_preview(app: &mut App, state: &PublicSessionState) {
+    app.view.transcript.remove(PREVIEW_ERROR_ID);
+    clear_attempts(app);
+    load_history(app, state);
+}
+
+pub(super) fn close(app: &mut App) {
+    finish_resume(app);
+    app.resume_picker.open = false;
+    scroll_to_bottom(app);
+    let previewing = app.resume_picker.previewing;
+    if let Some(transcript) = app.resume_picker.transcript.take() {
+        if previewing {
+            // Cancel rebuilds the transcript from the current session, dropping
+            // notices (e.g. a delete confirmation) mounted over the preview.
+            app.view.transcript.restore(transcript);
+        } else {
+            // No preview replaced the log, so keep notices mounted while open.
+            let notices = local::preserve(&app.view.transcript);
+            app.view.transcript.restore(transcript);
+            local::restore(&mut app.view.transcript, notices);
+        }
+        crate::notices::sync(app);
+        app.view
+            .transcript_cache
+            .start_history(app.view.transcript.entry_count());
+    }
+}
+
+/// The server's resume refusal mounts under one id, so a second attempt
+/// replaces the first instead of stacking under it.
+pub(super) const ATTEMPT_ERROR_ID: &str = "rs-resume-attempt-error";
+
+/// Drop the attempt error, which preservation would otherwise carry into the next transcript.
+pub(super) fn clear_attempts(app: &mut App) {
+    app.view.transcript.remove(ATTEMPT_ERROR_ID);
+}
+
+pub(super) fn result(app: &mut App, text: &str) {
+    local::add_command_status(
+        &mut app.view.transcript,
+        &submission::new_message_id(),
+        text,
+    );
+}
+
+pub(super) fn error(app: &mut App, id: &str, text: &str) {
+    local::add_command_error(&mut app.view.transcript, id, text);
+}

@@ -153,16 +153,27 @@ function check_vibe_installed() {
     VIBE_INSTALLED=false
 }
 
+# Install on the GIL-enabled build of Python 3.14 (Vibe supports 3.12+): since
+# 3.14, uv may select a free-threaded (no-GIL) interpreter without an explicit
+# request, and the locked dependencies ship no cp314t wheels. uv cannot download
+# a `+gil` request, so seed a managed GIL 3.14 first when no local one satisfies it.
+function uv_tool_gil() {
+    local subcommand="$1"
+    shift
+    uv tool "$subcommand" --python cpython-3.14+gil "$@" 2>/dev/null ||
+        { uv python install cpython-3.14 && uv tool "$subcommand" --python cpython-3.14+gil "$@"; }
+}
+
 function install_vibe() {
     info "Installing mistral-vibe from GitHub repository using uv..."
-    uv tool install mistral-vibe
+    uv_tool_gil install mistral-vibe
 
     success "Mistral Vibe installed successfully! (commands: vibe, vibe-acp)"
 }
 
 function update_vibe() {
     info "Updating mistral-vibe from GitHub repository using uv..."
-    uv tool upgrade mistral-vibe
+    uv_tool_gil upgrade mistral-vibe
 
     success "Mistral Vibe updated successfully!"
 }

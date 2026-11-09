@@ -1,22 +1,18 @@
 from __future__ import annotations
 
 import base64
-from collections.abc import Generator
-import importlib
 import json
-import os
 from pathlib import Path
-import sys
 import threading
-from types import ModuleType
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
-import httpx
+import httpx2
 import pytest
 import zstandard
 
 from tests.constants import TELEPORT_COMPLETE_URL, TELEPORT_SESSIONS_PATH
+from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
@@ -33,51 +29,26 @@ from vibe.core.teleport.types import (
     TeleportPushResponseEvent,
     TeleportStartingWorkflowEvent,
 )
-from vibe.core.utils.http import VibeAsyncHTTPClient
 from vibe.core.vibe_code_project import VibeProjectsStore
-
-
-@pytest.fixture(autouse=True)
-def _restore_reimported_agent_loop_modules() -> Generator[None]:
-    module_prefixes = ("vibe.core.agent_loop", "git", "vibe.core.teleport")
-    originals: dict[str, ModuleType] = {
-        name: module
-        for name, module in sys.modules.items()
-        if any(name.startswith(prefix) for prefix in module_prefixes)
-    }
-    yield
-    for name in [
-        name
-        for name in sys.modules
-        if any(name.startswith(prefix) for prefix in module_prefixes)
-    ]:
-        if name not in originals:
-            del sys.modules[name]
-    sys.modules.update(originals)
-
-
-def _reimport_agent_loop() -> Any:
-    to_clear = ("vibe.core.agent_loop", "git", "vibe.core.teleport")
-    for k in [k for k in sys.modules if any(k.startswith(m) for m in to_clear)]:
-        del sys.modules[k]
-    return importlib.import_module("vibe.core.agent_loop._loop")
+from vibe.utils.http import VibeAsyncHTTPClient
 
 
 def _make_service(tmp_path: Path, **kwargs: Any) -> TeleportService:
     return TeleportService(
-        session_logger=MagicMock(),
         vibe_code_sessions_base_url=kwargs.pop(
             "vibe_code_sessions_base_url", "https://api.example.com"
         ),
-        vibe_code_api_key=kwargs.pop("vibe_code_api_key", "api-key"),
+        credentials=kwargs.pop(
+            "credentials", ApiKeyPlatformCredentialProvider.from_api_key("api-key")
+        ),
         workdir=tmp_path,
         **kwargs,
     )
 
 
 def _mock_handler() -> Any:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200,
             json={
                 "sessionId": "controller-session-id",
@@ -126,20 +97,13 @@ class TestTeleportServiceCompressDiff:
 
 class TestTeleportServiceValidateConfig:
     def test_raises_when_no_api_key(self, tmp_path: Path) -> None:
-        service = _make_service(tmp_path, vibe_code_api_key="")
-        with pytest.raises(ServiceTeleportError, match="MISTRAL_API_KEY not set"):
+        service = _make_service(tmp_path, credentials=None)
+        with pytest.raises(ServiceTeleportError, match="Mistral API key not set"):
             service._validate_config()
 
     def test_passes_when_api_key_set(self, tmp_path: Path) -> None:
-        service = _make_service(tmp_path, vibe_code_api_key="valid-key")
+        service = _make_service(tmp_path)
         service._validate_config()
-
-    def test_uses_custom_env_var_name_in_error(self, tmp_path: Path) -> None:
-        mock_config = MagicMock()
-        mock_config.vibe_code_api_key_env_var = "CUSTOM_API_KEY"
-        service = _make_service(tmp_path, vibe_code_api_key="", vibe_config=mock_config)
-        with pytest.raises(ServiceTeleportError, match="CUSTOM_API_KEY not set"):
-            service._validate_config()
 
 
 class TestTeleportServiceCheckSupported:
@@ -201,6 +165,7 @@ class TestTeleportServiceExecute:
         request = service._build_nuage_request(
             prompt="test prompt",
             project_id="project-id",
+            conversation_id="cli-conversation-id",
             git_info=GitRepoInfo(
                 remote_name="origin",
                 remote_url="https://github.com/owner/repo",
@@ -213,6 +178,7 @@ class TestTeleportServiceExecute:
         )
 
         assert request.project_id == "project-id"
+        assert request.conversation_id == "cli-conversation-id"
         assert (
             request.model_dump(mode="json", by_alias=True, exclude_none=True)[
                 "projectId"
@@ -225,11 +191,11 @@ class TestTeleportServiceExecute:
         seen_body: dict[str, object] | None = None
         seen_url: str | None = None
 
-        async def handler(request: httpx.Request) -> httpx.Response:
+        async def handler(request: httpx2.Request) -> httpx2.Response:
             nonlocal seen_body, seen_url
             seen_url = str(request.url)
             seen_body = json.loads(request.content)
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "sessionId": "controller-session-id",
@@ -241,7 +207,7 @@ class TestTeleportServiceExecute:
             )
 
         async with VibeAsyncHTTPClient(
-            transport=httpx.MockTransport(handler)
+            transport=httpx2.MockTransport(handler)
         ) as client:
             service = _make_service(
                 tmp_path,
@@ -274,6 +240,7 @@ class TestTeleportServiceExecute:
                             entrypoint="acp", client_name="mistral-vibe-vscode"
                         ),
                     ),
+                    conversation_id="cli-conversation-id",
                 )
             ]
 
@@ -284,6 +251,7 @@ class TestTeleportServiceExecute:
         assert seen_url == f"https://chat.example.com{TELEPORT_SESSIONS_PATH}"
         assert seen_body is not None
         assert seen_body["projectId"] == "project-id"
+        assert seen_body["conversationId"] == "cli-conversation-id"
         assert seen_body["message"] == {
             "role": "user",
             "parts": [{"type": "text", "text": "test prompt"}],
@@ -357,7 +325,7 @@ class TestTeleportServiceExecute:
     @pytest.mark.asyncio
     async def test_execute_push_confirmation_approved(self, tmp_path: Path) -> None:
         async with VibeAsyncHTTPClient(
-            transport=httpx.MockTransport(_mock_handler())
+            transport=httpx2.MockTransport(_mock_handler())
         ) as client:
             service = _make_service(tmp_path, client=client)
             service._git.fetch = AsyncMock()
@@ -426,12 +394,12 @@ class TestTeleportServiceExecute:
     ) -> None:
         event_loop_thread = threading.get_ident()
 
-        async def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(404, text="project not found")
+        async def handler(request: httpx2.Request) -> httpx2.Response:
+            return httpx2.Response(404, text="project not found")
 
         project_store = TrackingProjectsStore(tmp_path / "projects.toml")
         async with VibeAsyncHTTPClient(
-            transport=httpx.MockTransport(handler)
+            transport=httpx2.MockTransport(handler)
         ) as client:
             service = _make_service(
                 tmp_path, client=client, project_store=project_store
@@ -472,28 +440,3 @@ class TestTeleportServiceContextManager:
             assert service._client is not None
             assert service._nuage_client_instance is not None
         assert service._client is None
-
-
-class TestTeleportAvailability:
-    def test_teleport_available_is_false_when_git_not_installed(self) -> None:
-        with patch.dict(os.environ, {"GIT_PYTHON_GIT_EXECUTABLE": "/nonexistent/git"}):
-            agent_loop = _reimport_agent_loop()
-            assert agent_loop._TELEPORT_AVAILABLE is False
-
-    def test_teleport_service_raises_error_when_git_not_available(self) -> None:
-        with patch.dict(os.environ, {"GIT_PYTHON_GIT_EXECUTABLE": "/nonexistent/git"}):
-            agent_loop = _reimport_agent_loop()
-            with pytest.raises(agent_loop.TeleportError, match="git to be installed"):
-                agent_loop.AgentLoop.teleport_service.fget(
-                    MagicMock(_teleport_service=None)
-                )
-
-    def test_teleport_available_is_true_when_git_installed(
-        self, tmp_path: Path
-    ) -> None:
-        fake_git = tmp_path / "git"
-        fake_git.write_text("#!/bin/sh\necho 'git version 2.0.0'")
-        fake_git.chmod(0o755)
-        with patch.dict(os.environ, {"GIT_PYTHON_GIT_EXECUTABLE": str(fake_git)}):
-            agent_loop = _reimport_agent_loop()
-            assert agent_loop._TELEPORT_AVAILABLE is True

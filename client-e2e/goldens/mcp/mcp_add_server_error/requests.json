@@ -1,0 +1,15 @@
+[
+ {
+  "method": "mcp_catalog/add",
+  "params": {
+   "allowInsecureHttp": false,
+   "name": "lin2",
+   "scopes": [
+    "read"
+   ],
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "transport": "streamable-http",
+   "url": "https://mcp.linear.app/mcp"
+  }
+ }
+]

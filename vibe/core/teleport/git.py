@@ -1,32 +1,51 @@
 from __future__ import annotations
 
-from configparser import NoOptionError, NoSectionError
 from dataclasses import dataclass
 from pathlib import Path
 import shutil
 import tempfile
 
+from vibe.core.git.errors import GitError
+from vibe.core.git.fetch import fetch_remote
+
+# Re-exported so `teleport.git.GitHubRemoteInfo` keeps resolving. Reading a
+# GitHub remote is not a teleport concern, so it lives with the rest of git.
+from vibe.core.git.remote import (
+    GitHubRemoteInfo as GitHubRemoteInfo,
+    find_github_remote,
+    parse_github_url,
+    to_https_url,
+)
+from vibe.core.git.repo import GitRepo
 from vibe.core.teleport.errors import (
     ServiceTeleportError,
     ServiceTeleportNotSupportedError,
 )
 from vibe.core.utils import AsyncExecutor
+from vibe.utils.platform import configure_git_python_executable
+
+_GIT_EXECUTABLE = configure_git_python_executable()
+if _GIT_EXECUTABLE is None:
+    raise ServiceTeleportError(
+        "Teleport requires a trusted Git executable. Install Git or set "
+        "GIT_PYTHON_GIT_EXECUTABLE to an absolute path."
+    )
 
 try:
-    from git import InvalidGitRepositoryError, Repo
-    from git.exc import GitCommandError
-    from giturlparse import parse as parse_git_url
+    from git import Git, InvalidGitRepositoryError, NoSuchPathError, Repo, refresh
+    from git.exc import GitCommandError, GitCommandNotFound
 except ImportError as e:
     raise ServiceTeleportError(
         "Teleport requires git to be installed. Please install git and try again."
     ) from e
 
-
-@dataclass
-class GitHubRemoteInfo:
-    name: str
-    owner: str
-    repo: str
+try:
+    if Git.GIT_PYTHON_GIT_EXECUTABLE != _GIT_EXECUTABLE:
+        refresh(_GIT_EXECUTABLE)
+except (GitCommandNotFound, PermissionError) as e:
+    raise ServiceTeleportError(
+        "Teleport requires git to be installed. Please install git and try again."
+    ) from e
 
 
 @dataclass
@@ -63,6 +82,18 @@ class GitRepository:
         return self._find_github_remote(repo) is not None
 
     async def get_info(self) -> GitRepoInfo:
+        return await self._build_info(include_diff=True)
+
+    async def get_metadata(self) -> GitRepoInfo:
+        """Repo metadata without the (potentially large) working-tree diff.
+
+        Project-link actions only need remote/branch/root info, so they skip the
+        full `git diff` scan `get_info` runs, which would otherwise touch the
+        whole working tree. `diff` is returned as an empty string.
+        """
+        return await self._build_info(include_diff=False)
+
+    async def _build_info(self, *, include_diff: bool) -> GitRepoInfo:
         repo = self._repo_or_raise()
 
         parsed = self._find_github_remote(repo)
@@ -72,22 +103,19 @@ class GitRepository:
             )
 
         try:
-            commit = repo.head.commit.hexsha
-        except (ValueError, TypeError) as e:
+            commit = GitRepo(repo).head_commit()
+        except GitError as e:
             raise ServiceTeleportNotSupportedError(
                 "Could not determine current commit"
             ) from e
 
-        if not commit:
-            raise ServiceTeleportNotSupportedError("Could not determine current commit")
-
         owner = parsed.owner
         repo_name = parsed.repo
-        branch = None if repo.head.is_detached else repo.active_branch.name
+        branch = _current_branch(repo)
         default_branch = _remote_ref_branch_name(
             await self._get_remote_default_branch(repo, parsed.name), parsed.name
         )
-        diff = await self._get_diff(repo)
+        diff = await self._get_diff(repo) if include_diff else ""
 
         return GitRepoInfo(
             remote_name=parsed.name,
@@ -117,9 +145,9 @@ class GitRepository:
         self, remote: str = "origin", *, fetch: bool = True
     ) -> bool:
         repo = self._repo_or_raise()
-        if repo.head.is_detached:
+        branch = _current_branch(repo)
+        if branch is None:
             return True  # Detached HEAD doesn't have a branch to check
-        branch = repo.active_branch.name
         if fetch:
             await self._fetch(repo, remote)
         return await self._ref_exists(repo, f"{remote}/{branch}")
@@ -127,11 +155,11 @@ class GitRepository:
     async def get_unpushed_commit_count(self, remote: str = "origin") -> int:
         repo = self._repo_or_raise()
 
-        if repo.head.is_detached:
+        branch = _current_branch(repo)
+        if branch is None:
             raise ServiceTeleportError(
                 "Cannot count unpushed commits: no current branch"
             )
-        branch = repo.active_branch.name
 
         await self._fetch(repo, remote)
 
@@ -150,49 +178,36 @@ class GitRepository:
 
     async def push_current_branch(self, remote: str = "origin") -> bool:
         repo = self._repo_or_raise()
-        if repo.head.is_detached:
+        branch = _current_branch(repo)
+        if branch is None:
             return False
-        return await self._push(repo, repo.active_branch.name, remote)
+        return await self._push(repo, branch, remote)
 
     def _repo_or_raise(self) -> Repo:
         if self._repo is None:
             try:
                 self._repo = Repo(self._workdir, search_parent_directories=True)
-            except InvalidGitRepositoryError as e:
+            except (InvalidGitRepositoryError, NoSuchPathError) as e:
+                # NoSuchPathError: the workdir was moved/deleted between the
+                # picker selecting it and this call. Surface it as an ineligible
+                # root (mapped to a clear reject reason) instead of a generic
+                # failure.
                 raise ServiceTeleportNotSupportedError(
                     "Teleport requires a git repository. cd into a project with a .git directory and try again."
                 ) from e
         return self._repo
 
-    def _find_github_remote(self, repo: Repo) -> GitHubRemoteInfo | None:
-        for remote in repo.remotes:
-            for url in self._remote_urls(remote):
-                if parsed := self._parse_github_url(url):
-                    owner, repo_name = parsed
-                    return GitHubRemoteInfo(
-                        name=remote.name, owner=owner, repo=repo_name
-                    )
-        return None
-
     @staticmethod
-    def _remote_urls(remote: object) -> list[str]:
-        urls: list[str] = []
-        config_reader = getattr(remote, "config_reader", None)
-        try:
-            raw_url = config_reader.get("url") if config_reader is not None else None
-        except (AttributeError, NoOptionError, NoSectionError, TypeError, ValueError):
-            raw_url = None
-        if isinstance(raw_url, str):
-            urls.append(raw_url)
-
-        for url in getattr(remote, "urls", ()):
-            if isinstance(url, str) and url not in urls:
-                urls.append(url)
-        return urls
+    def _find_github_remote(repo: Repo) -> GitHubRemoteInfo | None:
+        return find_github_remote(repo)
 
     async def _fetch(self, repo: Repo, remote: str) -> None:
         try:
-            await self._executor.run(lambda: repo.remote(remote).fetch())
+            await self._executor.run(
+                lambda: fetch_remote(
+                    repo, remote, (f"+refs/heads/*:refs/remotes/{remote}/*",)
+                )
+            )
         except (TimeoutError, ValueError, GitCommandError):
             pass
 
@@ -201,12 +216,20 @@ class GitRepository:
             temporary_dir = Path(tempfile.mkdtemp(prefix="vibe-teleport-index-"))
             temporary_index = temporary_dir / "index"
             try:
-                index_path = Path(repo.index.path)
+                index_path = Path(
+                    repo.git(c="core.fsmonitor=").rev_parse("--git-path", "index")
+                )
+                if not index_path.is_absolute():
+                    index_path = (
+                        Path(repo.working_tree_dir or self._workdir) / index_path
+                    )
                 if index_path.exists():
                     shutil.copy2(index_path, temporary_index)
                 with repo.git.custom_environment(GIT_INDEX_FILE=str(temporary_index)):
-                    repo.git.add("-N", ".")
-                    return repo.git.diff("HEAD", binary=True)
+                    repo.git(c="core.fsmonitor=").add("-N", ".")
+                    return repo.git(c="core.fsmonitor=").diff(
+                        "HEAD", binary=True, no_textconv=True, no_ext_diff=True
+                    )
             finally:
                 shutil.rmtree(temporary_dir, ignore_errors=True)
 
@@ -241,12 +264,9 @@ class GitRepository:
             return False
 
     async def _get_remote_default_branch(self, repo: Repo, remote: str) -> str | None:
-        try:
-            ref = repo.remotes[remote].refs.HEAD.reference.name
-            if await self._ref_exists(repo, ref):
-                return ref
-        except (KeyError, IndexError, TypeError, AttributeError):
-            pass
+        ref = GitRepo(repo).remote_default_branch_ref(remote)
+        if ref is not None and await self._ref_exists(repo, ref):
+            return ref
         return None
 
     async def _push(self, repo: Repo, branch: str, remote: str) -> bool:
@@ -264,14 +284,18 @@ class GitRepository:
 
     @staticmethod
     def _parse_github_url(url: str) -> tuple[str, str] | None:
-        p = parse_git_url(url)
-        if p.github and p.owner and p.repo:
-            return p.owner, p.repo
-        return None
+        return parse_github_url(url)
 
     @staticmethod
     def _to_https_url(owner: str, repo: str) -> str:
-        return f"https://github.com/{owner}/{repo}.git"
+        return to_https_url(owner, repo)
+
+
+def _current_branch(repo: Repo) -> str | None:
+    try:
+        return GitRepo(repo).branch()
+    except GitError as e:
+        raise ServiceTeleportError(str(e)) from e
 
 
 def _remote_ref_branch_name(ref: str | None, remote: str) -> str | None:

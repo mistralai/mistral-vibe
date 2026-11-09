@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -7,12 +8,12 @@ import tomllib
 
 import tomli_w
 
-from vibe.core.logger import logger
 from vibe.core.paths import (
     AGENTS_MD_FILENAME,
     TRUSTED_FOLDERS_FILE,
     find_local_config_dirs,
 )
+from vibe.observability.logging import logger
 
 
 class WorkspaceTrustDecision(StrEnum):
@@ -116,19 +117,41 @@ def find_repo_trustable_files_for_cwd(cwd: Path, repo_root: Path | None) -> list
     return sorted(found)
 
 
+def find_untrusted_config_dirs(
+    cwd: Path, *, manager: TrustedFoldersManager | None = None
+) -> list[Path]:
+    """Config dirs under a trusted *cwd* that are explicitly untrusted.
+
+    These are the folders left in a broken state by the fixed bug where trusting
+    a folder also marked its nested ``.vibe``/``.agents`` untrusted. Returns an
+    empty list unless *cwd* itself is trusted.
+    """
+    manager = manager or trusted_folders_manager
+    resolved_cwd = cwd.resolve()
+    if manager.is_trusted(resolved_cwd) is not True:
+        return []
+
+    return sorted(
+        config_dir
+        for config_dir in find_local_config_dirs(resolved_cwd).config_dirs
+        if manager.is_explicitly_untrusted(config_dir)
+    )
+
+
 def maybe_build_workspace_trust_prompt(
-    cwd: Path, *, include_explicitly_untrusted: bool = False
+    cwd: Path,
+    *,
+    include_explicitly_untrusted: bool = False,
+    manager: TrustedFoldersManager | None = None,
 ) -> WorkspaceTrustPrompt | None:
+    manager = manager or trusted_folders_manager
     resolved_cwd = cwd.resolve()
     if resolved_cwd == Path.home().resolve():
         return None
 
-    if trusted_folders_manager.is_trusted(cwd) is True:
+    if manager.is_trusted(cwd) is True:
         return None
-    if (
-        not include_explicitly_untrusted
-        and trusted_folders_manager.is_explicitly_untrusted(cwd)
-    ):
+    if not include_explicitly_untrusted and manager.is_explicitly_untrusted(cwd):
         return None
 
     repo_root = find_git_repo_ancestor(cwd)
@@ -141,15 +164,15 @@ def maybe_build_workspace_trust_prompt(
     offer_repo_trust = (
         resolved_repo_root is not None
         and resolved_repo_root in resolved_cwd.parents
-        and trusted_folders_manager.is_trusted(resolved_repo_root) is not True
+        and manager.is_trusted(resolved_repo_root) is not True
         and (
             include_explicitly_untrusted
-            or not trusted_folders_manager.is_explicitly_untrusted(resolved_repo_root)
+            or not manager.is_explicitly_untrusted(resolved_repo_root)
         )
     )
     repo_explicitly_untrusted = (
         resolved_repo_root is not None
-        and trusted_folders_manager.is_explicitly_untrusted(resolved_repo_root)
+        and manager.is_explicitly_untrusted(resolved_repo_root)
     )
 
     return WorkspaceTrustPrompt(
@@ -174,19 +197,23 @@ def available_workspace_trust_decisions(
 
 
 def apply_workspace_trust_decision(
-    prompt: WorkspaceTrustPrompt, decision: WorkspaceTrustDecision
+    prompt: WorkspaceTrustPrompt,
+    decision: WorkspaceTrustDecision,
+    *,
+    manager: TrustedFoldersManager | None = None,
 ) -> None:
+    manager = manager or trusted_folders_manager
     match decision:
         case WorkspaceTrustDecision.TRUST_REPO if (
             prompt.offer_repo_trust and prompt.repo_root is not None
         ):
-            trusted_folders_manager.add_trusted(prompt.repo_root)
+            manager.add_trusted(prompt.repo_root)
         case WorkspaceTrustDecision.TRUST_CWD:
-            trusted_folders_manager.add_trusted(prompt.cwd)
+            manager.add_trusted(prompt.cwd)
         case WorkspaceTrustDecision.TRUST_SESSION:
-            trusted_folders_manager.trust_for_session(prompt.cwd)
+            manager.trust_for_session(prompt.cwd)
         case WorkspaceTrustDecision.DECLINE:
-            trusted_folders_manager.add_untrusted(prompt.cwd)
+            manager.add_untrusted(prompt.cwd)
         case _:
             raise ValueError(f"Unsupported trust decision: {decision}")
 
@@ -199,31 +226,51 @@ class TrustedFoldersManager:
         self._session_trusted: list[str] = []
         self._load()
 
+    def for_session(self) -> TrustedFoldersManager:
+        """Share persisted decisions without inheriting temporary grants."""
+        manager = copy(self)
+        manager._session_trusted = []
+        return manager
+
     def trust_for_session(self, path: Path) -> None:
         self._session_trusted.append(self._normalize_path(path))
+
+    def revoke_session_trust(self, path: Path) -> None:
+        """Undo one ``trust_for_session`` grant.
+
+        Grants are counted rather than deduplicated, so revoking removes the
+        one the caller made and leaves any other in place. Trust that came from
+        the stored lists is untouched.
+        """
+        normalized = self._normalize_path(path)
+        if normalized in self._session_trusted:
+            self._session_trusted.remove(normalized)
 
     def _normalize_path(self, path: Path) -> str:
         return str(path.expanduser().resolve())
 
     def _load(self) -> None:
         if not self._file_path.is_file():
-            self._trusted = []
-            self._untrusted = []
+            self._trusted.clear()
+            self._untrusted.clear()
             self._save()
             return
 
         try:
             with self._file_path.open("rb") as f:
                 data = tomllib.load(f)
-            self._trusted = list(data.get("trusted", []))
-            self._untrusted = list(data.get("untrusted", []))
+            self._trusted[:] = list(data.get("trusted", []))
+            self._untrusted[:] = list(data.get("untrusted", []))
         except (OSError, tomllib.TOMLDecodeError):
-            self._trusted = []
-            self._untrusted = []
+            self._trusted.clear()
+            self._untrusted.clear()
             self._save()
 
     def _save(self) -> None:
         self._file_path.parent.mkdir(parents=True, exist_ok=True)
+        # The trust store is a security-decision record, so it is created
+        # owner-only; an existing file keeps its current mode.
+        self._file_path.touch(mode=0o600, exist_ok=True)
         data = {"trusted": self._trusted, "untrusted": self._untrusted}
         try:
             with self._file_path.open("wb") as f:

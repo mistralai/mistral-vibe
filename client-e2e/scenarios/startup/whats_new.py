@@ -1,0 +1,46 @@
+"""A cached old version shows the what's-new body under the messages area."""
+
+from __future__ import annotations
+
+import atexit
+import os
+from pathlib import Path
+import shutil
+import tempfile
+
+from e2e.app_server.config import MINIMAL_HOME_CONFIG, WHATS_NEW_FIXTURE
+from e2e.app_server.scenario import Action, Timeline
+
+# The harness's isolated home is fresh, so the what's-new gate never trips;
+# pin a VIBE_HOME seeded with a stale seen-version instead. The rust client
+# reads its seen-version from the same shared [update_cache] section Python's
+# update checks seed, so the stale latest_version doubles as the gate input.
+_home = tempfile.mkdtemp(prefix="e2e_whatsnew_")
+# Both captures of a session must read the same seeded home, so clean it up
+# only when the pytest session exits.
+atexit.register(shutil.rmtree, _home, True)
+Path(_home, "config.toml").write_text(MINIMAL_HOME_CONFIG)
+Path(_home, "cache.toml").write_text(
+    '[update_cache]\nlatest_version = "0.0.0"\nstored_at_timestamp = 0\n'
+    'seen_whats_new_version = "0.0.0"\n'
+)
+
+env = {
+    "VIBE_HOME": _home,
+    # The shipped release notes change every release, which would churn this
+    # golden; the clients render the frozen fixture history instead. The path
+    # must be absolute: the client runs with cwd=WORKSPACE_DIR, not the scenario's.
+    "VIBE_WHATS_NEW_DIR": os.fspath(WHATS_NEW_FIXTURE),
+}
+
+screen_contains = ("Release notes", "v9.9.9")
+
+_URI = "vscode:extension/mistralai.mistral-vibe-code"
+expected_actions = [Action("open_url", _URI)]
+
+# The fixture's `VS Code extension` link spans one-based columns 13-29 on row 12.
+_CLICK = "\x1b[<0;16;12M\x1b[<0;16;12m"
+
+# The banner mounts after startup; the capture after typing settles it.
+capture_startup = False
+timeline: Timeline = ["x", _CLICK]

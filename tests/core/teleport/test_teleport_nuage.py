@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import json
 
-import httpx
+import httpx2
 import pytest
 
 from tests.constants import TELEPORT_SESSIONS_PATH
+from vibe.core.platform_auth import (
+    ApiKeyPlatformCredentialProvider,
+    PlatformCredentialRequired,
+    PlatformCredentialResult,
+    PlatformCredentialTarget,
+)
 from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.teleport.nuage import (
     NuageClient,
@@ -16,13 +22,18 @@ from vibe.core.teleport.nuage import (
     NuageRequest,
     NuageTextPart,
 )
-from vibe.core.utils.http import VibeAsyncHTTPClient
+from vibe.utils.http import VibeAsyncHTTPClient
+
+
+def _key() -> ApiKeyPlatformCredentialProvider:
+    return ApiKeyPlatformCredentialProvider.from_api_key("api-key")
 
 
 def _request() -> NuageRequest:
     return NuageRequest(
         project_id="project-id",
         idempotency_key="idem-1",
+        conversation_id="cli-conversation-id",
         message=NuageMessage(parts=[NuageTextPart(text="continue from here")]),
         context=NuageContext(
             repositories=[
@@ -34,12 +45,12 @@ def _request() -> NuageRequest:
 
 @pytest.mark.asyncio
 async def test_start_posts_nuage_request() -> None:
-    seen_request: httpx.Request | None = None
+    seen_request: httpx2.Request | None = None
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal seen_request
         seen_request = request
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "sessionId": "controller-session-id",
@@ -50,8 +61,8 @@ async def test_start_posts_nuage_request() -> None:
             },
         )
 
-    async with VibeAsyncHTTPClient(transport=httpx.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com/", "api-key", client=client)
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
+        nuage = NuageClient("https://chat.example.com/", _key(), client=client)
         response = await nuage.start(_request())
 
     assert seen_request is not None
@@ -62,6 +73,7 @@ async def test_start_posts_nuage_request() -> None:
         "projectId": "project-id",
         "source": "vibe_code_cli",
         "idempotencyKey": "idem-1",
+        "conversationId": "cli-conversation-id",
         "message": {
             "role": "user",
             "parts": [{"type": "text", "text": "continue from here"}],
@@ -83,10 +95,10 @@ async def test_start_posts_nuage_request() -> None:
 async def test_start_omits_empty_branch() -> None:
     seen_body: dict[str, object] | None = None
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal seen_body
         seen_body = json.loads(request.content)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "sessionId": "controller-session-id",
@@ -105,8 +117,8 @@ async def test_start_omits_empty_branch() -> None:
             repositories=[NuageRepository(repo_url="https://github.com/owner/repo")]
         ),
     )
-    async with VibeAsyncHTTPClient(transport=httpx.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         await nuage.start(request)
 
     assert seen_body == {
@@ -122,10 +134,10 @@ async def test_start_omits_empty_branch() -> None:
 async def test_start_serializes_commit_sha_and_diff() -> None:
     seen_body: dict[str, object] | None = None
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal seen_body
         seen_body = json.loads(request.content)
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "sessionId": "s",
@@ -156,8 +168,8 @@ async def test_start_serializes_commit_sha_and_diff() -> None:
             ]
         ),
     )
-    async with VibeAsyncHTTPClient(transport=httpx.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         await nuage.start(request)
 
     assert seen_body is not None
@@ -174,11 +186,11 @@ async def test_start_serializes_commit_sha_and_diff() -> None:
 
 @pytest.mark.asyncio
 async def test_start_raises_for_unsuccessful_response() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(401, text="Unauthorized")
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401, text="Unauthorized")
 
-    async with VibeAsyncHTTPClient(transport=httpx.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         with pytest.raises(ServiceTeleportError, match="status 401") as exc_info:
             await nuage.start(_request())
 
@@ -190,11 +202,11 @@ async def test_start_raises_for_unsuccessful_response() -> None:
 
 @pytest.mark.asyncio
 async def test_start_raises_for_invalid_response() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"url": "https://chat.example.com/code/1/2"})
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json={"url": "https://chat.example.com/code/1/2"})
 
-    async with VibeAsyncHTTPClient(transport=httpx.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         with pytest.raises(
             ServiceTeleportError, match="response was invalid"
         ) as exc_info:
@@ -208,13 +220,13 @@ async def test_start_raises_for_invalid_response() -> None:
 
 @pytest.mark.asyncio
 async def test_start_raises_for_invalid_json_response() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
             200, text="not-json", headers={"content-type": "text/plain"}
         )
 
-    async with VibeAsyncHTTPClient(transport=httpx.MockTransport(handler)) as client:
-        nuage = NuageClient("https://chat.example.com", "api-key", client=client)
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
+        nuage = NuageClient("https://chat.example.com", _key(), client=client)
         with pytest.raises(ServiceTeleportError, match="not valid JSON") as exc_info:
             await nuage.start(_request())
 
@@ -228,11 +240,11 @@ async def test_start_raises_for_invalid_json_response() -> None:
 async def test_start_retries_ambiguous_gateway_timeout_with_same_request() -> None:
     seen_bodies: list[dict[str, object]] = []
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         seen_bodies.append(json.loads(request.content))
         if len(seen_bodies) == 1:
-            return httpx.Response(504, text="Gateway timeout")
-        return httpx.Response(
+            return httpx2.Response(504, text="Gateway timeout")
+        return httpx2.Response(
             200,
             json={
                 "sessionId": "controller-session-id",
@@ -243,12 +255,9 @@ async def test_start_retries_ambiguous_gateway_timeout_with_same_request() -> No
             },
         )
 
-    async with VibeAsyncHTTPClient(transport=httpx.MockTransport(handler)) as client:
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
         nuage = NuageClient(
-            "https://chat.example.com",
-            "api-key",
-            client=client,
-            retry_delay_seconds=0.0,
+            "https://chat.example.com", _key(), client=client, retry_delay_seconds=0.0
         )
         response = await nuage.start(_request())
 
@@ -260,11 +269,11 @@ async def test_start_retries_ambiguous_gateway_timeout_with_same_request() -> No
 async def test_start_retries_timeout_with_same_request() -> None:
     seen_bodies: list[dict[str, object]] = []
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         seen_bodies.append(json.loads(request.content))
         if len(seen_bodies) == 1:
-            raise httpx.ReadTimeout("read timed out", request=request)
-        return httpx.Response(
+            raise httpx2.ReadTimeout("read timed out", request=request)
+        return httpx2.Response(
             200,
             json={
                 "sessionId": "controller-session-id",
@@ -275,12 +284,9 @@ async def test_start_retries_timeout_with_same_request() -> None:
             },
         )
 
-    async with VibeAsyncHTTPClient(transport=httpx.MockTransport(handler)) as client:
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
         nuage = NuageClient(
-            "https://chat.example.com",
-            "api-key",
-            client=client,
-            retry_delay_seconds=0.0,
+            "https://chat.example.com", _key(), client=client, retry_delay_seconds=0.0
         )
         response = await nuage.start(_request())
 
@@ -292,15 +298,15 @@ async def test_start_retries_timeout_with_same_request() -> None:
 async def test_start_raises_retry_guidance_after_ambiguous_create_exhausted() -> None:
     calls = 0
 
-    async def handler(request: httpx.Request) -> httpx.Response:
+    async def handler(request: httpx2.Request) -> httpx2.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(504, text="Gateway timeout")
+        return httpx2.Response(504, text="Gateway timeout")
 
-    async with VibeAsyncHTTPClient(transport=httpx.MockTransport(handler)) as client:
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
         nuage = NuageClient(
             "https://chat.example.com",
-            "api-key",
+            _key(),
             client=client,
             max_start_attempts=2,
             retry_delay_seconds=0.0,
@@ -314,4 +320,36 @@ async def test_start_raises_retry_guidance_after_ambiguous_create_exhausted() ->
     assert exc_info.value.telemetry_details == {
         "failure_kind": "ambiguous_create",
         "http_status_code": 504,
+    }
+
+
+class _SignedOut:
+    async def resolve(
+        self, target: PlatformCredentialTarget
+    ) -> PlatformCredentialResult:
+        del target
+        return PlatformCredentialRequired(reason="reauthentication_required")
+
+    async def reject(
+        self, *_args: object, **_kwargs: object
+    ) -> PlatformCredentialResult:
+        return PlatformCredentialRequired(reason="reauthentication_required")
+
+
+@pytest.mark.asyncio
+async def test_start_without_a_credential_never_creates_a_session() -> None:
+    seen: list[httpx2.Request] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.append(request)
+        return httpx2.Response(500)
+
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(handler)) as client:
+        nuage = NuageClient("https://chat.example.com", _SignedOut(), client=client)
+        with pytest.raises(ServiceTeleportError) as exc_info:
+            await nuage.start(_request())
+
+    assert seen == []
+    assert exc_info.value.telemetry_details == {
+        "failure_kind": "credential_unavailable"
     }

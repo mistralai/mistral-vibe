@@ -1,0 +1,239 @@
+use serde::Deserialize;
+use serde::Serialize;
+use serde_json::Value;
+
+use crate::core::features::compaction::{CompactionRequestKind, CompactionTrigger};
+use crate::core::features::permissions::GrantKey;
+use crate::core::features::permissions::PublicArguments;
+use crate::core::hooks::HookCall;
+use crate::core::tools::external::{
+    ExternalTool, ExternalToolCall, ProvidedToolCall, RuntimeBuiltinToolCall,
+};
+use crate::core::wire::message::Message;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CompletionPurpose {
+    Agent,
+    Compaction,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "purpose", rename_all = "snake_case")]
+pub(crate) enum CompletionActionKind {
+    Agent,
+    Compaction {
+        compaction_id: String,
+        trigger: CompactionTrigger,
+        attempt: u32,
+        /// Omitted for the in-context request, so a Runtime that predates the
+        /// standalone fallback still reads every first compaction request.
+        #[serde(default, skip_serializing_if = "CompactionRequestKind::is_in_context")]
+        request: CompactionRequestKind,
+    },
+}
+
+impl CompletionActionKind {
+    pub(crate) fn purpose(&self) -> CompletionPurpose {
+        match self {
+            Self::Agent => CompletionPurpose::Agent,
+            Self::Compaction { .. } => CompletionPurpose::Compaction,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub parameters: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ModelMessageUpdate {
+    Append {
+        base_revision: u64,
+        revision: u64,
+        messages: Vec<Message>,
+    },
+    Replace {
+        revision: u64,
+        messages: Vec<Message>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum ModelToolCatalogUpdate {
+    Keep {
+        revision: u64,
+    },
+    Replace {
+        revision: u64,
+        tools: Vec<ToolDefinition>,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub(crate) struct ModelInputUpdate {
+    pub messages: ModelMessageUpdate,
+    pub tool_catalog: ModelToolCatalogUpdate,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum FilesystemOperation {
+    Write {
+        workspace_path: String,
+        content: String,
+    },
+}
+
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum Action {
+    Approval {
+        #[serde(rename = "action_id")]
+        effect_id: String,
+        turn_id: String,
+        call_id: String,
+        grant_key: String,
+        tool_id: String,
+        display_name: String,
+        input: Value,
+    },
+    #[serde(rename = "llm_call")]
+    Completion {
+        #[serde(rename = "action_id")]
+        effect_id: String,
+        turn_id: Option<String>,
+        #[serde(flatten)]
+        kind: CompletionActionKind,
+        iteration: u32,
+        max_iterations: Option<u32>,
+        model_input: ModelInputUpdate,
+    },
+    #[serde(rename = "runtime_builtin_tool_call")]
+    RuntimeBuiltinTool {
+        #[serde(rename = "action_id")]
+        effect_id: String,
+        turn_id: String,
+        #[serde(rename = "call_id")]
+        operation_id: String,
+        call: RuntimeBuiltinToolCall,
+        /// The `run_typescript` call whose program made this call. Omitted for a
+        /// call the model made directly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
+    },
+    #[serde(rename = "provided_tool_call")]
+    ProvidedTool {
+        #[serde(rename = "action_id")]
+        effect_id: String,
+        turn_id: String,
+        #[serde(rename = "call_id")]
+        operation_id: String,
+        call: ProvidedToolCall,
+        /// The `run_typescript` call whose program made this call. Omitted for a
+        /// call the model made directly.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_call_id: Option<String>,
+    },
+    #[serde(rename = "hook_call")]
+    Hook {
+        #[serde(rename = "action_id")]
+        effect_id: String,
+        turn_id: String,
+        hook_binding_ids: Vec<String>,
+        #[serde(flatten)]
+        call: HookCall,
+    },
+    Filesystem {
+        #[serde(rename = "action_id")]
+        effect_id: String,
+        turn_id: String,
+        operation: FilesystemOperation,
+    },
+}
+
+impl Action {
+    pub(crate) fn action_id(&self) -> &str {
+        match self {
+            Self::Approval { effect_id, .. }
+            | Self::Completion { effect_id, .. }
+            | Self::RuntimeBuiltinTool { effect_id, .. }
+            | Self::ProvidedTool { effect_id, .. }
+            | Self::Hook { effect_id, .. }
+            | Self::Filesystem { effect_id, .. } => effect_id,
+        }
+    }
+
+    pub(crate) fn approval(
+        effect_id: String,
+        turn_id: &str,
+        grant_key: &GrantKey,
+        call: &ExternalToolCall,
+        display_name: String,
+    ) -> Self {
+        Self::Approval {
+            effect_id,
+            turn_id: turn_id.to_string(),
+            call_id: call.call_id.clone(),
+            grant_key: grant_key.as_str().to_string(),
+            tool_id: call.hook_tool_key().qualified_name,
+            display_name,
+            input: PublicArguments::from_call(call).to_value(),
+        }
+    }
+
+    pub(crate) fn external_tool(call: &ExternalToolCall, turn_id: &str) -> Self {
+        match &call.call {
+            ExternalTool::RuntimeBuiltin { .. } => Self::RuntimeBuiltinTool {
+                effect_id: call.action_id.clone(),
+                turn_id: turn_id.to_string(),
+                operation_id: call.call_id.clone(),
+                call: call
+                    .call
+                    .runtime_builtin_call()
+                    .expect("matched Runtime built-in call"),
+                parent_call_id: None,
+            },
+            ExternalTool::Provided { .. } => Self::ProvidedTool {
+                effect_id: call.action_id.clone(),
+                turn_id: turn_id.to_string(),
+                operation_id: call.call_id.clone(),
+                call: call.call.provided_call().expect("matched provided call"),
+                parent_call_id: None,
+            },
+        }
+    }
+
+    /// Names `program_call_id`, the `run_typescript` call, as the parent of a
+    /// tool call Action that its program made. Other Actions are unchanged.
+    pub(crate) fn issued_by_program(mut self, program_call_id: &str) -> Self {
+        if let Self::RuntimeBuiltinTool { parent_call_id, .. }
+        | Self::ProvidedTool { parent_call_id, .. } = &mut self
+        {
+            *parent_call_id = Some(program_call_id.to_string());
+        }
+        self
+    }
+
+    pub(crate) fn filesystem_write(
+        effect_id: String,
+        turn_id: &str,
+        workspace_path: String,
+        content: String,
+    ) -> Self {
+        Self::Filesystem {
+            effect_id,
+            turn_id: turn_id.to_string(),
+            operation: FilesystemOperation::Write {
+                workspace_path,
+                content,
+            },
+        }
+    }
+}

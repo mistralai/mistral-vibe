@@ -1,0 +1,409 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+import respx
+
+from tests.app_server.backend_contract.conftest import (
+    BackendContractConnection,
+    connect_backend_contract_host,
+)
+from vibe.app_server._process_services import ProcessServices
+from vibe.app_server.local import LocalHarnessHost, LocalHarnessOptions
+from vibe.app_server.models import PublicMessageEntry
+from vibe.app_server.protocol import (
+    ClientCapabilities,
+    SessionOptions,
+    SessionReadParams,
+    SessionReadResponse,
+)
+from vibe.app_server.session import AppServerSession
+
+pytestmark = pytest.mark.both_paths
+
+
+@pytest.mark.asyncio
+async def test_session_start_returns_the_attached_public_session(
+    backend_contract_session: AppServerSession,
+) -> None:
+    assert (
+        backend_contract_session.state.session.id == backend_contract_session.session_id
+    )
+
+
+@pytest.mark.asyncio
+async def test_unified_session_advertises_only_supported_agent_tools(
+    backend_contract_mistral_api: respx.Route,
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A local Unified Harness session and scripted provider chunks.
+    *Do*: Start a turn and discover the agent tool declarations.
+    *Assert*: Local child tools are available without conversation forks; waiting
+              is the standalone direct ``wait`` tool, not an ``agents`` function.
+    """
+    # Prepare
+    # Accounting is covered separately; every reply still reports its usage.
+    choices = [
+        {
+            "index": 0,
+            "finish_reason": "tool_calls",
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "discover-agent-tools",
+                        "index": 0,
+                        "function": {
+                            "name": "search_tool_functions",
+                            "arguments": json.dumps({
+                                "mode": "details",
+                                "functions": [
+                                    "agents.list",
+                                    "agents.spawn",
+                                    "agents.send_message",
+                                    "agents.interrupt",
+                                ],
+                            }),
+                        },
+                    }
+                ],
+            },
+        },
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "delta": {"role": "assistant", "content": "Local agent tools are ready."},
+        },
+    ]
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                content="data: "
+                + json.dumps({
+                    "id": "completion-agent-tools",
+                    "object": "chat.completion.chunk",
+                    "created": 1234567890,
+                    "model": "mistral-vibe-cli-latest",
+                    "choices": [choice],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15,
+                    },
+                })
+                + "\n\ndata: [DONE]\n",
+                headers={"Content-Type": "text/event-stream"},
+            )
+            for choice in choices
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path)),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        # Do
+        session = await connection.host.open_session()
+        _ = [event async for event in session.act("Show the local agent tools")]
+    finally:
+        await connection.host.close()
+
+    # Assert
+    first_request, second_request = [
+        json.loads(call.request.content) for call in backend_contract_mistral_api.calls
+    ]
+    direct_tools = {tool["function"]["name"] for tool in first_request["tools"]}
+    assert {"search_tool_functions", "run_typescript", "wait"} <= direct_tools
+    declarations = next(
+        message["content"]
+        for message in second_request["messages"]
+        if message.get("tool_call_id") == "discover-agent-tools"
+    )
+    assert "declare namespace tools.agents" in declarations
+    for operation in ("list", "spawn", "send_message", "interrupt"):
+        assert f"function {operation}(" in declarations
+    assert "context?:" not in declarations
+    assert "function wait(" not in declarations
+
+
+@pytest.mark.asyncio
+async def test_session_read_returns_the_public_snapshot_and_event_watermark(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+) -> None:
+    result = await backend_contract_connection.client.request(
+        "session/read",
+        SessionReadParams(session_id=backend_contract_session.session_id),
+    )
+
+    response = SessionReadResponse.model_validate(result)
+    assert response.state.session.id == backend_contract_session.session_id
+    assert "vibe" not in result
+    assert "state" in result
+    assert result["lastEventId"] == response.state.event_id
+    assert "latestTurn" not in result["state"]
+    assert isinstance(result["state"]["history"], list)
+    assert isinstance(result["state"]["turns"], list)
+
+
+@pytest.mark.asyncio
+async def test_fork_attaches_the_public_child_session(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("First answer")
+    )
+    _ = [
+        event
+        async for event in backend_contract_persistent_session.act(
+            "First", client_message_id="user-1"
+        )
+    ]
+    source_session_id = backend_contract_persistent_session.session_id
+
+    fork = await backend_contract_persistent_session.resources.sessions.fork("user-1")
+
+    assert fork.source_session_id == source_session_id
+    assert backend_contract_persistent_session.session_id != source_session_id
+    assert (
+        backend_contract_persistent_session.state.session.parent_session_id
+        == source_session_id
+    )
+    assert [
+        entry.text
+        for entry in backend_contract_persistent_session.history
+        if isinstance(entry, PublicMessageEntry)
+    ] == ["First", "First answer"]
+
+
+@pytest.mark.asyncio
+async def test_detached_fork_returns_a_public_child_without_rebinding_the_source(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("Second answer"),
+        ]
+    )
+    _ = [
+        event
+        async for event in backend_contract_persistent_session.act(
+            "First", client_message_id="user-1"
+        )
+    ]
+    _ = [
+        event
+        async for event in backend_contract_persistent_session.act(
+            "Second", client_message_id="user-2"
+        )
+    ]
+    source_session_id = backend_contract_persistent_session.session_id
+
+    fork = await backend_contract_persistent_session.resources.sessions.fork(
+        "user-1", attach=False
+    )
+
+    assert backend_contract_persistent_session.session_id == source_session_id
+    assert fork.source_session_id == source_session_id
+    assert fork.state.session.id != source_session_id
+    assert fork.state.session.parent_session_id == source_session_id
+    assert [
+        entry.text
+        for entry in fork.state.history or []
+        if isinstance(entry, PublicMessageEntry)
+    ] == ["First", "First answer"]
+
+
+@pytest.mark.asyncio
+async def test_detached_fork_is_readable_and_resumable_from_a_new_host(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+    process_services: ProcessServices,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("First answer")
+    )
+    _ = [
+        event
+        async for event in backend_contract_persistent_session.act(
+            "First", client_message_id="user-1"
+        )
+    ]
+    fork = await backend_contract_persistent_session.resources.sessions.fork(
+        "user-1", attach=False
+    )
+
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    resumed: AppServerSession | None = None
+    try:
+        stored = await connection.host.read_session(fork.state.session.id)
+        resumed = await connection.host.resume_session(fork.state.session.id)
+    finally:
+        if resumed is None:
+            await connection.host.close()
+        else:
+            await resumed.close()
+
+    assert stored.session.id == fork.state.session.id
+    assert (
+        stored.session.parent_session_id
+        == backend_contract_persistent_session.session_id
+    )
+    assert resumed is not None
+    assert resumed.session_id == fork.state.session.id
+    assert [
+        entry.text for entry in resumed.history if isinstance(entry, PublicMessageEntry)
+    ] == ["First", "First answer"]
+
+
+@pytest.mark.asyncio
+async def test_in_place_resume_replaces_the_public_snapshot_and_keeps_the_session_usable(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("Before resume"),
+            backend_contract_mistral_response("After resume"),
+        ]
+    )
+    _ = [event async for event in backend_contract_persistent_session.act("first")]
+    session_id = backend_contract_persistent_session.session_id
+
+    await backend_contract_persistent_session.resume(session_id)
+    _ = [event async for event in backend_contract_persistent_session.act("second")]
+
+    assert backend_contract_persistent_session.state.session.id == session_id
+    assert [
+        entry.text
+        for entry in backend_contract_persistent_session.history
+        if isinstance(entry, PublicMessageEntry)
+    ] == ["first", "Before resume", "second", "After resume"]
+
+
+@pytest.mark.asyncio
+async def test_continue_attaches_the_latest_persisted_session_and_keeps_it_usable(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("saved"),
+            backend_contract_mistral_response("continued"),
+        ]
+    )
+    session = await backend_contract_persistent_connection.host.open_session()
+    try:
+        _ = [event async for event in session.act("save this")]
+        session_id = session.session_id
+    finally:
+        await session.close()
+
+    continued_connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    continued = await continued_connection.host.continue_session()
+    try:
+        _ = [event async for event in continued.act("continue this")]
+        assert continued.session_id == session_id
+        assert continued.state.session.id == session_id
+        assert [
+            entry.text
+            for entry in continued.history
+            if isinstance(entry, PublicMessageEntry)
+        ] == ["save this", "saved", "continue this", "continued"]
+    finally:
+        await continued.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_attaches_the_requested_persisted_session_and_keeps_it_usable(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("saved"),
+            backend_contract_mistral_response("resumed"),
+        ]
+    )
+    session = await backend_contract_persistent_connection.host.open_session()
+    try:
+        _ = [event async for event in session.act("save this")]
+        session_id = session.session_id
+    finally:
+        await session.close()
+
+    resumed_connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    resumed = await resumed_connection.host.resume_session(session_id)
+    try:
+        _ = [event async for event in resumed.act("resume this")]
+        assert resumed.session_id == session_id
+        assert [
+            entry.text
+            for entry in resumed.history
+            if isinstance(entry, PublicMessageEntry)
+        ] == ["save this", "saved", "resume this", "resumed"]
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_stopping_a_session_leaves_its_siblings_on_a_shared_harness_serving(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=lambda _request: backend_contract_mistral_response("still here")
+    )
+    harness_host = LocalHarnessHost()
+    options = LocalHarnessOptions(session_options=SessionOptions())
+    try:
+        stopped = await harness_host.start(options)
+        sibling = await harness_host.start(options)
+
+        await stopped.close()
+
+        try:
+            _ = [event async for event in sibling.act("are you there?")]
+            sibling_messages = [
+                entry.text
+                for entry in sibling.history
+                if isinstance(entry, PublicMessageEntry)
+            ]
+            later = await harness_host.start(options)
+            await later.close()
+        finally:
+            await sibling.close()
+    finally:
+        await harness_host.close()
+
+    assert sibling_messages == ["are you there?", "still here"]

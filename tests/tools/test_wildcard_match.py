@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from vibe.core.tools.permissions import wildcard_match
+from vibe.core.tools.models import ApprovedRule, PermissionScope
+from vibe.core.tools.permissions import (
+    PermissionStore,
+    RequiredPermission,
+    wildcard_match,
+)
 
 
 class TestWildcardMatch:
@@ -64,3 +69,52 @@ class TestWildcardMatch:
     def test_non_trailing_star_is_greedy(self):
         assert wildcard_match("abc123def", "abc*def")
         assert not wildcard_match("abc123de", "abc*def")
+
+
+def _rule(session_pattern: str) -> ApprovedRule:
+    return ApprovedRule(
+        tool_name="bash",
+        scope=PermissionScope.COMMAND_PATTERN,
+        session_pattern=session_pattern,
+    )
+
+
+def _required(invocation_pattern: str, *, literal: bool) -> RequiredPermission:
+    return RequiredPermission(
+        scope=PermissionScope.COMMAND_PATTERN,
+        invocation_pattern=invocation_pattern,
+        session_pattern=invocation_pattern,
+        label=invocation_pattern,
+        literal=literal,
+    )
+
+
+class TestLiteralPermissions:
+    def test_a_wide_rule_covers_a_pattern_permission(self):
+        store = PermissionStore()
+        store.add_rule(_rule("cat *"))
+
+        assert store.covers("bash", _required("cat notes.txt", literal=False))
+
+    def test_a_wide_rule_does_not_cover_a_literal_permission(self):
+        store = PermissionStore()
+        store.add_rule(_rule("cat *"))
+
+        assert not store.covers(
+            "bash", _required("cat notes.txt > /etc/cron.d/pwn", literal=True)
+        )
+
+    def test_a_literal_permission_is_covered_by_its_own_grant(self):
+        store = PermissionStore()
+        store.add_rule(_rule("cat notes.txt > /etc/cron.d/pwn"))
+
+        assert store.covers(
+            "bash", _required("cat notes.txt > /etc/cron.d/pwn", literal=True)
+        )
+
+    def test_a_literal_grant_does_not_read_its_own_glob_as_a_wildcard(self):
+        store = PermissionStore()
+        store.add_rule(_rule("git log *"))
+
+        assert store.covers("bash", _required("git log *", literal=True))
+        assert not store.covers("bash", _required("git log --ext-diff", literal=True))

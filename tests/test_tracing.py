@@ -13,14 +13,9 @@ from opentelemetry.sdk.trace.export import (
 from opentelemetry.trace import StatusCode
 import pytest
 
-from tests.conftest import build_test_agent_loop, build_test_vibe_config
-from tests.mock.utils import mock_llm_chunk
-from tests.stubs.fake_backend import FakeBackend
 from vibe.core import tracing
 from vibe.core.config import OtelRedactionMode, OtelSpanExporterConfig
-from vibe.core.tools.base import BaseToolConfig, ToolPermission
 from vibe.core.tracing import agent_span, setup_tracing, tool_span
-from vibe.core.types import BaseEvent, FunctionCall, ToolCall
 
 
 class _CollectingExporter(SpanExporter):
@@ -290,6 +285,72 @@ class TestSpanHierarchy:
         ]
 
 
+class TestModelCallResponseMetadata:
+    @pytest.mark.asyncio
+    async def test_model_call_span_uses_provider_name_over_api_style(
+        self, _otel_provider: _CollectingExporter
+    ) -> None:
+        async with tracing.model_call_span(
+            provider_name="custom-provider",
+            provider_api_style="vertex-anthropic",
+            model="accounts/fireworks/models/mistral-test",
+            streaming=False,
+        ):
+            pass
+
+        attrs = dict(_otel_provider.spans[0].attributes)
+        assert attrs["gen_ai.provider.name"] == "custom_provider"
+        assert attrs["vibe.provider.api_style"] == "vertex-anthropic"
+
+    @pytest.mark.asyncio
+    async def test_supports_anthropic_stream_metadata(
+        self, _otel_provider: _CollectingExporter
+    ) -> None:
+        async with tracing.model_call_span(
+            provider_name="anthropic",
+            provider_api_style="anthropic",
+            model="claude-test",
+            streaming=True,
+        ) as span:
+            tracing.set_model_call_response_metadata(
+                span, {"message": {"id": "msg_123", "model": "claude-test"}}
+            )
+            tracing.set_model_call_response_metadata(
+                span, {"delta": {"stop_reason": "end_turn"}}
+            )
+
+        attrs = dict(_otel_provider.spans[0].attributes)
+        assert attrs["gen_ai.response.id"] == "msg_123"
+        assert attrs["gen_ai.response.model"] == "claude-test"
+        assert attrs["gen_ai.response.finish_reasons"] == ("end_turn",)
+
+    @pytest.mark.asyncio
+    async def test_supports_openai_responses_metadata(
+        self, _otel_provider: _CollectingExporter
+    ) -> None:
+        async with tracing.model_call_span(
+            provider_name="openai",
+            provider_api_style="openai-responses",
+            model="gpt-test",
+            streaming=True,
+        ) as span:
+            tracing.set_model_call_response_metadata(
+                span,
+                {
+                    "response": {
+                        "id": "resp_123",
+                        "model": "gpt-test",
+                        "finish_reason": "stop",
+                    }
+                },
+            )
+
+        attrs = dict(_otel_provider.spans[0].attributes)
+        assert attrs["gen_ai.response.id"] == "resp_123"
+        assert attrs["gen_ai.response.model"] == "gpt-test"
+        assert attrs["gen_ai.response.finish_reasons"] == ("stop",)
+
+
 class TestBaggagePropagation:
     @pytest.mark.asyncio
     async def test_tool_span_inherits_conversation_id(
@@ -375,71 +436,3 @@ class TestErrorIsolation:
 
         async with agent_span():
             pass
-
-
-class TestIntegration:
-    @staticmethod
-    async def _collect_events(agent_loop, prompt: str) -> list[BaseEvent]:
-        return [ev async for ev in agent_loop.act(prompt)]
-
-    @pytest.mark.asyncio
-    async def test_agent_turn_with_tool_call_produces_spans(
-        self, _otel_provider: _CollectingExporter
-    ) -> None:
-        tool_call = ToolCall(
-            id="call_1",
-            index=0,
-            function=FunctionCall(name="todo", arguments='{"action": "read"}'),
-        )
-        backend = FakeBackend([
-            [mock_llm_chunk(content="Let me check.", tool_calls=[tool_call])],
-            [mock_llm_chunk(content="Done.")],
-        ])
-        config = build_test_vibe_config(
-            enabled_tools=["todo"],
-            tools={"todo": BaseToolConfig(permission=ToolPermission.ALWAYS)},
-        )
-        agent_loop = build_test_agent_loop(config=config, backend=backend)
-
-        await self._collect_events(agent_loop, "What are my todos?")
-
-        spans = _otel_provider.spans
-        agent_spans = [s for s in spans if "invoke_agent" in s.name]
-        tool_spans = [s for s in spans if "execute_tool" in s.name]
-
-        assert len(agent_spans) == 1
-        assert len(tool_spans) == 1
-
-        agent = agent_spans[0]
-        tool = tool_spans[0]
-
-        # Parent-child relationship
-        assert tool.parent is not None
-        assert tool.parent.span_id == agent.context.span_id
-
-        # -- Agent span: name, status, and every attribute set by agent_span() --
-        assert agent.name == "invoke_agent mistral-vibe"
-        assert agent.status.status_code == StatusCode.OK
-        agent_attrs = dict(agent.attributes)
-        assert agent_attrs["gen_ai.operation.name"] == "invoke_agent"
-        assert agent_attrs["gen_ai.provider.name"] == "mistral_ai"
-        assert agent_attrs["gen_ai.agent.name"] == "mistral-vibe"
-        assert agent_attrs["gen_ai.request.model"] == "mistral-vibe-cli-latest"
-        assert agent_attrs["gen_ai.conversation.id"] == agent_loop.session_id
-
-        # -- Tool span: name, status, and every attribute set by tool_span() + set_tool_result() --
-        assert tool.name == "execute_tool todo"
-        assert tool.status.status_code == StatusCode.OK
-        tool_attrs = dict(tool.attributes)
-        assert tool_attrs["gen_ai.operation.name"] == "execute_tool"
-        assert tool_attrs["gen_ai.tool.name"] == "todo"
-        assert tool_attrs["gen_ai.tool.call.id"] == "call_1"
-        assert tool_attrs["gen_ai.tool.type"] == "function"
-        assert (
-            tool_attrs["gen_ai.tool.call.arguments"] == '{"action":"read","todos":null}'
-        )
-        assert tool_attrs["gen_ai.tool.call.result"] == (
-            "message: Retrieved 0 todos\ntodos: []\ntotal_count: 0"
-        )
-        # Conversation ID propagated via baggage from agent_span
-        assert tool_attrs["gen_ai.conversation.id"] == agent_loop.session_id

@@ -1,0 +1,561 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable
+import contextlib
+import os
+from pathlib import Path
+import sys
+import time
+
+import httpx
+import pytest
+import respx
+
+from tests.app_server.backend_contract.conftest import (
+    BackendContractConnection,
+    connect_backend_contract_host,
+)
+from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._runtime import HarnessProcess, create_harness_server
+from vibe.app_server.client import AppServerClient
+from vibe.app_server.events import HistoryEntryAdded, HistoryEntryUpdated
+from vibe.app_server.host import AppServerHost
+from vibe.app_server.models import (
+    CancelledEffectState,
+    CompletedEffectState,
+    FailedEffectState,
+    PublicEffectEntry,
+    RunningEffectState,
+)
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ClientCapabilities,
+    ClientInfo,
+    SessionOptions,
+    SessionShellCommandParams,
+)
+from vibe.app_server.session import AppServerSession
+from vibe.app_server.transport import memory_transport_pair
+from vibe.utils.tool_presentation import ToolEffectKind
+
+
+@pytest.mark.both_paths
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_streams_one_effect_entry_to_the_timeline(
+    backend_contract_session: AppServerSession,
+) -> None:
+    events = [
+        event
+        async for event in backend_contract_session.resources.shell.run(
+            "printf 'hello from the shell'"
+        )
+    ]
+
+    added = next(event for event in events if isinstance(event, HistoryEntryAdded))
+    assert isinstance(added.entry, PublicEffectEntry), (
+        "the terminal has no shell effect to draw"
+    )
+    assert added.entry.detail.kind is ToolEffectKind.SHELL
+    updates = [event for event in events if isinstance(event, HistoryEntryUpdated)]
+    assert updates, "the effect never reported an outcome"
+    assert all(update.entry.id == added.entry.id for update in updates)
+
+    final = updates[-1].entry
+    assert isinstance(final, PublicEffectEntry)
+    assert isinstance(final.state, CompletedEffectState)
+    assert final.state.output_text == "hello from the shell"
+    assert any(entry.id == final.id for entry in backend_contract_session.history)
+
+
+@pytest.mark.both_paths
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_injects_its_output_as_model_context(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[backend_contract_mistral_response("answer")]
+    )
+
+    _ = [
+        event
+        async for event in backend_contract_session.resources.shell.run(
+            "printf 'hello from the shell'"
+        )
+    ]
+    _ = [event async for event in backend_contract_session.act("what did that print?")]
+
+    sent = backend_contract_mistral_api.calls.last.request.content.decode()
+    assert "Manual `!` command result" in sent, (
+        "the shell result never reached the model as context"
+    )
+    assert "hello from the shell" in sent
+
+
+@pytest.mark.one_path
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_reports_the_exit_code_of_a_failure(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[backend_contract_mistral_response("answer")]
+    )
+
+    _ = [
+        event
+        async for event in backend_contract_session.resources.shell.run(
+            "printf 'nope' >&2; exit 3"
+        )
+    ]
+    _ = [event async for event in backend_contract_session.act("what happened?")]
+
+    sent = backend_contract_mistral_api.calls.last.request.content.decode()
+    assert "Exit code: 3" in sent
+    assert "nope" in sent
+
+
+async def _run_manual_shell(
+    session: AppServerSession, command: str
+) -> PublicEffectEntry:
+    events = [event async for event in session.resources.shell.run(command)]
+    return _final_shell_entry(events)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_without_output_completes_with_empty_streams(
+    backend_contract_session: AppServerSession,
+) -> None:
+    final = await _run_manual_shell(backend_contract_session, "true")
+
+    assert isinstance(final.state, CompletedEffectState)
+    assert final.state.output == {"stdout": "", "stderr": "", "output": ""}
+    assert final.state.output_text == ""
+    assert final.state.display is not None
+    assert final.state.display.success is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_with_a_non_zero_exit_settles_as_failed(
+    backend_contract_session: AppServerSession,
+) -> None:
+    final = await _run_manual_shell(backend_contract_session, "exit 7")
+
+    assert isinstance(final.state, FailedEffectState)
+    assert final.state.error.message == "Command exited with status 7"
+    assert final.state.display is not None
+    assert final.state.display.success is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "stream"),
+    [("printf '\\377\\376'", "stdout"), ("printf '\\377\\376' >&2", "stderr")],
+)
+async def test_manual_shell_command_replaces_invalid_utf8_output(
+    backend_contract_session: AppServerSession, command: str, stream: str
+) -> None:
+    final = await _run_manual_shell(backend_contract_session, command)
+
+    assert isinstance(final.state, CompletedEffectState)
+    assert isinstance(final.state.output, dict)
+    assert final.state.output[stream] == "\ufffd\ufffd"
+
+
+@pytest.mark.asyncio
+async def test_manual_shell_command_is_confined_to_the_workspace(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+) -> None:
+    # The filesystem root can never be inside the session's workspace.
+    outside = Path(Path.cwd().anchor)
+
+    with pytest.raises(AppServerResponseError, match="outside the workspace"):
+        _ = await backend_contract_connection.client.request(
+            "session/shellCommand",
+            SessionShellCommandParams(
+                session_id=backend_contract_session.session_id,
+                command="pwd",
+                action="run",
+                cwd=str(outside),
+            ),
+        )
+
+
+def _final_shell_entry(
+    events: list[HistoryEntryAdded | HistoryEntryUpdated],
+) -> PublicEffectEntry:
+    updates = [
+        event.entry
+        for event in events
+        if isinstance(event, HistoryEntryUpdated)
+        and isinstance(event.entry, PublicEffectEntry)
+    ]
+    assert updates, "the effect never reported an outcome"
+    return updates[-1]
+
+
+def _shell_history(session: AppServerSession) -> list[PublicEffectEntry]:
+    return [
+        entry
+        for entry in session.history
+        if isinstance(entry, PublicEffectEntry)
+        and entry.detail.kind is ToolEffectKind.SHELL
+    ]
+
+
+async def _resume_on_a_new_host(
+    session_id: str, *, process_services: ProcessServices
+) -> tuple[AppServerSession, BackendContractConnection]:
+    """Resume a stored session through a brand-new Host, as a restart would."""
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    session = await connection.host.resume_session(session_id)
+    return session, connection
+
+
+@pytest.mark.both_paths
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_survives_a_new_host(
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A persistent session that ran one manual shell command.
+    *Do*: Close it, resume it through a brand-new Host, and read the history.
+    *Assert*: The shell effect restores once, with the same id and terminal state.
+    """
+    session = await backend_contract_persistent_connection.host.open_session()
+    events = [
+        event
+        async for event in session.resources.shell.run("printf 'hello from the shell'")
+    ]
+    final = _final_shell_entry(events)
+    assert isinstance(final.state, CompletedEffectState)
+    session_id = session.session_id
+    await session.close()
+
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
+    try:
+        restored = _shell_history(resumed)
+        assert len(restored) == 1, (
+            "the shell effect duplicated or vanished across the restart"
+        )
+        assert restored[0].id == final.id
+        assert restored[0].title == final.title
+        assert restored[0].detail == final.detail
+        assert isinstance(restored[0].state, CompletedEffectState)
+        assert restored[0].state.output_text == final.state.output_text
+        assert restored[0].state.duration_ms == final.state.duration_ms
+    finally:
+        await resumed.close()
+        await resumed_connection.host.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_timeout_state_survives_a_new_host(
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A persistent session whose manual shell command timed out.
+    *Do*: Close it and resume it through a brand-new Host.
+    *Assert*: The restored effect reports the timed-out failure, not a phantom run.
+    """
+    session = await backend_contract_persistent_connection.host.open_session()
+    events = [
+        event
+        async for event in session.resources.shell.run(
+            "printf 'slow'; sleep 5", timeout_seconds=0.2
+        )
+    ]
+    final = _final_shell_entry(events)
+    assert isinstance(final.state, FailedEffectState)
+    assert final.state.error.message == "Command timed out"
+    session_id = session.session_id
+    await session.close()
+
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
+    try:
+        restored = _shell_history(resumed)
+        assert len(restored) == 1
+        assert restored[0].id == final.id
+        assert isinstance(restored[0].state, FailedEffectState)
+        assert restored[0].state.error.message == "Command timed out"
+        assert restored[0].state.output_text == "slow"
+    finally:
+        await resumed.close()
+        await resumed_connection.host.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_interrupt_state_survives_a_new_host(
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A persistent session whose manual shell command was
+    interrupted by the user mid-run.
+    *Do*: Close it and resume it through a brand-new Host.
+    *Assert*: The restored effect reports the interruption, not a phantom run.
+    """
+    session = await backend_contract_persistent_connection.host.open_session()
+    stream = session.resources.shell.run("printf 'slow'; sleep 30")
+    added = await anext(stream)
+    assert isinstance(added, HistoryEntryAdded), "the terminal has no live effect"
+    operation_id = added.entry.id
+    events: list[HistoryEntryAdded | HistoryEntryUpdated] = [added]
+    # Interrupt only once the streamed output landed, so the recorded state is
+    # deterministic instead of racing the command's first write.
+    async for event in stream:
+        events.append(event)
+        if (
+            isinstance(event, HistoryEntryUpdated)
+            and isinstance(event.entry, PublicEffectEntry)
+            and isinstance(event.entry.state, RunningEffectState)
+            and event.entry.state.output_text
+        ):
+            break
+    await backend_contract_persistent_connection.client.request(
+        "session/shellCommand",
+        SessionShellCommandParams(
+            session_id=session.session_id, operation_id=operation_id, action="interrupt"
+        ),
+    )
+    events.extend([event async for event in stream])
+    final = _final_shell_entry(events)
+    assert isinstance(final.state, CancelledEffectState)
+    assert final.state.reason == "Command interrupted"
+    session_id = session.session_id
+    await session.close()
+
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
+    try:
+        restored = _shell_history(resumed)
+        assert len(restored) == 1
+        assert restored[0].id == operation_id
+        assert isinstance(restored[0].state, CancelledEffectState)
+        assert restored[0].state.reason == "Command interrupted"
+        assert restored[0].state.output_text == "slow"
+    finally:
+        await resumed.close()
+        await resumed_connection.host.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_output_is_capped_in_the_stored_record(
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A persistent Unified session whose command printed past the
+    model limit.
+    *Do*: Close it and resume it through a brand-new Host.
+    *Assert*: The stored record holds no more output than the model saw, while
+    the live entry showed everything. The legacy log deliberately stores the
+    full output, so this bound is Unified-specific.
+    """
+    limit = 16_000
+    marker = "\n... [truncated]"
+
+    session = await backend_contract_persistent_connection.host.open_session()
+    events = [
+        event async for event in session.resources.shell.run("yes x | head -c 20000")
+    ]
+    final = _final_shell_entry(events)
+    assert isinstance(final.state, CompletedEffectState)
+    full_output = final.state.output_text
+    assert len(full_output) == 20_000, "the live stream must stay uncapped"
+    session_id = session.session_id
+    await session.close()
+
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
+    try:
+        restored = _shell_history(resumed)
+        assert len(restored) == 1
+        assert isinstance(restored[0].state, CompletedEffectState)
+        assert restored[0].state.output_text == full_output[:limit] + marker
+        output = restored[0].state.output
+        assert isinstance(output, dict)
+        assert output["truncated"] is True
+    finally:
+        await resumed.close()
+        await resumed_connection.host.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_past_the_client_cap_keeps_its_stored_output(
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A persistent Unified session whose command printed past the
+    client-facing output cap.
+    *Do*: Close it and resume it through a brand-new Host.
+    *Assert*: The stored record still holds the model-limit stdout and its
+    truncation flag, not the output the client cap dropped.
+    """
+    limit = 16_000
+    marker = "\n... [truncated]"
+
+    session = await backend_contract_persistent_connection.host.open_session()
+    events = [
+        event async for event in session.resources.shell.run("yes x | head -c 120000")
+    ]
+    assert isinstance(_final_shell_entry(events).state, CompletedEffectState)
+    session_id = session.session_id
+    await session.close()
+
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
+    try:
+        restored = _shell_history(resumed)
+        assert len(restored) == 1
+        assert isinstance(restored[0].state, CompletedEffectState)
+        output = restored[0].state.output
+        assert isinstance(output, dict)
+        assert output["stdout"] == "x\n" * (limit // 2) + marker
+        assert output["truncated"] is True
+    finally:
+        await resumed.close()
+        await resumed_connection.host.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_manual_shell_command_rejects_a_reused_operation_id_after_restart(
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A persistent session holding one recorded shell effect.
+    *Do*: Resume through a brand-new Host and rerun the same operation id.
+    *Assert*: The rerun is rejected and the history still holds one entry.
+    """
+    session = await backend_contract_persistent_connection.host.open_session()
+    _ = await backend_contract_persistent_connection.client.request(
+        "session/shellCommand",
+        SessionShellCommandParams(
+            session_id=session.session_id,
+            command="printf 'first run'",
+            action="run",
+            operation_id="shell-op-1",
+        ),
+    )
+    session_id = session.session_id
+    await session.close()
+
+    resumed, resumed_connection = await _resume_on_a_new_host(
+        session_id, process_services=process_services
+    )
+    try:
+        with pytest.raises(AppServerResponseError, match="shell-op-1"):
+            _ = await resumed_connection.client.request(
+                "session/shellCommand",
+                SessionShellCommandParams(
+                    session_id=resumed.session_id,
+                    command="printf 'second run'",
+                    action="run",
+                    operation_id="shell-op-1",
+                ),
+            )
+        assert [entry.id for entry in _shell_history(resumed)] == ["shell-op-1"]
+    finally:
+        await resumed.close()
+        await resumed_connection.host.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses POSIX shell commands")
+@pytest.mark.asyncio
+async def test_client_transport_eof_kills_a_running_shell_process(
+    tmp_path: Path,
+    backend_contract_session_options: SessionOptions,
+    backend_contract_capabilities: ClientCapabilities,
+    backend_contract_mistral_api: respx.Route,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A session whose manual `!` command is still running.
+    *Do*: Close the client transport without session/stop, like a client that
+    died (VIBE-4913). A stdio-kind harness is not reconnectable, so EOF closes
+    the server exactly like the production stdio transport.
+    *Assert*: The server peer task ends and the running command's process dies.
+    """
+    client_transport, server_transport = memory_transport_pair()
+    harness = await create_harness_server(
+        server_transport,
+        transport_kind="stdio",
+        process=HarnessProcess(services=process_services),
+    )
+    client = AppServerClient(client_transport, run_peer=harness.serve)
+    host = await AppServerHost.connect(
+        client,
+        client_info=ClientInfo(name="backend-contract-test", version="0"),
+        capabilities=backend_contract_capabilities,
+        session_options=backend_contract_session_options,
+    )
+    session = await host.open_session()
+    pid_file = tmp_path / "shell.pid"
+    stream = session.resources.shell.run(f"echo $$ > {pid_file}; sleep 60")
+
+    async def drain() -> None:
+        async for _event in stream:
+            pass
+
+    # Cancelling a foreground read of the stream would interrupt (and kill) the
+    # shell command, masking a broken EOF teardown; consume in the background
+    # and poll only the pid file.
+    reader = asyncio.create_task(drain())
+    try:
+        deadline = time.monotonic() + 5
+        while not (pid_file.exists() and pid_file.read_text().strip()):
+            if time.monotonic() > deadline:
+                pytest.fail("the shell effect never spawned its process")
+            if reader.done():
+                pytest.fail("the shell stream ended before the process spawned")
+            await asyncio.sleep(0.05)
+
+        # The client dies without session/stop: transport EOF must close the
+        # server and kill the running command's process group.
+        await client_transport.close()
+        peer = client._peer_task
+        assert peer is not None
+        await asyncio.wait_for(peer, timeout=5)
+
+        pid = int(pid_file.read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("the running shell process outlived the EOF teardown")
+    finally:
+        reader.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await reader
+        with contextlib.suppress(Exception):
+            await stream.aclose()
+        with contextlib.suppress(Exception):
+            await client.close()

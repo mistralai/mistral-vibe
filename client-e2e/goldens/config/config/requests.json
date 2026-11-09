@@ -1,0 +1,18 @@
+[
+ {
+  "method": "config/write",
+  "params": {
+   "ops": [
+    {
+     "op": "set",
+     "path": "/models/mistral-medium-3.5/max_context_length",
+     "targetLayer": "user-toml",
+     "value": 128000
+    }
+   ],
+   "reason": "config screen edit",
+   "reloadRuntime": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

@@ -1,30 +1,43 @@
-# 0002 Core Engine And Delivery Surfaces
+# 0002 Ownership Boundaries
 
 ## Decision
 
-`vibe/core` owns the agent engine: agent loop, tools, LLM backends, config, sessions, skills, hooks, telemetry types, and shared domain models.
+Vibe uses Unified Harness Core and Runtime outside `vibe.app_server`.
 
-Delivery surfaces adapt that engine:
+| Owner | Responsibility |
+| --- | --- |
+| Harness Core | Deterministic context, legal transitions and Action planning. |
+| Runtime | Content, execution, ordering, cancellation, approval enforcement, persistence and recovery of one session. |
+| App server | Product capabilities, resolved configuration, integrations, public projections, session hosting and cross-session coordination. |
+| Clients | Presentation, input, navigation and explicitly client-local facilities. |
 
-- `vibe/cli` owns the Textual app, terminal UX, widgets, slash-command handling, manual shell commands, voice UI, and local interactive affordances.
-- `vibe/acp` owns Agent Client Protocol translation and ACP-specific tool/session updates.
-- `vibe/setup` owns first-run and onboarding flows.
-- Programmatic entry points should call core orchestration without depending on Textual or ACP internals.
+Runtime exposes typed session operations and generic capability bindings. It
+invokes supplied handlers without importing app-server modules. Adapters map
+resolved product inputs and dependency-neutral errors at that boundary.
+`vibe.core` retains reusable utilities; it is not a second execution owner.
+
+Each child has its own session. Hosting owns the catalogue, creation, routing
+and process resources; a session retains its direct child links and results.
+Runtime-private checkpoints and journals stay behind the session API. Features
+must not create competing execution stores, accepted-work queues or execution
+schedulers.
+
+These boundaries guide new work. Existing product behavior and hosting inside
+Runtime are migration work; current placement does not authorize more coupling.
+Feature-module rules are in [0018](0018-modular-app-server-capabilities.md).
 
 ## Rationale
 
-The same engine must serve multiple clients. UI or protocol behavior should not leak into core decisions because it makes the engine harder to test, reuse, and replace.
+One execution owner keeps session state and recovery coherent. Separate product
+and hosting contracts allow features to change independently.
 
 ## Agent Guidance
 
-- Add user-interface behavior in `vibe/cli`, not `vibe/core`.
-- Add protocol translation in `vibe/acp`, not `vibe/core`.
-- Keep core events and models surface-neutral. Let surfaces render or translate them.
-- Shared behavior belongs in core only when it is truly independent of the delivery surface.
-- When a surface needs special behavior, prefer an adapter or subclass at that surface boundary.
+- Identify the owner of each state value and side effect before changing it.
+- Use session capabilities while preserving leases, idempotency and cleanup.
+- Keep execution-relevant feature state within existing persistence capabilities.
 
 ## Flag To User When
 
-- Implementing a feature requires `vibe/core` to import Textual, ACP schema objects, or setup UI code.
-- A protocol-specific or UI-specific workaround is being added to a core model.
-- A change makes programmatic mode depend on interactive terminal assumptions.
+- A change creates two authoritative owners for execution or durable state.
+- A proposed boundary exposes private engine or storage details.

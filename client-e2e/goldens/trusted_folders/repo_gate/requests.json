@@ -1,0 +1,10 @@
+[
+ {
+  "method": "workspace/trust/decision",
+  "params": {
+   "cwd": "/home/user/repo/packages/app",
+   "decision": "trust_repo",
+   "sessionId": null
+  }
+ }
+]

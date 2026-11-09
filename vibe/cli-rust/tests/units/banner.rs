@@ -1,0 +1,121 @@
+//! Welcome banner: the model label and the model-driven cat sprite.
+
+use serde_json::{json, Value};
+use vibe_rs::ui::banner::petit_chat::CatVariant;
+use vibe_rs::ui::banner::Banner;
+use vibe_rs::utils::startup_cache::StartupConfig;
+
+fn runtime(display_name: &str, thinking: &str, extra: Value) -> Value {
+    let mut runtime = json!({
+        "config": {
+            "theme": "ansi-dark",
+            "activeModel": {"displayName": display_name, "thinking": thinking},
+            "models": [{}, {}],
+        },
+        "skills": [
+            {"name": "a"}, {"name": "b"}, {"name": "c"}, {"name": "d"}, {"name": "e"},
+            {"name": "builtin", "source": "builtin"},
+        ],
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        runtime[key] = value.clone();
+    }
+    json!({"runtime": runtime})
+}
+
+fn config(display_name: &str, thinking: &str, extra: Value) -> StartupConfig {
+    StartupConfig::from_runtime("1.0.0", &runtime(display_name, thinking, extra)).unwrap()
+}
+
+fn text(banner: &Banner, config: &StartupConfig) -> Vec<String> {
+    banner
+        .view(config, 120)
+        .lines()
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn the_model_label_shows_the_display_name_and_thinking_level() {
+    let config = config("glm-5.2 (Mistral Hosted)", "max", json!({}));
+    assert_eq!(config.active_model, "glm-5.2 (Mistral Hosted)[max]");
+    let lines = text(&Banner::default(), &config);
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.trim_start().ends_with("glm-5.2 (Mistral Hosted)[max]")),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn large_models_pick_the_chonky_cat() {
+    for model in ["Mistral Large 3", "mistral-large-latest", "ml4", "le-chonk"] {
+        assert!(
+            CatVariant::from_model(model) == CatVariant::LeChonk,
+            "{model}"
+        );
+    }
+    for model in ["Medium", "devstral-2", "mistral-small"] {
+        assert!(
+            CatVariant::from_model(model) == CatVariant::LeChat,
+            "{model}"
+        );
+    }
+}
+
+#[test]
+fn a_model_switch_swaps_the_cat_sprite() {
+    let width = |banner: &Banner| {
+        banner
+            .chat_frame()
+            .lines()
+            .map(|row| row.chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let mut banner = Banner::default();
+    let classic = width(&banner);
+
+    banner.sync_model_variant(&config("Mistral Large 3", "off", json!({})));
+    let chonk = width(&banner);
+    assert!(chonk > classic, "{chonk} > {classic}");
+
+    banner.sync_model_variant(&config("Medium", "off", json!({})));
+    assert_eq!(width(&banner), classic);
+}
+
+#[test]
+fn every_cat_keeps_the_text_at_column_14() {
+    for model in ["Medium", "Mistral Large 3"] {
+        let config = config(model, "off", json!({}));
+        let mut banner = Banner::default();
+        banner.sync_model_variant(&config);
+        assert!(
+            banner
+                .chat_frame()
+                .lines()
+                .all(|row| row.chars().count() < 14),
+            "{model}"
+        );
+        let info: String = text(&banner, &config)[1].chars().skip(14).collect();
+        assert!(info.starts_with("Mistral Vibe"), "{model}: {info}");
+    }
+}
+
+#[test]
+fn the_cat_uses_the_banner_text_color() {
+    let config = config("Medium", "off", json!({}));
+    let lines = Banner::default().view(&config, 120);
+    let row = &lines.lines()[1];
+    assert_eq!(
+        row.spans[0].style.fg,
+        Some(vibe_rs::ui::theme::foreground())
+    );
+}

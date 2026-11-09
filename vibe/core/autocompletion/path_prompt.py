@@ -4,8 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from vibe.core.session.title_format import MentionSegment, TextSegment, TitleSegment
-from vibe.core.types import IMAGE_EXTENSIONS
+from vibe.utils.images import IMAGE_EXTENSIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,10 +64,7 @@ def _extract_candidate(message: str, start: int) -> tuple[str | None, int]:
 
     quote = message[start]
     if quote in {"'", '"'}:
-        end_quote = message.find(quote, start + 1)
-        if end_quote == -1:
-            return None, start
-        return message[start + 1 : end_quote], end_quote + 1
+        return _extract_quoted_candidate(message, start + 1, quote)
 
     end = start
     while end < len(message) and _is_path_char(message[end]):
@@ -78,6 +74,24 @@ def _extract_candidate(message: str, start: int) -> tuple[str | None, int]:
         return None, start
 
     return message[start:end], end
+
+
+def _extract_quoted_candidate(
+    message: str, start: int, quote: str
+) -> tuple[str | None, int]:
+    candidate: list[str] = []
+    pos = start
+    while pos < len(message):
+        char = message[pos]
+        if char == "\\" and pos + 1 < len(message) and message[pos + 1] == quote:
+            candidate.append(quote)
+            pos += 2
+            continue
+        if char == quote:
+            return "".join(candidate), pos + 1
+        candidate.append(char)
+        pos += 1
+    return None, start
 
 
 def _is_path_char(char: str) -> bool:
@@ -90,14 +104,15 @@ def _to_resource(candidate: str, base_dir: Path) -> PathResource | None:
 
     try:
         candidate_path = Path(candidate).expanduser()
-    except RuntimeError:
-        return None
-    resolved = (
-        candidate_path if candidate_path.is_absolute() else base_dir / candidate_path
-    )
-    resolved = resolved.resolve()
-
-    if not resolved.exists():
+        resolved = (
+            candidate_path
+            if candidate_path.is_absolute()
+            else base_dir / candidate_path
+        )
+        resolved = resolved.resolve()
+        if not resolved.exists():
+            return None
+    except (RuntimeError, OSError):
         return None
 
     kind: Literal["file", "folder", "image"]
@@ -119,35 +134,3 @@ def _dedupe_resources(resources: list[PathResource]) -> list[PathResource]:
         seen.add(resource.path)
         unique.append(resource)
     return unique
-
-
-def build_title_segments(
-    message: str, *, base_dir: Path | None = None
-) -> list[TitleSegment]:
-    if not message:
-        return []
-
-    resolved_base = (base_dir or Path.cwd()).resolve()
-    segments: list[TitleSegment] = []
-    text_buf: list[str] = []
-    pos = 0
-
-    def flush_text() -> None:
-        if text_buf:
-            segments.append(TextSegment(text="".join(text_buf)))
-            text_buf.clear()
-
-    while pos < len(message):
-        if _is_path_anchor(message, pos):
-            candidate, new_pos = _extract_candidate(message, pos + 1)
-            if candidate and (resource := _to_resource(candidate, resolved_base)):
-                flush_text()
-                segments.append(MentionSegment(name=resource.path.name))
-                pos = new_pos
-                continue
-
-        text_buf.append(message[pos])
-        pos += 1
-
-    flush_text()
-    return segments

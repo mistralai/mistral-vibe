@@ -1,439 +1,370 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
-from typing import Any, ClassVar
+from collections.abc import AsyncGenerator, Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Literal
 from unittest.mock import AsyncMock, patch
 
-import keyring
-from keyring.backend import KeyringBackend
-import keyring.errors
+import anyio
+import httpx2
 from mcp.client.auth import OAuthFlowError
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 import pytest
 
-from vibe.core.auth.mcp_oauth import (
-    Fingerprint,
-    KeyringTokenStorage,
-    MCPOAuthInvalidGrant,
-    MCPOAuthLoginFailed,
-    MCPOAuthTransientRefreshError,
-)
 from vibe.core.config import MCPOAuth, MCPStreamableHttp
-from vibe.core.tools.base import BaseToolConfig, InvokeContext, ToolError
-from vibe.core.tools.mcp import AuthStatus, MCPRegistry, MCPToolResult, RemoteTool
-from vibe.core.tools.mcp.tools import (
-    MCPHttpOAuthRuntime,
-    _OpenArgs,
-    create_mcp_http_proxy_tool_class,
+from vibe.core.tools.mcp import MCPRegistry, RemoteTool, tools as mcp_tools
+from vibe.core.tools.mcp.authorization import (
+    MCPAuthorizationRef,
+    MCPAuthorizationRequired,
+    MCPAuthorizationResult,
+    MCPAuthorizationSnapshot,
 )
+from vibe.core.tools.mcp.tools import is_authorization_rejection
 
 
-class MemoryKeyring(KeyringBackend):
-    priority: ClassVar[Any] = 100
-
-    def __init__(self) -> None:
-        self.store: dict[tuple[str, str], str] = {}
-
-    def get_password(self, service: str, username: str) -> str | None:
-        return self.store.get((service, username))
-
-    def set_password(self, service: str, username: str, password: str) -> None:
-        self.store[(service, username)] = password
-
-    def delete_password(self, service: str, username: str) -> None:
-        if (service, username) not in self.store:
-            raise keyring.errors.PasswordDeleteError()
-        del self.store[(service, username)]
-
-
-@pytest.fixture
-def memory_keyring() -> Iterator[MemoryKeyring]:
-    original = keyring.get_keyring()
-    fake = MemoryKeyring()
-    keyring.set_keyring(fake)
-    try:
-        yield fake
-    finally:
-        keyring.set_keyring(original)
-
-
-def _oauth_server(
-    *,
-    name: str = "linear",
-    url: str = "https://mcp.example.com/mcp",
-    scopes: list[str] | None = None,
-) -> MCPStreamableHttp:
+def _oauth_server() -> MCPStreamableHttp:
     return MCPStreamableHttp(
-        name=name,
+        name="linear",
         transport="streamable-http",
-        url=url,
-        auth=MCPOAuth(type="oauth", scopes=scopes if scopes is not None else ["read"]),
+        url="https://mcp.example.com/mcp",
+        auth=MCPOAuth(type="oauth", scopes=["read"]),
     )
 
 
-def _grouped(exc: Exception) -> ExceptionGroup:
-    # streamable_http_client surfaces auth-flow errors wrapped in a task-group
-    # ExceptionGroup, never bare. Tests must reproduce that shape.
-    return ExceptionGroup("unhandled errors in a TaskGroup", [exc])
+def _reference() -> MCPAuthorizationRef:
+    return MCPAuthorizationRef(
+        server_name="linear",
+        server_fingerprint="fingerprint",
+        kind="oauth",
+        descriptor_revision="descriptor-1",
+    )
 
 
-async def _save_valid_oauth_state(srv: MCPStreamableHttp) -> None:
-    storage = KeyringTokenStorage(alias=srv.name)
-    await storage.set_tokens(
-        OAuthToken(
-            access_token="ACCESS",
-            token_type="Bearer",
-            expires_in=3600,
-            refresh_token="REFRESH",
+def _snapshot(
+    connection_revision: str = "connection-1",
+    descriptor_revision: str = "descriptor-1",
+    *,
+    headers: Mapping[str, str] | None = None,
+    expires_at: datetime | None = None,
+) -> MCPAuthorizationSnapshot:
+    return MCPAuthorizationSnapshot(
+        headers=headers or {"Authorization": "Bearer token"},
+        connection_revision=connection_revision,
+        descriptor_revision=descriptor_revision,
+        expires_at=expires_at,
+    )
+
+
+@dataclass
+class FakeAuthorizationProvider:
+    resolved: MCPAuthorizationResult
+    rejected: MCPAuthorizationResult | None = None
+    resolve_calls: list[MCPAuthorizationRef] = field(default_factory=list)
+    reject_calls: list[tuple[MCPAuthorizationRef, str, str]] = field(
+        default_factory=list
+    )
+
+    async def resolve(self, reference: MCPAuthorizationRef) -> MCPAuthorizationResult:
+        self.resolve_calls.append(reference)
+        return self.resolved
+
+    async def reject(
+        self,
+        reference: MCPAuthorizationRef,
+        *,
+        observed_connection_revision: str,
+        reason: Literal["http_unauthorized", "mcp_unauthorized"],
+    ) -> MCPAuthorizationResult:
+        self.reject_calls.append((reference, observed_connection_revision, reason))
+        return self.rejected or MCPAuthorizationRequired(
+            reason="rejected",
+            descriptor_revision=self.resolved.descriptor_revision,
+            observed_connection_revision=observed_connection_revision,
         )
+
+
+def _configure(
+    registry: MCPRegistry,
+    provider: FakeAuthorizationProvider,
+    *,
+    sink: AsyncMock | None = None,
+) -> None:
+    registry.configure_authorization(
+        provider, {"linear": _reference()}, required_sink=sink
     )
-    await Fingerprint.compute(srv).save(srv.name)
 
 
-class TestMCPRegistryOAuthDiscovery:
+def _http_status_error(status_code: int) -> httpx2.HTTPStatusError:
+    request = httpx2.Request("POST", "https://mcp.example.com/mcp")
+    response = httpx2.Response(status_code, request=request)
+    return httpx2.HTTPStatusError(
+        f"HTTP {status_code}", request=request, response=response
+    )
+
+
+def _unauthorized() -> httpx2.HTTPStatusError:
+    return _http_status_error(401)
+
+
+def test_authorization_rejection_uses_typed_invalid_credential_failures_only() -> None:
+    """*Prepare*: Typed 401, typed 403, OAuth-flow, and misleading string failures.
+    *Do*: Classify each failure at the legacy MCP transport boundary.
+    *Assert*: Only invalid-credential types trigger credential rejection.
+    """
+    # Prepare
+    failures = (
+        _http_status_error(401),
+        _http_status_error(403),
+        OAuthFlowError("interactive authorization is required"),
+        RuntimeError("authorization failed with status 401"),
+    )
+
+    # Do
+    classified = tuple(is_authorization_rejection(failure) for failure in failures)
+
+    # Assert
+    assert classified == (True, False, True, False)
+
+
+class TestMCPRegistryAuthorizationProvider:
     @pytest.mark.asyncio
-    async def test_missing_tokens_mark_needs_auth_without_caching(
-        self, memory_keyring: MemoryKeyring
+    async def test_disabled_source_skips_authorization_and_discovery_until_refresh(
+        self,
     ) -> None:
-        srv = _oauth_server()
+        server = _oauth_server().model_copy(update={"disabled": True})
+        provider = FakeAuthorizationProvider(_snapshot())
         registry = MCPRegistry()
+        _configure(registry, provider)
+        discover = AsyncMock(return_value=[RemoteTool(name="search")])
 
-        tools = await registry.get_tools_async([srv])
+        with patch("vibe.core.tools.mcp.registry.list_tools_http", new=discover):
+            ordinary = await registry.get_tools_async([server])
+            registry.clear()
+            refreshed = await registry.get_tools_async([server])
+
+        assert ordinary == {}
+        assert set(refreshed) == {"linear_search"}
+        assert provider.resolve_calls == [_reference()]
+        discover.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_missing_authorization_withdraws_source_and_emits_signal(
+        self,
+    ) -> None:
+        required = MCPAuthorizationRequired(
+            reason="missing", descriptor_revision="descriptor-1"
+        )
+        provider = FakeAuthorizationProvider(required)
+        sink = AsyncMock()
+        registry = MCPRegistry()
+        _configure(registry, provider, sink=sink)
+
+        with patch(
+            "vibe.core.tools.mcp.registry.list_tools_http", new=AsyncMock()
+        ) as discover:
+            tools = await registry.get_tools_async([_oauth_server()])
 
         assert tools == {}
         assert registry.needs_auth == {"linear"}
-        assert registry.status()["linear"] == AuthStatus.NEEDS_AUTH
-        assert registry.count_loaded([srv]) == 0
+        assert registry.descriptor_revision("linear") == "descriptor-1"
+        discover.assert_not_awaited()
+        sink.assert_awaited_once_with("linear", required)
 
     @pytest.mark.asyncio
-    async def test_removed_oauth_server_clears_auth_status(
-        self, memory_keyring: MemoryKeyring
+    async def test_valid_authorization_is_injected_into_discovery_and_proxy(
+        self,
     ) -> None:
-        srv = _oauth_server()
+        provider = FakeAuthorizationProvider(_snapshot())
         registry = MCPRegistry()
-
-        await registry.get_tools_async([srv])
-        await registry.get_tools_async([])
-
-        assert registry.needs_auth == set()
-        assert registry.status() == {}
-
-    @pytest.mark.asyncio
-    async def test_valid_tokens_register_tools_with_oauth_provider(
-        self, memory_keyring: MemoryKeyring
-    ) -> None:
-        srv = _oauth_server()
-        await _save_valid_oauth_state(srv)
-        registry = MCPRegistry()
+        _configure(registry, provider)
         remote = RemoteTool(name="create_issue")
 
         with patch(
             "vibe.core.tools.mcp.registry.list_tools_http",
             new=AsyncMock(return_value=[remote]),
-        ) as list_tools:
-            tools = await registry.get_tools_async([srv])
+        ) as discover:
+            tools = await registry.get_tools_async([_oauth_server()])
 
-        assert "linear_create_issue" in tools
+        assert set(tools) == {"linear_create_issue"}
         assert registry.needs_auth == set()
-        assert registry.status()["linear"] == AuthStatus.OK
-        await_args = list_tools.await_args
+        assert registry.descriptor_revision("linear") == "descriptor-1"
+        await_args = discover.await_args
         assert await_args is not None
-        assert await_args.kwargs["auth"] is not None
+        assert await_args.kwargs["headers"] == {"Authorization": "Bearer token"}
 
     @pytest.mark.asyncio
-    async def test_fingerprint_mismatch_deletes_tokens_and_requires_auth(
-        self, memory_keyring: MemoryKeyring
-    ) -> None:
-        original = _oauth_server(scopes=["read"])
-        changed = _oauth_server(scopes=["read", "write"])
-        await _save_valid_oauth_state(original)
-        storage = KeyringTokenStorage(alias="linear")
-        await storage.set_client_info(
-            OAuthClientInformationFull.model_validate({
-                "client_id": "client",
-                "redirect_uris": ["http://127.0.0.1:47823/callback"],
-                "token_endpoint_auth_method": "none",
-            })
-        )
-        registry = MCPRegistry()
-
-        tools = await registry.get_tools_async([changed])
-
-        assert tools == {}
-        assert registry.needs_auth == {"linear"}
-        assert await storage.get_tokens() is None
-        assert await storage.get_client_info() is None
-        assert await Fingerprint.load("linear") is None
-
-    @pytest.mark.asyncio
-    async def test_login_clears_needs_auth_and_rediscovers(
-        self, memory_keyring: MemoryKeyring
-    ) -> None:
-        srv = _oauth_server()
-        registry = MCPRegistry()
-        await registry.get_tools_async([srv])
-
-        async def perform_login(_srv: MCPStreamableHttp, *, on_url: object) -> None:
-            await _save_valid_oauth_state(_srv)
-
-        with (
-            patch(
-                "vibe.core.tools.mcp.registry.perform_oauth_login",
-                new=AsyncMock(side_effect=perform_login),
-            ),
-            patch(
-                "vibe.core.tools.mcp.registry.list_tools_http",
-                new=AsyncMock(return_value=[RemoteTool(name="search")]),
-            ),
-        ):
-            await registry.login("linear", on_url=AsyncMock())
-
-        assert registry.needs_auth == set()
-        assert registry.status()["linear"] == AuthStatus.OK
-        tools = await registry.get_tools_async([srv])
-        assert "linear_search" in tools
-
-    @pytest.mark.asyncio
-    async def test_login_keeps_needs_auth_when_discovery_fails(
-        self, memory_keyring: MemoryKeyring
-    ) -> None:
-        srv = _oauth_server()
-        registry = MCPRegistry()
-        await registry.get_tools_async([srv])
-
-        async def perform_login(_srv: MCPStreamableHttp, *, on_url: object) -> None:
-            await _save_valid_oauth_state(_srv)
-
-        with (
-            patch(
-                "vibe.core.tools.mcp.registry.perform_oauth_login",
-                new=AsyncMock(side_effect=perform_login),
-            ),
-            patch(
-                "vibe.core.tools.mcp.registry.list_tools_http",
-                new=AsyncMock(side_effect=RuntimeError("boom")),
-            ),
-        ):
-            with pytest.raises(MCPOAuthLoginFailed):
-                await registry.login("linear", on_url=AsyncMock())
-
-        assert registry.needs_auth == {"linear"}
-        assert registry.status()["linear"] == AuthStatus.NEEDS_AUTH
-
-    @pytest.mark.asyncio
-    async def test_mark_oauth_failure_drops_cached_tools(
-        self, memory_keyring: MemoryKeyring
-    ) -> None:
-        srv = _oauth_server()
-        await _save_valid_oauth_state(srv)
-        registry = MCPRegistry()
-
-        with patch(
-            "vibe.core.tools.mcp.registry.list_tools_http",
-            new=AsyncMock(return_value=[RemoteTool(name="search")]),
-        ):
-            tools = await registry.get_tools_async([srv])
-
-        assert "linear_search" in tools
-        assert registry.count_loaded([srv]) == 1
-
-        await registry.mark_oauth_failure("linear")
-
-        assert registry.needs_auth == {"linear"}
-        assert registry.count_loaded([srv]) == 0
-
-    @pytest.mark.asyncio
-    async def test_invalid_grant_during_discovery_deletes_tokens(
-        self, memory_keyring: MemoryKeyring
-    ) -> None:
-        srv = _oauth_server()
-        await _save_valid_oauth_state(srv)
-        storage = KeyringTokenStorage(alias="linear")
-        registry = MCPRegistry()
-
-        with patch(
-            "vibe.core.tools.mcp.registry.list_tools_http",
-            new=AsyncMock(
-                side_effect=_grouped(
-                    MCPOAuthInvalidGrant(server_alias="linear", reason="invalid_grant")
-                )
-            ),
-        ):
-            tools = await registry.get_tools_async([srv])
-
-        assert tools == {}
-        assert registry.needs_auth == {"linear"}
-        assert await storage.get_tokens() is None
-
-    @pytest.mark.asyncio
-    async def test_transient_refresh_during_discovery_keeps_tokens(
-        self, memory_keyring: MemoryKeyring
-    ) -> None:
-        srv = _oauth_server()
-        await _save_valid_oauth_state(srv)
-        storage = KeyringTokenStorage(alias="linear")
-        registry = MCPRegistry()
-
-        with patch(
-            "vibe.core.tools.mcp.registry.list_tools_http",
-            new=AsyncMock(
-                side_effect=_grouped(
-                    MCPOAuthTransientRefreshError(
-                        server_alias="linear", reason="HTTP 503"
-                    )
-                )
-            ),
-        ):
-            tools = await registry.get_tools_async([srv])
-
-        assert tools == {}
-        assert registry.needs_auth == {"linear"}
-        tokens = await storage.get_tokens()
-        assert tokens is not None
-        assert tokens.refresh_token == "REFRESH"
-
-    @pytest.mark.asyncio
-    async def test_logout_deletes_tokens_client_info_and_fingerprint(
-        self, memory_keyring: MemoryKeyring
-    ) -> None:
-        srv = _oauth_server()
-        await _save_valid_oauth_state(srv)
-        storage = KeyringTokenStorage(alias="linear")
-        await storage.set_client_info(
-            OAuthClientInformationFull.model_validate({
-                "client_id": "client",
-                "redirect_uris": ["http://127.0.0.1:47823/callback"],
-                "token_endpoint_auth_method": "none",
-            })
-        )
-        registry = MCPRegistry()
-        with patch(
-            "vibe.core.tools.mcp.registry.list_tools_http",
-            new=AsyncMock(return_value=[RemoteTool(name="search")]),
-        ):
-            await registry.get_tools_async([srv])
-
-        await registry.logout("linear")
-
-        assert registry.needs_auth == {"linear"}
-        assert await storage.get_tokens() is None
-        assert await Fingerprint.load("linear") is None
-        assert await storage.get_client_info() is None
-
-
-class TestMCPHttpOAuthProxy:
-    @pytest.mark.asyncio
-    async def test_invalid_grant_marks_auth_failure_with_stop_turn_message(
+    async def test_stale_rejection_retries_discovery_with_new_authorization(
         self,
     ) -> None:
-        callback = AsyncMock()
-        tool_cls = create_mcp_http_proxy_tool_class(
-            url="https://mcp.example.com/mcp",
-            remote=RemoteTool(name="search"),
-            alias="linear",
-            oauth_runtime=MCPHttpOAuthRuntime(
-                lock=asyncio.Lock(), failure_callback=callback
+        provider = FakeAuthorizationProvider(
+            _snapshot(),
+            rejected=_snapshot(
+                "connection-2", headers={"Authorization": "Bearer replacement"}
             ),
         )
-        tool = tool_cls.from_config(lambda: BaseToolConfig())
+        registry = MCPRegistry()
+        _configure(registry, provider)
+        discover = AsyncMock(side_effect=[_unauthorized(), [RemoteTool(name="search")]])
 
-        with patch(
-            "vibe.core.tools.mcp.tools.call_tool_http",
-            new=AsyncMock(
-                side_effect=_grouped(
-                    MCPOAuthInvalidGrant(server_alias="linear", reason="invalid_grant")
-                )
-            ),
-        ):
-            with pytest.raises(ToolError, match="lost authentication"):
-                async for _ in tool.run(_OpenArgs(), InvokeContext(tool_call_id="tc")):
-                    pass
+        with patch("vibe.core.tools.mcp.registry.list_tools_http", new=discover):
+            tools = await registry.get_tools_async([_oauth_server()])
 
-        callback.assert_awaited_once_with("linear")
+        assert set(tools) == {"linear_search"}
+        assert provider.reject_calls == [
+            (_reference(), "connection-1", "http_unauthorized")
+        ]
+        assert discover.await_args_list[1].kwargs["headers"] == {
+            "Authorization": "Bearer replacement"
+        }
 
     @pytest.mark.asyncio
-    async def test_transient_refresh_error_keeps_credentials(self) -> None:
-        callback = AsyncMock()
-        tool_cls = create_mcp_http_proxy_tool_class(
-            url="https://mcp.example.com/mcp",
-            remote=RemoteTool(name="search"),
-            alias="linear",
-            oauth_runtime=MCPHttpOAuthRuntime(
-                lock=asyncio.Lock(), failure_callback=callback
-            ),
+    async def test_current_rejection_withdraws_source_and_emits_signal(self) -> None:
+        required = MCPAuthorizationRequired(
+            reason="rejected",
+            descriptor_revision="descriptor-2",
+            observed_connection_revision="connection-1",
         )
-        tool = tool_cls.from_config(lambda: BaseToolConfig())
+        provider = FakeAuthorizationProvider(_snapshot(), rejected=required)
+        sink = AsyncMock()
+        registry = MCPRegistry()
+        _configure(registry, provider, sink=sink)
 
         with patch(
-            "vibe.core.tools.mcp.tools.call_tool_http",
-            new=AsyncMock(
-                side_effect=_grouped(
-                    MCPOAuthTransientRefreshError(
-                        server_alias="linear", reason="HTTP 503"
-                    )
-                )
-            ),
+            "vibe.core.tools.mcp.registry.list_tools_http",
+            new=AsyncMock(side_effect=_unauthorized()),
         ):
-            with pytest.raises(ToolError, match="transient token refresh"):
-                async for _ in tool.run(_OpenArgs(), InvokeContext(tool_call_id="tc")):
-                    pass
+            tools = await registry.get_tools_async([_oauth_server()])
 
-        callback.assert_not_awaited()
+        assert tools == {}
+        assert registry.needs_auth == {"linear"}
+        sink.assert_awaited_once_with("linear", required)
 
-    @pytest.mark.asyncio
-    async def test_oauth_flow_error_does_not_delete_credentials(self) -> None:
-        callback = AsyncMock()
-        tool_cls = create_mcp_http_proxy_tool_class(
-            url="https://mcp.example.com/mcp",
-            remote=RemoteTool(name="search"),
-            alias="linear",
-            oauth_runtime=MCPHttpOAuthRuntime(
-                lock=asyncio.Lock(), failure_callback=callback
-            ),
-        )
-        tool = tool_cls.from_config(lambda: BaseToolConfig())
 
-        with patch(
-            "vibe.core.tools.mcp.tools.call_tool_http",
-            new=AsyncMock(
-                side_effect=_grouped(OAuthFlowError("needs interactive login"))
-            ),
-        ):
-            with pytest.raises(ToolError, match="needs re-authentication"):
-                async for _ in tool.run(_OpenArgs(), InvokeContext(tool_call_id="tc")):
-                    pass
+@pytest.mark.asyncio
+async def test_a_401_from_the_mcp_server_reads_as_an_authorization_rejection() -> None:
+    """*Prepare*: An MCP server that answers the handshake with HTTP 401.
+    *Do*: List its tools through the real MCP SDK and Vibe's MCP HTTP client.
+    *Assert*: The failure reads as an authorization rejection. The SDK alone
+        reports any HTTP error as one generic protocol error, which would leave
+        a rejected credential in place instead of asking for a new one.
+    """
+    # Prepare
+    original = mcp_tools.create_vibe_mcp_http_client
 
-        callback.assert_not_awaited()
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(401, request=request)
 
-    @pytest.mark.asyncio
-    async def test_oauth_lock_serializes_concurrent_calls(self) -> None:
-        active = 0
-        max_active = 0
+    def build_client(
+        headers: dict[str, str] | None, *, auth: httpx2.Auth | None = None
+    ) -> httpx2.AsyncClient:
+        client = original(headers, auth=auth)
+        client._transport = httpx2.MockTransport(respond)
+        return client
 
-        async def fake_call(*_args: object, **_kwargs: object) -> MCPToolResult:
-            nonlocal active, max_active
-            active += 1
-            max_active = max(max_active, active)
-            await asyncio.sleep(0.01)
-            active -= 1
-            return MCPToolResult(server="linear", tool="search")
-
-        tool_cls = create_mcp_http_proxy_tool_class(
-            url="https://mcp.example.com/mcp",
-            remote=RemoteTool(name="search"),
-            alias="linear",
-            oauth_runtime=MCPHttpOAuthRuntime(
-                lock=asyncio.Lock(), failure_callback=AsyncMock()
-            ),
+    # Do
+    with (
+        patch.object(mcp_tools, "create_vibe_mcp_http_client", build_client),
+        pytest.raises(BaseException) as raised,
+    ):
+        await mcp_tools.list_tools_http(
+            "https://mcp.example.com/mcp", startup_timeout_sec=5
         )
 
-        async def run_once() -> None:
-            tool = tool_cls.from_config(lambda: BaseToolConfig())
-            async for _ in tool.run(_OpenArgs(), InvokeContext(tool_call_id="tc")):
-                pass
+    # Assert
+    assert is_authorization_rejection(raised.value)
 
-        with patch("vibe.core.tools.mcp.tools.call_tool_http", new=fake_call):
-            await asyncio.gather(run_once(), run_once())
 
-        assert max_active == 1
+@pytest.mark.asyncio
+async def test_an_oauth_provider_answers_a_401_before_it_reads_as_a_rejection() -> None:
+    """*Prepare*: An auth that answers a 401 with a fresh credential.
+    *Do*: Send the request through Vibe's MCP HTTP client.
+    *Assert*: The retried request succeeds: the 401 reaches the auth first.
+    """
+
+    # Prepare
+    class _FreshCredential(httpx2.Auth):
+        async def async_auth_flow(
+            self, request: httpx2.Request
+        ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
+            response = yield request
+            if response.status_code == httpx2.codes.UNAUTHORIZED:
+                request.headers["Authorization"] = "Bearer fresh"
+                yield request
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        fresh = request.headers.get("Authorization") == "Bearer fresh"
+        return httpx2.Response(200 if fresh else 401, request=request)
+
+    client = mcp_tools.create_vibe_mcp_http_client({}, auth=_FreshCredential())
+    client._transport = httpx2.MockTransport(respond)
+
+    # Do
+    async with client:
+        response = await client.post("https://mcp.example.com/mcp")
+
+    # Assert
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_an_auth_is_released_after_a_failed_request() -> None:
+    """*Prepare*: An auth that holds an anyio lock while its flow runs, as the
+        MCP OAuth provider does, and a server that is down once.
+    *Do*: Send two requests through Vibe's MCP HTTP client.
+    *Assert*: The second request succeeds: the first released the lock.
+    """
+    # Prepare
+    lock = anyio.Lock()
+
+    class _LockingAuth(httpx2.Auth):
+        async def async_auth_flow(
+            self, request: httpx2.Request
+        ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
+            async with lock:
+                yield request
+
+    answered: list[int] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        if not answered:
+            answered.append(0)
+            raise httpx2.ConnectError("down", request=request)
+        return httpx2.Response(200, request=request)
+
+    client = mcp_tools.create_vibe_mcp_http_client({}, auth=_LockingAuth())
+    client._transport = httpx2.MockTransport(respond)
+
+    # Do
+    async with client:
+        with pytest.raises(httpx2.ConnectError):
+            await client.post("https://mcp.example.com/mcp")
+        response = await asyncio.wait_for(
+            client.post("https://mcp.example.com/mcp"), timeout=5
+        )
+
+    # Assert
+    assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_a_refused_session_end_is_not_an_error() -> None:
+    """*Prepare*: A server that refuses to end a session (405 on DELETE).
+    *Do*: End the session through Vibe's MCP HTTP client.
+    *Assert*: The 405 comes back as a response: only a POST's HTTP error is
+        raised, so the SDK's normal teardown logs no warning.
+    """
+
+    # Prepare
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(405, request=request)
+
+    client = mcp_tools.create_vibe_mcp_http_client({})
+    client._transport = httpx2.MockTransport(respond)
+
+    # Do
+    async with client:
+        response = await client.delete("https://mcp.example.com/mcp")
+
+    # Assert
+    assert response.status_code == 405

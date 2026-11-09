@@ -6,12 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from vibe.core.session.image_snapshot import (
-    ImageSnapshotError,
-    snapshot_image,
-    snapshot_image_bytes,
-)
-from vibe.core.types import MAX_IMAGE_BYTES, FileImageSource, InlineImageSource
+from vibe.core.session.image_snapshot import ImageSnapshotError, snapshot_image
+from vibe.core.types import FileImageSource, InlineImageSource
+from vibe.utils.images import MAX_IMAGE_BYTES
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
 
@@ -48,15 +45,16 @@ def test_snapshot_image_is_idempotent_on_same_bytes(tmp_path: Path) -> None:
     assert sum(1 for _ in (session_dir / "attachments").iterdir()) == 1
 
 
-def test_snapshot_image_returns_source_when_session_dir_is_none(tmp_path: Path) -> None:
+def test_snapshot_image_inlines_when_session_dir_is_none(tmp_path: Path) -> None:
     src = tmp_path / "screenshot.png"
     src.write_bytes(PNG_BYTES)
 
     att = snapshot_image(src, alias="screenshot.png", session_dir=None)
 
-    assert isinstance(att.source, FileImageSource)
-    assert att.source.path == src.resolve()
+    assert isinstance(att.source, InlineImageSource)
+    assert base64.b64decode(att.source.data) == PNG_BYTES
     assert att.alias == "screenshot.png"
+    assert att.mime_type == "image/png"
 
 
 def test_snapshot_image_rejects_non_image_extension(tmp_path: Path) -> None:
@@ -81,52 +79,9 @@ def test_snapshot_image_normalizes_jpg_to_jpeg_mime(tmp_path: Path) -> None:
     assert att.mime_type == "image/jpeg"
 
 
-def test_snapshot_image_bytes_inlines_when_session_dir_is_none() -> None:
-    att = snapshot_image_bytes(
-        PNG_BYTES, alias="pasted.png", mime_type="image/png", session_dir=None
-    )
-
-    assert isinstance(att.source, InlineImageSource)
-    assert att.source.data == base64.b64encode(PNG_BYTES).decode("ascii")
-    assert att.alias == "pasted.png"
-    assert att.mime_type == "image/png"
-
-
-def test_snapshot_image_bytes_writes_file_when_session_dir_is_set(
-    tmp_path: Path,
-) -> None:
-    session_dir = tmp_path / "session"
-
-    att = snapshot_image_bytes(
-        PNG_BYTES, alias="pasted.png", mime_type="image/png", session_dir=session_dir
-    )
-
-    digest = hashlib.sha1(PNG_BYTES, usedforsecurity=False).hexdigest()
-    assert isinstance(att.source, FileImageSource)
-    assert att.source.path == (session_dir / "attachments" / f"{digest}.png").resolve()
-    assert att.source.path.read_bytes() == PNG_BYTES
-
-
-def test_snapshot_image_bytes_rejects_unsupported_mime() -> None:
-    with pytest.raises(ImageSnapshotError):
-        snapshot_image_bytes(
-            PNG_BYTES, alias="x", mime_type="image/tiff", session_dir=None
-        )
-
-
 def test_snapshot_image_rejects_oversized_file(tmp_path: Path) -> None:
     src = tmp_path / "big.png"
     src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * MAX_IMAGE_BYTES)
 
     with pytest.raises(ImageSnapshotError):
         snapshot_image(src, alias="big.png", session_dir=None)
-
-
-def test_snapshot_image_bytes_rejects_oversized_data() -> None:
-    with pytest.raises(ImageSnapshotError):
-        snapshot_image_bytes(
-            b"x" * (MAX_IMAGE_BYTES + 1),
-            alias="big.png",
-            mime_type="image/png",
-            session_dir=None,
-        )

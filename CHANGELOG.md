@@ -5,6 +5,1382 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-11-03
+
+### Added
+
+- New enable_file_autocomplete setting (and VIBE_ENABLE_FILE_AUTOCOMPLETE) turns off @ file completion and its background file index.
+- A Jump to bottom button appears over a scrolled-up conversation and returns to the latest message.
+- Ctrl+C closes the PR/MR list, and Home, End, PageUp and PageDown move its highlight.
+- New `/context` command (also opened by clicking the footer's token counter) shows what fills the context window: system prompt, tool definitions, skills, conversation, free space and the auto-compaction buffer, with per-category token estimates.
+- A copy icon after the footer's working directory copies the whole path.
+- The footer shows how much of your monthly Vibe Code usage is spent, turning yellow then red as it runs out, or marked PAYG when pay-as-you-go covers usage past it.
+- The Nix flake exposes `packages.mistral-vibe`, an overlay and `nix flake check` checks
+- The agent can open an image file with `read_file` and see it, on a model that reads images.
+- `Ctrl+R` searches your prompt history and loads the selected prompt into the input.
+- Experimental: the Mistral MCP built-in connector, behind the `experimental_enable_mistral_mcp_connector` setting
+- New `mistral-dark` and `mistral-light` themes built from the Mistral brand palette.
+
+### Changed
+
+- On macOS, new worktrees of a trusted repository are now cloned from a template checkout by default; set `worktree_copy_on_write = false` to turn this off
+- `experimental_worktree_copy_on_write` is renamed to `worktree_copy_on_write`, and existing configs are updated on startup
+- Connector tools meant only for their MCP App are no longer offered to the model
+- Errors, warnings and startup config issues now appear as lines in the conversation instead of pop-ups
+- Refused inputs show a notice above the input that stays until the next key
+- Experimental browser sign-in now authenticates first-party CLI requests without an API key.
+- Experimental browser sign-in reads account and tenant information from the account-context endpoint.
+- The Rust CLI now honors file_watcher_for_autocomplete: turned off, the file index is built once without watching the filesystem.
+- PR/MR rows lead with a dot colored by their state, and CI checks show a colored ✓, ✗ or ○ with failures first.
+- Inside a tmux session with `mouse off` (the default before tmux 3.8), Vibe leaves the mouse to the terminal, so its native selection and copy work without holding a modifier key.
+- The footer's PR/MR link now sits after the working directory, led by a dot colored by its state, and the context gauge reads `ctx 23k/600k`.
+- On narrow terminals the footer first turns its gauges into one-cell levels and drops the PR status, then shortens the working directory.
+- The footer's context window reads as a bar, and both gauges are the first to shrink to a one-cell level on narrow terminals.
+- The input box borders stay neutral; only the mode label is colored.
+- The plan name reads Free, Pro or Team.
+- The model and its thinking level moved from the footer to the top border of the input box, where a click opens /model.
+- A generic subagent now runs the instructions its parent writes for its task
+- The Nix package no longer rebuilds when unrelated files such as tests or docs change
+- A pull request's status counts only its required checks and their latest run; skipped and neutral checks pass
+- A pull request whose optional checks failed no longer reads as blocked
+- The pull requests of open sessions refresh every minute, at about one GitHub API point per minute
+- Voice recording moved from `Ctrl+R` to `Ctrl+T`.
+- `/whoami` now shows the last 4 characters of the API key instead of the first ones, matching Studio
+- Brand accents now use the Mistral palette, and the loading animation cycles through three softer oranges.
+- Under the `ansi-dark` and `ansi-light` themes, the input box and popup borders are dimmed so they stand out less.
+
+### Fixed
+
+- Interrupting a `!` shell command now also stops the processes it started, instead of hanging until they exit
+- Saving a setting, an MCP server change, an agent install, or an "always allow" approval no longer erases config.toml changes made by hand or by another Vibe session.
+- Saving settings no longer replaces a symlinked `config.toml` with a regular file
+- Sessions no longer crash, or fail to start or resume, when a tool result or MCP tool schema contains an integer above 2^53.
+- MCP servers whose sign-in is hosted elsewhere (Cloudflare Access, Keycloak, Consensus) now renew their login silently instead of asking you to sign in again each time it expires
+- OIDC-authenticated model requests no longer forward tenant headers through redirects.
+- OIDC refresh no longer restores cleared or replaced credentials, and rejected model tokens require renewed authentication.
+- OIDC account and tenant switches no longer reuse another account’s cached settings or connector catalog.
+- `/retry` now works after interrupting a response with Esc, and says so when there is nothing to retry instead of doing nothing.
+- A retried response replaces the unfinished one instead of being appended to it, which showed the same text twice.
+- Smart approve no longer asks for approval on every tool call when its model cannot turn reasoning off, such as GLM 5.3 or Mistral Large 4.
+- On Linux, starting Vibe in a folder with symlinked directories no longer pins a CPU core and grows memory without limit.
+- The PR/MR list keeps its height and its highlight, and its CI checks stay readable at any length and width.
+- After `/clear`, `/resume`, a rewind or a compaction, the footer and the PR/MR list show the new session's PRs and MRs.
+- A `default_agent` set in your config (for example `auto-approve`) is no longer replaced by smart approve when new sessions start.
+- Starting several worktree sessions in the same repository at once no longer fails one of them with "could not lock config file".
+- On Windows, sessions no longer fail with "Access is denied" (WinError 5) when an antivirus or indexer briefly holds a session file open.
+- Copying inside tmux now goes through tmux's own clipboard forwarding, so it reaches the terminal clipboard without enabling passthrough and also fills the tmux paste buffer.
+- Subagents can be spawned from a session forked with `/branch`.
+- A connector connected, disconnected or revoked now reaches every open session at its next turn, without a restart
+- Listing or opening sessions with a Vibe config that breaks a rule now says which setting to fix, instead of an internal error
+- Mistral Large 4 turns with no thinking level set no longer fail with a 400, and its thinking picker offers Low, High and Max when its config lists no levels.
+- `nix develop` builds again and ships the Rust toolchain it needs
+- Pull request titles come from GitHub or GitLab instead of the creation command, so heredoc and variable titles show correctly
+- A GitLab merge request with skipped or allowed-to-fail jobs no longer shows failing or pending checks
+- Starting a queued message no longer stalls for up to a few hundred milliseconds when many MCP or connector tools are loaded.
+- `read_file` refuses a binary file instead of returning it as unreadable text.
+- Resuming a session that was closed mid-turn opens right away, and the interrupted turn keeps running so you can follow it, approve its tools or interrupt it
+- The welcome banner cat now uses the theme's text color instead of the terminal default.
+
+### Removed
+
+- Floating notification popups in the bottom-right corner
+- The `smart_approve_default` setting: set `default_agent = "smart-approve"` instead.
+
+## [3.0.4] - 2026-10-30
+
+### Added
+
+- `/release-notes` (alias `/whatsnew`) browses the release notes of every Vibe version in a searchable, full-screen view.
+- Provider option `preserve_api_base = true` keeps a custom `api_base` that `/whoami` would otherwise overwrite (split-horizon / proxied deployments)
+- `VIBE_TERMINAL_KEY` names the terminal `--continue` uses; an empty value makes it ignore the terminal
+- Setup warns when an API key set in your shell overrides the key it saves.
+- `/whoami` shows which credential source (shell, `.env`, or keyring) is in use.
+- `vibe -p --system-prompt-file PATH` replaces Vibe's own instructions in the system prompt with the file's text.
+- `agent_max_output_tokens` and `compaction_max_output_tokens` cap the output of every agent and compaction request on any provider, held to what the model and its context window leave room for; at 0, the default, a cap is still sent only where the provider requires one.
+- `vibe -p --model ALIAS` runs with that model without changing your default.
+- New `/fork` alias for the `/branch` command, which forks the current conversation into a new resumable session.
+- Experimental `experimental_worktree_copy_on_write` setting on macOS: new worktrees of a trusted repository are cloned from a template checkout, so they use less disk and are created faster
+- A model's thinking_levels can list levels of its own, such as ["low", "turbo"]: each one is offered in /thinking and sent to the provider as written. On a Mistral provider, a config warning flags a level the Mistral SDK does not support, which the SDK leaves out of the request
+
+### Changed
+
+- Sessions open faster: Vibe reuses the loaded config until a config file, trust decision or environment variable changes.
+- After an upgrade, a new session lists what is new in every release since your last visit, not only the latest one; resumed sessions no longer show it below the conversation.
+- Opening or resuming a session no longer waits for your organization's settings when a copy is cached; Vibe checks for changes every 10 minutes in the background and retries a failed check after a delay.
+- A change to your organization's settings now reaches open sessions at their next turn, taking away tools, connectors, MCP servers or a mode it disables.
+- `/mcp` always opens its panel, showing empty sections when nothing is configured or connectors fail to load.
+- Slash commands no longer echo in the transcript, and pickers no longer print open or close messages.
+- Command outcomes and errors show as `✓`, `⚠` or `✕` status rows, and content commands such as `/help` and `/status` render like an assistant reply under their own heading.
+- Hooks imported from other agents' plugins are reported as not supported yet instead of being silently ignored.
+- Markdown in assistant messages is easier to read on every theme: headings rank by style, links and inline code stand out, quotes are muted, and table, rule and quote lines share one subtle color.
+- Code blocks show their language in the top border, and highlighted code is easier to read: function names are no longer underlined, plain identifiers keep the body color, and token colors stay readable on light themes.
+- Links and plain code text outside markdown (diffs, file bodies, approvals, bottom bar) use the new link and body text colors.
+- `vibe-acp --setup` now runs the same onboarding wizard as `vibe --setup`.
+- Image descriptions, worktree names, teleport summaries, turn narration and the fast-model check now need a provider that reports token usage and a finish reason, like agent turns.
+- Without such a provider, utility features stay on the active model.
+- The subagent list now hides waiting subagents once their work ends, behind a `N subagents waiting` row; press `a` on the focused list to show all subagents.
+- Vibe no longer loads custom Python tools from `~/.vibe/tools/` or `.vibe/tools/`: each file now shows a warning at startup. Ask Vibe to migrate it to a skill.
+- Settings under a built-in tool's name, such as `[tools.web_fetch] proxy_host`, are now checked even when a custom tool of that name used them.
+- A user skill named vibe or skill-creator is no longer silently skipped
+- Opening a stored session reads only its latest history, so long sessions open faster
+- An unknown thinking_levels value is kept instead of ignored: any word is a level. A value that is not a word, such as a blank, is still ignored with a warning
+- A thinking level that is neither a standard level nor in the model's thinking_levels is now sent as written with a config warning, instead of being dropped
+- Levels the Mistral model catalog lists are kept as written, including ones Vibe has no name for
+- On providers that use the Chat Completions or Responses API, a model whose thinking_levels lists minimal sends minimal instead of low
+
+### Fixed
+
+- Teleport and worktrees work in repositories that use Git's reftable ref format
+- Messages the model writes before calling a tool now show in the transcript instead of staying hidden.
+- On Windows, choosing "Update now" prints the upgrade command to run after closing Vibe instead of upgrading in place, which could leave the install broken
+- A follow-up prompt queued while busy no longer reappears below newer messages.
+- `vibe --continue` reopens the last session of the current terminal in the current folder again, instead of the folder's most recent session from any terminal
+- `vibe -c -p` continues a session of the current folder instead of the most recent session anywhere on the machine
+- A SOCKS proxy in the shell environment no longer breaks session creation.
+- Hooks shipped in a native Vibe plugin's `ai.mistral.vibe/hooks.toml` now run, from the session's copy of the plugin with `PLUGIN_ROOT` and `PLUGIN_DATA` set, like the plugin's MCP servers.
+- Inline code is readable on light themes, and ANSI themes pick link, code and function colors that suit a light or dark terminal.
+- Diffs highlight edited lines inside multi-line strings and comments correctly.
+- On ANSI themes, selecting a tool group or thought header now uses the same background color as the rest of the selection.
+- Text after a nested blockquote stays inside its outer quote.
+- `--setup` with a non-Mistral model (litellm, local) now offers Mistral browser sign-in alongside the provider's API key.
+- A shell `default_timeout` set without `max_timeout_seconds` loads again when it is at most 300 seconds, and runs under Vibe's 300-second maximum.
+- Rust CLI on Windows: moving the mouse no longer types escape sequences into the prompt in terminals such as IntelliJ's.
+- Model requests send a `Mistral-Vibe/<version>` User-Agent again instead of the HTTP library default, unless `extra_headers` sets one.
+- An idle Vibe no longer burns CPU, and session locks left by killed Vibe processes are cleaned up
+- Answering a subagent's question now reaches the subagent instead of leaving it stuck.
+- Questions asked by several subagents at once are shown one after another instead of the latest replacing the others.
+- A question answer the server rejects now shows a warning and reopens the question instead of failing silently.
+- Answered questions from the agent now stay in the transcript when you reopen a session.
+- Image descriptions and compaction on Mistral Large 4 no longer fail with a 400 when its config lists no thinking levels.
+- The built-in `vibe:` skills are now available in the standalone `vibe-acp` binaries.
+
+### Removed
+
+- The `api_connect_timeout`, `api_write_timeout` and `api_pool_timeout` settings no longer have any effect: connecting to the provider is now bounded by `api_timeout`.
+- The `tool_paths` setting: Vibe removes it from `config.toml` at startup and leaves the folders it listed on disk.
+
+## [3.0.3] - 2026-10-26
+
+### Added
+
+- Skills added or edited on disk are picked up by running sessions without `/reload`
+- The footer shows the active model and its thinking level next to the token counter, and updates after `/model`, `/thinking` or a resume.
+- Clicking the model in the footer opens `/model` while no turn is running, keeping the prompt being typed.
+- The `/` menu starts each skill's description with its scope (project, user or vibe), setting skills apart from built-in commands.
+- `post_agent` hooks accept `match` to run only after a given agent, or after the main agent with `match = "main"`.
+- The `post_agent` hook payload includes `agent_name`, the configuration name of the agent that finished its turn.
+- `outside_workdir = "deny"` (global or per tool) refuses file and shell access outside the working directory with a tool error instead of a prompt, so the agent keeps working.
+- Vibe now shows a warning when the model refuses a request as too long or a compaction has to shorten its inputs or summary
+- Vibe now warns at startup about settings in your config that it does not use, such as misspelt keys, and suggests the right name
+- Set `strict_config = true` (or `VIBE_STRICT_CONFIG=1`) to make Vibe refuse to start when your config has settings it does not use. A `VIBE_STRICT_CONFIG` value that is not on or off, such as `2`, is refused too
+- `vibe config schema` prints a JSON schema of every setting, including each built-in tool's settings
+- Administrators can set `VIBE_CUSTOM_CONSOLE_URL` to pin the console URL: VS Code and Vibe CLI sign-in is prefilled with that console, redirected into its normal login flow, and the domain can no longer be changed. The value may be a full URL or a bare domain; scheme-less values are upgraded to `https://` (an explicit `http://` is kept) and trailing slashes are stripped. A split-horizon API base configured for the pinned console is preserved.
+- New `artifacts/markViewed` app-server RPC: marks a session's artifacts (PRs/MRs) as viewed, persists `viewed_at` into the session logs, and announces each newly marked artifact with an `artifacts/updated` notification (Phase 3, Desktop artifact panel)
+- Session artifacts (experimental): open pull requests and merge requests linked to the session's current branch (`gh pr list --head` / `glab mr list --source-branch`) are now discovered at session load and recorded in the session logs, behind the `experimental_enable_pr_monitoring` feature flag (shared with PR/MR creation detection)
+- The bottom bar shows the session's pull requests and merge requests: a single one as a centered, clickable link (`PR #123` / `MR !7`) that opens it in your browser, or a `PRs (n)` count link that opens a modal listing every artifact with its link
+- Session artifacts (experimental): pull requests and merge requests created during a session (`gh pr create` / `glab mr create`) are now detected and recorded in the session logs, behind the `experimental_enable_pr_monitoring` feature flag
+- Session artifacts (experimental): PR/MR artifacts now sync from the provider — lifecycle state, title, branches, author, timestamps, merge commit, CI checks, and an aggregated actionability status — at session start, after each turn, and on a new `artifacts/sync` RPC; the bottom bar and artifacts modal render the status and the per-check list
+
+### Changed
+
+- `/theme`, `/log-level`, `/voice`, `/proxy-setup` and `/remote-project` now work while the agent is busy or prompts are queued.
+- An agent file named `main` is no longer loaded: the name is reserved for hook matching.
+- Shell tools set to `permission = "always"` now ask before reaching paths outside the working directory, like file tools.
+- Shell tools now treat a bare file name that is a symlink or a Windows junction, such as `cat link`, as a path, so a link pointing outside the working directory asks or is denied like any outside path.
+- On platforms without a prebuilt audio library, such as OpenBSD, editor dictation and narration are no longer installed by default; install the `voice` extra to build them from source.
+- Sending a message no longer waits for connectors or MCP servers that have cached tools: it runs on those, and they refresh in the background. A message waits only for ones with nothing cached yet, and only a call to a server still loading waits for it.
+- The app server started by the CLI and Desktop fetches the connector catalog as it starts, before any session opens.
+- Sessions opened at the same time contact each MCP server once and share what it returns.
+- New sessions start with the connectors from the last successful load instead of none.
+- Vibe now shows a warning naming each connector or MCP server that could not load, including in `vibe -p` runs and their export. A server without a connector service (self-hosted, Private Cloud) has no connectors rather than a failure to load them.
+- An MCP server found to need a login after the session starts is named with the `/mcp login` command to run.
+- MCP server tools older than six hours are refreshed in the background, and the cached tools are kept if the refresh fails.
+- **[Breaking — config]** `auto_compact_threshold = 0` is now a config error; set a positive threshold or remove it to use the model's default
+- `auto_compact_threshold` must fit the model's range; an old `-1` is removed when the config loads, so the model's default applies
+- **[Breaking — models]** A reply without token usage fails the turn; third-party model servers must support `stream_options.include_usage`
+- Context window, maximum output, image input and thinking levels come from your config, then the provider's model list, then a built-in table; unknown models use a 262,144-token window and show a warning
+- An unset `thinking` uses the model's lowest level; `off` is refused on models that always reason, such as gpt-6-astra and GLM 5.3
+- With third-party models that can turn thinking off, thinking `off` turns thinking off
+- The `xhigh` thinking level is offered for models that list it
+- **[Breaking — config]** A model's `max_output_tokens` no longer caps replies; it is only sent to providers that require an output limit
+- A model reply waits up to 12 minutes for its first output and retries once after 5 minutes without output
+- A reply stopped by a full context window counts as cut off
+- A model that can't take images gets `[Image]` in place of each image, followed by the image's file link when it has one, so the agent can open it; opening or switching to such a model in a session that holds images shows a warning. Images stay in the session, so switching to a model that reads images sends them again
+- **[Breaking — sessions]** Images in sessions saved by Vibe 3.0.2 reach a model without image input as `[Image]`, without their file link
+- Chat code blocks now sit inside a thin keyline box, making them easier to spot in the transcript.
+- A thinking level the model does not take now fails with the provider's error
+- When a model's config lists thinking_levels, the picker offers those, plus the configured thinking level if it is outside them
+- With background processes on, the model starts long builds and servers as background processes.
+- **[Breaking — shell timeouts]** Shell timeout settings that are invalid, set one without the other, or clash with the `lean` profile are now refused as config errors. An agent file with such a setting, or any other invalid one, now gives that error when you choose it, instead of "Agent not found".
+- Old user configs whose only bash timeout is `default_timeout = 300`, written by Vibe's first run, keep loading: Vibe drops that line and uses its default bash timeouts.
+- Under the `lean` profile, the shell runs commands with 1200 s by default and at most 1200 s, on Windows too.
+- A Linux wheel built from a checkout is portable (manylinux) and leaves out voice mode, even with the ALSA development files installed. For voice mode, build a wheel for your machine only with MATURIN_PEP517_ARGS="--compatibility linux".
+- The self-awareness skill now documents allowed_models gotchas: full-match regexes, hiding server-routed models, and the silent fallback of a hidden default model
+
+### Fixed
+
+- vibe-acp now exits when its client stops it, instead of sometimes running on in the background.
+- The `/` menu no longer lists a skill named like a built-in command, such as `/retry`, which always ran the built-in.
+- Allowlisted paths, both `vibe-path:` grants and path globs, now cover paths reached through system symlinks, such as `/tmp` on macOS.
+- Calling a connector or MCP server that needs (re)authorization no longer fails with "Core rejected durable input"; the tool reports that authorization is required and the turn continues.
+- Vibe installs again on OpenBSD and other platforms where the audio library used by editor voice features has no prebuilt package.
+- Sign-in works again behind a Windows proxy, honoring system proxy settings, proxy environment variables, and the configured local-address bypass.
+- Sign-in and update-check errors now name the underlying network failure and the effective proxy instead of an opaque request error.
+- A permission change applied with `/reload` now reaches custom subagents that are already running, on their next tool call.
+- An agent file Vibe cannot use is now reported with the failing field, as a TUI toast and on stderr with `-p`, instead of being dropped silently.
+- Spawning a rejected subagent type now says why it was rejected instead of reporting an unknown type.
+- Custom subagents now run on the model their `active_model` selects instead of the session's model; a model they cannot use is reported instead of silently replaced.
+- Backspace works in terminals that send Ctrl+H, such as QTerminal, and Ctrl+Alt+H, Alt+D, Alt+Enter and Ctrl+M get their usual editing meaning in the prompt.
+- The app server no longer exits with an uncaught exception when a session stops
+- Rust CLI: mouse clicks and selections in VS Code and Cursor terminals land on the pointed line instead of a line below.
+- `/clear` no longer fails with `plugin_pin_mismatch` when an installed plugin was upgraded while the CLI was running; the cleared session carries its pinned plugin environment forward.
+- Long lines of a running tool call now wrap inside its header instead of spilling to the left edge of the terminal
+- `@` file completion no longer hangs on a stuck git fsmonitor daemon, and no longer runs a repository's `core.fsmonitor` command
+- Long conversations now compact instead of failing when the summary or the rebuilt context doesn't fit
+- A session resumed on a model with a smaller context window is no longer refused because one large tool result doesn't fit: the next turn compacts it
+- A conversation larger than the model's context window fails as a context overflow instead of a generic model error
+- Switching from a reasoning model to a Mistral model without reasoning no longer fails
+- A session resumed on a model whose context window cannot hold the conversation is refused instead of failing later
+- Model settings show each model's compaction threshold, including the default one
+- With third-party providers, an image in a tool result reaches the model as `[Image]` instead of failing the turn
+- Embedded file data that is neither text nor an image reaches the model as its link instead of being dropped
+- Images in a tool result no longer send it to a file: the model gets them inline, and only long text is saved
+- When `config.toml` does not parse, app-server clients such as the desktop app now get the parse error when they list agents, skills or settings, instead of an internal error
+- Starting, resuming and switching sessions no longer waits on unreachable connectors or MCP servers.
+- Image descriptions, worktree names and other requests Vibe makes on its own now turn thinking off when it is set to off; models that can't turn it off use their lowest level
+- Bumped the Rust CLI's `rustls` dependency to address an upstream security advisory.
+- Reasoning effort max now works on Mistral models that support it, such as Mistral Large 4
+- Thinking levels are sent to the model as picked (`max` as `max`, `high` as `high`), never silently changed
+- An unknown thinking or thinking_levels value no longer stops Vibe from starting: it is ignored with a warning, so you can pick a level with /thinking
+- Streamed replies no longer fail when MISTRAL_SDK_TELEMETRY is set
+- Subagents that were working when the app restarted can be messaged again after an update, instead of failing the turn with "Stored subagent binding no longer matches Host policy".
+- When an edit fails, the model is pointed at the closest matching text anywhere in the file, without the multi-second wait on large files or long edits.
+- The Lean agent's prompt no longer shows a raw `$current_date` placeholder.
+- Images returned by tools now reach third-party models that support images.
+- Shell timeouts set in `config.toml` now apply with the unified harness, and the model is told them.
+- A shell timeout above 9007199254740991 seconds (2**53 - 1), the longest a unified harness session starts with, is now a config error naming the setting instead of a session that cannot start; a shell timeout up to that is passed on exactly.
+- A quoted bash timeout in `config.toml`, such as `max_timeout_seconds = "1800"`, no longer crashes session start.
+- A resumed session no longer runs a saved shell call whose timeout is above the current `max_timeout_seconds`, after you lowered it or switched to an agent with a lower one. That call fails as a new one would, and the session goes on. A saved shell call without a timeout runs with the current `default_timeout`, as a new one would, instead of 120 s.
+- A config edit Vibe refuses, such as one whose shell timeouts clash with `lean`, now says why after "Invalid configuration edit" instead of stopping there.
+- `/reload` of a `config.toml` that breaks a config rule, such as setting `default_timeout` without `max_timeout_seconds`, now reports the config error naming the setting, and the session keeps the config it has.
+- Linux wheels tagged manylinux_2_28 load on hosts with glibc 2.28, instead of needing glibc 2.34.
+- Automatic project context no longer runs repository-configured Git signature verification programs.
+- Smart approve no longer asks before read-only calls to MCP servers and connectors you added, such as listing resources or reading a workflow run. When the classifier cannot answer, the session and log now record why.
+- Creating a worktree no longer runs file filters defined by the repository's own Git configuration before the folder is trusted.
+- Conditional Git includes are checked in the destination worktree, and untrusted snapshots cannot run repository LFS extensions through global filters.
+- Worktree Git operations honor session trust and source repository trust; untrusted submodules are retained when their contents cannot be safely inspected or saved.
+
+### Removed
+
+- The footer no longer shows the process ID.
+- **[Breaking — config]** Removed the `compaction_thinking` setting: compaction uses the compaction model's thinking level
+- Removed the `compaction_max_output_tokens` and `output_token_reserve` settings
+- `include_model_info` and `include_prompt_detail` no longer do anything; Vibe warns if your config still sets them
+
+## [3.0.2] - 2026-10-22
+
+### Added
+
+- `enable_mouse_capture` setting (or `VIBE_ENABLE_MOUSE_CAPTURE=false`) to leave text selection and copy to your terminal; depending on the terminal, some other mouse interactions such as clicks are disabled too.
+- Added `max_subagents` and `max_concurrent_subagents` settings to control how many subagents can be alive and running at once
+- In VS Code, connectors that need no login, such as DeepWiki, show as `Not connected` and connect in one click, instead of asking an admin to set them up.
+
+### Changed
+
+- An image sent to a model that does not support image input no longer fails the turn. The model gets the text "[image]" in place of the image, and the session continues.
+- Shortened the copy hint so it fits in narrow terminals.
+- The model's reasoning now shows by default, as a collapsible "Thought" row.
+- The starting mode your organization sets now applies even when Vibe would otherwise have started you in smart-approve.
+- Using `--agent` to pick a mode your organization disabled now opens your default starting mode (your organization's, if it sets one) and shows a notice.
+- Raised the default subagent limits to 32 alive and 32 running concurrently (previously 8 and 4)
+
+### Fixed
+
+- Copying on Linux now falls back to xclip or xsel when wl-copy fails, and suggests Shift+select or installing xclip when no clipboard tool works.
+- Hooks from `hooks.toml` now run for tool calls made inside subagents, including `post_agent` hooks, as they do for the main agent.
+- A custom subagent's `[tools.*]` `permission`, `allowlist` and `denylist` now apply to its tool calls, on top of the main agent's rules, instead of being ignored.
+- A custom subagent's `enabled_skills` and `disabled_skills` now limit which skills it can load, instead of being ignored.
+- Long context compactions no longer fail behind proxies or VPNs that close idle connections.
+- Sessions that could not be resumed after a turn was stopped during a tool approval open again.
+- Sessions saved during a tool call by Vibe 3.0.0 or earlier open again instead of failing with "Invalid Unified session store".
+- ACP clients get a cancelled stop reason instead of an error when a turn is stopped during a pending approval or question.
+- Sessions now start with your organization's enforced settings from the first message.
+- When your organization's settings cannot be fetched, sessions now use the last fetched copy (up to 7 days old) instead of dropping them.
+- `/reload` now stops enforcing settings your organization has removed.
+- Moving a session into a worktree where its current mode is unavailable no longer fails: the session continues in another available mode and shows why.
+- `@` file completion no longer misses files and folders in large workspaces
+- The selected row of the completion popup no longer scrolls out of view when moving up
+- Idle sessions in large folders no longer pin a CPU core while the file index watches for changes.
+- Desktop's new-session picker now loads your organization's settings, experiment models and catalog models when nothing is cached yet, so the first session starts in your organization's default mode.
+- The built-in vibe skill and the README now document the current hook payload: qualified tool names, success or failure status only, the bash result shape, background commands, and subagent spawning.
+- Rapid clicks on a tool group or collapsible section now toggle it every time instead of selecting a word or line
+- Installing from source on Linux without the ALSA development files no longer fails and builds the terminal UI without voice mode.
+- Long tool-call headers keep their status tag, such as "(running)", after the ellipsis when collapsed and after the last word when expanded, instead of wrapping and breaking the border.
+- Rust CLI: Mouse selections are copied to the clipboard even when the button is released outside the terminal window.
+- Rust CLI: Tables inside list items render their cells instead of an empty grid with the text glued to the item.
+- Vibe now warns that `[tools.grep]` settings and a `tools/prompts/task.md` description override have no effect, instead of ignoring them silently.
+- Collapsed tool-call summaries count distinct files read, edited, or written instead of one per call
+- The trusted folder prompt now ignores Enter for a moment after it appears, so keys typed during startup no longer trust a folder by accident
+- Subagents whose last turn failed stay in the subagent list as failed instead of disappearing.
+- Headless runs given a prompt with `-p` or `--prompt-file` no longer hang when stdin is left open.
+
+## [3.0.1] - 2026-10-20
+
+### Added
+
+- New `enable_auto_approve` setting: when the admin-managed config sets it to `false`, the auto-approve (YOLO) mode is forbidden — the `auto-approve` agent (and any custom agent with `safety = "yolo"`) is hidden and `--auto-approve`/`--yolo` plus `bypass_tool_permissions` are ignored. Per-tool permissions still apply.
+- `compaction_max_output_tokens` (80000), `compaction_thinking` (unset), `compaction_reasoning_limit_tokens` (32000), `output_limit_retries` (6) and `output_token_reserve` (4096) settings tune compaction requests and recovery from answers cut off at the output limit.
+- The app server has experimental `session/subagents/wait`, `session/subagents/interrupt` and `session/subagents/read` methods: a client can wait for the subagents a turn left running, interrupt them, and read each one's status, store, model, usage, cost and steps
+- `vibe -p` waits for the subagents its turn left running before it exits; `--time-limit` and other stops interrupt them, and the `--output-dir` export lists each subagent with its status, model, usage, cost and steps, and copies its journal
+- Each subagent's cost is priced at its own model's rates; when its model is unknown, the root's rates price it and the row says so (`pricingModel`, `pricingFallback`)
+- An `--agent-socket` server's `tools/call` names its caller, so the server can tell a subagent's call from the root's
+- A custom tool that fails to load now shows a warning naming the file and the error, instead of disappearing silently.
+- Experimental `vibe run-server` command: runs many `vibe -p --agent-socket` sessions from one process, on shared app-servers (`--runs-per-app-server`, default 16) that exit once idle, each run with its own config, credentials, limits and export
+- Vibe Desktop sessions support scheduled loops: the assistant can schedule a recurring prompt, fired prompts show as loop cards in the conversation, and active loops are listed (and can be deleted) in the session info.
+
+### Changed
+
+- `/model` and the `/config` model list now group models by where they come from: your organization, experiments, the model catalog, then your own config.
+- Resuming or continuing a session keeps the agent it last ran on, even if your default agent changes; switch agents in the session to change it.
+- ACP usage updates now report the session's prompt-cache hits as cached read tokens.
+- A tool output past about 16,000 characters is saved to a file, and the model sees its start and end instead of only its start.
+- A bash command that times out returns what it printed, and the default timeout is now 120 seconds, up to 300 when asked.
+- `tools.bash.default_timeout` and `max_timeout_seconds` are unset unless set in `config.toml`; the native shell tools still default to 300 seconds, at most 600 or the default when that is longer.
+- A shell tool's `default_timeout` above its `max_timeout_seconds` is now a config error naming both, instead of being lowered to the maximum.
+- `read_file` reports the file's line count and where to read on, and an offset past the end is an error.
+- `read_file` on a directory lists its entries, up to 500 at a time, instead of failing.
+- `read_file` and file mentions return up to 64,000 bytes a call instead of 51,200, the same as the Agents SDK.
+- On Linux, a command that runs the machine out of memory is the first process the kernel stops, before Vibe itself.
+- A shell's login profile runs before a session's first command and outside its timeout, and one that fails or takes over 10 seconds is skipped with a warning.
+- Bash commands can call the functions and aliases the login profile defines, for bash and zsh, and a change to a profile file is picked up by the next command.
+- Vibe now supports Python 3.12 and later instead of requiring Python 3.14.
+- All Vibe skill descriptions now support up to 1,024 characters.
+
+### Fixed
+
+- Background process results from the app server keep their process ID and exit code.
+- A model response kept open by keepalives without sending any data now times out after `api_timeout` instead of hanging the session.
+- An unparseable `VIBE_*` environment variable such as `VIBE_MODELS` is now ignored and logged instead of stopping Vibe at startup.
+- Sessions now record the agent they run on, so a session started with `--agent` reopens on that agent.
+- Code the agent runs with `run_typescript` now sees an MCP or connector tool's own error text instead of a generic message.
+- A failed /clear keeps the conversation on screen, and failed /clear and rewind requests show the server's reason.
+- Picking a model your administrator enforces explains why the model does not change.
+- Resuming a session from the picker restores its queued prompts.
+- A malformed background-process call now fails that tool call instead of ending the session.
+- When you have not chosen a model, a new session's first message now waits up to 5 seconds for the model assigned to your account.
+- Editors that sign in on every connection over ACP, such as CodeCompanion.nvim, no longer open a browser sign-in page when Vibe already has an API key for that console.
+- With `enable_system_trust_store = true` in `config.toml`, prompts now also use the operating system's certificates, so they work behind corporate proxies that only the OS trusts.
+- Turns no longer fail when the model announces a tool call but sends none, or sends one without a name; Vibe retries once or ends the turn cleanly instead.
+- The welcome banner text no longer shifts when you switch to or from a Mistral Large model.
+- Connectors that need no login, such as DeepWiki, now show as `not connected` in `/mcp` instead of `error - try refreshing`, and pressing Enter connects them without visiting the dashboard.
+- The CLI no longer hangs when it talks to an app-server that has already exited, such as after cancelling setup during a slow startup
+- Hovering a subagent row with the ansi-dark theme no longer turns its text black on black
+- Clicking a hovered subagent row no longer flashes the highlight back to the previous row
+- Installs and launches through uv now force a GIL-enabled build of Python, fixing failures on machines with a free-threaded (no-GIL) Python 3.14 installed.
+- Compaction no longer fails when a provider's cache repeats a malformed summary, or spends its whole output budget reasoning; Vibe falls back to a simpler request instead.
+- An answer cut off at the output-token limit no longer ends the turn at once: it is discarded and asked for again with feedback, up to 6 times a turn.
+- A tool call cut off at the output-token limit, such as a large file write, is asked for again in smaller pieces instead of failing with a JSON error.
+- Tool argument errors now name the field at fault, the allowed fields and the one the model most likely meant.
+- A failed edit now shows the closest matching text in the file, or the lines where a repeated match occurs.
+- Requests to a model with a declared `max_context_length` no longer overflow its window: the output cap is clipped to the room the input leaves, less a 4096-token reserve.
+- Bash commands no longer lose `PATH` entries that a login profile resets, and the profile runs once per session.
+- Bash commands still run after a command deleted `/dev/null`.
+- The git context names the repository's default branch instead of always `main`, and no longer hedges the instructions a session starts with.
+- In a sandbox, the git context is read in one round trip, and no longer times out on a slow sandbox.
+- Cached input tokens now reach the session's token usage and runtime stats, so `vibe -p` reports and prices them
+- Plugins that set a `displayName` in their `ai.mistral.vibe` extension now load their knowledge, hooks, agents and tool namespace instead of reporting an extension error.
+- `vibe -p` exits only once its app-server has, and on Linux a killed `vibe -p` or `vibe run-server` takes its app-servers down with it
+- `vibe -p` whose stdout closes early, as when piped into `head`, now ends the run as `infrastructure_failure` instead of crashing in text output
+- In Vibe Desktop, a session with no new turn no longer moves in the sidebar session list when you open it or restart the app.
+
+## [3.0.0] - 2026-10-15
+
+### Added
+
+- The app-server reports each model's compaction threshold, so a client can show how full a session's context is before it compacts.
+- Desktop can import projects and sessions from another coding agent during onboarding.
+- Rust CLI: `/leanstall` and `/unleanstall` install and uninstall the Lean agent.
+- With `experimental_enable_model_catalog` on, the model list includes Mistral's curated models, and your config can still override their settings.
+- Rust CLI: Tool approval options, /thinking levels, /resume sessions and /log-level rows and badges can be clicked.
+- Rust CLI: Option lists show a faint hover background under the mouse.
+- With a "shared only" API key, `/mcp` blocks connectors that need your login and tells you to run `vibe --setup`.
+- Rust CLI: `/branch` forks the current conversation into a new resumable session.
+- The agent can now wait for your next message or for background work to finish, instead of repeatedly checking.
+- Rust CLI: Debug console for live session logs, opened with /debug or Ctrl+\.
+- Rust CLI: Report activity, approvals, questions, completion, and failure with session titles and error messages through the OSC 7501 Program Status Protocol.
+- `/status` shows the credential source in use and the shadowed sources
+- Admin-enforceable `enable_mcp` flag to block all user-facing MCP server operations (add, remove, toggle, login, logout, tool registration), including plugin-provided MCP servers, via managed config.
+- With `experimental_enable_model_catalog` on and no model picked, Vibe runs the catalog's recommended model.
+
+### Changed
+
+- `read_file` shows a file's line endings as they are on disk, like shell commands do
+- `write_file` writes new files with the line endings it is given, also on Windows
+- The app server now shows up as `vibe-app-server` instead of `python3` in Activity Monitor, `ps`, and `top`.
+- Rust CLI: dragging a scrollbar moves smoothly in fine steps on terminals that report the mouse in pixels, such as Ghostty, kitty and WezTerm.
+- displayed_workdir, context_warnings and raise_on_compaction_failure are deprecated: they remain accepted in existing configs but have no effect on Unified execution.
+- Rust CLI: The welcome banner starts at the top left, with the conversation and what's new flowing below it while queued messages stay at the bottom.
+- Rust CLI: One click picks an option whose only action is choosing it (tool approvals, questions, /theme, /plugins, subagents, config choices, the remote project picker, MCP or connector sign-in); options with several actions (/model, /thinking, /resume, /mcp, /config) highlight on the first click and confirm on the second.
+- Rust CLI: The highlighted free-text answer spans the full row, and clicking its number unticks it in multi-select questions.
+- Rust CLI: Colored text on a highlighted row takes the row's text color.
+- Rust CLI: headless mode (`-p`) now follows the Python CLI's run contract, with turn, token, price and time limits, graceful stops, and a JSON run export whose exit code reports the outcome.
+- Pressing Esc twice to clear the input or open rewind now accepts a slower second press.
+- Rust CLI: The welcome banner is more compact: the cat sits beside the version, model and plan, and the model, connector, MCP server, skill and hook counts are gone.
+- The Vibe VS Code extension (ACP surface) now gets the same background session titles as CLI and Desktop; the sessions list shows the summarized title instead of the message preview
+- The agent's subagent tools are renamed from `subagent.*` to `agents.*`, and sessions saved with the old names still resume.
+- Plugins can no longer use the `agents`, `agent` or `collaboration` tool namespaces, which are reserved for built-in agent tools.
+- A programmatic tool call now stops after 60 seconds in total, and a single sleep inside it is capped at 30 seconds.
+- Faster session startup when no MCP server is used.
+- Vibe now requires Python 3.14 or newer (previously 3.12)
+- Outbound HTTPS connections now validate certificate chains with stricter RFC 5280 rules; a private CA missing SKID/AKID or KeyUsage extensions may be rejected — set `enable_system_trust_store` or use a compliant CA
+- Vibe Code: the retry notice keeps counting the seconds past the planned retry instead of freezing until the provider answers, and screen readers get paced progress announcements
+- `vibe -p` JSON and streaming output mark each completed assistant message and reasoning with an `outcome`: committed, or discarded with its cause.
+- The Rust TUI detects terminal activity reporting support to avoid duplicate title indicators and notification bells.
+- Faster session startup, most noticeably on Windows and in repositories with many branches or tags.
+- On Windows, hooks run in the same shell as the `bash` tool (Git Bash, otherwise PowerShell) instead of cmd.exe
+- The Upgrade to Vibe Pro offer opens the plans page instead of the API key page
+- When your selected model is not available, the warning names the model Vibe runs instead and how to pick another.
+- Changing a setting of a model that comes from the catalog or an experiment no longer copies the model's definition into your config file.
+
+### Fixed
+
+- Desktop local Code holds queued messages while editing without a timeout; Save and Cancel let the queue continue unless paused.
+- Disconnecting during an unfinished queued edit keeps the original message and pauses the queue until Resume.
+- In Vibe Desktop, the sidebar session list now only reorders when a new conversation turn starts, instead of jumping around on queued messages, steers, and permission answers.
+- On Windows, the shell tools no longer auto-approve commands that use a mid-word `#`, an escaped quote, or PowerShell quoting to hide part of the command from the approval check.
+- Multi-line edits to CRLF files no longer fail, and edited lines keep the file's line endings
+- The Unified Harness no longer converts a CRLF file to LF when it overwrites it
+- Sessions containing a large image no longer fail with a compaction error when the context is nowhere near full.
+- Listing saved sessions (`/resume` and the Desktop session sidebar) is several times faster when you have thousands of sessions.
+- Rust CLI: scrolling with the wheel or a scrollbar no longer stutters or trails the pointer when the view is slow to redraw.
+- Rust CLI: the smart approve mode now shows its warning-colored input border and cycles with Shift+Tab, matching the Python CLI.
+- Automatic context compaction now shows a progress row in the transcript that settles to done, failed, or interrupted.
+- The current input line no longer blinks with the cursor in the textual-dark theme.
+- A suspended Rust CLI now dies when its terminal closes or it is killed, instead of lingering forever.
+- Resuming a suspended session with shell `bg` twice no longer exits the CLI with an interrupted-syscall error.
+- Rust CLI: Fix shell MCP commands to support named URLs, static authentication, stdio servers, and timeout options.
+- Rust CLI: `/mcp` add, login, logout, and status errors now show the server's reason.
+- Session meta.json records the active model and provider model name for Unified Harness sessions.
+- Subagents now see connector tools in sessions whose connector catalog finishes loading after the session starts, and connector changes applied mid-session reach subagents spawned afterwards.
+- Starting, resuming, or continuing another session no longer resets the shared host's resolved connector catalog to its start-time placeholder, so a session promoted after that keeps its connector grants.
+- Rust CLI: config validation warnings that appear mid-session now surface as a toast, not only at startup.
+- Very large tool outputs are truncated in the transcript, so sessions containing them can be previewed and resumed again.
+- Rust CLI: A session preview that fails to load no longer closes the resume picker or makes the CLI unusable.
+- Rust CLI: The `/rename` usage tip and `/mcp add --help` show their `<...>` placeholders instead of dropping them.
+- A locked or unapproved macOS Keychain no longer hangs `vibe -p` forever: the read gives up after 60s and the error says the Keychain could not be read instead of reporting a missing key.
+- Rust CLI: `-p` runs announce on stderr when the API key comes from the keyring, fail if startup stalls, and print the server's error instead of a bare `session/start`.
+- When a third-party model declines a request, Vibe now says so instead of recording an empty reply.
+- Sessions where a third-party model returned an empty reply no longer fail every later message with a 400 error.
+- Sessions on GLM and other reasoning models get automatic titles again
+- Rust CLI: Characters typed or pasted with AltGr on Windows (such as Polish `ą`) are no longer dropped.
+- Rust CLI: `vibe -p --resume SESSION_ID` continues that session instead of being rejected or starting a new one
+- Windows (Git Bash): the agent now uses `/c/...` paths in shell commands instead of retrying several path spellings.
+- Ctrl+Shift+C copies the selection on terminals that report the shifted letter in uppercase.
+- Text pasted while a picker or rewind is open no longer lands in the hidden prompt.
+- Confirming a /model or /thinking pick after a turn has started, such as a /loop prompt firing while the picker is open, now saves it for the next turn instead of failing.
+- Deleting the last saved session from `/resume` now confirms which session was deleted.
+- Restored the occasional feedback survey in Unified Harness sessions.
+- `/config` now shows an error toast with the server's reason when saving or loading a setting fails, instead of silently doing nothing.
+- In Vibe Desktop, archiving a session now reliably removes its worktree once every session that used it is archived or deleted, without slowing the archive down.
+- Vibe Code renders agent file edits as an inline diff in the chat panel again.
+- Vibe Code restores the aggregate review panel on the unified backend.
+- Rust CLI on Windows: pasting multiline text inserts it whole instead of sending each line as a separate message.
+- Rust CLI: highlighted list rows no longer randomly lose their bold text.
+- Rust CLI: Text no longer blinks or garbles in terminals without truecolor support, such as macOS Terminal.
+- Rust CLI: Keep terminal status accurate across queued turns, overlapping dialogs, and interruptions.
+- Smart approve now asks before a shell command whose redirect target it can place outside your workspace and temporary directories, or cannot place at all, even when the command looks like it only reads.
+- Answers stream live again when a `post_agent` hook is configured, instead of appearing all at once when the turn ends.
+- The `title_prompt_id` setting now also applies to session titles in Vibe Desktop and in the CLI's default harness.
+- Starting the interactive CLI or the `vibe update` prompt without a terminal (e.g. `nohup vibe > /dev/null 2>&1 &`) now exits with an error instead of running forever at full CPU.
+- The review diff refreshes when a shell command changes a tracked file mid-turn
+- Interrupts that arrive while a turn is starting are delivered instead of dropped
+- Cancelling a prompt no longer hangs the agent shutdown
+- A `grep` or `rg` shell command run by the agent shows its matches as a file-search result with clickable file chips
+- Git timeouts while reading project context are now enforced on Windows.
+- Recent commit messages in the project context are no longer truncated at their first parenthesis.
+- On Windows, PowerShell commands can now run `npm` scripts, fail on prompts instead of hanging, and show non-ASCII output correctly
+- On Windows, MCP stdio servers whose `command` string contains a backslash path now start
+- Resuming a session already open in another Vibe process now shows a clear busy message, at startup and in the /resume picker
+- The /resume picker marks those sessions with a lock and refuses to resume or delete them with a busy toast
+- Failed resume and delete attempts report the server's own error, and their notices no longer leak into the resumed session's transcript
+- Toasts float above open bottom apps instead of covering them, and --resume keeps the initializing indicator visible behind the picker
+- Rewinding a compacted conversation no longer hides the next answer or overwrites an earlier one.
+- The what's-new message shows your Vibe Pro upgrade or API key switch offer again
+- Vibe no longer fails to start when your config overrides a model that does not exist; the override is ignored with a warning.
+
+### Removed
+
+- Removed harness selection flags and rollout settings. Vibe, ACP, app-server, Desktop, and IDE sessions now always use the Unified Harness.
+- Removed the retired legacy execution runtime while preserving Unified execution and read-only imports of Vibe 2.0+ session folders (meta.json and messages.jsonl). Vibe 1.x single-JSON sessions are no longer supported.
+- Removed the unused app-server RPCs tools/list, stats/read and diagnostics/list.
+- The legacy Python TUI and the `VIBE_CLI` environment variable: `vibe` always starts the Rust TUI.
+- Plan mode: the `plan` agent and the `exit_plan_mode` tool.
+
+## [2.26.1] - 2026-10-09
+
+### Added
+
+- The app-server reports which process holds a stored session, and pushes a change when that process lets go of it, so a client can show a session open elsewhere as read-only
+- Rust CLI: Configure proxy and SSL certificate settings with `/proxy-setup`.
+- Rust CLI: The narrator reads each turn's summary aloud and shows a `speaking` status row that Esc or Ctrl+C stops.
+- Rust CLI: `/plugins` browses the session's plugins, and `/reload-plugins` re-pins them and reports what changed.
+- Rust CLI: Free-text answers to agent questions accept multiple lines, multi-line pastes, and click-to-place caret.
+- Rust CLI: In the `/model` and `/thinking` pickers, `s` applies the selection for the current session only, while Enter still saves it to your config.
+- Rust CLI: Picking a model immediately opens the thinking level picker for that model, and both are applied together (Esc cancels both); after a session-only model pick, the thinking level is session-only too.
+- `nix run .#rustCli` to launch the Rust terminal instead of the Python one
+- Rust CLI: `/whoami` shows the start of your API key, its scope, and its access scope.
+- Space toggles the focused checkbox in multi-select questions.
+- `enable_background_processes = false` stops the agent from starting background processes
+- `enable_subagents = false` takes subagents away from the agent on the default runtime.
+- Disable main input cursor blinking with `cursor_blink = false` or `/config`, keeping a steady caret in both Python and Rust terminals.
+- Document Library connector: search, list, open, and fetch documents from your Mistral document libraries directly in Vibe.
+- `export.json` records `steps`, the number of model calls the agent made
+- `export.json` lists the session's config issues, such as a skill it could not load, under `warnings`
+- `vibe -p` reads the prompt from `--prompt-file` or stdin, and `--output-dir` writes an `export.json` and the session journal on every exit.
+- `vibe -p --time-limit SECONDS` stops the run at a deadline; SIGTERM and Ctrl-C stop it the same way, and the session can be resumed.
+- Per-model `top_p` and `max_output_tokens` config settings.
+- Experimental `experimental_enable_model_catalog` config flag (default off) — groundwork for the upcoming model catalog, no visible effect yet.
+- New `api_stream_idle_timeout` setting (off by default) fails a model response that goes silent for that many seconds.
+- `vibe -p --agent-socket` sessions run background processes in their POSIX sandbox, as `enable_background_processes` says, instead of always turning them off
+- New `title_prompt_id` config setting to override the prompt used to generate session titles: built-in `session_title` or a custom `.md` file from `~/.vibe/prompts/` or `.vibe/prompts/`.
+
+### Changed
+
+- New sessions start their first turn faster, and long sessions open, load older messages and resume sooner.
+- `/status` shows token counts in a compact form (e.g. `1.23M`) followed by the exact value, dimmed, with thousands separators.
+- The context usage indicator and subagent token counts round to three significant digits (e.g. `12.5k` instead of `12k`).
+- Rust CLI: Queue selection removes the highlighted prompt with Backspace or Ctrl+C instead of Backspace or Delete.
+- Rust CLI: Tool group headers count each kind of call (e.g. "Read 10 files, ran 3 commands"), a single visible entry is no longer folded into a group, and result borders line up under their toggle arrows, wrapped headers included.
+- The off thinking level now actually disables reasoning on models whose offered levels include it, instead of silently leaving the server's default in charge.
+- The default model's thinking levels are now off and high; a stored low pick resets to off and a stored medium pick resets to high.
+- The default model declares a 256k context window; auto-compaction now derives from it.
+- A stale pin to the removed local model now warns and falls back to the hosted default.
+- Rust CLI: In text inputs, Cmd+Left/Right, Home/End and Ctrl+A/E at a line edge move on to the previous line start or the next line end.
+- Rust CLI: Shortcut hints use the same wording everywhere, and j/k navigate every list.
+- Rust CLI: `/config`, `/mcp`, `/plugins` and the project picker search with `/`; Esc leaves the search, then clears it, then closes. `/plugins` now shows its search field under the title, like `/mcp` and `/config`.
+- Rust CLI: Every list marks the focused row with the same highlight bar, and a green `›` marks the current value.
+- Rust CLI: Lists wrap at both ends and scroll back to their very top, Esc always goes back one level, and numbered options take their digit.
+- Your Mistral identity and plan now show in `/whoami` and the banner even when the active model isn't a Mistral model.
+- Rust CLI: Typing `/`, `!` or `&` over a fully selected input switches to that mode, and so does pasting a `/command` or `!command` into an empty input.
+- Rust CLI: the startup banner hint now reads "You are using the new Vibe TUI. To switch back to the classic TUI, set the `VIBE_CLI` environment variable to `python`."
+- Stopping a background process now also stops what it started in the background, and returns only once all of it has exited
+- A background process now keeps running until everything it started in the background has exited, not just its shell
+- The Document Library connector is now gated behind the `experimental_enable_document_library_connector` config flag (off by default) while its tools stabilize.
+- `vibe -p` exits 1 on usage or config errors, 2 on infrastructure failures and 3 when a limit or a model refusal stopped the agent
+- `vibe -p --max-turns` now exits 3, not 1, when the agent reaches the turn limit; so do `--max-tokens` and `--max-price`, including when the budget ran out as the agent finished
+- Model requests retry HTTP 520.
+- Rust CLI: The welcome banner starts at the top left, with the conversation and what's new flowing below it while queued messages stay at the bottom.
+
+### Fixed
+
+- Browser sign-in now explains when your workspace can't be used and asks you to select another one, instead of showing a generic error.
+- Rust CLI: `Ctrl+G` opens the current input in `$VISUAL` / `$EDITOR` and loads the saved text back.
+- Rust CLI: A chat input selection no longer reappears after an approval, a question, or the subagent list takes focus.
+- Rust CLI: Text stays selectable and copyable while an approval, question, picker, or other bottom panel is open, including the transcript, the loading row, and the panel itself.
+- `/reload-plugins` now offers the skills of a plugin installed during the session, without a restart.
+- Rust CLI: Copying a selection no longer adds line breaks or indentation where long text wraps on screen.
+- Rust CLI: Copying wide characters such as CJK text no longer inserts a space after each one.
+- Rust CLI: Selecting or copying a wrapped or multi-line transcript row no longer picks up its hang indent.
+- Rust CLI: Long lines in an expanded thought now wrap inside its border and indent.
+- Rust CLI: Queue selection and edit controls replace the loading hints for as long as the mode lasts, instead of a notice that timed out or lingered.
+- Rust CLI: The loading hints no longer offer steering or queued-message cancellation when Enter or Ctrl+C would do something else.
+- Rust CLI: Long free-text answers to agent questions wrap instead of overflowing the question box.
+- Rust CLI: Answered questions show a check mark instead of an expand arrow that did nothing.
+- A corrupted MCP OAuth token in the keychain no longer crashes Vibe; the server just asks you to log in again
+- Tool calls with a very large result (e.g. reading a big file) keep their tool-specific header, marked as truncated, instead of showing as a generic tool call.
+- File paths in read, write, edit, and search headers are shown relative to the working directory or workspace root that contains them.
+- Rust CLI: Rewinding to a skill invocation reloads it in `/` mode with the caret at the end and that skill highlighted in the completion menu.
+- CI: fix Nix build step
+- Prompts sent by a scheduled loop now appear in the conversation, marked with the loop that fired them.
+- Scratchpad notes now display like file contents instead of a raw tool result dump.
+- Rust CLI: Copying a transcript selection keeps the blank lines and wrapped characters it shows, and drops the spacing between messages.
+- Rewinding to an earlier message no longer fails after the session was titled or renamed.
+- Rust CLI: `/clear` resets the context window display right away instead of keeping the previous conversation's usage until the next turn.
+- Rust CLI: Dead-key and IME previews show at the input caret instead of in the loader.
+- Rust CLI: Code blocks and edit diffs wrap long lines between words instead of splitting words, and continuation rows no longer start with a space.
+- Rust CLI: On terminal (ANSI) themes, code blocks are separated from the text around them by a blank row.
+- Rust CLI: Text with `/`, `!` or `&` added before an existing message, or after leading spaces, is sent as a message instead of running a command, and stays one when rewound or edited in the queue.
+- Rust CLI: Backspace at the start of a `/`, `!` or `&` input leaves the mode and keeps the text.
+- `vibe -p` no longer offers the `cron` tool, whose calls always failed in a headless session.
+- A model request that times out now shows a readable error instead of a blank one, and is recorded in the log.
+- A question or approval the agent asks while a steered message is waiting is no longer hidden, so the session no longer stalls on "Preparing a question".
+- Rust CLI: A long working directory is shortened with an ellipsis so the token counter stays visible in the bottom bar.
+- Closing a session no longer waits for its archived worktree to be deleted.
+- Smart approve asks less often for routine work, such as edits in a worktree, CI file changes and local commits.
+- Tool results with accents or non-Latin text now reach the model as written instead of as escape sequences.
+- Fix turns crashing with "Completed public history entry is frozen" when a backend keeps streaming reasoning or text after a tool call
+
+### Removed
+
+- The bundled Devstral (local) model
+- New `--experimental-harness` turns no longer re-state scratchpad notes into prompts, so they no longer add `<vibe-scratchpad>` blocks to the transcript.
+
+## [2.26.0] - 2026-10-05
+
+### Added
+
+- The app-server can discover built-in plugins from roots an embedding application ships, alongside the ones inside the package.
+- Vibe Code warns when the selected model cannot view attached images.
+- Vibe Code sessions list their background processes in a side panel with live status indicators and a Stop action for running ones.
+- The `~/.vibe/.env` fallback for the API key when the OS keyring is unavailable is now created owner-only (0600), so a saved key is no longer readable by other accounts on the machine.
+- Rust CLI: first-run onboarding wizard with theme selection, API key entry stored in the OS keyring, and browser sign-in; it opens automatically when the API key is missing, and `--setup` runs it and exits.
+- Rust CLI: `/teleport`, `&<prompt>` and `--teleport` send the session to Vibe Code Web, with push approval and Esc to cancel.
+- Rust CLI: Configure voice mode and narration with `/voice`.
+- Rust CLI: Schedule recurring prompts in natural language with `/loop` and model-managed cron tools.
+- Rust CLI: Undo and redo composer edits with platform-aware keyboard shortcuts.
+- Rust CLI: `vibe update` and `--check-upgrade` ask the install's own package manager (uv, Homebrew, or PyPI) what it can deliver and prompt to upgrade the CLI.
+- Rust CLI: update checks honor `enable_system_trust_store` — bundled Mozilla roots by default, the OS trust store when enabled.
+- Rust CLI: Clicking the scrollbar track scrolls one page; holding it keeps scrolling until the thumb reaches the pointer.
+- Rust CLI: Client usage telemetry now reaches the analytics pipeline: startup timings, slash commands, @-mentions, copies, cancellations and voice transcription events, with the detected terminal reported at launch.
+- Models accept a `thinking_levels` field to offer only the thinking levels they support.
+- Rust CLI: `/mcp` shows connector display names, plugin owners, and a link to add connectors in Studio.
+- `/mcp <name>` also accepts the display name shown in the browser, and unknown names list those display names.
+- Per-model `max_context_length` setting, editable in `/config`.
+- Rust CLI: Mention skills anywhere in a prompt with `/skill-name`, with the same caret-based completion popup as `@` file mentions.
+- Rust CLI: Accepted `/skill` and `@file` completions and pasted images are highlighted in the prompt and edited as a single unit.
+- Rust CLI: Long pastes show as a `[Pasted n characters]` placeholder, also once sent or rewound; paste the same text again right away to show it in full.
+- Rust CLI: Scrolling to the top of a resumed session or a `/resume` preview loads its older messages automatically.
+- Rust CLI: the startup banner hint now explains that unsetting `VIBE_CLI` (or setting it to `python`) switches to the legacy Python TUI.
+- Documented the `VIBE_CLI` selector, including the Windows session-variable forms, for running the legacy Python TUI.
+- Publish a source distribution on PyPI again, so Homebrew can build new releases.
+- Rust CLI: Typing a command followed by a space shows its arguments inline (e.g. `/loop`, `/mcp`, `/rename`) until the first argument is typed.
+- Fork an earlier completed response while a session continues generating.
+- A plugin can bundle its own MCP server executable and launch it with a `./` command in its `mcp.json`.
+- Project-links and teleport support in the VS Code extension: link a local workspace to a Vibe Code Web project and teleport the current conversation to continue it in the browser.
+- While the model provider is unavailable, Vibe shows which retry it is on and counts down to the next attempt.
+- `/status` shows the active model, provider, and API base.
+- You can now choose the model behind session titles and smart approve with `[utility_models]` in your config; `active` pins a feature to the model your session runs.
+- The worktree step of a new session shows what it is doing while it is created, including how many files have been checked out.
+- Xcode setup instructions for using Mistral Vibe as an ACP agent.
+
+### Changed
+
+- `workspace/git/worktrees/remove` gained additive `inspect`, `force`, and `deleteBranch` params plus `branchCreated`/`holders` response fields, so a client can probe a removal before committing to it.
+- A session that starts in a worktree now announces the prepared worktree over `session/updated` before the session moves, so clients that gate their UI on it can proceed as soon as it exists.
+- Unified backend: a tool set to `permission = "never"` now denies a sensitive path instead of prompting for it.
+- Packaged `vibe`, `vibe-acp`, and `vibe-app-server` executables now always ship the Unified Runtime; a build that cannot collect it fails instead of producing a legacy-only binary.
+- Vibe now always runs on the Unified Harness by default and exits with an actionable error when the runtime is missing or broken, instead of silently falling back to the legacy engine.
+- Rust CLI: Pasted images show as numbered `[Image #N]` placeholders instead of their file path.
+- Rust CLI: Several images attached to one message are listed as a tree.
+- Rust CLI: Web search queries and source titles are sanitized, and long source titles wrap aligned under their bullet.
+- hooks.toml hooks on the unified harness receive session_id, transcript_path and parent_session_id on stdin again, matching the legacy runtime.
+- Builtin tool_input reaches hooks with the CLI's author-facing argument names, and a pre_tool rewrite of those names takes effect.
+- A hook's system_message shows as the hook's result line, and a hook that fails to run reports the real reason instead of a generic message.
+- Rust CLI: The `/resume` picker takes at most 40% of the screen height.
+- Previewing a saved session in the resume picker is much faster.
+- Rust CLI: The command and skill completion menu closes as soon as anything is typed after the command.
+- Rust CLI: Tab-completing a command or skill adds a trailing space, ready for its arguments.
+- A compaction model on a different provider than the active model is now ignored with a warning instead of rejecting the configuration.
+- CLI session titles now describe the whole task, stop changing after a single confirmation pass, and survive resume unchanged
+- Session titles now draw on tool results (fetched PRs, changed files) so terse prompts still get a useful title
+- Session titles are now generated by default for CLI (opt out with `session_logging.generate_titles = false`) and run on the session's own model and provider.
+- Session titles and smart approve now check once whether your deployment serves a small fast model, instead of assuming it from the endpoint's address.
+- Custom and self-hosted Mistral deployments that serve a small model now get fast session titles and a fast smart-approve classifier, rather than falling back to your coding model.
+- Where your deployment serves no small model, session titles and smart approve run on your session's model, which costs more per call; name a cheaper one under `[utility_models]`.
+- New session worktrees check their files out in parallel, roughly halving creation time in large repositories.
+
+### Fixed
+
+- Forked Unified Harness sessions now keep their original cache affinity to improve prompt cache reuse.
+- Forked Unified Harness sessions running in managed worktrees now use independent managed worktrees.
+- Forking a live Unified Harness session preserves its active configuration.
+- Isolated forks no longer inherit or revoke the caller's --trust grant.
+- Worktree sessions now use one configuration update for the displayed, executed, and model-visible working directory.
+- Managed-worktree forks warn when uncommitted source changes remain outside the fork.
+- Smart Approve no longer asks for approval on every command or edit that names a file in a managed worktree under `~/.vibe/worktrees`.
+- Smart approve no longer sends every classification to a model name your deployment may not serve, which made it ask for approval on every call.
+- Closing one session no longer stops other sessions sharing the same harness.
+- Plugins cannot claim the reserved `subagent` or `skill` namespaces.
+- Auto-update only reports success once the new version is installed, and offers a forced reinstall when a pinned uv install stays on the old version.
+- Teleport no longer fails with "Failed to summarize context" on the experimental harness when the model uses thinking.
+- Rust CLI: Show microphone-access guidance when voice recordings capture no audio.
+- Rust CLI: Dictated text is inserted at the caret, and the caret follows it.
+- Rust CLI: Markdown horizontal rules, strikethrough, task lists, images, and hard line breaks now render with Textual parity.
+- Rust CLI: Enable clipboard copying over SSH on Windows.
+- Rust CLI: Keep keyboard input working after an empty piped prompt.
+- Rust CLI: Clean up Windows app-server child processes on exit.
+- Rust CLI: Avoid unsupported suspension hints on Windows.
+- Rust CLI: `/clear` shows the previous session id and how to resume it.
+- Rust CLI: tool calls separated only by an answered approval or a background notice now stay in the same folded block instead of opening a new one.
+- Rust CLI: Expanding a tool result or group scrolls it into view, and expanding or collapsing keeps the clicked header in place.
+- Rust CLI: Ctrl+O keeps the view on the same content instead of jumping to earlier messages.
+- Telemetry now labels background calls (session titles, worktree names, smart-approve checks) with their own call type, so they no longer count as regular model calls.
+- Unified harness turns report legacy turn error codes again (rate-limited, incomplete-stream, refused-key), so auto-retry and the `/retry` hint work; request telemetry carries attachment counts again.
+- A background start asks before running, honors the shell's allowlist and denylist, and remembers your approval for later starts; a start that sets its own environment or working directory always asks.
+- Reading a background process's output or the process list no longer prompts, writing to one asks for that process only in the current session, and stopping one never prompts.
+- Unified backend: a file tool set to `permission = "never"` with an `allowlist` now writes where the allowlist permits, instead of refusing everything
+- Unified backend: the `plan` agent can write its plan file again
+- Rust CLI: The interactive question free-text input now shares the composer keybindings (Ctrl+A, Ctrl+E, Ctrl+U, Ctrl+K, word navigation, Home/End, Delete).
+- Rust CLI: Ctrl+D respects `ask_confirmation_on_exit`, and the quit hint names the pressed key and warns about queued messages.
+- Rust CLI: Saving an edit to a queued prompt now leaves queue selection mode, so Enter steers the running turn instead of reopening the editor.
+- Rust CLI: Inline code inside a Markdown link label now opens the link when clicked.
+- Rust CLI: Hovering a wrapped link highlights every row of it.
+- Restored the subagents list and transcripts after resuming a session.
+- Rust CLI: Pasted tabs and zero-width characters no longer leave undeletable ghost characters in the chat input.
+- Rust CLI: Tabs in submitted prompts now show in the transcript instead of disappearing.
+- Rust CLI: Scripts like Khmer no longer shift the rest of the row or break the scrollbar.
+- Rust CLI: Wrapped lines of a user message now align with the start of its text instead of the prompt marker.
+- Rewind in the Rust CLI now offers to restore files changed since the chosen message, and restores them.
+- Rust CLI: Refreshing `/mcp` also reloads workspace connectors and no longer piles up requests or floods the transcript with errors.
+- Refreshing `/mcp` still re-discovers MCP servers when workspace connectors fail to load.
+- Rust CLI: Rejected `/mcp` toggles roll back only their own row with a warning, enabling no longer shows a status early, and plugin servers cannot be toggled.
+- Rust CLI: `/mcp <name>` on a server that needs auth opens its login instead of an empty panel.
+- Rust CLI: A viewed `/mcp` source that starts needing auth opens its login instead of an empty panel.
+- Rust CLI: After an MCP login, the login panel shows `Connecting...` until `/mcp` reopens instead of going blank.
+- `/mcp` no longer offers `Connect` on a source whose bootstrap failed.
+- `/mcp` reports when connectors fail to load instead of saying nothing is configured.
+- Rust CLI: Multi-line `/mcp` errors keep their line breaks instead of running together.
+- Refreshing a connector after signing in no longer resets token stats and skill completions.
+- Toggling a connector in `/mcp` no longer fails once the connector cache is over ten minutes old.
+- `/mcp` shows tools disabled by the global `disabled_tools`/`enabled_tools` patterns as disabled.
+- Plugin MCP servers show their session connection status and prompt for login when needed.
+- Rust CLI: Starting a background process no longer flashes the full command in the loading spinner.
+- Rust CLI: Pasting an image path into a `!` shell command keeps the raw path.
+- Rust CLI: Resumed sessions show each attached image under the name its prompt gave it, and clicking it opens the image.
+- Rust CLI: Scrolling no longer lags when an expanded tool group holds large tool outputs.
+- Manual `!` shell commands stay in the transcript after an app-server restart or session resume on the experimental harness.
+- Resuming a session imported from an older Vibe version no longer fails when its transcript carries embedded resource blocks.
+- Rust CLI: Esc closes the open todo panel instead of rejecting a pending tool approval or question.
+- Rust CLI: Web search and URL fetch results from the Unified harness render as readable sources and page text instead of raw JSON.
+- Rust CLI: Web fetch and web search results trim blank edges and only make http(s) sources clickable, matching the Python CLI.
+- Resumed Unified Harness sessions report older history, so clients can page past the latest 200 messages.
+- Rust CLI: A malformed older-history reply warns about the failed load instead of silently ending paging.
+- Update checks for uv tool installs now respect uv settings such as `exclude-newer`.
+- Building Vibe from source without Rust now fails early with install instructions
+- Wheel builds missing the bundled Harness Python runtime or Rust CLI now fail loudly instead of shipping a broken package.
+- Rust CLI: Ctrl+C interrupts a running turn or teleport whenever the loading hint offers it.
+- Rust CLI: The loading hint offers Ctrl+C to cancel a queued message whenever that is what Ctrl+C does.
+- Rust CLI: Interrupting a prompt before the server starts its turn now interrupts that turn once it starts.
+- Rust CLI: Ctrl+C rejects a pending tool approval or cancels an open question, as Esc does.
+- Rust CLI: Ctrl+C exits on the first press after the app server crashes, as its notice says.
+- Rust CLI: Pasting or dropping several files from Finder inserts one image placeholder or `@` mention per file.
+- Rust CLI: Ctrl+V and `/paste-image` insert the images copied in Finder instead of their icon.
+- Rust CLI: Image pastes are accepted when the backend can describe images for a text-only model.
+- Rust CLI: A message holding the same image file twice is sent instead of failing to enqueue.
+- Rust CLI: Pasted clipboard images are saved as `vibe-pasted-images/clipboard-<timestamp>.png`, like the Python CLI.
+- Rust CLI: A rejected prompt shows the server's reason, not only the failing request.
+- Failed connector tool calls now show the underlying cause (e.g. gateway HTTP 404, SSL error) instead of an opaque TaskGroup error.
+- Rust CLI: Clicking a tool call group header no longer flashes a text selection before toggling.
+- Opening a session over ACP now reports the app-server's field-level error detail (e.g. which transcript field failed validation) instead of the bare 'Invalid request parameters' protocol code name.
+- Resuming a session no longer fails when its model is on a different provider than the configured compaction model.
+- A session created by a newer Vibe resumes on an older one instead of failing to validate, and keeps the settings that older build cannot read.
+- Overwriting a file shows what changed, instead of reading as a newly created file.
+- Resuming a session whose transcript holds an @-mention no longer fails on embedded resources stored without a kind tag.
+- Preserve pending permission prompts and running status when reconnecting to a chat.
+- Teleport now resolves git at the session's workspace instead of the agent process's cwd, fixing 'requires a git repository' errors on eligible projects.
+- Rust CLI: Edit and write tool results start collapsed and expand or collapse on click.
+- Rust CLI: Expanded edit results show their diff again.
+- Turns no longer crash with "Completed public history entry is frozen" when a backend reuses tool call ids.
+- A new worktree session accepts its first message right away instead of after the worktree is created.
+
+## [2.25.8] - 2026-09-23
+
+### Added
+
+- Rust CLI: support for configuring Vibe Code remote projects
+- Clean up managed worktrees after archiving local sessions
+- Archive local sessions so they can be hidden from active session lists
+- Vibe Desktop now shows unseen indicators for local Code sessions that need attention or finish a turn
+- Rust CLI: the live todo plan pins above the input, and Cmd+\ opens the full plan in a right sidebar.
+
+### Fixed
+
+- MCP servers declared by a plugin now start, so the tools they carry are callable in the session
+- Rust CLI: Support sessionless MCP server add and remove commands from the shell.
+- Rust CLI: File completions respect the caret, preserve surrounding text, and allow directory descent.
+- Rust CLI: Filter MCP servers and connectors with / in the MCP browser.
+- Text selection, copying, and scrolling in trusted-folder prompts.
+- Rust CLI no longer renders raw ANSI escape codes from tool output as garbled text.
+- Rust CLI: Pasting into an interactive question now lands in the free-text answer box instead of the composer.
+- Rust CLI: Selecting transcript text while an interactive question is open now highlights and copies it.
+- Rust CLI: The question text, its options and the waiting row are now selectable with the mouse while a question is open; the option prefix (cursor, numbering, checkbox) is never selected or copied.
+- Rust CLI: Releasing a selection while a question is open now flashes the `Copied` inline notice, and only when autocopy is enabled.
+- Rust CLI: Selecting text while a question without the free-text row (`hideOther`) is open now anchors from every box row instead of none.
+- Rust CLI config editor now clearly identifies each setting's source and save layer
+- Rust CLI config editor keeps the caret visible at exact-width line endings
+- `/leanstall` and `/unleanstall` now work on the unified backend instead of failing
+- `/leanstall` and `/unleanstall` no longer crash the TUI on the unified backend
+- Uninstalling the agent the session is running switches it back to the default agent on the unified backend
+- Rust CLI exits cleanly when its terminal disconnects.
+- Rust CLI: toast text can be selected and copied without dismissing the toast
+- Rust CLI: preserves transcript ordering when session snapshots arrive
+- Rust CLI: the what's-new banner is dismissed by the first prompt instead of staying pinned at the bottom
+- Org-enforced configuration now applies when a Unified Harness session opens
+- Enforced allowed-model policies now match canonical model names
+- Show model-policy warnings when enforced configuration arrives at startup
+- Reject enforced model policies that match no configured models
+- Unified Harness: subagents defined in `~/.vibe/agents` or `.vibe/agents` can be spawned again
+- Unified Harness: an agent that names its own `system_prompt_id` runs on that prompt instead of the default
+- An agent file the harness cannot honor is reported instead of disappearing silently
+- Switching to an agent before the first message now applies its prompt, not just its tools
+- Relative path allowlists no longer authorize files just because the path ends with the same suffix.
+- Shell command wildcards no longer skip outside-workdir path checks.
+- Legacy parent-folder grants no longer cover nested descendants, so some outside-workdir accesses may ask for approval again.
+- On macOS 26 and later, the native harness no longer fails to load with a 'mis-aligned LINKEDIT string pool' error.
+- MCP OAuth login no longer fails after the browser callback on servers that issue a client secret (e.g. Supabase)
+- Abandoned MCP OAuth logins now time out and release the loopback callback port instead of blocking later logins until exit
+- Outside-workdir approvals now apply to the referenced file or, for a folder, its full tree.
+- Scrolling the Rust CLI transcript no longer stutters on long sessions with large edit diffs or file bodies.
+- The todo list now updates while the agent is running a `run_typescript` program, instead of staying frozen until the program finishes.
+- Unified Harness: restore lazy injection of subdirectory AGENTS.md docs on read_file, matching the legacy harness
+
+## [2.25.7] - 2026-09-22
+
+### Fixed
+
+- Allow /teleport with Vibe and workspace API keys, including free accounts, without an internal feature gate.
+- Explain which API keys to use when teleport rejects a Codestral key.
+- Warn when managed configuration contains removed Vibe Code settings.
+- On Windows, opening a session that is already open in another process reports 'Session is already open' instead of a raw permission error.
+- On Windows, idle-session cleanup no longer mistakes a session held by another process for an idle one.
+- Automatic project context no longer runs repository-configured Git clean or process filters.
+
+## [2.25.6] - 2026-09-21
+
+### Added
+
+- Attach images while running a model that cannot see them: under `--experimental-harness`, any vision-capable model on the active model's own provider describes them for the agent. Set `vision_model` in `config.toml` to override that choice or to use another provider.
+
+### Changed
+
+- Vibe packages now bundle the Unified Harness Runtime
+- Described UI and design screenshots now include a layout contract — regions, colors, typography hierarchy, and recurring components — so the agent can rebuild them.
+- VS Code narration now plays through the ACP subprocess (PortAudio) instead of the webview AudioContext, following the system default output device mid-playback
+
+### Fixed
+
+- Invalid MCP server tables now show actionable configuration guidance instead of a traceback
+- Concurrent Vibe sessions now merge their prompt history instead of overwriting each other.
+- Submitting a prompt no longer pauses the UI on history file I/O.
+- The session no longer freezes for good when a burst of subagents finishes at the same time
+- Path completion no longer inserts outdated suggestions while searching.
+- ACP integrations now preserve Windows MCP executable paths containing spaces and backslashes
+- Picking a model and a thinking level together no longer leaves that model's configuration unwritable when the model came from a rollout.
+- A session reopens on the thinking level it ran with, instead of the level another session left in the configuration.
+- Secure Git fetches no longer trust inherited Git configuration path overrides.
+- Repository worktree configuration can no longer rewrite validated Git fetch URLs.
+- Untrusted checkouts can no longer choose the SSH client or Git hooks used for approval-free fetches.
+- Secure fetches reject encoded network file paths, checkout-controlled credential helpers, and repository HTTP configuration.
+- Risky options, output operands, repository hooks, and shell redirections on otherwise read-only commands now require approval.
+- Git-reader approvals are scoped to one repository and cover repeated commands and remerge diffs.
+- Interactive pager input now requires approval on PowerShell and when session metadata cannot be verified.
+- `/mcp login` fails loudly when a server never issues an OAuth challenge, instead of reporting a false success with no token
+- Opening a session is faster on machines with many git worktrees: listing them no longer re-inspects each one, and the composer's model and approval-policy pickers no longer wait for the session to resume.
+
+## [2.25.5] - 2026-09-18
+
+### Added
+
+- Subagent conversation history is readable through the owning parent session
+- Configurable live subagent status and read-only transcript switching from the interactive prompt
+- `--experimental-harness` sessions can track todos, shown as a pinned line under the input and in full on `/todo`, and keep a per-session scratchpad whose notes are re-stated to the agent after the conversation is summarised.
+- Turn an installed skill on or off from the `/skills` browser without removing it.
+- Skill authors can mark skills as explicit-only, keeping slash invocation available while preventing model-initiated loading.
+- `vibe mcp add --allow-insecure-http` and `/mcp add --allow-insecure-http` opt into plaintext http:// MCP servers on non-localhost hosts, such as a server on the LAN.
+- Tool telemetry events now carry approval_source (config/smart/user/bypass/never) to distinguish how a tool call was authorized.
+- Press `r` in the MCP servers & connectors panel to refresh the list on demand.
+- Connectors view now links to Studio to add more connectors, pre-scoped to your org and workspace.
+- Local app-server sessions now persist and expose their latest accepted user interaction timestamp for downstream session resources.
+- Unified Harness app-server sessions can now be pinned, and remember it across restarts.
+- Scheduled loops (/loop) are now available in the Vibe VS Code extension with a panel UI for creating, listing, editing, and canceling recurring prompts.
+- Vulnerability disclosure guidance and private reporting instructions in SECURITY.md.
+- /teleport now works under --experimental-harness
+
+### Changed
+
+- The Unified Harness is no longer labeled "experimental"; `--legacy-harness` is the documented escape hatch back to the legacy Python harness.
+- Sessions with OAuth MCP servers configured start faster: fewer and overlapping keychain reads.
+- Approving a shell command with a variable expansion now covers the next call that differs only in the expansion.
+- Switched the audio engine to miniaudio to improve stability and performance of voice recording and playback
+- Connectors are listed and titled by their display name, falling back to the connector name.
+- Removed the local Cargo build job cap that limited editable builds to 2 jobs, restoring full parallelism for local harness builds.
+- Admin-managed config now enforces the individual keys it sets inside `session_logging`, `project_context` and `experiments`, rather than the whole group. Keys an admin does not set are taken from the user's own config instead of being reset to defaults.
+- A model change requested while a turn is running is now accepted and applied at the next turn boundary, instead of being rejected.
+- The Vibe CLI now sends a dedicated `MistralAI-VibeCLI/<version>` User-Agent header on MCP HTTP requests, letting the connectors gateway distinguish Vibe CLI tool calls from other MCP clients.
+
+### Fixed
+
+- Images attached to text-only models now fall back to file links instead of failing the turn.
+- Worktree sessions now tell the agent about the worktree working directory instead of the original checkout.
+- Subagents no longer prompt for tool permission when the parent session is in auto-approve mode under the Unified Harness
+- Workspace trust decisions over ACP now require a session and can only target its working directory.
+- The experimental unified harness can now record the IDE's workspace trust decision.
+- Keep skills with invalid invocation policy metadata explicit-only instead of exposing them to the model.
+- Creating or cleaning up a worktree no longer runs the repository's own git hooks (such as post-checkout) or its fsmonitor command.
+- Show retrying status during transient provider failures.
+- Cancelling a turn no longer hangs when the interrupt wedges server-side, and an interrupt that is taking unusually long now warns with the force-quit hint instead of leaving you staring at a silent "Interrupting" spinner.
+- Message sending after resuming pre-existing sessions that use connectors
+- Attaching an image from outside the workspace (e.g. ~/Downloads) in a fresh session no longer fails with 'Image file is outside the workspace or session attachments'.
+- Existing session logs are restricted to owner-only permissions when Vibe starts.
+- Vibe's home directory and the logs inside it are now accessible only to the current user.
+- Tool telemetry events now carry the actual approval decision (execute/skip) and approval type (always/never/ask) instead of always None.
+- MCP and connector tool calls now respect the permission system: they honor each tool's configured permission, ask before running by default, and remember your approval for later calls.
+- The enabled_tools and disabled_tools config globs now apply to MCP tools, not just connector tools.
+- `session_logging.enabled = false` is honoured again on the Unified Harness: the conversation and its attachments no longer land in the session save directory, the session log summary reports that logging is off, and `--continue`/`--resume` are refused with the same message the legacy backend gives.
+- Hooks now run inside subagents on the experimental harness, instead of being silently skipped.
+- `pre_tool` and `post_tool` hooks now run for the `skill` tool, which previously took no hooks at all.
+- Hook commands using pipes, `&&`, redirects, globs or `$VAR` now run through the shell.
+- A hook's `match` now matches the tool the model actually calls, including `edit` and MCP tools.
+- Unified Harness now injects the current git branch, status, and recent commits into the system instructions, matching the legacy backend
+- Shell approvals no longer widen to cover a different program, subcommand, custom shell, or environment.
+- Shell approvals no longer cover side-effecting options that the command's guardrails gate.
+- Approving a guardrailed command whose argument the shell could not read no longer approves the same command with a different one.
+- A shell call that can only be approved as written -- a redirect, a heredoc, a command the shell could not read -- is no longer covered by a wider approval for the same program.
+- A permanent approval a tool's allowlist cannot express is kept to the session instead of written there, and now says which scopes it kept.
+- Saving a setting while another part of Vibe reads the same config file no longer fails the request
+- Starting a turn after an enqueued first message no longer fails while a worktree is being prepared.
+- Agent and experiment updates no longer conflict with a worktree setup turn the UI already shows as running.
+- Stopping a worktree setup turn now runs the next queued message.
+- A dropped first-turn response no longer blocks later turns while a worktree is being prepared.
+- A dropped stop response no longer leaves a worktree setup turn stuck.
+- Creating a loop via /loop no longer fails with an opaque "Internal error"; app-server errors are now surfaced with their actual message.
+- `/mcp login` now recovers when a stored OAuth token refresh fails transiently (e.g. the server returns 5xx); it discards the stuck credentials and retries a fresh authorization instead of failing every retry.
+- Shell commands using line continuations now require approval.
+- `sort --files0-from` now requires approval before reading listed files.
+- Teleport no longer runs repository-configured external diff or text conversion helpers when preparing diffs.
+- Teleport no longer runs repository-configured file-monitor hooks when preparing diffs.
+- WebFetch now requires separate approval before following redirects to another origin.
+- Vibe no longer runs a project-local Git executable during automatic repository inspection.
+- Config layers now merge key by key, so setting one nested value through an environment variable or a project file no longer discards the rest of that group.
+- Reopening a session now restores the model that was picked last, not the one the last turn started with.
+- Changing the model in the CLI no longer stops the session's live display.
+- Smart approve now asks you to confirm a risky action you requested, instead of blocking it repeatedly and giving up.
+- Commands that discard output, such as `ls 2>&1` or `make >/dev/null`, no longer ask for approval. Redirections that write to a file still do.
+- Smart approve no longer asks you to confirm deleting a file the agent created earlier in the same session.
+- Smart approve no longer prompts when a tool only reads `.vibe/` or `.git/` configuration; it still asks before writing one.
+- Smart approve no longer overrides your permission rules: a command your rules had already gated is no longer auto-approved.
+- Smart approve now reclassifies each risky call instead of reusing an earlier decision, so revising your instructions mid-session takes effect immediately.
+- Keep a subagent's initial instruction visible after long transcripts
+- Crash when the subagent list updates while a row is highlighted
+- Escape now returns from a subagent transcript to the main conversation
+- Quit confirmation no longer leaks after leaving a subagent transcript
+- Clearing or resuming no longer races subagent transcript refreshes
+- Resumed sessions and tool approvals no longer stall when notifications arrive
+- Providers configured without an API key environment variable — local or self-hosted model servers — run again on the Unified Harness instead of failing every turn with a missing MISTRAL_API_KEY error.
+- A provider error on the Unified Harness shows the provider's own explanation again, such as "model is overloaded" or "context length exceeded", instead of only the HTTP status line and the request URL.
+- Queueing a message on a Unified session no longer risks killing the app server when the queue change arrives on a session state update.
+- Opening a session and loading the session list are much faster on machines with many linked checkouts: reads no longer resolve plugins, MCP servers and connectors they never use, and Desktop asks for a project's sessions in one request instead of one per checkout.
+
+## [2.25.4] - 2026-09-12
+
+### Fixed
+
+- Connector discovery excludes raw HTTP connectors that do not support MCP tools.
+- A single invalid connector no longer prevents the rest of your connectors from loading; an individual tool with an oversized schema is dropped on its own, and accounts over the connector cap keep a bounded catalog instead of loading none.
+- Automatic session titles use the active model on custom Mistral endpoints.
+- Smart-approve now appears in the Vibe Desktop mode picker when enabled via its rollout, and a background refresh no longer drops it.
+- ACP clients (Zed/JetBrains) always list the active mode, so a session can never get stuck on a mode missing from its own list.
+- Smart-approve now escalates to a confirmation prompt when a risky action is requested again, instead of only blocking it, and shows the reason it is asking.
+- Auto-approved calls no longer read as warnings: the reason smart-approve let a call run is shown as a note rather than a warning.
+- `@` file mentions now resolve against every workspace root, including `--add-dir` ones.
+- A `@` mention outside the workspace no longer rejects the whole message; it stays plain text and the read tool can still ask for it.
+- `--add-dir` no longer drops the working directory from the file tools' workspace roots.
+- Shell permission checks now require approval for risky syntax and command options that could bypass workspace and denylist controls (CVE-2026-87984, CVE-2026-87985, CVE-2026-87986, CVE-2026-87987, and residual CVE-2026-87988 variants).
+
+## [2.25.3] - 2026-09-11
+
+### Added
+
+- New `/branch` command forks the current conversation into a new resumable session, leaving the current session unchanged. Resume the copy in another terminal with `vibe --resume <id>`.
+
+### Changed
+
+- Bump the local harness runtime to v0.4.5.
+- Make @ file mentions use Git-aware discovery and accept standalone pasted files and folders.
+
+### Fixed
+
+- Retained chats remain readable and restore their worktrees when work resumes.
+- New session logs are no longer readable by other users on POSIX systems.
+- AGENTS.md instructions now load into the system prompt under the experimental unified harness.
+
+## [2.25.2] - 2026-09-10
+
+### Added
+
+- VS Code extension: debug submenu with log level picker, open log file, and a togglable session status panel showing agent statistics (steps, tokens, tokens/sec, context, cost)
+
+### Changed
+
+- Open the session picker faster by building the merged session listing once per cursor walk instead of on every page.
+- Renamed `SessionBackendKind` literals from `"python"`/`"rust"` to `"legacy"`/`"unified"` to match backend identity naming.
+
+### Fixed
+
+- An "always" permission grant that fails to reach `~/.vibe` now warns instead of passing silently: `ConfigOrchestrator.set_field` returns its errors rather than raising, so an ignored failure looked exactly like a successful write and the next session asked again with nothing to explain why.
+- Steered prompts now preserve their host-provided display content in app-server session history.
+- Preserve the selected permission mode when a session starts in a worktree.
+- Managed worktree creation, attachment, and retention cleanup are serialized across processes, and stale reservations are recovered safely.
+- Stop dropping a session from the picker when it is touched while paging through the list.
+
+## [2.25.1] - 2026-09-09
+
+### Added
+
+- Desktop keeps 15 recent managed Code worktrees by default, configurable in Local Coding settings; cleanup skips active, dirty, untracked, or unpushed worktrees.
+- Background process tools (process.start, process.stop, process.output, process.list, process.write) now show the command or process ID in the call header and a typed result widget instead of raw JSON.
+- Tool call groups now fold into a single compact summary line by default. Click to expand the full list. Ctrl+O toggles all groups and result bodies. The summary shows present-tense labels while running (e.g. "Running commands") and past-tense when done (e.g. "Ran commands"). File edits and writes are included in the fold.
+- Show a loading spinner in the conversation while `/reload` is in progress
+- A risky call is returned to the model to self-correct rather than interrupting the human, escalating to an approval prompt only after a streak; no failure path auto-approves
+- Experimental `experimental_enable_tab_status` config option: shows `>>` (running) and `?` (waiting) indicators in the terminal tab title.
+- New built-in `worktree` plugin with a skill for creating, reusing, and cleaning up git worktrees under $VIBE_HOME/worktrees.
+
+### Changed
+
+- The invalid API key error now names where the key came from (`env var MISTRAL_API_KEY`, `the keyring`), so a shell-exported key shadowing the one saved at setup is visible.
+- Optimized resource usage when running the full test suite.
+- The `vibe` and `skill-creator` skills now reach a session as skills of the shipped `vibe` plugin, so they are offered once, as `/vibe:vibe` and `/vibe:skill-creator`.
+- Bump harness to v0.4.3
+- Vibe Desktop can create local projects from any existing folder.
+- Background LLM session titles are now off by default. Set `session_logging.generate_titles = true` to re-enable them.
+- Vibe CLI shows the output of a `!` command directly in the timeline: it is neither folded behind its own toggle nor gathered into the summary line that folds the agent's tool calls. Shell calls the model makes still fold, as every other tool result does.
+- The `/plugins` detail view now leads with Author and Version, then the description, then Location (renamed from "Installed from"), Scope, Format, and Pinned.
+- The `/resume` session picker now shows an animated loading indicator while saved sessions are discovered and waits briefly before loading a highlighted session preview, keeping rapid keyboard navigation responsive.
+- A session that asks for a worktree now starts in the repository and moves into the worktree once `git worktree add` lands, so the session exists from the moment the prompt is sent instead of after the checkout. Only its first turn waits.
+
+### Fixed
+
+- Worktree sessions retain access to attached images and files.
+- Pinning or removing a shared skill now republishes this repository's claims, so another repository's cleanup no longer deletes a skill you just added.
+- Removed unauthenticated debugpy listener on localhost:5678 that was activated by `DEBUG_MODE=true` under `vibe-acp`
+- A rejected API key no longer offers `/retry`, which could only fail again with the same key.
+- Path autocomplete now prioritizes matches beneath an explicitly typed directory prefix in large repositories
+- GrowthBook rollouts set only via a feature's default value now take effect (previously ignored)
+- GrowthBook boolean feature flags now take effect, not just string on/off values
+- Cached experiment variants are no longer dropped to defaults on cold start or resume
+- Stop the CLI from dumping a traceback on exit when the app-server connection drops during shutdown (a failed reconnect/resume no longer crashes the event listener).
+- Built-in plugins are no longer listed under "Not loaded" in `/plugins` with "Plugin namespace 'vibe' is reserved". Only a built-in may claim the reserved `vibe` namespace, but the re-resolve a session's plugin bind performs was re-reading every checkout at project scope, so the shipped `vibe` plugin was dropped from every session.
+- Tool call group icon now reflects the status of the last call in the group instead of the worst (any failure no longer overrides a later success)
+- Individual failed tool call indicators stay grey (muted) when a later call in the same group succeeds, instead of escalating to red
+- Tool group and individual tool call indicators now show a blinking square while running, then a colored dropdown triangle when settled
+- App-server validation errors now name the offending field and reason instead of only "Invalid request parameters".
+- The auto-generated session title now waits for the first turn to complete and ignores the assistant's process preamble, so it names the actual task (e.g. the real subject of a linked issue) rather than an opening line like "I'll explore the codebase"
+- Session titles now generate and refresh while a turn is still running — including long, tool-heavy turns that emit few assistant messages — instead of only when the turn ends or is interrupted
+- A `!` command that exits non-zero (or is interrupted) now shows what it printed. Only the exit status was reported before, which hid the stderr explaining it.
+- User-scope plugins (`~/.vibe/plugins/`) were shown as `project` scope in `/plugins` because the bind-time resolve collapsed all staged checkouts to project scope. Scope is now preserved from the original discovery.
+- Smart approve now runs its classifier on the fast Mistral model regardless of the session's active model, including when you switch into the mode mid-turn; a session on another model (e.g. a non-Mistral provider) sent the classify call to the wrong endpoint, so every gated tool call came back unverifiable and prompted instead of auto-approving
+- The smart-approve pre-check no longer fast-approves content-dumping git commands (`git diff`/`show`/`blame`, `git log -p`, `git status -v`); they defer to the classifier so a secret shown in a diff is not auto-read
+- The smart-approve pre-check no longer fast-approves a secret path hidden behind a `cd` prefix (e.g. `cd ~/.ssh && ls`); the secret scan now reads the whole command, not the part after the `cd`
+- The classifier now runs the fast model with deterministic decoding (temperature 0, thinking off) regardless of the session, so a thinking session no longer sends a thinking request to the small model and escalates every gated call
+- A subagent's classification event under smart approve is now forwarded to telemetry like a top-level one, instead of being applied as a subagent state update — which had dropped the subagent's events from the main-agent stream
+- Smart approve no longer classifies `ui.ask_user_question`; asking the user a clarifying question is the escalation channel itself, so it always runs instead of paying a classifier round-trip, being deny-and-continued, or escalating to an approval dialog to ask
+- Starting with `--smart-approve` now keeps the mode in the Shift+Tab cycle for the whole session; it was selected at launch but dropped out of the cycle after switching to another mode, so you could not switch back to it
+- Switching agent mode mid-turn now re-gates MCP/connector tools too: leaving smart approve stopped asking for built-in tools but kept classifying every connector call because the mid-turn config graft dropped `provided_tool_mode`
+- "Approve for session" on an MCP/connector tool under smart approve now covers the whole tool instead of the exact arguments, so calling the same tool with different arguments no longer re-prompts (built-in tools keep their per-call resolver scope)
+- Resuming a session created by a newer version of Vibe now shows a clear message to restart with `--check-upgrade` and update, instead of an internal store-format validation error.
+- Hook commands run without a shell to prevent injection via hooks.toml
+
+## [2.25.0] - 2026-09-03
+
+### Added
+
+- `/skills` browser for session skills, with search and filter; shared skills sync on session start. Experimental, off by default.
+- Browser SSO completes behind split-horizon reverse proxies; opt-in `browser_auth_allow_origin_rewrite` rewrites sign-in/poll URLs onto configured origins
+- Discovery of Mistral's built-in web-search connector
+- Plugin-declared MCP servers in `/mcp`, tagged with their plugin and authenticatable via `/mcp login`; a pending login is announced at session start
+- Connectors (Notion, Linear, Slack, GitHub, Gmail, Google Calendar, Drive) in ACP
+- ACP elicitation-form clients can answer `ask_user_question` and `exit_plan_mode`
+- Session-scoped model pinning for resumed conversations
+- `vibe update` to check for and install a newer release
+
+### Changed
+
+- Connector discovery skips unsupported protocols
+- `agents/list` no longer requires a session id
+- Prompt queueing runs through the app server with select, edit, remove, pause, and resume controls
+- `/skills` browser groups by scope, fits rows to width, and pages long lists
+- `vibe --yolo` selects the `auto-approve` profile (cyclable with Shift+Tab; blockable via `disabled_agents`)
+- A plugin MCP server whose name collides with an `[[mcp_servers]]` entry is dropped with a warning instead of inheriting the configured credential
+- `/config` saves to user config by default; Tab cycles user / session / (trusted) project target
+- Vibe CLI sends queued prompts as a single turn; Desktop keeps turn-by-turn
+- `/mcp` title marks an in-flight background refresh
+
+### Fixed
+
+- Pruning cached skills preserves versions pinned by other repos
+- Approved file operations act on the cleared path, preventing symlink redirection outside the project; approved writes outside the project execute
+- Onboarding crash on a malformed `browser_auth_api_base_url` port
+- Split-horizon account and re-signin reach the connector origin and adopt tenant domains from `/whoami`
+- Multi-line tool descriptions (remote MCP, connector, plugin) no longer break `/mcp` layout; rows render the first line only, `[source]` prefix stripped
+- Mode indicator reflects the effective tool-approval bypass (`--yolo`, `--auto-approve`, `bypass_tool_permissions`)
+- Builtin `vibe` skill no longer recommends the removed `/terminal-setup` and now documents `/copy`, `/paste-image`, `/remote-project`
+- Context gauge drops the discarded conversation immediately after `/clear` and `/compact`
+- `/config` shows and edits the active model's effective auto-compaction threshold, preserving org-enforced global locks
+- Session event stream no longer crashes on a JSON-Patch `move` from a field relocation
+- `/mcp login` no longer probes with a bare GET (405 before credentials); for a plugin server it sends the plugin's declared headers and uses its own URL, not a same-named `[[mcp_servers]]` entry from another session
+- Toggling an MCP row the app server refuses to change shows a notice instead of ending the session
+- `/mcp add` under a plugin-owned name takes the name immediately for the configured entry
+- `/mcp` refresh reconnects plugin servers, not just configured ones
+- Same-named plugin MCP servers each get their own `/mcp` row with their own status and tools
+- Adding then removing an `[[mcp_servers]]` entry under a plugin-owned name no longer strands the plugin's server
+- A second session no longer drops the first's plugin servers or `[[mcp_servers]]` entries; each session's configured servers are its own
+- A server whose name another session shares no longer gets that session's credential deleted on identity mismatch
+- Context-window indicator updates on model switch without a restart
+- Failed queue merge no longer leaves a ghost prompt; rewind targets the merged turn's real history entry and survives removing the first queued prompt
+- Connectors/MCP panel auto-sizes to content instead of a fixed 50vh
+- `/mcp` no longer paints a failing-discovery source or unlinked connector as enabled before it comes up
+- Crash on closing the app while a turn is streaming
+- Loading spinner keeps its "Interrupting" label in the pre-surface gap
+- Closing the resume picker mid-load no longer crashes with `NoMatches`
+- Invalid active model falls back to the current default; the banner model refreshes after clearing a session
+- Account refresh no longer overwrites third-party provider settings on a concurrent model change
+- Rewind into a new session and rewind-in-place while resyncing no longer redraw stale turns
+- `/mcp` opens from cache and waits 60s before refreshing; HTTP setup runs outside the UI loop
+- System trust store respected during browser sign-in
+- A message sent while idle or right after interrupting no longer flashes as queued and shows the loading indicator immediately
+- Escape-to-interrupt updates the status immediately; Escape+Enter to restart a queued turn no longer drops the Enter; Escape just as a turn finishes no longer stalls the next message
+
+### Removed
+
+- Devstral Small (`devstral-small-latest`) from the default models list; stale sparse config overrides migrated automatically
+
+## [2.24.5] - 2026-08-27
+
+### Added
+
+- Fuzzy search in the MCP servers and connectors browser
+
+### Changed
+
+- Faster startup through additional lazy imports and deferred schema builds
+
+### Fixed
+
+- Trust prompt is skipped when `--worktree` or `--trust` already grants access
+- Links are normalized before opening to prevent broken clicks
+- Themes apply correctly at startup
+- Retried Mistral responses are released back into the connection pool
+
+
+## [2.24.4] - 2026-08-26
+
+### Added
+
+- LLM-generated session titles and terminal title
+- Queue selection and edit mode for queued messages
+- Git info is shown in the session header
+
+### Changed
+
+- Model connections are reused across tool turns for faster responses
+
+### Fixed
+
+- `/mcp login <connector>` routes to the connector auth flow
+- Rate-limited calls retry with adaptive backoff and pacing
+- Model retry state stays authoritative across clients
+- Loading nix-managed skills through a symlinked `SKILL.md` no longer freezes
+- Chat-completion connections are closed to avoid pool timeouts
+
+
+## [2.24.3] - 2026-08-20
+
+### Added
+
+- Slash commands and setting pickers can be used while the agent or a command is running
+- The process is named "Vibe CLI" and the bottom bar shows its PID
+
+### Changed
+
+- Models are shown by display name instead of the raw config alias
+- Python dependencies updated to clear known security advisories
+
+### Fixed
+
+- Connector bootstrap failures are surfaced instead of reporting no connectors
+
+
+## [2.24.2] - 2026-08-18
+
+### Added
+
+- In-app session picker with live preview
+- `/log-level` command for runtime log-level control
+- `/retry` is exposed to ACP clients
+- Created worktrees are shown in the transcript
+- Worktrees are cleaned up when their local session is deleted
+
+### Changed
+
+- Faster startup: the TUI renders before session initialization and imports are deferred
+- Faster session resume
+- Edit and read tool headers show paths relative to the current directory
+- Admin config fetch retries with exponential backoff
+- Custom tools are flagged as deprecated
+
+### Fixed
+
+- New worktrees branch from the remote default instead of local HEAD
+- Configured temperature is respected for reasoning models
+- Thinking setting updates correctly for routed models
+- Path picker stays open on `/` and supports `../` traversal
+- Escape sequences in command output no longer flood the input box
+- Live tool-permission bypass propagates to child agent loops
+- Managed shell output is no longer sent to the LLM twice
+- Adding a tool to the allowlist keeps the default allowlist
+- OpenTelemetry traces are sent to the correct endpoint
+
+
+## [2.24.1] - 2026-08-11
+
+### Added
+
+- Inline ghost-text completion for mid-prompt skills
+- `/clear` and `/new` accept an optional first prompt and show the resume id
+- Compacted conversation history is preserved
+- OpenTelemetry tracing configuration is now available
+
+### Changed
+
+- Default agent renamed to `ask` and defaults to accept-edits
+- Auto worktrees are named with a model
+- Faster resume by deferring sub-agent instantiation
+
+### Fixed
+
+- Surface MCP server startup failures to the user
+- Text selection is now visible in the chat input
+- Provider reasoning is replayed verbatim
+- Detect and retry incomplete LLM streams
+- Surface voice transcription errors instead of swallowing them
+- Proactively refresh expired MCP OAuth tokens
+- Theme switching is now responsive
+- Crash on undo of a large multiline insert in the chat input
+- Config modal headers stay visible on wrap, with a tighter layout
+- Trusting the cwd no longer untrusts `<cwd>/.vibe`
+- Home directory is no longer treated as a project root
+- Explain the fallback when the configured default model is invalid
+- Scope sensitive-file read grants and stop chat bypass
+- Git Bash paths no longer create bogus `C:\c\...` directories on Windows
+- Use POSIX separators when shortening home paths in display
+- `/clear` resume hint gated on session persistability
+
+
+## [2.24.0] - 2026-08-05
+
+### Added
+
+- Admin config layer for shared/enforced config that applies over user config
+- "Default" (unpinned) model option in `/model` and `/config` to track the recommended model without pinning a specific alias
+- Server-side default model routing via experiment, never overriding explicit pins
+- LLM retries surfaced in ACP/VS Code conversations via `_session/retrying` notification
+- Explore subagent can load skills
+- Local sessions start in the selected worktree
+- User and project config layers compose; trusted project config overlays user config instead of replacing it
+- Startup duration telemetry (`vibe.startup`)
+
+### Changed
+
+- Experiment variants routed through the config schema; TOML/env/overrides now take precedence over GrowthBook assignments
+- Autocopy: keyboard copy shortcuts give feedback, double/triple-click drag improved, and `autocopy_to_clipboard` documented
+
+### Fixed
+
+- Drag-and-drop of files into the terminal when unfocused (iTerm2, Ghostty)
+- Subagent session handoff after compaction
+- Stale `devstral-small` thinking setting migrated to off
+- Noisy non-Vibe events dropped from Sentry
+- ACP returns `max_turn_requests` stop reason instead of erroring on turn limit
+- `/resume` listing speed no longer scales with total session count (persistent index)
+
+
+## [2.23.3] - 2026-08-03
+
+### Added
+
+- `/retry` command to retry an interrupted response
+- `/rewind` now lets you choose between forking and rewinding in place
+- LLM retries surfaced in the UI and logs
+- Read the config catalogue without an attached session
+
+### Changed
+
+- `/status` shows provider prompt-cache usage and discounts cached tokens from the session cost
+- Native copy hint on the clipboard notice
+
+### Fixed
+
+- Refused config change no longer wipes the picker
+- Git fsmonitor hook disabled in project context
+- Signed reasoning blocks preserved
+- Tab hint colored in config edit modal
+- UPX disabled in the PyInstaller specs
+- List formatting preserved when copying a selection from the TUI
+- Duplicate approval widget prevented when callbacks overlap
+- ACP usage update sent on session resume, fork, and new
+- Context token display updated on session resume
+- More frequent context window updates in ACP
+
+### Removed
+
+- Unreachable chat mode
+
+## [2.23.2] - 2026-07-30
+
+ ### Added
+
+- Skill-creator built-in skill: a guided flow to author, update, and delete your own skills
+- Browser sign-in can target a custom login domain for self-hosted or private-gateway deployments
+- Session stats now track provider cache-hit (cached) tokens
+
+### Changed
+
+- Redesigned `/config` as a searchable, full-screen settings browser with typed edit modals and per-layer origin display
+- App-server protocol extended and packaged as a standalone `vibe-app-server` binary for desktop integration
+
+### Fixed
+
+- Cached-token counts now reported in session stats instead of always zero
+- Zed ACP packaging preserves symlinks by shipping `.tar.gz` archives
+- `grep` result chips open the correct file and no longer leak absolute host paths into context (ACP)
+- ACP `/rewind` truncates in place instead of forking
+- Extra fields in the whoami response no longer rejected
+- ACP session history sorted by recency
+- Blank permission prompt and duplicated user message in the ACP/VS Code webview
+- WhoAmI result again tolerates extra fields
+
+
+## [2.23.1] - 2026-07-28
+
+### Fixed
+
+- Crash when `@`-mentioning a file, which aborted the turn
+
+
+## [2.23.0] - 2026-07-28
+
+### Added
+
+- [A/B testing] OS-native managed shell tools
+- `vibe mcp add` and `vibe mcp remove` commands to add and remove remote MCP servers without editing TOML
+- Auto theme that follows terminal/OS appearance
+- ACP project links surface for desktop integration
+- Dense, grouped tool-call rendering in the TUI
+
+### Changed
+
+- Trust dialog now defaults to "Trust folder" and is simplified
+- Tool descriptions compressed to reduce context bloat
+- Smoother, faster scrolling in long conversations
+- Fixed unnecessary textual relayout computation on constant-size animation frames, removing lag spikes
+- Major internal refactor introducing a JSON-RPC 2.0 app server as the single runtime owner between delivery surfaces (TUI, `-p`, ACP) and the core engine, replacing direct `AgentLoop`/callback coupling with a typed, projected protocol
+
+### Fixed
+
+- Option+Left/Right word navigation in the chat input
+- Unsigned thinking blocks dropped on backend replay
+- SGR mouse protocol renegotiated when the emulator sends x10 bytes
+- Crash on `/resume` delete confirmation
+- Empty mapping treated as absent in CONCAT/UNION config merge
+- `LC_CTYPE` used instead of `LC_ALL` in the bash tool environment
+- Chunk text emitted before its tool call in the streaming loop
+- Text selection guarded against detached widgets
+- `OSError` on over-long `@`-mention autocompletion candidates
+- MCP registry created when the first server is added via `/mcp add`
+- CLI conversation ID preserved after teleport
+- Data-retention link accessible to non-admins
+
+
 ## [2.22.0] - 2026-07-21
 
 ### Added
