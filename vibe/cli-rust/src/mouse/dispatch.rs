@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 use super::{option_gesture, MouseTarget};
 use crate::app::App;
 use crate::config;
-use crate::config_write::Scope;
 use crate::option_list::{Click, MultiAction, OptionList, OptionView, SingleAction};
 use crate::selection::{self, RegionId, Release};
 use crate::server::Client;
@@ -46,11 +45,7 @@ pub(super) fn dispatch(
                 connector_auth::select(app);
             }
         }
-        MouseTarget::ModelPicker => {
-            if confirmed(app, event, |app| &mut app.model_picker.list) {
-                model_picker::select(app, client, Scope::Saved);
-            }
-        }
+        MouseTarget::ModelPicker => model_picker::mouse(app, event, client),
         MouseTarget::ThemePicker => {
             if picked(app, event, |app| &mut app.theme_picker.list) {
                 crate::input::select_theme(app, client);

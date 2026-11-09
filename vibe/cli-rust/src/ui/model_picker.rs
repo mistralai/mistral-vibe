@@ -1,15 +1,26 @@
-//! `/model` picker bottom-app: a bordered box with a title, the model option
-//! list (a leading Default row with a `(currently …)` hint, `›` on the current
-//! choice, no live preview), and a hint.
+//! `/model` picker bottom-app: a bordered box with a title, the `/` search row,
+//! the option list (a leading Default row with a `(currently …)` hint, `›` on
+//! the current choice, no live preview), and a hint.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 
-use super::{hint_line, list_cursor, scrollbar, theme};
+use super::{hint_line, list_cursor, scrollbar, search_field, theme};
 use crate::app::App;
-use crate::model_picker::{is_current, option_count};
+use crate::hints::{self, action, key, Hint};
+use crate::model_picker::{self, option_count, Row};
+use crate::search_field as search_model;
+
+/// Footer hints: the shared pick hints plus search.
+const HINTS: &[Hint] = &[
+    hints::NAVIGATE,
+    (key::ENTER, action::SAVE),
+    ("s", action::SESSION_ONLY),
+    hints::SEARCH,
+    hints::CANCEL,
+];
 
 /// Draw the whole screen with the picker replacing the input box; the chat
 /// shrinks to make room for the bottom-app.
@@ -24,13 +35,13 @@ fn visible_rows(app: &App, area_height: u16) -> usize {
     (area_height as usize / 2).min(option_count(app))
 }
 
-/// Total box height: 2 borders + title + options + margin-top + help.
+/// Total box height: 2 borders + title + search + blank + options + help.
 fn box_height(app: &App, area_height: u16) -> u16 {
-    visible_rows(app, area_height) as u16 + 5
+    visible_rows(app, area_height) as u16 + 6
 }
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
-    if area.height < 5 {
+    if area.height < 6 {
         return;
     }
     f.render_widget(Clear, area);
@@ -57,8 +68,10 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let visible = h.saturating_sub(5) as usize;
-    let top = by + 2;
+    draw_search(app, f, area);
+
+    let visible = h.saturating_sub(6) as usize;
+    let top = by + 4;
     let total = option_count(app);
     let list_area = Rect::new(bx + 1, top, w.saturating_sub(2), visible as u16);
     // Without overflow there is no scrollbar gutter, so the options span one
@@ -96,13 +109,33 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         );
     }
 
-    hint_line::draw(f, bx + 2, by + h - 2, hint_line::PICK_HINTS);
+    let search = &app.model_picker.search;
+    let hints = search_model::hints(search.focused, !search.query.is_empty(), HINTS);
+    hint_line::draw(f, bx + 2, by + h - 2, &hints);
 }
 
-/// One option row: the `›`/blank marker, the label, and (row 0) the dim hint.
+/// The search row under the title; the field owns its mouse like Python's `Input`.
+fn draw_search(app: &mut App, f: &mut Frame, area: Rect) {
+    let row = Rect::new(area.x + 3, area.y + 2, area.width.saturating_sub(6), 1);
+    let input = search_field::draw_row(
+        f,
+        row,
+        &app.model_picker.search,
+        "Search models",
+        app.view.cursor_on,
+        theme::background(),
+    );
+    app.model_picker.search.area = input;
+    crate::mouse::register_region(app, input, crate::mouse::MouseTarget::ModelPicker);
+    // A box drag never selects the field.
+    let field = (input.y, input.x, input.right().saturating_sub(1));
+    app.view.bottom_app_selection_chrome.push(field);
+}
+
+/// One option row: the `›`/blank marker, the label, and (Default row) the dim hint.
 fn draw_option(app: &App, f: &mut Frame, row: Rect, i: usize) {
     let is_hl = i == app.model_picker.list.selected();
-    let current = is_current(app, i);
+    let current = model_picker::is_current(app, i);
     let (x, y) = (row.x, row.y);
     if is_hl {
         list_cursor::paint(f, row);
@@ -117,17 +150,22 @@ fn draw_option(app: &App, f: &mut Frame, row: Rect, i: usize) {
         true => base.add_modifier(Modifier::BOLD),
         false => base,
     };
-    let label = if i == 0 {
-        "Default"
-    } else {
-        &app.model_picker.models[i - 1].display_name
-    };
-    f.buffer_mut().set_string(x + 2, y, label, name_style);
-
-    if i == 0 {
-        let hint = format!("  (currently {})", app.model_picker.default_display_name);
-        let hint_style = dim;
-        let hint_x = x + 2 + label.chars().count() as u16;
-        f.buffer_mut().set_string(hint_x, y, hint, hint_style);
+    match model_picker::rows(app).get(i) {
+        Some(Row::Note) => {
+            f.buffer_mut()
+                .set_string(x + 2, y, model_picker::NO_MATCHES_LABEL, dim);
+        }
+        Some(Row::Default) => {
+            let label = "Default";
+            f.buffer_mut().set_string(x + 2, y, label, name_style);
+            let hint = format!("  (currently {})", app.model_picker.default_display_name);
+            let hint_x = x + 2 + label.chars().count() as u16;
+            f.buffer_mut().set_string(hint_x, y, hint, dim);
+        }
+        Some(Row::Model(m)) => {
+            let label = app.model_picker.models[*m].display_name.as_str();
+            f.buffer_mut().set_string(x + 2, y, label, name_style);
+        }
+        None => {}
     }
 }

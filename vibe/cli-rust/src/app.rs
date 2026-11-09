@@ -511,8 +511,10 @@ pub struct ModelOption {
 pub struct ModelPicker {
     /// While set the picker replaces the input box: title, option list, hint.
     pub open: bool,
-    /// Highlighted option (0 = Default row, then one per model) and the viewport.
+    /// Highlighted visible row and the viewport.
     pub list: crate::option_list::OptionList<crate::option_list::MultiAction>,
+    /// The `/` fuzzy filter over the rows; empty shows every model.
+    pub search: crate::search_field::Search,
     /// Model snapshot from `runtime/read`, refreshed on `runtime/updated`.
     pub models: Vec<ModelOption>,
     /// The active model's alias (`activeModel.alias`).

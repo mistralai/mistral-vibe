@@ -160,7 +160,6 @@ fn handle_input_event(
                 | Focus::ConnectorAuth
                 | Focus::Rewind
                 | Focus::ThemePicker
-                | Focus::ModelPicker
                 | Focus::LogLevelPicker
                 | Focus::ThinkingPicker
                 | Focus::ArtifactsModal
@@ -171,6 +170,7 @@ fn handle_input_event(
                 Focus::ReleaseNotes => crate::release_notes::paste(app, &text),
                 Focus::VibeCodeProject => crate::vibe_code_project::input::paste(app, &text),
                 Focus::Mcp => crate::mcp::search::paste(app, &text),
+                Focus::ModelPicker => crate::model_picker::paste_search(app, &text),
                 Focus::Plugins => crate::plugins::paste(app, &text),
                 Focus::SubagentList | Focus::Composer => input::handle_paste(app, text),
             }

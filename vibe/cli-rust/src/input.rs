@@ -645,10 +645,14 @@ pub fn handle_mcp_oauth_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) 
     }
 }
 
-/// The `/model` picker owns keys: arrows/jk navigate, Enter saves to config,
-/// `s` keeps the pick for this session only, Esc cancels.
+/// The `/model` picker owns keys: `/` focuses the fuzzy search (typing filters),
+/// arrows/jk navigate, Enter saves to config, `s` keeps the pick for this
+/// session only, Esc leaves search, clears the filter, then cancels.
 /// Unlike the theme picker, navigation does not live-preview.
 pub fn handle_model_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+    if model_picker::handle_search_key(app, &key) {
+        return;
+    }
     match key.code {
         KeyCode::Esc => model_picker::cancel(app),
         KeyCode::Up | KeyCode::Char('k') => model_picker::navigate(app, false),
