@@ -138,7 +138,7 @@ jobs:
             os: darwin
             arch: x86_64
             cargo_flags: ""
-          - runner: macos-14
+          - runner: macos-15
             os: darwin
             arch: aarch64
             cargo_flags: ""
@@ -155,7 +155,7 @@ jobs:
             arch: x86_64
             cargo_flags: "--no-default-features"
             from_sdist: true
-          - runner: macos-14
+          - runner: macos-15
             os: darwin
             arch: aarch64
             cargo_flags: ""
