@@ -309,7 +309,6 @@ async fn run() -> Result<std::process::ExitCode> {
     // Hold the positional prompt until startup converges. An empty positional
     // (`vibe ""`) yields to the piped prompt.
     app.session.initial_prompt = cli.interactive_initial_prompt(stdin_prompt);
-    app.session.teleport_on_start = cli.teleport;
     // One agent config for the process, resent on every resume.
     app.session.agent_config = interactive_agent_config.clone();
     app.chat_input.history = utils::history_manager::HistoryManager::load();

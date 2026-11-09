@@ -44,7 +44,7 @@ from vibe.core.config import VibeConfigSchema
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.models import MCPHttp, MCPStdio, MCPStreamableHttp
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.hooks.models import HookProtocol
+from vibe.core.hooks.models import HookProtocol, RuntimeHookDefinition
 from vibe.core.paths import VIBE_HOME
 from vibe.core.plugins import (
     DetectedPluginFormat,
@@ -865,6 +865,27 @@ def plugin_hook_signature(plugins: SessionPlugins) -> tuple[str, ...]:
     )
 
 
+def pinned_plugin_hook(
+    bound: SessionPlugins | None, hook: RuntimeHookDefinition
+) -> RuntimeHookDefinition:
+    """The session's pinned copy of ``hook``, which names its checkout and data dir.
+
+    Matched by plugin and declared name. A plugin a reload dropped, or a session with
+    no plugins bound, keeps the hook as resolved at start.
+    """
+    if bound is None:
+        return hook
+    return next(
+        (
+            candidate
+            for candidate in bound.materialized.resolution.runtime_hooks
+            if candidate.plugin_name == hook.plugin_name
+            and candidate.declared_name == hook.declared_name
+        ),
+        hook,
+    )
+
+
 def plugin_components_by_owner(
     plugins: SessionPlugins,
 ) -> Mapping[str, tuple[PluginComponent, ...]]:
@@ -1038,7 +1059,7 @@ def _plugin_contexts(
         RustPluginContextDefinition,
     )
 
-    owners = {plugin.namespace: plugin.name for plugin in resolution.plugins}
+    owners = {plugin.component_prefix: plugin.name for plugin in resolution.plugins}
     skills = _core_skills(resolution.skills, owners)
     return [
         RustPluginContextDefinition(
@@ -1058,7 +1079,7 @@ def _plugin_contexts(
 def _core_skills(
     skills: Mapping[str, SkillInfo], owners: Mapping[str, str]
 ) -> Mapping[str, list[RustSkillDefinition]]:
-    """Group plugin skills by owning plugin, under their ``namespace:name`` alias.
+    """Group plugin skills by owning plugin, under their ``plugin:name`` alias.
 
     Core accepts that alias verbatim, so the name the model sees is the one the
     resolver assigned. The path is the runtime path, which for a foreign format
@@ -1068,8 +1089,8 @@ def _core_skills(
 
     grouped: dict[str, list[RustSkillDefinition]] = defaultdict(list)
     for alias, skill in skills.items():
-        namespace, _, _ = alias.partition(":")
-        owner = owners.get(namespace)
+        prefix, _, _ = alias.partition(":")
+        owner = owners.get(prefix)
         path = plugin_skill_runtime_path(skill)
         if owner is None or path is None:
             continue

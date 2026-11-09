@@ -10,8 +10,6 @@ use crate::post_ready::AccountReads;
 /// A completed background slash command, returned to the UI reducer. Exactly one
 /// per dispatch, so the reducer can tell when the UI is settled again.
 pub enum CommandEvent {
-    RemoteProject(Box<crate::vibe_code_project::Reply>),
-    Teleport(Box<crate::teleport::Reply>),
     Plugins(Box<crate::plugins::Event>),
     /// The `/context` breakdown read, with the generation it was requested at.
     Context(Box<(u64, crate::context_app::Event)>),

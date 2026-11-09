@@ -41,7 +41,7 @@ fn budget_block(block: &mut ContentBlock, image_cost: ImageCostRule) -> Option<u
 fn budget_message(message: &mut Message, image_cost: ImageCostRule) -> u64 {
     let mut image_tokens = 0u64;
     match message {
-        Message::System { content } | Message::User { content } => {
+        Message::System { content } | Message::User { content, .. } => {
             budget_contents(content, image_cost, &mut image_tokens);
         }
         Message::Assistant { content } => content.retain_mut(|part| match part {

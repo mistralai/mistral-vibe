@@ -15,6 +15,7 @@ import tomli_w
 
 from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
+    connect_backend_contract_host,
     wait_for_background_integrations,
 )
 from tests.constants import CONNECTORS_BOOTSTRAP_PATH, MISTRAL_BASE_URL
@@ -44,6 +45,7 @@ from vibe.app_server.protocol import (
     MCPRemoveResponse,
     MCPToggleParams,
     ProtocolErrorCode,
+    SessionOptions,
     SessionStartParams,
     SessionStartResponse,
     SessionStopParams,
@@ -207,6 +209,7 @@ async def test_mcp_catalog_read_refresh_toggle_remove_and_compatibility_aliases(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("connectors_enabled")
 async def test_local_mcp_servers_stay_usable_when_connectors_reject_the_key(
     backend_contract_connection: BackendContractConnection, respx_mock: respx.MockRouter
 ) -> None:
@@ -759,3 +762,125 @@ def _assert_login_wire_order(timeline: list[tuple[str, dict[str, Any]]]) -> None
     assert auth_url < response
     assert compatibility_auth_url < response
     assert response < runtime_updated
+
+
+_COUNTING_SERVER_SOURCE = """
+import sys
+from pathlib import Path
+
+from mcp.server.mcpserver import MCPServer
+
+log, fail = Path(sys.argv[1]), sys.argv[2] == "fail"
+server = MCPServer("counting")
+
+
+@server.tool()
+def echo(value: str) -> str:
+    return value
+
+
+list_tools = server.list_tools
+
+
+async def counted_list_tools():
+    with log.open("a") as stream:
+        stream.write("tools/list\\n")
+    if fail:
+        raise RuntimeError("down")
+    return await list_tools()
+
+
+server.list_tools = counted_list_tools
+
+if __name__ == "__main__":
+    server.run()
+"""
+
+
+def _configure_counting_servers(config_dir: Path, tmp_path: Path) -> dict[str, Path]:
+    """A healthy and a failing stdio server, each logging every tools/list."""
+    source = tmp_path / "counting_mcp_server.py"
+    source.write_text(_COUNTING_SERVER_SOURCE, encoding="utf-8")
+    logs = {name: tmp_path / f"{name}.log" for name in ("counted", "failing")}
+    config_path = config_dir / "config.toml"
+    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+    config["mcp_servers"] = [
+        {
+            "name": name,
+            "transport": "stdio",
+            "command": [
+                sys.executable,
+                str(source),
+                str(log),
+                "fail" if name == "failing" else "ok",
+            ],
+            "startup_timeout_sec": 30.0,
+            "tool_timeout_sec": 30.0,
+        }
+        for name, log in logs.items()
+    ]
+    config_path.write_text(tomli_w.dumps(config), encoding="utf-8")
+    return logs
+
+
+def _listed(log: Path) -> int:
+    return len(log.read_text().splitlines()) if log.exists() else 0
+
+
+@pytest.mark.asyncio
+async def test_sessions_of_one_process_discover_each_mcp_server_once(
+    config_dir: Path,
+    tmp_path: Path,
+    process_services: ProcessServices,
+    backend_contract_mistral_api: respx.Route,
+) -> None:
+    """*Prepare*: A healthy and a failing stdio MCP server, nothing cached, and
+      two channels of one multiplexed process.
+    *Do*: Open a session on the first channel and let its discovery finish,
+      then open one on the second channel.
+    *Assert*: The second session routes the healthy server's tools from the
+      shared cache and reports the failing one unavailable, and neither
+      server is contacted again.
+    """
+    # Prepare
+    logs = _configure_counting_servers(config_dir, tmp_path)
+    connections = [
+        await connect_backend_contract_host(
+            session_options=SessionOptions(),
+            capabilities=ClientCapabilities(),
+            process_services=process_services,
+        )
+        for _ in range(2)
+    ]
+
+    # Do
+    sessions: list[AppServerSession] = []
+    reads: list[MCPReadResponse] = []
+    listed: list[dict[str, int]] = []
+    try:
+        for connection in connections:
+            session = await connection.host.open_session()
+            sessions.append(session)
+            await session.resources.runtime.wait_until_ready()
+            await wait_for_background_integrations()
+            reads.append(
+                MCPReadResponse.model_validate(
+                    await connection.client.request(
+                        "mcp_catalog/read", MCPReadParams(session_id=session.session_id)
+                    )
+                )
+            )
+            listed.append({name: _listed(log) for name, log in logs.items()})
+    finally:
+        for session in sessions:
+            await session.close()
+        for connection in connections:
+            await connection.host.close()
+
+    # Assert
+    assert listed == [{"counted": 1, "failing": 1}] * 2
+    for read in reads:
+        counted = _source(read, "counted")
+        assert counted.status is MCPSourceStatus.ENABLED
+        assert {tool.name for tool in counted.tools} == {"echo"}
+        assert _source(read, "failing").status is MCPSourceStatus.UNAVAILABLE

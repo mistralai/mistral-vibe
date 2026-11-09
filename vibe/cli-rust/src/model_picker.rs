@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::app::{App, ModelOption};
+use crate::app::{App, ModelOption, Severity};
 use crate::config_write::Scope;
 use crate::event_handler;
 use crate::server::Client;
@@ -27,7 +27,7 @@ pub enum Event {
 pub fn apply_event(app: &mut App, event: Event) {
     match event {
         Event::Written(runtime) => event_handler::apply_runtime_value(app, &runtime),
-        Event::Failed(message) => crate::notices::failed(app, &message),
+        Event::Failed(message) => crate::notices::inline(app, Severity::Error, &message),
     }
 }
 

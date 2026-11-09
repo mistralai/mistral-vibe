@@ -24,3 +24,4 @@ screen_contains = (
     "neither.",
     "accept edits",
 )
+screen_excludes = ("✕",)

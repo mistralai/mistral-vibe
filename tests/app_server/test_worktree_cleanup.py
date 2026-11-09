@@ -9,6 +9,7 @@ from threading import Event
 from git import Repo
 import pytest
 
+from tests.stubs.background_worker import in_process_worktree_housekeeping
 from vibe.app_server._worktree_cleanup import WorktreeCleanup, session_finished
 from vibe.app_server._worktree_session import SessionWorktrees
 from vibe.core.git.worktree import (
@@ -268,13 +269,11 @@ def test_releasing_the_final_session_hold_removes_an_archived_worktree(
     _init_repo(tmp_path)
     worktree, managed = _managed_worktree(tmp_path, "closing")
     service = WorktreeCleanup(session_finished=_archived)
-    monkeypatch.setattr(
-        "vibe.app_server._worktree_session.worktree_cleanup", lambda: service
-    )
+    worktrees = SessionWorktrees(housekeeping=in_process_worktree_housekeeping(service))
     managed.hold("session-a")
 
     # Do
-    SessionWorktrees.release(worktree.root, "session-a")
+    worktrees.release(worktree.root, "session-a")
 
     # Assert
     assert service.wait_idle(timeout=30)
@@ -414,3 +413,87 @@ def test_background_worker_uses_injected_persisted_source_policy(
         assert managed.claim.read_recovery() is None
         assert not marker.exists()
     repo.close()
+
+
+def _break_checkout(root: Path) -> None:
+    (root / ".git").unlink()
+
+
+def test_a_broken_checkout_is_reported_once_then_skipped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """*Prepare*: A finished worktree whose checkout lost its `.git`.
+    *Do*: Reap it, sweep, and prune it, again and again.
+    *Assert*: One warning, no retry scheduled, and the directory is kept.
+    """
+    # Prepare
+    _init_repo(tmp_path)
+    worktree, _ = _managed_worktree(tmp_path, "lost-git")
+    _break_checkout(worktree.root)
+    cleanup = WorktreeCleanup(session_finished=_archived, retry_delays=(0.01,) * 3)
+
+    # Do
+    with caplog.at_level("WARNING", logger="vibe"):
+        for _ in range(3):
+            cleanup.schedule(worktree.root)
+            assert cleanup.wait_idle(timeout=30)
+            cleanup.sweep()
+            assert cleanup.wait_idle(timeout=30)
+        cleanup.prune(0)
+
+    # Assert
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert [r.getMessage() for r in warnings] == [warnings[0].getMessage()], (
+        "reported more than once"
+    )
+    assert "checkout is broken" in warnings[0].getMessage()
+    assert worktree.root.is_dir()
+
+
+def test_a_broken_checkout_is_looked_at_again_once_it_changes(tmp_path: Path) -> None:
+    """*Prepare*: A broken worktree already reported.
+    *Do*: Repair its checkout, then reap it.
+    *Assert*: The reap runs and removes it.
+    """
+    # Prepare
+    _init_repo(tmp_path)
+    worktree, _ = _managed_worktree(tmp_path, "repaired")
+    git_file = (worktree.root / ".git").read_text()
+    _break_checkout(worktree.root)
+    cleanup = WorktreeCleanup(session_finished=_archived, retry_delays=())
+    cleanup.schedule(worktree.root)
+    assert cleanup.wait_idle(timeout=30)
+
+    # Do
+    (worktree.root / ".git").write_text(git_file)
+    cleanup.schedule(worktree.root)
+
+    # Assert
+    assert cleanup.wait_idle(timeout=30)
+    assert not worktree.root.exists()
+
+
+def test_prune_skips_a_broken_checkout_and_removes_the_next_oldest(
+    tmp_path: Path,
+) -> None:
+    _init_repo(tmp_path)
+    with WorktreeRepository.open(tmp_path) as repository:
+        broken = repository.prepare_auto(suggested_name="broken")
+        oldest_whole = repository.prepare_auto(suggested_name="whole")
+        newest = repository.prepare_auto(suggested_name="newest")
+    for prepared in (broken, oldest_whole, newest):
+        managed = ManagedWorktree.at(prepared.root)
+        assert managed is not None
+        managed.hold("starter")
+        managed.release_holder("starter")
+    _break_checkout(broken.root)
+    cleanup = WorktreeCleanup(session_finished=lambda _dir: False)
+
+    # Over the limit by one: a broken checkout is skipped, as a failed
+    # removal always was, so the next oldest goes in its place.
+    removed = cleanup.prune(2)
+
+    assert removed == 1
+    assert broken.root.is_dir()
+    assert not oldest_whole.root.exists()
+    assert newest.root.is_dir()

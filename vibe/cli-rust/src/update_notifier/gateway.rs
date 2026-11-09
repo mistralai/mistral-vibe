@@ -211,7 +211,9 @@ impl UpdateCheckGateway {
     /// Async because the probes shell out to `uv tool dir` and `brew --cellar`.
     pub async fn for_project(project_name: &str) -> Self {
         match install_source().await {
-            UpdateSource::Uv => Self::UvOracle(super::uv_oracle::UvOracleGateway),
+            UpdateSource::Uv => Self::UvOracle(super::uv_oracle::UvOracleGateway {
+                fallback: PyPIUpdateGateway::new(project_name),
+            }),
             UpdateSource::Brew => Self::Brew(super::brew_oracle::BrewOracleGateway),
             UpdateSource::Pypi => Self::PyPI(PyPIUpdateGateway::new(project_name)),
         }

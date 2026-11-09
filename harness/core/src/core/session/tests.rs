@@ -73,7 +73,7 @@ fn tool_catalog_revision_overflow_rejects_without_committing_candidate() {
     session.state.tool_catalog.revision = u64::MAX;
     let previous_state = session.state.clone();
     let previous_inspection = session.inspect();
-    let mut capabilities = session.state.config.capabilities.clone();
+    let mut capabilities = session.state.config().capabilities.clone();
     capabilities.tool_groups.push(ToolGroupDefinition {
         name: "workspace".to_string(),
         description: "Workspace tools".to_string(),
@@ -109,6 +109,38 @@ fn tool_catalog_revision_overflow_rejects_without_committing_candidate() {
     assert_eq!(error.message, "model tool catalog revision overflowed");
     assert_eq!(session.state, previous_state);
     assert_eq!(session.inspect(), previous_inspection);
+}
+
+///
+/// *Prepare*: A new session.
+/// *Do*: Apply a user message, which changes the conversation but not the
+/// configuration.
+/// *Assert*: The accepted state keeps the same compiled configuration instead of
+/// a copy of it.
+///
+#[test]
+fn a_command_that_keeps_the_configuration_shares_it() {
+    // Prepare
+    let mut session = HarnessSession::create(crate::core::testing::config()).unwrap();
+    let previous = session.state.clone();
+
+    // Do
+    let result = session.apply(input(
+        1,
+        HarnessCommand::UserMessage {
+            turn_id: "turn-1".to_string(),
+            content: vec![ContentBlock::text("hello")],
+            mode: UserMessageMode::Queue,
+            output_type: None,
+        },
+    ));
+
+    // Assert
+    assert!(matches!(result, HarnessApplyResult::Accepted { .. }));
+    assert!(std::sync::Arc::ptr_eq(
+        &session.state.compiled,
+        &previous.compiled
+    ));
 }
 
 /// Settings with automatic compaction on a 262,144-token model.
@@ -250,7 +282,7 @@ fn context_no_compaction_can_fit_is_refused() {
     // Do
     let result = crate::core::validate_model_switch(
         &small_model_config(),
-        &state.resolved_tools,
+        state.resolved_tools(),
         state.context.messages(),
         crate::core::features::compaction::RequestMeasurements::of(state),
     );
@@ -696,6 +728,7 @@ fn a_resumed_session_still_opens_with_a_full_model_input_replacement() {
             turn_id: "turn-resumed".to_string(),
             content: vec![ContentBlock::text("carry on")],
             mode: UserMessageMode::Queue,
+            output_type: None,
         },
     ));
 

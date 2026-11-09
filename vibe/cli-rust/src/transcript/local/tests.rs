@@ -111,3 +111,39 @@ fn merged_follow_up_is_not_duplicated_when_snapshot_has_merged_head() {
         ]
     );
 }
+
+#[test]
+fn a_huge_compaction_error_settles_capped() {
+    use crate::utils::text::{MESSAGE_MAX_CHARS, MESSAGE_TRUNCATION_MARKER};
+    let mut transcript = Transcript::default();
+    super::add_compact_status(&mut transcript, "compact");
+
+    super::settle_compact_status(&mut transcript, "compact", Some(&"A".repeat(1_200_000)));
+
+    assert_eq!(
+        shown(&transcript),
+        vec![(
+            "compact".to_owned(),
+            format!(
+                "Error: {}{MESSAGE_TRUNCATION_MARKER}",
+                "A".repeat(MESSAGE_MAX_CHARS)
+            )
+        )]
+    );
+}
+
+#[test]
+fn a_huge_error_row_is_capped_whatever_its_caller() {
+    use crate::utils::text::{MESSAGE_TRUNCATION_MARKER, ROW_MAX_CHARS};
+    let mut transcript = Transcript::default();
+
+    super::add_command_error(&mut transcript, "error", &"A".repeat(1_200_000));
+
+    assert_eq!(
+        shown(&transcript),
+        vec![(
+            "error".to_owned(),
+            format!("{}{MESSAGE_TRUNCATION_MARKER}", "A".repeat(ROW_MAX_CHARS))
+        )]
+    );
+}

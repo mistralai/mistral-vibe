@@ -57,6 +57,14 @@ class LocalHarnessHost:
         # The options the process was started with; later sessions must match.
         self._process_options: LocalHarnessOptions | None = None
 
+    @property
+    def services(self) -> ProcessServices:
+        """The process services every session runs on. Exported for the
+        entry point owning this host; sessions read them through the app
+        server.
+        """
+        return self._services
+
     async def start(self, options: LocalHarnessOptions) -> AppServerSession:
         host = await self.connect(options)
         try:

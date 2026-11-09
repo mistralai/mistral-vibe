@@ -81,6 +81,16 @@ fn a_click_after_a_word_drag_only_places_the_caret() {
 }
 
 #[test]
+fn a_click_on_the_last_column_places_the_caret_at_the_row_end() {
+    let mut composer = Composer::new();
+    composer.app.chat_input.cursor = 0;
+
+    composer.click(37);
+
+    assert_eq!(composer.app.chat_input.cursor, TEXT.len());
+}
+
+#[test]
 fn a_right_click_neither_moves_the_caret_nor_advances_the_chain() {
     let mut composer = Composer::new();
 

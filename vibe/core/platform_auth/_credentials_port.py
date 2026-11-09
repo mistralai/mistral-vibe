@@ -9,6 +9,13 @@ from urllib.parse import unquote_to_bytes, urlsplit, urlunsplit
 
 type PlatformCredentialKind = Literal["api_key", "oauth_access_token", "oidc_id_token"]
 
+# A user token refused again right after a successful refresh. The platform
+# answers the same bare 401 when the client's sign-in is retired (update Vibe)
+# and when the user lost access (sign in again), so the message offers both.
+UNAUTHORIZED_AFTER_REFRESH_MESSAGE = (
+    "Vibe couldn't authenticate you. Update Vibe or sign in again."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PlatformCredentialIdentity:
@@ -82,6 +89,8 @@ class PlatformCredentialRequired:
         "invalid",
         "reauthentication_required",
         "transient",
+        # A user token was refused again right after a successful refresh.
+        "unauthorized_after_refresh",
     ]
     observed_revision: str | None = None
 
@@ -158,6 +167,7 @@ def _path_has_ambiguous_segments(raw_path: str | bytes) -> bool:
 
 
 __all__ = [
+    "UNAUTHORIZED_AFTER_REFRESH_MESSAGE",
     "CachedPrincipal",
     "PlatformCredentialFactory",
     "PlatformCredentialIdentity",

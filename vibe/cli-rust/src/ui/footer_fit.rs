@@ -11,7 +11,7 @@ pub const GAP: &str = "  ";
 pub const GAUGE_SEP: &str = " · ";
 /// Leads a single PR/MR, colored by its state.
 pub const STATE_DOT: &str = "● ";
-/// Follows the cwd; a click copies the whole path.
+/// Follows a shortened cwd; a click copies the whole path.
 pub const COPY_ICON: &str = "⧉";
 /// The cwd shrinks to `…/` and its last component, at most this many cells, once the gauges are levels and the PR/MR status is gone.
 const CWD_FLOOR: usize = 16;
@@ -22,6 +22,8 @@ pub enum Tone {
     Muted,
     /// Plain text color: the PR/MR label and the copy icon.
     Text,
+    /// A PR/MR label whose status the user has not seen yet.
+    Unseen,
     Good,
     Bad,
     Done,
@@ -66,18 +68,19 @@ const LADDER: [Slot; 7] = [
 /// The steps taken before the cwd shortens: the gauges turn into levels and the PR/MR status goes.
 const BEFORE_CWD: usize = 3;
 
-/// The PR/MR link: its label (`PR #123`), short label (`#123`), synced status and the state dot's tone (`None` paints no dot).
+/// The PR/MR link: its label (`PR #123`), short label (`#123`), synced status, the state dot's tone (`None` paints no dot) and whether it changed unseen.
 pub struct LinkInput {
     pub label: String,
     pub short: String,
     pub status: Option<String>,
     pub dot: Option<Tone>,
+    pub unseen: bool,
 }
 
 pub struct Inputs<'a> {
     pub width: usize,
     pub cwd: &'a str,
-    /// Whether the copy icon follows the cwd.
+    /// Whether the copy icon may follow the cwd once it is shortened.
     pub copy_icon: bool,
     /// The quit hint's width; it replaces the cwd and link and never shrinks.
     pub quit: Option<usize>,
@@ -90,7 +93,7 @@ pub struct Inputs<'a> {
 #[derive(Debug, Default)]
 pub struct Fitted {
     pub cwd: String,
-    /// Paint the copy icon after the cwd.
+    /// Paint the copy icon after the shortened cwd.
     pub copy_icon: bool,
     pub link: Form,
     pub context: Form,
@@ -133,13 +136,14 @@ pub fn fit(inputs: Inputs) -> Fitted {
     } else {
         cwd_full.min(cwd_floor(inputs.cwd))
     };
-    // The icon and its leading space show while any of the cwd does.
+    // The icon and its leading space show only while the cwd is shortened.
     let icon = if inputs.copy_icon && !quit {
         1 + COPY_ICON.width()
     } else {
         0
     };
-    let cwd = |cells: usize| if cells == 0 { 0 } else { cells + icon };
+    let shortened = |cells: usize| cells > 0 && cells < cwd_full;
+    let cwd = |cells: usize| cells + if shortened(cells) { icon } else { 0 };
     let mut ladder = LADDER.iter();
     for slot in ladder.by_ref().take(BEFORE_CWD) {
         if total(&segments, cwd(cwd_full)) <= inputs.width {
@@ -162,7 +166,7 @@ pub fn fit(inputs: Inputs) -> Fitted {
         } else {
             elide_path(inputs.cwd, cwd_width)
         },
-        copy_icon: icon > 0 && cwd_width > 0,
+        copy_icon: icon > 0 && shortened(cwd_width),
         link,
         context,
         usage,
@@ -190,7 +194,14 @@ fn link_forms(link: Option<LinkInput>) -> Vec<Form> {
             .map(|tone| (STATE_DOT.to_owned(), tone))
             .into_iter()
             .collect();
-        form.push((text, Tone::Text));
+        form.push((
+            text,
+            if link.unseen {
+                Tone::Unseen
+            } else {
+                Tone::Text
+            },
+        ));
         form.extend(status.map(|status| (format!(" {status}"), Tone::Muted)));
         form
     };
@@ -209,7 +220,7 @@ fn cwd_floor(cwd: &str) -> usize {
     tail.min(CWD_FLOOR)
 }
 
-/// Fit `path` in `width` cells keeping its end: `…/` and the last whole components, else `…` and the tail.
+/// Fit `path` in `width` cells keeping its end: `…` and the last whole words or components, else `…` and the tail.
 pub fn elide_path(path: &str, width: usize) -> String {
     if path.width() <= width {
         return path.to_owned();
@@ -217,9 +228,14 @@ pub fn elide_path(path: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    if let Some((at, _)) = path
-        .match_indices(['/', '\\'])
-        .find(|(at, _)| path[*at..].width() < width)
+    let cuts = path.char_indices().filter_map(|(at, c)| match c {
+        '/' | '\\' => Some(at),
+        '-' | '_' | ' ' => Some(at + 1),
+        _ => None,
+    });
+    if let Some(at) = cuts
+        .filter(|&at| at < path.len())
+        .find(|&at| path[at..].width() < width)
     {
         return format!("…{}", &path[at..]);
     }

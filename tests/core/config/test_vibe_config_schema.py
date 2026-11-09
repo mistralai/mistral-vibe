@@ -219,6 +219,10 @@ def test_file_autocomplete_defaults_to_enabled() -> None:
     assert VibeConfigSchema().enable_file_autocomplete is True
 
 
+def test_pr_monitoring_is_enabled_by_default() -> None:
+    assert VibeConfigSchema().enable_pr_monitoring is True
+
+
 def test_subagent_status_list_is_enabled_by_default() -> None:
     assert VibeConfigSchema().show_subagent_status_list is True
 

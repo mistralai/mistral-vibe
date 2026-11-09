@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 import yaml
 
-_PLUGIN_SKILLS = ("vibe", "skill-creator")
+_PLUGIN_SKILLS = ("vibe", "skill-creator", "import")
 
 
 def _plugin_skill(name: str) -> dict[str, Any]:

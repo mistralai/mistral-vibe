@@ -1,4 +1,4 @@
-"""One PR: the bar paints a state dot and its link after the path; hovering highlights it and clicking opens it."""
+"""One PR: the bar paints a state dot and its link after the path; hovering highlights it, clicking lists it and Enter opens it."""
 
 from __future__ import annotations
 
@@ -16,12 +16,16 @@ _LISTED = artifact(
 )
 _LISTED["details"].update({"state": "open", "prStatus": "mergeable"})
 
-handshake = {"artifacts/list": {"artifacts": [_LISTED]}}
-request_methods = {"artifacts/list"}
+handshake = {
+    "artifacts/list": {"artifacts": [_LISTED]},
+    "artifacts/sync": {},
+    "artifacts/markViewed": {},
+}
+request_methods = {"artifacts/list", "artifacts/sync", "artifacts/markViewed"}
 expected_actions = [Action("open_url", _LISTED_URL)]
 screen_excludes = ("PR #124",)
 
-_LEFT = "/test/workdir ⧉  "
+_LEFT = "/test/workdir  "
 _LINK = "● PR #123 mergeable"
 _RIGHT = "ctx        0/600k"
 screen_rows = {ROWS - 1: (_LEFT + _LINK).ljust(COLUMNS - len(_RIGHT)) + _RIGHT}
@@ -31,5 +35,5 @@ _CLICK_COL = len(_LEFT) + 3
 _HOVER = f"\x1b[<35;{_CLICK_COL};{ROWS}M"
 _CLICK = f"\x1b[<0;{_CLICK_COL};{ROWS}M\x1b[<0;{_CLICK_COL};{ROWS}m"
 
-# The hover frame paints the link's highlight before the click opens it.
-timeline: Timeline = [_HOVER, _CLICK]
+# The hover frame paints the link's highlight; the click refreshes and lists the PR, Enter opens it.
+timeline: Timeline = [_HOVER, _CLICK, "\r"]

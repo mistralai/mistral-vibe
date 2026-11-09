@@ -46,6 +46,7 @@ pub fn start_params(
         history_limit,
         model: options.model.clone(),
         session_only: options.model.is_some(),
+        kind: None,
     }
 }
 

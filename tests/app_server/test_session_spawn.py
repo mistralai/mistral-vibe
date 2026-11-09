@@ -20,6 +20,8 @@ from vibe.app_server.protocol import (
     JsonRpcSuccessResponse,
     ProtocolError,
     ProtocolErrorCode,
+    SessionMessageSender,
+    SessionPeerMarkSeenParams,
     SessionPeerReadParams,
     SessionPeerReadResponse,
     SessionPeerRestoreParams,
@@ -58,6 +60,8 @@ def _attached_server(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         ),
     )
     # A session is attached and its client finished the handshake.
@@ -214,7 +218,10 @@ async def test_an_answer_after_the_tool_gave_up_is_dropped(
 
 
 _SEND = SessionPeerSendParams(
-    target_session_id="other", text="Rebase", idempotency_key="k-1"
+    target_session_id="other",
+    text="Rebase",
+    idempotency_key="k-1",
+    sender=SessionMessageSender(session_id="me"),
 )
 
 
@@ -279,6 +286,19 @@ async def test_a_client_that_hosts_peers_but_not_restore_is_never_asked_to_resto
     with pytest.raises(SessionPeerError, match="cannot restore sessions"):
         await server.restore_peer_sessions(
             SessionPeerRestoreParams(session_ids=["other"])
+        )
+    assert server._client_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_hosts_peers_but_not_mark_seen_is_never_asked_to_mark(
+    process_services: ProcessServices,
+) -> None:
+    server, _ = _attached_server(session_peers=True, process_services=process_services)
+
+    with pytest.raises(SessionPeerError, match="cannot mark sessions as seen"):
+        await server.mark_peer_sessions_seen(
+            SessionPeerMarkSeenParams(session_ids=["other"])
         )
     assert server._client_requests == {}
 

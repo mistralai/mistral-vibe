@@ -39,6 +39,7 @@ struct ChildTask {
     /// The child's name: one path segment, without `/`, other than `.` or `..`. The child's agent path is your path followed by `/name`.
     #[schemars(length(min = 1), regex(pattern = r"^(?!\.{1,2}$)[^/]+$"))]
     name: String,
+    /// The child's task, sent as its first message. Every child needs one.
     #[schemars(length(min = 1))]
     message: String,
 }
@@ -463,6 +464,20 @@ mod tests {
                 .collect();
 
             assert_eq!(requires, expected, "forking: {forking}");
+        }
+    }
+
+    #[test]
+    fn every_spawn_variant_describes_message() {
+        for forking in [false, true] {
+            let schema = spawn_schema(forking);
+
+            let variants = schema["oneOf"].as_array().unwrap();
+
+            for variant in variants {
+                let message = &variant["properties"]["message"];
+                assert!(message.get("description").is_some(), "forking: {forking}");
+            }
         }
     }
 

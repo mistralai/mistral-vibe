@@ -55,6 +55,8 @@ async def test_lists_a_trusted_projects_skills_without_a_session(
         HarnessFilesManager(sources=("user", "project")),
         builtin_plugin_roots=[],
         org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     names = await _list(
@@ -77,7 +79,11 @@ async def test_does_not_list_an_untrusted_projects_skills(
     _write_skill(tmp_path, "code-review", "Review a diff.")
     harness_files = HarnessFilesManager(sources=("user", "project"))
     handler = HostRequestHandler(
-        harness_files, builtin_plugin_roots=[], org_config=process_services.org_config
+        harness_files,
+        builtin_plugin_roots=[],
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     names = await _list(handler, SkillsListParams(cwd=str(tmp_path)))
@@ -98,7 +104,11 @@ async def test_trust_for_a_listing_does_not_outlive_it(
     _write_skill(tmp_path, "code-review", "Review a diff.")
     harness_files = HarnessFilesManager(sources=("user", "project"))
     handler = HostRequestHandler(
-        harness_files, builtin_plugin_roots=[], org_config=process_services.org_config
+        harness_files,
+        builtin_plugin_roots=[],
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     await _list(handler, SkillsListParams(cwd=str(tmp_path), trust_workspace=True))
@@ -113,7 +123,10 @@ async def test_a_named_session_is_not_the_hosts_to_answer(
     process_services: ProcessServices,
 ) -> None:
     handler = HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
     )
 
     with pytest.raises(RequestFailure):

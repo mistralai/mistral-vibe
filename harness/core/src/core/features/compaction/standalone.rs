@@ -163,7 +163,7 @@ mod tests {
 
     fn text(message: &StoredMessage) -> String {
         match &message.message {
-            Message::System { content } | Message::User { content } => render_blocks(content),
+            Message::System { content } | Message::User { content, .. } => render_blocks(content),
             _ => panic!("standalone request contains only system and user messages"),
         }
     }

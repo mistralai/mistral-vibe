@@ -1,6 +1,7 @@
 //! A fired scheduled loop annotates the user prompt it sent instead of rendering itself.
 
 use serde_json::json;
+use vibe_rs::transcript::split_loop_prompt;
 use vibe_rs::utils::datetime::format_utc;
 
 use crate::support::live;
@@ -90,6 +91,46 @@ fn fired_loop_without_a_same_turn_prompt_renders_nothing() {
         ["u0"]
     );
     assert!(rendered[0].fired_loop.is_none());
+}
+
+#[test]
+fn loop_prompts_fold_on_click() {
+    let transcript = live(&[
+        user_message("u0", "t0", "Check CI\nand report failures."),
+        user_message("u1", "t1", "CI watch\nCheck CI and report failures."),
+        fired("n1", "t1"),
+        user_message("u2", "t2", "Untitled loop prompt"),
+        fired("n2", "t2"),
+    ]);
+
+    assert!(!transcript.is_expandable("u0"));
+    assert!(transcript.is_expandable("u1"));
+    assert!(transcript.is_expandable("u2"));
+    assert!(transcript.expandable_ids().contains(&"u1".to_owned()));
+}
+
+#[test]
+fn a_fired_notice_names_the_loop_prompt_it_annotated() {
+    let transcript = live(&[
+        user_message("u0", "t0", "earlier"),
+        user_message("u1", "t1", "CI watch\nCheck CI."),
+        fired("n1", "t1"),
+        fired("n2", "t2"),
+    ]);
+
+    assert_eq!(transcript.loop_prompt_of("n1"), Some("u1"));
+    assert_eq!(transcript.loop_prompt_of("u1"), Some("u1"));
+    assert_eq!(transcript.loop_prompt_of("u0"), None);
+    assert_eq!(transcript.loop_prompt_of("n2"), None);
+}
+
+#[test]
+fn loop_prompt_splits_its_title_from_its_instructions() {
+    assert_eq!(
+        split_loop_prompt("\n  CI watch \nCheck CI.\n\nReport.\n"),
+        ("CI watch", "Check CI.\n\nReport.")
+    );
+    assert_eq!(split_loop_prompt("CI watch"), ("CI watch", ""));
 }
 
 #[test]

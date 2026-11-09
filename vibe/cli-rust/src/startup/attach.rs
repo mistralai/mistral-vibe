@@ -34,22 +34,28 @@ pub(super) async fn attach_session(
     agent_config: AgentConfig,
     list_error: Option<String>,
 ) -> Result<(Value, Attach), StartError> {
-    let started = start_session(client, agent_config.clone()).await?;
+    let started = start_session(client, agent_config.clone(), &resume).await?;
     rebind(client, started, resume, &agent_config, list_error)
         .await
         .map_err(StartError::Other)
 }
 
 /// Start the fresh session a resume rebinds onto.
+///
+/// With a resume intent it is only a warm-up: the server opens it for the user
+/// (session_start, new-session telemetry) once it gets a message, so a resume
+/// that replaces it reports nothing for it.
 pub(super) async fn start_session(
     client: &Arc<Client>,
     agent_config: AgentConfig,
+    resume: &StartupResume,
 ) -> Result<Value, StartError> {
     let start = SessionStartParams {
         agent_config,
         history_limit: HISTORY_LIMIT,
         model: None,
         session_only: false,
+        kind: start_kind(resume),
     };
     let params = serde_json::to_value(&start).map_err(|e| StartError::Other(e.into()))?;
     let result = client
@@ -73,6 +79,13 @@ pub(super) async fn start_session(
         .cloned()
         .with_context(|| "session/start response missing state")
         .map_err(StartError::Other)
+}
+
+/// The `session/start` kind: `ephemeral` for a warm-up a resume replaces at
+/// once. The picker's session is the user's own until they pick another, so it
+/// starts as a normal one, ready from the start.
+pub fn start_kind(resume: &StartupResume) -> Option<&'static str> {
+    matches!(resume, StartupResume::ById(_) | StartupResume::Continue).then_some("ephemeral")
 }
 
 /// Rebind onto the saved session the resume intent names, or keep the fresh

@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use super::event::{dispatch, CommandEvent};
 use crate::app::App;
-use crate::server::{method, Client, SessionForkParams, SessionForkResponse};
-use crate::transcript::local;
+use crate::server::{method, Client, RpcError, SessionForkParams, SessionForkResponse};
 
 pub(super) fn branch_session(app: &mut App, client: &Arc<Client>) {
     let Some((session_id, tx)) = dispatch(app) else {
@@ -28,7 +27,7 @@ pub(super) fn branch_session(app: &mut App, client: &Arc<Client>) {
                 },
                 Err(error) => branch_error(&error.to_string()),
             },
-            Err(error) => branch_error(&error.message),
+            Err(error) => CommandEvent::Error(branch_failure_message(&error)),
         };
         let _ = tx.try_send(event);
     });
@@ -38,10 +37,18 @@ fn branch_error(message: &str) -> CommandEvent {
     CommandEvent::Error(format!("Failed to branch session: {message}"))
 }
 
-/// Mount the branch notice; unified records the fork server-side, other harnesses record it here.
+/// The `/branch` failure notice; the server refuses a busy fork it cannot cut before the running turn.
+pub fn branch_failure_message(error: &RpcError) -> String {
+    if error.harness_code() == Some("fork_entry_required") {
+        return "Can't branch while this response is running. Try again when it finishes."
+            .to_owned();
+    }
+    format!("Failed to branch session: {}", error.message)
+}
+
+/// Show the resume command; unified records the fork server-side, other harnesses record it here.
 pub fn apply_branched(
     app: &mut App,
-    id: &str,
     old_session_id: &str,
     new_session_id: &str,
     harness: Option<&str>,
@@ -49,5 +56,5 @@ pub fn apply_branched(
     if harness != Some("unified") {
         crate::telemetry::session_branched(app, old_session_id, new_session_id);
     }
-    local::add_branch_created(&mut app.view.transcript, id, old_session_id, new_session_id);
+    crate::branch_app::open(app, new_session_id);
 }

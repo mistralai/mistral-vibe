@@ -35,6 +35,7 @@ from .common import (
     TurnId,
     TurnStatus,
     UnixMs,
+    UnknownValue,
 )
 from .history import HistoryEntry
 
@@ -62,7 +63,7 @@ class Page[ItemT](SessionModel):
 
 class TurnState(SessionModel):
     id: TurnId
-    status: TurnStatus
+    status: TurnStatus | UnknownValue
     started_at: UnixMs | None = None
     completed_at: UnixMs | None = None
     history_entry_ids: list[HistoryEntryId] = Field(default_factory=list)
@@ -79,6 +80,9 @@ class TurnState(SessionModel):
 
     @model_validator(mode="after")
     def validate_termination(self) -> Self:
+        # A status from a newer Runtime says nothing this reader can check.
+        if isinstance(self.status, UnknownValue):
+            return self
         if self.status == "terminated" and self.termination is None:
             raise ValueError("A terminated turn requires termination details")
         if self.status != "terminated" and self.termination is not None:
@@ -94,7 +98,7 @@ class Session(SessionModel):
     parent_session_id: SessionId | None = None
     title: str | None = None
     preview: str = ""
-    status: SessionStatus
+    status: SessionStatus | UnknownValue
     termination: Termination | None = None
     created_at: UnixMs
     updated_at: UnixMs
@@ -102,6 +106,9 @@ class Session(SessionModel):
 
     @model_validator(mode="after")
     def validate_termination(self) -> Self:
+        # A status from a newer Runtime says nothing this reader can check.
+        if isinstance(self.status, UnknownValue):
+            return self
         if self.status == "terminated" and self.termination is None:
             raise ValueError("A terminated Session requires termination details")
         if self.status != "terminated" and self.termination is not None:

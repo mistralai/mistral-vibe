@@ -26,4 +26,4 @@ timeline: Timeline = [
 ]
 
 screen_contains = ("Saved; it applies when the current turn ends.",)
-screen_excludes = ("Failed to apply", "Configuration reloaded")
+screen_excludes = ("Failed to apply", "Applied:")

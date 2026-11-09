@@ -1,9 +1,11 @@
 """Transport contract for the stateless Session Protocol."""
 
 from collections.abc import AsyncIterator
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, Self, runtime_checkable
+from uuid import UUID
 
 from .models.base import SessionModel
+from .models.common import ProtocolError
 from .models.events import ClientTransportStreamItem
 from .procedures.session import CallbacksTreeParams, CallbacksTreeResponse, EventsReadParams
 
@@ -80,8 +82,9 @@ class SessionIdempotencyConflictError(RuntimeError):
 class SessionBusyError(RuntimeError):
     """The Session cannot accept the message yet and committed nothing.
 
-    Each transport retries for a bounded time before it raises this error.
-    Retry the same request later.
+    It also covers a temporary server-side outage where nothing was applied, for example
+    the upload storage at message admission. Each transport retries for a bounded time
+    before it raises this error. Retry the same request later.
     """
 
 
@@ -108,15 +111,81 @@ class SessionCallbackRejectedError(RuntimeError):
     """The Session refused this answer and applied nothing.
 
     The callback stays open, so answer it again with a corrected result under the same
-    callback id.
+    callback ID.
     """
+
+
+type SessionMessageRejectedCode = Literal[
+    "upload_not_found",
+    "upload_expired",
+    "upload_not_uploaded",
+    "upload_blocked",
+    "upload_scan_failed",
+    "upload_link_invalid",
+    "upload_metadata_mismatch",
+    "session_file_not_found",
+]
+"""Why a host refused a message, before committing it.
+
+Hosts set one of these as ``SessionMessageRejectedError.code``. Clients must still
+accept codes outside this set: a newer host can add one.
+"""
 
 
 class SessionMessageRejectedError(RuntimeError):
     """The Session refused this message and committed nothing.
 
-    Do not retry it unchanged. Send a corrected message with a new idempotency key.
+    Send a corrected message with a new idempotency key.
+
+    Args:
+        message: The refusal reason.
+        code: A machine-readable refusal code, when the host supplies one. Hosts
+            may add codes, so treat an unknown code like an absent one.
+        upload_id: The uploaded file the refusal concerns, when known.
     """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: SessionMessageRejectedCode | str | None = None,
+        upload_id: UUID | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code: SessionMessageRejectedCode | str | None = code
+        """A machine-readable refusal code, when the host supplies one."""
+        self.upload_id = upload_id
+        """The uploaded file the refusal concerns, when known."""
+
+    @classmethod
+    def from_rejection(cls, rejection: "SessionMessageRejection") -> Self:
+        return cls(rejection.message, code=rejection.code, upload_id=rejection.upload_id)
+
+    def rejection(self) -> "SessionMessageRejection":
+        """This refusal as every binding sends it."""
+        return SessionMessageRejection(message=str(self), code=self.code, upload_id=self.upload_id)
+
+
+class SessionMessageRejection(SessionModel):
+    """A message refusal on the wire: the fields of ``SessionMessageRejectedError``."""
+
+    message: str
+    # Open: a newer host may send a code this reader does not know yet; it is kept as sent.
+    code: SessionMessageRejectedCode | str | None = None
+    upload_id: UUID | None = None
+
+
+class SessionCompactionFailedError(RuntimeError):
+    """The compaction ended without a usable summary; the model context is unchanged.
+
+    The Session's history records a failed compaction that sent a summary request; one Core
+    refused to plan sent nothing and records none. ``error`` is why it failed;
+    ``error.retryable`` says whether the same request may succeed.
+    """
+
+    def __init__(self, error: ProtocolError) -> None:
+        super().__init__(f"Context compaction failed: {error.message}")
+        self.error = error
 
 
 class SessionEventStreamLostError(RuntimeError):
@@ -185,9 +254,12 @@ __all__ = [
     "SessionBusyError",
     "SessionCallbackRejectedError",
     "SessionCallbackSettledError",
+    "SessionCompactionFailedError",
     "SessionEventStreamLostError",
     "SessionIdempotencyConflictError",
+    "SessionMessageRejectedCode",
     "SessionMessageRejectedError",
+    "SessionMessageRejection",
     "SessionTerminatedError",
     "SessionTransport",
     "SessionTurnActiveError",

@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use vibe_rs::app::{App, Status};
 use vibe_rs::notices;
 use vibe_rs::server::{HistoryEntry, MessageContent};
+use vibe_rs::utils::text::{MESSAGE_MAX_CHARS, MESSAGE_TRUNCATION_MARKER};
 
 /// Every message entry as `(role, text)`, in transcript order.
 fn messages(app: &App) -> Vec<(String, String)> {
@@ -70,7 +71,7 @@ fn a_warning_before_the_first_turn_joins_the_box() {
 }
 
 #[test]
-fn after_the_first_turn_each_warning_is_its_own_row() {
+fn the_first_turn_drops_the_box_and_each_later_warning_is_its_own_row() {
     let mut app = App::default();
     notices::warn(&mut app, "startup");
     notices::close_startup(&mut app);
@@ -79,10 +80,7 @@ fn after_the_first_turn_each_warning_is_its_own_row() {
     notices::error(&mut app, "Scheduled loop failed: boom");
 
     let roles: Vec<String> = messages(&app).into_iter().map(|(role, _)| role).collect();
-    assert_eq!(
-        roles,
-        vec!["startup_notices", "notice_warning", "notice_error"]
-    );
+    assert_eq!(roles, vec!["notice_warning", "notice_error"]);
 }
 
 #[test]
@@ -116,23 +114,65 @@ fn a_restored_transcript_gets_the_box_back_on_sync() {
 }
 
 #[test]
-fn messages_are_sanitized_and_their_markdown_escaped() {
+fn errors_are_sanitized() {
     let mut app = App::default();
 
-    notices::warn(&mut app, "\u{1b}[31mbad\u{1b}[0m `code` *star*");
-    notices::close_startup(&mut app);
     notices::error(&mut app, "\u{1b}[1mboom\u{1b}[0m");
 
     assert_eq!(
         messages(&app),
+        vec![("notice_error".to_owned(), "boom".to_owned())]
+    );
+}
+
+#[test]
+fn huge_server_warnings_and_errors_mount_capped() {
+    let mut app = App::default();
+    notices::close_startup(&mut app);
+    let huge = "A".repeat(1_200_000);
+    let capped = format!(
+        "{}{MESSAGE_TRUNCATION_MARKER}",
+        "A".repeat(MESSAGE_MAX_CHARS)
+    );
+
+    notices::warn(&mut app, &huge);
+    notices::error(&mut app, &huge);
+
+    assert_eq!(
+        messages(&app),
         vec![
-            (
-                "startup_notices".to_owned(),
-                "- bad \\`code\\` \\*star\\*".to_owned()
-            ),
-            ("notice_error".to_owned(), "boom".to_owned()),
+            ("notice_warning".to_owned(), capped.clone()),
+            ("notice_error".to_owned(), capped),
         ]
     );
+}
+
+#[test]
+fn startup_messages_are_markdown_escaped() {
+    let mut app = App::default();
+
+    notices::warn(&mut app, "\u{1b}[31mbad\u{1b}[0m `code` *star*");
+
+    assert_eq!(
+        messages(&app),
+        vec![(
+            "startup_notices".to_owned(),
+            "- bad \\`code\\` \\*star\\*".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_closed_box_stays_gone_after_a_transcript_restore() {
+    let mut app = App::default();
+    notices::warn(&mut app, "first");
+    let with_box = app.view.transcript.snapshot();
+    notices::close_startup(&mut app);
+    app.view.transcript.restore(with_box);
+
+    notices::sync(&mut app);
+
+    assert!(messages(&app).is_empty());
 }
 
 #[test]
@@ -227,7 +267,7 @@ fn startup_warnings_are_not_repeated_by_a_later_update() {
     notices::close_startup(&mut app);
     notices::show_updated_config_warnings(&mut app, &runtime);
 
-    assert_eq!(messages(&app).len(), 1);
+    assert!(messages(&app).is_empty());
 }
 
 #[test]
@@ -251,4 +291,22 @@ fn updated_warning_is_held_when_failed() {
     notices::show_updated_config_warnings(&mut app, &runtime(json!([]), &["toto"]));
 
     assert!(messages(&app).is_empty());
+}
+
+#[test]
+fn a_huge_failure_mounts_capped() {
+    let mut app = App::default();
+
+    notices::failed(&mut app, &"A".repeat(1_200_000));
+
+    assert_eq!(
+        messages(&app),
+        vec![(
+            "command_error".to_owned(),
+            format!(
+                "{}{MESSAGE_TRUNCATION_MARKER}",
+                "A".repeat(MESSAGE_MAX_CHARS)
+            )
+        )]
+    );
 }

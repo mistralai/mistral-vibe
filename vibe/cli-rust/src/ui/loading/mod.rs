@@ -181,13 +181,11 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
     if failure::draw(app, f, area) {
         return;
     }
-    let teleport_since = crate::teleport::loading_since(app);
     // Queue mode's own keys replace every other hint for exactly as long as it lasts.
     let queue_hints = crate::input::composer_reachable(app)
         .then(|| crate::message_queue::mode_hints(app))
         .flatten();
     if !app.view.command_loading
-        && teleport_since.is_none()
         && !matches!(
             app.session.status,
             Status::Starting | Status::Generating { .. }
@@ -233,7 +231,7 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
     let elapsed = match (app.session.shell_started_at, app.session.status) {
         (Some(since), _) => anim.elapsed(since),
         (None, Status::Generating { since }) => anim.elapsed(since),
-        _ => teleport_since.map_or_else(Duration::default, |since| anim.elapsed(since)),
+        _ => Duration::default(),
     };
     let hints = queue_hints.map_or_else(|| hint::running(app), <[_]>::to_vec);
     hint::push(

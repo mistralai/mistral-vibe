@@ -40,6 +40,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHostDelete,
     SessionBackendHostHistoryList,
     SessionBackendHostLeaseWatch,
+    SessionBackendHostMove,
     SessionBackendHostPin,
     SessionBackendHostRelocate,
     SessionBackendHostSeenState,
@@ -70,6 +71,7 @@ from vibe.app_server.protocol import (
     SERVER_METHODS,
     SESSION_PEER_ARCHIVE_METHOD,
     SESSION_PEER_LIST_METHOD,
+    SESSION_PEER_MARK_SEEN_METHOD,
     SESSION_PEER_READ_METHOD,
     SESSION_PEER_RESTORE_METHOD,
     SESSION_PEER_SEND_METHOD,
@@ -127,10 +129,13 @@ from vibe.app_server.protocol import (
     SessionHistoryListParams,
     SessionListParams,
     SessionMarkAsSeenParams,
+    SessionMoveParams,
     SessionPeerArchiveParams,
     SessionPeerArchiveResponse,
     SessionPeerListParams,
     SessionPeerListResponse,
+    SessionPeerMarkSeenParams,
+    SessionPeerMarkSeenResponse,
     SessionPeerReadParams,
     SessionPeerReadResponse,
     SessionPeerRestoreParams,
@@ -1097,7 +1102,7 @@ class AppServer:
                     validate_wire(ArtifactsSyncParams, raw_params)
                 )
             )
-        if method in {"session/rename", "session/relocate"}:
+        if method in {"session/rename", "session/relocate", "session/move"}:
             result = await self._dispatch_backend_host_session_update(
                 method, raw_params
             )
@@ -1137,18 +1142,26 @@ class AppServer:
             if self._root is not None and self._root.session_id == params.session_id:
                 await self._flush_backend_events(self._root)
             return DispatchResult(response)
-        if not isinstance(self._session_backend_host, SessionBackendHostRelocate):
-            return None
-        params = validate_wire(SessionRelocateParams, raw_params)
-        attached = (
-            self._root
-            if self._root is not None and self._root.session_id == params.session_id
-            else None
-        )
-        response = await self._session_backend_host.relocate(params, attached)
+        if method == "session/move":
+            if not isinstance(self._session_backend_host, SessionBackendHostMove):
+                return None
+            params = validate_wire(SessionMoveParams, raw_params)
+            attached = self._attached_root(params.session_id)
+            response = await self._session_backend_host.move(params, attached)
+        else:
+            if not isinstance(self._session_backend_host, SessionBackendHostRelocate):
+                return None
+            params = validate_wire(SessionRelocateParams, raw_params)
+            attached = self._attached_root(params.session_id)
+            response = await self._session_backend_host.relocate(params, attached)
         if attached is not None:
             await self._flush_backend_events(attached)
         return DispatchResult(response)
+
+    def _attached_root(self, session_id: str) -> SessionBackend | None:
+        if self._root is not None and self._root.session_id == session_id:
+            return self._root
+        return None
 
     async def _read_stored_session_config(
         self, raw_params: dict[str, Any]
@@ -1228,7 +1241,12 @@ class AppServer:
         params = validate_wire(SessionHistoryClearParams, raw_params)
         async with self._lifecycle_transition():
             result = await self._session_backend_host.clear_history(root, params)
-            await self._activate_backend(result.backend, 200)
+            try:
+                await self._activate_backend(result.backend, 200)
+            except BaseException:
+                if result.on_failure is not None:
+                    result.on_failure()
+                raise
         return DispatchResult(
             SessionHistoryClearResponse(
                 state=result.state, session_log=result.session_log
@@ -1962,6 +1980,21 @@ class AppServer:
             lost=(
                 "before confirming, so some sessions may have been restored. "
                 "List them before restoring again."
+            ),
+        )
+
+    async def mark_peer_sessions_seen(
+        self, params: SessionPeerMarkSeenParams
+    ) -> SessionPeerMarkSeenResponse:
+        if not self._client_capabilities.session_peer_mark_seen:
+            raise SessionPeerError("The attached client cannot mark sessions as seen")
+        return await self._request_peers(
+            SESSION_PEER_MARK_SEEN_METHOD,
+            params,
+            SessionPeerMarkSeenResponse,
+            lost=(
+                "before confirming, so some sessions may have been marked seen. "
+                "List them before marking them again."
             ),
         )
 

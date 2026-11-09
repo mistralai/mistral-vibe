@@ -28,7 +28,7 @@ fn a_layout_without_a_queue_has_no_spacer() {
 fn a_layout_with_a_queue_fills_the_free_rows_above_it() {
     let mut cache = TranscriptCache::default();
     cache.ensure_context(40, 39, 0, false);
-    cache.store_layout(1, 40, 10, Vec::new(), Some(4));
+    cache.store_layout(1, 40, 10, Vec::new(), Some(4), Vec::new());
     let spacer = cache.layout(1, 40).unwrap().queue_spacer(7);
     assert_eq!((spacer.at, spacer.height), (4, 7));
 }

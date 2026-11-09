@@ -3,7 +3,8 @@
 With no cached eval result, a session whose model is not set may be about to
 get it from an experiment: its first turn waits for the eval, for at most
 ``EVAL_WAIT_CAP_SECONDS`` from when the session opened. Once an eval fails, or
-is still running when a cap expires, no later session in the process waits.
+is still running when a cap expires, no later session in the process waits:
+the process's ``ExperimentsService`` holds that memory.
 """
 
 from __future__ import annotations
@@ -23,21 +24,6 @@ if TYPE_CHECKING:
     from vibe.core.config.orchestrator import ConfigOrchestrator
     from vibe.core.platform_auth import PlatformCredentialFactory
 
-_failures = FetchFailures()
-
-
-def experiments_eval_failed() -> bool:
-    return _failures.failed
-
-
-def mark_experiments_eval_failed() -> None:
-    _failures.mark()
-
-
-def reset_experiments_eval_failed() -> None:
-    """Forget a failed eval; for test isolation."""
-    _failures.reset()
-
 
 def experiments_eval_runs(
     config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
@@ -52,6 +38,7 @@ def experiments_eval_runs(
 
 def experiments_wait_needed(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    failures: FetchFailures,
     credentials: PlatformCredentialFactory | None = None,
 ) -> bool:
     """Whether a session opening on *orchestrator* must hold its first turn for
@@ -63,7 +50,7 @@ def experiments_wait_needed(
     config = orchestrator.config
     if not experiments_eval_runs(config, credentials):
         return False
-    if config.active_model or experiments_eval_failed():
+    if config.active_model or failures.failed:
         return False
     return not _loaded_the_cached_eval(orchestrator, credentials)
 
@@ -87,10 +74,10 @@ def _loaded_the_cached_eval(
 
 
 class ExperimentsWait(FetchWait):
-    def __init__(self, task: asyncio.Task[Any]) -> None:
+    def __init__(self, task: asyncio.Task[Any], failures: FetchFailures) -> None:
         super().__init__(
             task,
             name="GrowthBook eval",
             cap_seconds=EVAL_WAIT_CAP_SECONDS,
-            failures=_failures,
+            failures=failures,
         )

@@ -1,4 +1,4 @@
-"""A model pick the administrator pins is not written and the error says why."""
+"""A model pick the administrator pins is not written and the inline notice says why."""
 
 from __future__ import annotations
 
@@ -19,8 +19,5 @@ handshake = {"config/fields/read": _fields}
 # Pick the next model, then keep its current thinking level in the chained picker.
 timeline: Timeline = ["/model", "\r", "\x1b[B", "\r", "\r"]
 
-screen_contains = (
-    "'active_model' is enforced by your administrator.",
-    "Contact your admin to change it.",
-)
-screen_excludes = ("Configuration reloaded",)
+screen_contains = ("'active_model' is enforced by your administrator.",)
+screen_excludes = ("Applied:", "✕")

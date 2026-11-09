@@ -254,9 +254,13 @@ class SessionApiEventProducer:
 
     def callback_resolved(self, raw: JsonObject) -> list[SessionEvent]:
         callback_id = cast(str, raw["callbackId"])
-        if self._callbacks.pop(callback_id, None) is None:
+        if (callback := self._callbacks.pop(callback_id, None)) is None:
             return []
-        return [_callback_resolved_event(callback_id, cast(JsonObject, raw["state"]))]
+        return [
+            _callback_resolved_event(
+                callback_id, cast(JsonObject, raw["state"]), callback.turn_id
+            )
+        ]
 
     def _history_events(self, entries: Sequence[HistoryEntry]) -> list[SessionEvent]:
         events: list[SessionEvent] = []
@@ -289,13 +293,15 @@ class SessionApiEventProducer:
         for callback_id, callback in current.items():
             if callback_id not in self._callbacks:
                 events.append(CallbackOpenedEvent(callback=callback))
-        for callback_id in list(self._callbacks):
+        for callback_id, gone in self._callbacks.items():
             if callback_id not in current:
                 # Gone without a resolution event of its own: the Runtime
                 # dropped it, which reads as cancelled.
                 events.append(
                     CallbackResolvedEvent(
-                        callback_id=callback_id, outcome=CancelledCallbackOutcome()
+                        callback_id=callback_id,
+                        outcome=CancelledCallbackOutcome(),
+                        turn_id=gone.turn_id,
                     )
                 )
         self._callbacks = current
@@ -605,10 +611,17 @@ def _escape(key: str) -> str:
     return key.replace("~", "~0").replace("/", "~1")
 
 
-def _callback_resolved_event(callback_id: str, state: JsonObject) -> SessionEvent:
-    """``state`` is the Runtime's settled callback state: answered or cancelled."""
+def _callback_resolved_event(
+    callback_id: str, state: JsonObject, turn_id: str | None
+) -> SessionEvent:
+    """``state`` is the Runtime's settled callback state: answered or cancelled.
+
+    ``turn_id`` is the turn the callback's opening named.
+    """
     if state["status"] == "cancelled":
         outcome = CancelledCallbackOutcome(reason=cast(str, state["reason"]))
     else:
         outcome = AnsweredCallbackOutcome(output=state.get("output"))
-    return CallbackResolvedEvent(callback_id=callback_id, outcome=outcome)
+    return CallbackResolvedEvent(
+        callback_id=callback_id, outcome=outcome, turn_id=turn_id
+    )

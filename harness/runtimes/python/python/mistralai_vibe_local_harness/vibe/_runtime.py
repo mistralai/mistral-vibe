@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import json
 import logging
@@ -100,6 +101,7 @@ from mistralai_vibe_local_harness.vibe._errors import (
 from mistralai_vibe_local_harness.vibe._fact_recorder import FactRecorder, fact_recorder
 from mistralai_vibe_local_harness.vibe._fork import (
     SessionForkSnapshot,
+    active_turn_start,
     history_for_fork,
 )
 from mistralai_vibe_local_harness.vibe._observability import (
@@ -156,6 +158,7 @@ from mistralai_vibe_local_harness.vibe._storage import (
     CoreInputRecordV1,
     HarnessStoreCapacityError,
     HeldGeneration,
+    InteropHistoryMessageV1,
     InteropToolMessageV1,
     InteropUserMessageV1,
     JournalRecordExceedsPageError,
@@ -278,6 +281,18 @@ type ContextCompactionResult = ContextCompactionSuccess | ContextCompactionFailu
 
 
 @dataclass(frozen=True, slots=True)
+class _StrandedTurn:
+    turn_id: str
+    error: RustProtocolError
+    # Set by a recovery that failed with this turn: the reservations marked to
+    # abandon on restart are owed once the turn's failure is durable.
+    abandons_restart_reservations: bool = False
+    # The command whose drive failed. Unset when recovery replays a turn that
+    # no caller is left to answer.
+    client_command_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveredTurn:
     turn_id: str | None
     transition: RustSessionTransition
@@ -298,6 +313,9 @@ class _PendingProcessActionResult:
     event: RustEvent
     failed: bool
     completed: asyncio.Future[None]
+    # Set once Core has dropped the Action. The retried write still spends the
+    # journal reservation, and nothing else acknowledges it afterwards.
+    release_reservation: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,7 +339,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     executor's result event is durable before it is supplied to Core.
     """
 
-    def __init__(  # noqa: PLR0913 - explicit Runtime dependencies
+    def __init__(  # noqa: PLR0913, PLR0915 - explicit Runtime dependencies
         self,
         *,
         config: RustHarnessConfig,
@@ -413,6 +431,14 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self._in_flight_commands: dict[str, asyncio.Future[DurableCommandResult]] = {}
         self._cancelled_commands: set[str] = set()
         self._unanswered_commands: dict[str, ResponseFactory] = {}
+        self._stranded_turn: _StrandedTurn | None = None
+        # Admitted process actions still landing after the drive that owned them
+        # failed. Set before the first await of that cleanup, cleared before the
+        # failure itself is settled.
+        self._action_cleanup: asyncio.Task[None] | None = None
+        self._abandoned_actions: set[str] = set()
+        self._abandoned_commands: dict[str, str] = {}
+        self._live_action_ids: set[str] = set()
         self._closed = False
 
     @classmethod
@@ -729,20 +755,39 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             for block in message.content
         )
 
+    async def committed_history(self) -> list[InteropHistoryMessageV1]:
+        """The conversation as the Core holds it: what the model was given."""
+        async with self._lock:
+            self._guard_open()
+            capture = asyncio.create_task(
+                asyncio.to_thread(self._capture_core_generation),
+                name=f"history-capture-{self._store.session_id}",
+            )
+            try:
+                checkpoint, _core_last_input_id = await asyncio.shield(capture)
+            except asyncio.CancelledError:
+                await capture
+                raise
+            # The source only labels the export, which never leaves this call.
+            source = UnifiedInteropSourceV1(
+                session_id=self._store.session_id,
+                generation="0" * 16,
+                snapshot_sequence=0,
+            )
+            return list(committed_history_from_checkpoint(source, checkpoint).history)
+
     async def snapshot_for_fork(
         self, entry_id: str | None, *, include_entry: bool
     ) -> SessionForkSnapshot:
         """Copy completed history without stopping active work.
 
-        A running session requires an entry ID so the active Turn can be excluded.
-        An idle session may omit it to copy all committed history.
+        Without an entry ID, an idle session copies all committed history and a
+        running session the history before its active Turn.
         """
         async with self._lock:
             self._guard_open()
             await self._catch_up_projection()
             inspection = self.inspection
-            if inspection.active_turn_id is not None and entry_id is None:
-                raise HarnessForkEntryRequiredError()
             capture = asyncio.create_task(
                 asyncio.to_thread(self._capture_core_generation),
                 name=f"fork-snapshot-capture-{self._store.session_id}",
@@ -759,20 +804,29 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 snapshot_sequence=stored.runtime_state.snapshot_sequence,
             )
             history = committed_history_from_checkpoint(source, checkpoint).history
-            try:
-                fork_history = history_for_fork(
-                    history, entry_id, include_entry=include_entry
-                )
-            except HarnessForkEntryNotFoundError as exc:
+            if entry_id is None and inspection.active_turn_id is not None:
+                start = active_turn_start(checkpoint)
+                if start is None:
+                    raise HarnessForkEntryRequiredError()
+                fork_history = history[:start]
+            else:
+                try:
+                    fork_history = history_for_fork(
+                        history,
+                        entry_id,
+                        include_entry=include_entry,
+                        public_entries=self.projection.history.entries,
+                    )
+                except HarnessForkEntryNotFoundError as exc:
+                    if entry_id is not None and self._is_active_turn_entry(
+                        entry_id, inspection.active_turn_id
+                    ):
+                        raise HarnessForkActiveTurnError(entry_id) from exc
+                    raise
                 if entry_id is not None and self._is_active_turn_entry(
                     entry_id, inspection.active_turn_id
                 ):
-                    raise HarnessForkActiveTurnError(entry_id) from exc
-                raise
-            if entry_id is not None and self._is_active_turn_entry(
-                entry_id, inspection.active_turn_id
-            ):
-                raise HarnessForkActiveTurnError(entry_id)
+                    raise HarnessForkActiveTurnError(entry_id)
             return SessionForkSnapshot(
                 source=source,
                 history=tuple(fork_history),
@@ -935,7 +989,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     async def deliver_notification(
         self, notification: RustHarnessNotification
     ) -> RustSessionTransition:
-        async with self._lock:
+        async with self._lock_after_settling_stranded_turn():
             self._guard_open()
             await self._catch_up_projection()
             transition = await self._apply(
@@ -946,7 +1000,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     async def fail_pending_action(
         self, *, action_id: str, expected_turn_id: str, error: RustProtocolError
     ) -> RustSessionTransition:
-        async with self._lock:
+        async with self._lock_after_settling_stranded_turn():
             self._guard_open()
             await self._catch_up_projection()
             transition = await self._apply(
@@ -956,6 +1010,375 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             )
         await self._reconcile_subagent_receipts()
         return transition
+
+    @property
+    def stranded_turn_id(self) -> str | None:
+        """The turn whose driver failed and whose failure is not yet durable."""
+        stranded = self._stranded_turn
+        return stranded.turn_id if stranded is not None else None
+
+    @property
+    def has_unsettled_failure(self) -> bool:
+        """A failed turn still owes a durable write only this process remembers.
+
+        The stranded marker is cleared once Core has the failure, so a retry
+        does not apply it again. Results for the actions that failure dropped,
+        and the receipt of the command that started it, can still be unwritten
+        after that. Idle eviction has to see them: resume would rebuild an idle
+        Core and leave those rows pending forever.
+        """
+        return bool(
+            self._stranded_turn is not None
+            or self._abandoned_actions
+            or self._abandoned_commands
+        )
+
+    async def settle_stranded_turn(self) -> None:
+        """Write down the failure of a turn its driver abandoned, if one is owed.
+
+        A turn whose drive fails keeps its pending Actions in Core with nothing
+        left to resolve them, so it would hold the Session busy until a restart.
+        Its failure is applied when the drive fails, together with failed
+        results for the Actions it abandoned and the receipt of the command that
+        started it, so the store goes quiescent again. When those writes fail
+        too, as they do on a full disk, every later entry point that hands Core
+        an input retries them here first: an input applied to the turn instead
+        would be refused, or folded into a turn nothing drives. Raises if a
+        write still fails, with Core left as the journal describes it.
+
+        An Action still running, or a process reservation whose intent never
+        landed, stays owed so a later call can close it. A recovery that still
+        owes reservations marked to abandon on restart fails them here once
+        the turn is durable and Core is idle.
+
+        A drive that is still applying results of admitted process actions is
+        finished first. Failing the turn before those results land would drop
+        them, and an input admitted during that wait would join a turn nothing
+        is left to drive.
+        """
+        cleanup = self._action_cleanup
+        if cleanup is not None and cleanup is not asyncio.current_task():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+        async with self._lock:
+            if (
+                self._stranded_turn is None
+                and not self._abandoned_actions
+                and not self._abandoned_commands
+            ):
+                return
+            self._guard_open()
+            await self._settle_stranded_turn_locked()
+        await self._reconcile_subagent_receipts()
+
+    @asynccontextmanager
+    async def _lock_after_settling_stranded_turn(
+        self, client_command_id: str | None = None
+    ) -> AsyncIterator[None]:
+        """Hold the runtime lock once a stranded turn can no longer take input.
+
+        Settlement runs before the lock. A drive still applying the input that
+        fails can note that failure and yield in cleanup while this caller waits
+        to enter, and the input would then join the turn that failure is about
+        to end. If the marker is set once the lock is held, release it and
+        settle again.
+        """
+        while True:
+            await self.settle_stranded_turn()
+            stranded_on_admission: str | None = None
+            admission_error: Exception | None = None
+            async with self._lock:
+                if self._stranded_turn is not None:
+                    continue
+                accepted_before = self.inspection.last_input_id
+                try:
+                    yield
+                except Exception as error:
+                    stranded_on_admission = self._strand_turn_admitted_without_drive(
+                        accepted_before, error, client_command_id
+                    )
+                    if stranded_on_admission is None:
+                        raise
+                    admission_error = error
+            # The caller has left. Returning stops a second yield, which would
+            # drop the lock and try to enter again. A turn stranded on admission
+            # has no drive to settle it, so it is settled here, as a failed
+            # drive settles its own, before the error reaches the caller.
+            if stranded_on_admission is not None and admission_error is not None:
+                await self._settle_stranded_turn_logged(stranded_on_admission)
+                raise admission_error
+            return
+
+    def _strand_turn_admitted_without_drive(
+        self, accepted_before: int, error: Exception, client_command_id: str | None
+    ) -> str | None:
+        """Strand the running turn when admitting an input fails after Core took it.
+
+        Core can accept an input and then a later write of the same admission
+        fail, such as the projection append on a full disk. No drive runs for
+        it, so no drive failure strands the turn either: Core would keep it
+        running with nothing to resolve its actions, and refuse every later
+        turn. An input Core never took leaves nothing to strand, since a lost
+        journal write already rolls Core back. Returns the stranded turn.
+
+        A drive can note that same turn without the lock while this admission
+        still holds it. The receipt is recorded anyway: the drive's settle
+        fails only the commands it was told about, and a reserved receipt it
+        never hears of keeps the store from going quiescent. Settlement stays
+        with that drive.
+        """
+        if self._closed:
+            return None
+        if self.inspection.last_input_id == accepted_before:
+            return None
+        turn_id = self.inspection.active_turn_id
+        if turn_id is None or not self.pending_action_ids:
+            return None
+        already_stranded = self._stranded_turn is not None
+        self._note_stranded_turn(turn_id, error, client_command_id)
+        if already_stranded:
+            return None
+        return turn_id
+
+    async def _settle_stranded_turn_locked(self) -> None:
+        stranded = self._stranded_turn
+        if (
+            stranded is not None
+            and stranded.client_command_id is not None
+            and self._turn_finished_without_failure(stranded.turn_id)
+        ):
+            # Core already finished this turn. Failing its receipt would refuse
+            # the retry that replays the completed transition.
+            self._abandoned_commands.pop(stranded.client_command_id, None)
+        if stranded is not None:
+            pending = self.pending_action_ids
+            if pending and self.inspection.active_turn_id == stranded.turn_id:
+                # Owed before the failure is applied: its record can land while
+                # a later write still fails, and a retry then finds Core idle.
+                # Actions Core still holds are skipped below, so a rolled-back
+                # failure leaves them alone.
+                self._abandoned_actions.update(pending)
+                await self._apply(
+                    RustFailTurnEvent(
+                        expected_turn_id=stranded.turn_id,
+                        action_id=min(pending),
+                        error=stranded.error,
+                    )
+                )
+            # Cleared only once nothing the turn owes can still fail: a retry
+            # finds Core idle and skips the failure, which already landed.
+            if stranded.abandons_restart_reservations:
+                await self._abandon_reservations_marked_for_restart_locked()
+            self._stranded_turn = None
+        if self._abandoned_actions:
+            stored = await asyncio.to_thread(self._store.load)
+            still_pending = self.pending_action_ids
+            durable_by_id = {
+                durable.action_id: durable for durable in stored.runtime_state.actions
+            }
+            for action_id in tuple(self._abandoned_actions):
+                # Still running, or still held by Core. A result may still be
+                # recorded for it, so it stays owed until a later settle finds
+                # it finished and can release its reservation.
+                if action_id in self._live_action_ids or action_id in still_pending:
+                    continue
+                durable = durable_by_id.get(action_id)
+                if durable is None:
+                    self._release_unrecorded_abandoned_action(action_id)
+                else:
+                    await self._close_abandoned_action_locked(durable)
+                self._abandoned_actions.discard(action_id)
+        if self._abandoned_commands:
+            stored = await asyncio.to_thread(self._store.load)
+            for receipt in stored.runtime_state.command_receipts:
+                reason = self._abandoned_commands.get(receipt.client_command_id)
+                if reason is None:
+                    continue
+                if receipt.state == "reserved":
+                    await asyncio.to_thread(
+                        self._store.fail_command, receipt.client_command_id, reason
+                    )
+                del self._abandoned_commands[receipt.client_command_id]
+            # Ids this walk did not settle stay owed. The snapshot can miss a
+            # receipt, and a drive can note one after this loop has passed it.
+            # Clearing the map drops either, and the reservation never settles.
+
+    def _release_unrecorded_abandoned_action(self, action_id: str) -> None:
+        """Release a process reservation whose intent write never landed.
+
+        The reservation is taken before ``record_action_intent``. When that
+        write hits a full disk, Core can still list the Action and the ledger
+        never does, so closing ledger rows cannot see it. Nothing else pops
+        the reservation, and ``has_active_process_work`` stays true.
+        """
+        reservation = self._process_action_reservations.pop(action_id, None)
+        if reservation is None:
+            return
+        _temporary, _permanent, process_identifier = reservation
+        self._store.release_journal_capacity(action_id)
+        if process_identifier is not None:
+            self._process_lifetime_reservations.pop(process_identifier, None)
+            self._store.release_journal_capacity(process_identifier)
+        self._notify_work_state_changed()
+
+    async def _close_abandoned_action_locked(self, durable: RuntimeActionV1) -> None:
+        """Close an Action its failed turn abandoned, and release what it reserved.
+
+        Core no longer holds the Action, so no result will ever be applied for
+        it: an intent left open keeps the store off quiescence, and a process
+        Action's journal reservation keeps the Session counted as running
+        process work, so it is never idle-evicted. The reservation is released
+        whether or not the intent was still open, since a cancelled process
+        Action records its own failure but is never acknowledged. A process
+        result whose write is being retried is already on its way, and is left
+        to land. That retry spends the journal reservation, so it stays until
+        the write does; Core will not acknowledge the Action afterwards.
+        """
+        reserved = durable.action_id in self._process_action_reservations
+        pending = self._pending_process_action_results.get(durable.action_id)
+        if pending is not None:
+            if reserved and not pending.release_reservation:
+                self._pending_process_action_results[durable.action_id] = replace(
+                    pending, release_reservation=True
+                )
+            return
+        recorded = durable
+        if durable.state in {"pending", "running"}:
+            # The durability retry may have recorded the real result and dropped
+            # its pending row after this snapshot was taken. Writing a failure
+            # over that result conflicts, and nothing would then release the
+            # reservation.
+            stored = await asyncio.to_thread(self._store.load)
+            live = next(
+                (
+                    item
+                    for item in stored.runtime_state.actions
+                    if item.action_id == durable.action_id
+                ),
+                None,
+            )
+            if live is None or live.state in {"pending", "running"}:
+                with self._store.use_journal_reservation(
+                    durable.action_id if reserved else None
+                ):
+                    await asyncio.to_thread(
+                        self._store.record_action_result,
+                        durable.action_id,
+                        _STRANDED_ACTION_RESULT,
+                        failed=True,
+                    )
+            elif live.state == "succeeded":
+                recorded = live
+        if not reserved:
+            return
+        action = action_from_recovery_state(durable)
+        await self._acknowledge_process_result_applied(
+            action, _event_for_abandoned_action(action, recorded)
+        )
+
+    def _note_stranded_turn(
+        self, turn_id: str, error: Exception, client_command_id: str | None
+    ) -> None:
+        """Remember a drive failure before its cleanup awaits.
+
+        Recorded synchronously, before admitted process actions are waited on.
+        Until this is set, ``settle_stranded_turn`` has nothing to settle, and a
+        notification, steer, or command can still be applied to the turn that
+        failure is about to drop. Callers that already settled re-check the
+        marker under the runtime lock before applying, so one that waited out
+        this note does not join that turn.
+        """
+        if self._closed:
+            return
+        message = str(error) or type(error).__name__
+        if self._stranded_turn is None:
+            self._stranded_turn = _StrandedTurn(
+                turn_id=turn_id,
+                error=RustProtocolError(
+                    code=type(error).__name__, message=message, retryable=False
+                ),
+                client_command_id=client_command_id,
+            )
+        elif self._stranded_turn.turn_id != turn_id:
+            return
+        self._remember_stranded_command(turn_id, client_command_id)
+
+    def _remember_stranded_command(
+        self, turn_id: str, client_command_id: str | None
+    ) -> None:
+        """Keep a drive's receipt only when its turn did not already finish.
+
+        The failure is recorded before cleanup, and cleanup can still apply the
+        result that completes the turn. A finished turn's receipt stays reserved
+        so the retry replays that transition instead of being refused as abandoned.
+        """
+        if client_command_id is None:
+            return
+        stranded = self._stranded_turn
+        if stranded is None or stranded.turn_id != turn_id:
+            return
+        if stranded.client_command_id is None:
+            stranded = replace(stranded, client_command_id=client_command_id)
+            self._stranded_turn = stranded
+        if self._turn_finished_without_failure(turn_id):
+            self._abandoned_commands.pop(client_command_id, None)
+            return
+        self._abandoned_commands.setdefault(
+            client_command_id, f"the turn it started failed: {stranded.error.message}"
+        )
+
+    def _turn_finished_without_failure(self, turn_id: str) -> bool:
+        latest = self._projector.projection.snapshot.latest_turn
+        return (
+            latest is not None
+            and latest.id == turn_id
+            and latest.status not in {"in_progress", "failed"}
+        )
+
+    async def _strand_turn(
+        self, turn_id: str, error: Exception, client_command_id: str | None
+    ) -> None:
+        if self._closed:
+            return
+        # Do not record the debt again. A settle that ran once cleanup finished
+        # may already have cleared it, and replacing it would resurrect a turn
+        # whose failure is durable.
+        stranded = self._stranded_turn
+        if stranded is not None and stranded.turn_id == turn_id:
+            self._remember_stranded_command(turn_id, client_command_id)
+        elif (
+            stranded is None
+            and not self._abandoned_actions
+            and not self._abandoned_commands
+        ):
+            return
+        settling = asyncio.create_task(
+            self._settle_stranded_turn_logged(turn_id), name=f"fail-turn-{turn_id}"
+        )
+        try:
+            await asyncio.shield(settling)
+        except asyncio.CancelledError:
+            await settling
+            raise
+
+    async def _settle_stranded_turn_logged(self, turn_id: str) -> None:
+        try:
+            await self.settle_stranded_turn()
+        except Exception:
+            logger.warning(
+                "Unified session could not record the failure of an abandoned turn",
+                extra={
+                    "harness_backend": "unified",
+                    "session_id": self._store.session_id,
+                    "store_format": "mistral.vibe.unified-session-store/v1",
+                    "turn_id": turn_id,
+                },
+                exc_info=True,
+            )
 
     def configure_process_runtime(
         self,
@@ -1109,6 +1532,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 await self._settle_restored_idle_locked()
         except Exception as exc:
             self._record_replay_failure(exc, recovered.started_at)
+            await self._settle_after_failed_recovery()
             raise
         record_session_operation(
             time.perf_counter() - recovered.started_at,
@@ -1126,6 +1550,42 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             },
         )
         return terminal
+
+    async def _settle_after_failed_recovery(self) -> None:
+        """Settle what a recovery that failed its turn leaves idle, if it can.
+
+        A recovery whose drive fails still ends its turn, so Core is idle and the
+        reservations marked to be abandoned on restart, and the journal fold, are
+        owed just as after a recovery that succeeded. This runs them when the
+        failure of the turn is durable, and only logs if they fail in turn: the
+        recovery's own error is the one its caller needs. When the turn is not
+        durable yet, the abandon stays owed for the settle that lands the
+        failure.
+        """
+        try:
+            async with self._lock:
+                if self._closed:
+                    return
+                stranded = self._stranded_turn
+                if stranded is not None:
+                    self._stranded_turn = replace(
+                        stranded, abandons_restart_reservations=True
+                    )
+                    return
+                if self.inspection.pending_actions:
+                    return
+                await self._abandon_reservations_marked_for_restart_locked()
+                await self._settle_idle_locked()
+        except Exception:
+            logger.warning(
+                "Unified session could not settle after a failed replay",
+                extra={
+                    "harness_backend": "unified",
+                    "session_id": self._store.session_id,
+                    "store_format": "mistral.vibe.unified-session-store/v1",
+                },
+                exc_info=True,
+            )
 
     def _record_replay_failure(self, exc: Exception, started: float) -> None:
         add_recovery_failure(failure_code=type(exc).__name__, phase="replay")
@@ -1226,7 +1686,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         transition: RustSessionTransition | None = None
         owned: asyncio.Future[DurableCommandResult] | None = None
         try:
-            async with self._lock:
+            async with self._lock_after_settling_stranded_turn(client_command_id):
                 self._guard_open()
                 await self._catch_up_projection()
                 reservation = await asyncio.to_thread(
@@ -1268,7 +1728,9 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             assert transition is not None
             assert owned is not None
             terminal = await self._drive(
-                transition, recovering=not reservation.newly_reserved
+                transition,
+                recovering=not reservation.newly_reserved,
+                client_command_id=client_command_id,
             )
             async with self._lock:
                 self._guard_open()
@@ -1285,17 +1747,25 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 owned.cancel()
                 self._cancelled_commands.add(client_command_id)
             else:
-                # A command that failed has an outcome only its caller can
-                # describe, so the Runtime stops holding an answer for it.
-                self._unanswered_commands.pop(client_command_id, None)
-                owned.set_exception(error)
-                owned.exception()
+                self._release_failed_command(client_command_id, owned, error)
             raise
         finally:
             if owned is not None:
                 async with self._lock:
                     if self._in_flight_commands.get(client_command_id) is owned:
                         del self._in_flight_commands[client_command_id]
+
+    def _release_failed_command(
+        self,
+        client_command_id: str,
+        owned: asyncio.Future[DurableCommandResult],
+        error: BaseException,
+    ) -> None:
+        # A command that failed has an outcome only its caller can
+        # describe, so the Runtime stops holding an answer for it.
+        self._unanswered_commands.pop(client_command_id, None)
+        owned.set_exception(error)
+        owned.exception()
 
     async def _append_accepted_history_entries(
         self, entries: Sequence[JsonObject]
@@ -1409,7 +1879,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         response_factory: ResponseFactory,
         abandon_on_restart: bool = False,
     ) -> DurableCommandResult:
-        async with self._lock:
+        async with self._lock_after_settling_stranded_turn(client_command_id):
             self._guard_open()
             await self._catch_up_projection()
             reservation = await asyncio.to_thread(
@@ -1642,7 +2112,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
 
     async def reconfigure_configuration(self, config: RustHarnessConfig) -> None:
         """Replace every live Core configuration dimension as one command."""
-        async with self._lock:
+        async with self._lock_after_settling_stranded_turn():
             self._guard_open()
             await self._reconfigure_configuration_locked(config)
 
@@ -1671,7 +2141,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self, plugins: Sequence[RustPluginContextDefinition]
     ) -> None:
         params = _plugin_reconfigure_params(plugins)
-        async with self._lock:
+        async with self._lock_after_settling_stranded_turn():
             self._guard_open()
             pending = await self._flush_pending_plugin_command()
             self._post_recovery_plugins = None
@@ -1690,7 +2160,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     async def reconfigure_capability_dimension(
         self, update: Callable[[RustHarnessCapabilitySet], RustHarnessCapabilitySet]
     ) -> None:
-        async with self._lock:
+        async with self._lock_after_settling_stranded_turn():
             self._guard_open()
             await self._flush_pending_capability_command()
             live = self._config.capabilities
@@ -1703,7 +2173,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
 
     async def reconfigure_settings(self, settings: RustHarnessSettings) -> None:
         params = _settings_reconfigure_params(settings)
-        async with self._lock:
+        async with self._lock_after_settling_stranded_turn():
             self._guard_open()
             pending = await self._flush_pending_settings_command()
             # A caller reconfiguring now outranks the set a restore deferred:
@@ -1782,6 +2252,21 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             abandon_on_restart=abandon_on_restart,
         )
         return _parse_context_compaction_response(result.response)
+
+    async def fold_idle_journal(self) -> StoredSession:
+        """Fold what an idle Session journalled since its last turn ended.
+
+        Inputs that arrive between turns, such as a background process's
+        terminal notification, are journalled with no turn end left to fold
+        them, so the stored export would lag the Session until the next turn.
+        A Session with Runtime work still pending keeps its journal. Returns
+        the store as it stood when the fold finished.
+        """
+        async with self._lock:
+            self._guard_open()
+            await self._catch_up_projection()
+            await self._compact_store()
+            return await asyncio.to_thread(self._store.load)
 
     async def replace_quiescent_context(
         self, *, checkpoint: dict[str, JsonValue], projection: PublicSessionState
@@ -1863,7 +2348,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     ) -> None:
         revision = revision or _capability_revision(capabilities)
         params = _capability_reconfigure_params(capabilities, revision)
-        async with self._lock:
+        async with self._lock_after_settling_stranded_turn():
             self._guard_open()
             pending = await self._flush_pending_capability_command()
             self._post_recovery_capabilities = None
@@ -2107,7 +2592,10 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     async def interrupt(
         self, *, expected_turn_id: str, reason: str | None = None
     ) -> RustSessionTransition:
-        async with self._lock:
+        # A stranded turn is failed rather than interrupted: settling it leaves
+        # Core idle with the turn as its last, which Core takes this interrupt
+        # for as a late one and answers without effect.
+        async with self._lock_after_settling_stranded_turn():
             self._guard_open()
             await self._catch_up_projection()
             pending_completion = any(
@@ -2177,6 +2665,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             await self._answer_abandoned_commands_locked()
             self._closed = True
             self._core.close()
+            # Wake whoever waits on Core input: nothing commits once closed.
+            self._signal_core_input_committed()
 
     async def _resume_reserved_command(
         self, command: RustEvent
@@ -2406,9 +2896,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         transition: RustSessionTransition,
         *,
         recovering: bool,
+        client_command_id: str | None = None,
         on_live_work: Callable[[], None] | None = None,
     ) -> RustSessionTransition:
         current = transition
+        turn_id = self.inspection.active_turn_id
         in_flight: dict[str, tuple[RustAction, asyncio.Task[RustEvent]]] = {}
         finished: asyncio.Queue[str] = asyncio.Queue()
         replayed_ids: set[str] = set()
@@ -2464,23 +2956,57 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     if isinstance(emitted, Awaitable):
                         await emitted
                 del in_flight[action_id]
-                await _cancel_tasks([
+                abandoned = [
                     in_flight.pop(pending_id)[1]
                     for pending_id in tuple(in_flight)
                     if pending_id not in pending_ids
-                ])
-        except BaseException:
-            # A second cancellation must not abandon this cleanup: an action task
-            # left running here never records its result, and its open intent
-            # keeps the store from ever folding again.
-            settlement = asyncio.ensure_future(
-                self._settle_actions_after_drive_failure(in_flight)
+                ]
+                await _cancel_tasks(abandoned)
+                if abandoned:
+                    # Their receipts were left alone while they ran.
+                    await self._reconcile_subagent_receipts()
+        except BaseException as error:
+            await self._clean_up_failed_drive(
+                in_flight, error, turn_id, client_command_id
             )
+            raise
+
+    async def _clean_up_failed_drive(
+        self,
+        in_flight: dict[str, tuple[RustAction, asyncio.Task[RustEvent]]],
+        error: BaseException,
+        turn_id: str | None,
+        client_command_id: str | None,
+    ) -> None:
+        # A second cancellation must not abandon this cleanup: an action task
+        # left running here never records its result, and its open intent
+        # keeps the store from ever folding again.
+        if isinstance(error, Exception) and turn_id is not None:
+            self._note_stranded_turn(turn_id, error, client_command_id)
+        settlement = asyncio.ensure_future(
+            self._settle_actions_after_drive_failure(in_flight)
+        )
+        self._action_cleanup = settlement
+        try:
             try:
                 await asyncio.shield(settlement)
             except asyncio.CancelledError:
+                # The drive's own error is re-raised by its caller. Swallowing
+                # this cancellation lets that error survive, after cleanup and
+                # stranding have both finished.
                 await settlement
-            raise
+        finally:
+            if self._action_cleanup is settlement:
+                self._action_cleanup = None
+            if isinstance(error, Exception) and turn_id is not None:
+                try:
+                    await self._strand_turn(turn_id, error, client_command_id)
+                except asyncio.CancelledError:
+                    # Stranding waits out its settle, then re-raises. Swallowing
+                    # that cancellation leaves the drive's own error in place,
+                    # so a failed recovery can still mark what a later settle
+                    # abandons.
+                    pass
 
     async def _start_transition_actions(
         self,
@@ -2535,6 +3061,12 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                         completed_id
                     )
                 )
+                task.add_done_callback(
+                    lambda _task, completed_id=action.action_id: (
+                        self._live_action_ids.discard(completed_id)
+                    )
+                )
+                self._live_action_ids.add(action.action_id)
                 in_flight[action.action_id] = (action, task)
                 if (
                     action_recovering
@@ -3794,22 +4326,10 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             for action_id, pending in tuple(
                 self._pending_process_action_results.items()
             ):
-                try:
-                    await self._record_action_result(
-                        pending.action,
-                        pending.durable,
-                        pending.event,
-                        reconcile_started=None,
-                        failed=pending.failed,
-                    )
-                except Exception:
+                if not await self._commit_retried_process_action_result(
+                    action_id, pending
+                ):
                     failed = True
-                    logger.warning("background_process.operation_failed")
-                    continue
-                self._pending_process_action_results.pop(action_id, None)
-                if not pending.completed.done():
-                    pending.completed.set_result(None)
-                self._notify_work_state_changed()
             for process_identifier, snapshot in tuple(
                 self._pending_terminal_snapshots.items()
             ):
@@ -3827,6 +4347,44 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     self._terminal_tasks.pop(process_identifier, None)
                 self._notify_work_state_changed()
             attempt = attempt + 1 if failed else 0
+
+    async def _commit_retried_process_action_result(
+        self, action_id: str, pending: _PendingProcessActionResult
+    ) -> bool:
+        """Persist one retried process result.
+
+        Returns whether it is durable now. A close that found this write already
+        queued leaves the journal reservation in place for the retry, and marks
+        it to be released here: Core has dropped the Action, so nothing else will.
+        """
+        current = pending
+        try:
+            await self._record_action_result(
+                pending.action,
+                pending.durable,
+                pending.event,
+                reconcile_started=None,
+                failed=pending.failed,
+            )
+            # Close marks release_reservation under this lock as soon as the
+            # result write releases it. Sampling the flag and dropping the row
+            # have to be the same critical section: a mark that lands between
+            # them is popped with the row and never frees the reservation.
+            async with self._lock:
+                self._guard_open()
+                current = self._pending_process_action_results.get(action_id) or pending
+                if current.release_reservation:
+                    await self._acknowledge_process_result_applied(
+                        current.action, current.event
+                    )
+                self._pending_process_action_results.pop(action_id, None)
+        except Exception:
+            logger.warning("background_process.operation_failed")
+            return False
+        if not current.completed.done():
+            current.completed.set_result(None)
+        self._notify_work_state_changed()
+        return True
 
     def _notify_work_state_changed(self) -> None:
         callback = self._work_state_callback
@@ -4047,6 +4605,31 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         return _failed_action_event(
             action, "The interrupted effect cannot be reconnected safely"
         )
+
+    async def _pre_agent_hook_signal(self, turn_id: str) -> asyncio.Event | None:
+        # Under the lock, Core state matches the journal: `_apply` commits there.
+        async with self._lock:
+            # Closed: no hook will finish. The caller's next step reports it.
+            if self._closed:
+                return None
+            inspection = self.inspection
+            if inspection.active_turn_id != turn_id or not any(
+                isinstance(action, RustPendingHookCallAction)
+                and action.hook == "pre_agent_turn"
+                for action in inspection.pending_actions
+            ):
+                return None
+            return self._core_input_committed
+
+    async def wait_for_pre_agent_hooks(self, turn_id: str) -> None:
+        """Wait until ``turn_id`` is past its pre_agent hooks, no longer active, or
+        the Runtime is closed.
+
+        The Core refuses a steer while those hooks run: the message they review is
+        not committed yet.
+        """
+        while (signal := await self._pre_agent_hook_signal(turn_id)) is not None:
+            await signal.wait()
 
     async def _model_input_signal(self) -> asyncio.Event | None:
         # Under the lock, Core state matches the journal: `_apply` commits there.
@@ -5123,6 +5706,38 @@ async def _cancel_tasks(tasks: Sequence[asyncio.Task[RustEvent]]) -> None:
     for task in tasks:
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _event_for_abandoned_action(
+    action: RustAction, recorded: RuntimeActionV1
+) -> RustEvent:
+    """The event that releases a reservation without denying a stored success.
+
+    ``process.start`` completes its barrier from this event's type. A synthetic
+    failure reports a start Core already accepted as cancelled.
+    """
+    if recorded.state == "succeeded":
+        event = _stored_tool_success(recorded)
+        if event is not None:
+            return event
+        if (
+            isinstance(action, RustRuntimeBuiltinToolCallAction)
+            and action.call.name == "process.start"
+        ):
+            return process_succeeded(action, {"status": "running"})
+    return _failed_action_event(action, "Action cancelled")
+
+
+def _stored_tool_success(recorded: RuntimeActionV1) -> RustToolSucceededEvent | None:
+    if not isinstance(recorded.result, dict):
+        return None
+    try:
+        event = _EVENT_ADAPTER.validate_python(stored_reply(recorded.result))
+    except Exception:
+        return None
+    if isinstance(event, RustToolSucceededEvent):
+        return event
+    return None
 
 
 def _failed_action_event(action: RustAction, reason: str | Exception) -> RustEvent:

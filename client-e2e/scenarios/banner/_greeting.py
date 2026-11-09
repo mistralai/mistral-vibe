@@ -26,8 +26,6 @@ def identity_handshake(first_name: str) -> dict[str, Any]:
                 "plan": {"kind": "chat", "name": "TEAM", "title": PLAN},
                 "planOffer": None,
                 "rateLimitAction": None,
-                "teleportEligible": True,
-                "teleportAction": None,
             }
         },
     }

@@ -248,6 +248,26 @@ def api_transport(adapter: UnifiedHarnessBackendAdapter) -> LocalSessionApiTrans
     return api_path.commands.transport
 
 
+def use_answering_model(
+    monkeypatch: pytest.MonkeyPatch, *, text: str = "answer"
+) -> None:
+    """Make the model answer every completion with ``text``."""
+
+    async def execute_completion(
+        action: Any, _messages: Any, _tools: Any, _config: Any, **_kwargs: Any
+    ) -> RustCompletionSucceededEvent:
+        return RustCompletionSucceededEvent(
+            action_id=action.action_id,
+            result=RustCompletionResult(
+                parts=[RustTextContentBlock(text=text)],
+                finish_reason="stop",
+                usage=USAGE,
+            ),
+        )
+
+    monkeypatch.setattr(_local_actions, "execute_completion", execute_completion)
+
+
 def use_model_calling_one_tool(
     monkeypatch: pytest.MonkeyPatch, *, call_id: str = "0123456789abcdef"
 ) -> None:
@@ -320,4 +340,6 @@ __all__ = [
     "forwarding",
     "publish",
     "until",
+    "use_answering_model",
+    "use_model_calling_one_tool",
 ]

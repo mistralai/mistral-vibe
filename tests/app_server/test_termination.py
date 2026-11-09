@@ -112,6 +112,8 @@ async def test_a_server_closing_itself_mid_read_ends_its_serving_cleanly(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
         ),
     )
     serving = asyncio.create_task(server.serve())
@@ -199,7 +201,9 @@ async def test_a_sigtermed_stdio_server_closes_as_on_the_end_of_its_stdin(
         return servers[-1]
 
     exits: list[int] = []
-    monkeypatch.setattr(stdio, "create_harness_server", create_harness_server)
+    monkeypatch.setattr(
+        "vibe.app_server._runtime.create_harness_server", create_harness_server
+    )
     monkeypatch.setattr(_termination, "_exit_now", exits.append)
     serving = asyncio.create_task(
         stdio.serve_stdio(reader=stdin, writer=BytesIO(), end_on_sigterm=True)

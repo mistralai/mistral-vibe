@@ -6,6 +6,9 @@ Run for a specific scenario:
 Run for all scenarios (or use `make store_golden`):
     uv run --no-project --with "pyte==0.8.2" --with "rich==15.0.0" python client-e2e/store_golden.py --all
 
+Rewrite only client-e2e/goldens.lock (after merging main into a conflicting PR):
+    uv run --no-project --with "pyte==0.8.2" --with "rich==15.0.0" python client-e2e/store_golden.py --lock
+
 Goldens are written to client-e2e/goldens/<scenario>/{snapshot_*.svg,requests.json}.
 Regenerate when the CLI intentionally changes rendering; review the diff.
 """
@@ -18,13 +21,17 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from e2e.app_server.capture import capture_scenario
-from e2e.app_server.config import CLIENT_BIN, REPLAY_BIN
-from e2e.app_server.golden import normalize_snapshot, store_golden
+from e2e.app_server.config import CLIENT_BIN, GOLDEN_LOCK, REPLAY_BIN
+from e2e.app_server.golden import normalize_snapshot, render_golden_lock, store_golden
 from e2e.app_server.scenario import available_scenarios, load_scenario
 
 
 def main() -> None:
     args = sys.argv[1:]
+    if args == ["--lock"]:
+        GOLDEN_LOCK.write_text(render_golden_lock())
+        print(f"  stored {GOLDEN_LOCK}")
+        return
     if not args or args == ["--all"]:
         names = available_scenarios()
     else:
@@ -55,6 +62,7 @@ def main() -> None:
             f"  stored {name}: {len(captured.snapshots)} snapshot(s), "
             f"{len(captured.requests)} request(s) -> {path}"
         )
+    GOLDEN_LOCK.write_text(render_golden_lock())
 
 
 if __name__ == "__main__":

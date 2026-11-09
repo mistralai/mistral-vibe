@@ -65,13 +65,12 @@ fn options_that_pick_a_host_directory_or_session_are_named() {
         "--add-dir",
         ".",
         "-c",
-        "--teleport",
     ]);
     assert_eq!(
         usage_error(&run, false).as_deref(),
         Some(
             "--agent-socket cannot be combined with --workdir, --worktree, --add-dir, \
-             --continue, --teleport"
+             --continue"
         )
     );
 }

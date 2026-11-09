@@ -165,16 +165,13 @@ fn retry_and_retro_rank_the_same_whatever_the_skill_order() {
             );
         }
         let mut app = retry_and_retro(order);
-        assert_eq!(
-            type_slash(&mut app, "retr"),
-            ["/retro", "/retry", "/remote-project"]
-        );
+        assert_eq!(type_slash(&mut app, "retr"), ["/retro", "/retry"]);
     }
 }
 
 #[test]
 fn tab_and_enter_accept_the_highlighted_row() {
-    for (moves, accepted) in [(0, "retro"), (1, "retry"), (3, "retro")] {
+    for (moves, accepted) in [(0, "retro"), (1, "retry"), (2, "retro")] {
         let mut app = retry_and_retro(["retry", "retro"]);
         type_slash(&mut app, "retr");
         for _ in 0..moves {

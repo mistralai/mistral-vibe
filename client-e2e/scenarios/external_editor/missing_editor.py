@@ -12,3 +12,4 @@ capture_startup = False
 screen_contains = ("keep my draft", "Could not open editor vibe-e2e-missing-editor")
 
 timeline: Timeline = ["keep my draft", _CTRL_G]
+screen_excludes = ("✕",)

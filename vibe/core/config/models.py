@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import StrEnum, auto
+import json
 import logging
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ from pydantic import (
     ConfigDict,
     Field,
     HttpUrl,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -630,6 +632,48 @@ def normalize_model_configs(value: Any) -> Any:
         return normalized
 
     return value
+
+
+def parse_routed_model_payload(payload: Any) -> ModelConfig | None:
+    """One routed-model payload (a model table or its JSON string), or None."""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return None
+    if isinstance(payload, ModelConfig):
+        return payload
+    if not isinstance(payload, Mapping):
+        return None
+    try:
+        return ModelConfig.model_validate(payload)
+    except ValidationError:
+        return None
+
+
+def routed_model_keys(data: Mapping[str, Any]) -> set[str]:
+    """The model keys the routed-model fields inject into ``models``.
+
+    Mirrors the injection validators: the routed config counts only when it is
+    the routed default.
+    """
+    keys: set[str] = set()
+    default = data.get("routed_default_model")
+    config = parse_routed_model_payload(data.get("routed_model_config"))
+    if config is not None and config.alias and config.alias == default:
+        keys.add(config.alias)
+    extra = data.get("routed_extra_models")
+    if isinstance(extra, str):
+        try:
+            extra = json.loads(extra)
+        except ValueError:
+            extra = None
+    if isinstance(extra, list):
+        for entry in extra:
+            model = parse_routed_model_payload(entry)
+            if model is not None and model.alias:
+                keys.add(model.alias)
+    return keys
 
 
 def serialize_model_configs(value: Any) -> Any:

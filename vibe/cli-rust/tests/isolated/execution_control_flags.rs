@@ -98,6 +98,7 @@ fn session_start_params_without_flags_match_default_payload() {
         history_limit: HISTORY_LIMIT,
         model: None,
         session_only: false,
+        kind: None,
     };
     let value: Value = serde_json::to_value(&params).unwrap();
     assert_eq!(value["agentConfig"], json!({"cwd": "/work"}));
@@ -123,6 +124,7 @@ fn headless_yolo_without_agent_is_a_session_wide_bypass() {
         history_limit: HISTORY_LIMIT,
         model: None,
         session_only: false,
+        kind: None,
     };
     let value: Value = serde_json::to_value(&params).unwrap();
     assert!(value["agentConfig"].get("agent").is_none());

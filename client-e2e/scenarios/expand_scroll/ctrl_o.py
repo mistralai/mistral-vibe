@@ -11,7 +11,7 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-screen_rows = {1: "  alpha reply 1", 15: "⏵ Ran 3 commands"}
+screen_rows = {3: "  alpha reply 2", 15: "⏵ Ran 3 commands"}
 
 _WHEEL_UP = "\x1b[<64;60;10M"
 _CTRL_O = "\x0f"

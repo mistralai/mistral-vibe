@@ -1,4 +1,4 @@
-"""A rejected session/rewind shows the server's reason and keeps the conversation."""
+"""A rejected session/rewind shows the server's reason as a notice, never a conversation row."""
 
 from __future__ import annotations
 
@@ -25,3 +25,4 @@ handshake = {
 request_methods = {"session/rewind"}
 
 screen_contains = ("A turn is already running: turn-9", "Hi. What do you need?")
+screen_excludes = ("✕",)

@@ -49,15 +49,21 @@ pub fn restore(app: &mut App, display: Option<&serde_json::Value>) {
         let (Some(start), Some(end)) = (start.checked_sub(offset), end.checked_sub(offset)) else {
             continue;
         };
-        let paste: Arc<str> = Arc::from(&input.input[start..end]);
-        let label = crate::collapsed_pastes::label(chars);
-        input.input.replace_range(start..end, &label);
-        input.sync_mentions_at(start);
-        input.collapsed_pastes.remember(paste.clone());
-        input
-            .mentions
-            .add(&input.input, start, start + label.len(), Some(paste));
+        collapse_range(input, start, end, chars);
     }
+}
+
+/// Replace `start..end` of the input with the placeholder of a `chars`-character paste; returns its length.
+pub fn collapse_range(input: &mut ChatInput, start: usize, end: usize, chars: usize) -> usize {
+    let paste: Arc<str> = Arc::from(&input.input[start..end]);
+    let label = crate::collapsed_pastes::label(chars);
+    input.input.replace_range(start..end, &label);
+    input.sync_mentions_at(start);
+    input.collapsed_pastes.remember(paste.clone());
+    input
+        .mentions
+        .add(&input.input, start, start + label.len(), Some(paste));
+    label.len()
 }
 
 /// Show in full the paste just collapsed when `text` pastes it again before

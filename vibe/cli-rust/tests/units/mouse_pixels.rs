@@ -50,10 +50,14 @@ fn fractional_cells_of_vscode_hosts_map_to_the_pointed_cell() {
 }
 
 #[test]
-fn pixel_reports_past_the_text_area_clamp_to_the_last_cell() {
-    let (cell, _) = cells(Some(GRID), pixels(MouseEventKind::Moved, 1005, 815));
+fn a_move_past_the_text_area_lands_outside_it_while_a_drag_clamps_to_the_last_cell() {
+    let cell = |kind| {
+        let (cell, _) = cells(Some(GRID), pixels(kind, 1005, 815));
+        (cell.column, cell.row)
+    };
 
-    assert_eq!((cell.column, cell.row), (99, 39));
+    assert_eq!(cell(MouseEventKind::Moved), (100, 40));
+    assert_eq!(cell(MouseEventKind::Drag(MouseButton::Left)), (99, 39));
 }
 
 #[test]
@@ -172,6 +176,15 @@ fn hover_motion_within_the_same_cell_is_dropped() {
     assert!(coalesce.keep(Some(GRID), &moved(505, 400)));
     assert!(!coalesce.keep(Some(GRID), &moved(509, 419)));
     assert!(coalesce.keep(Some(GRID), &moved(509, 420)));
+}
+
+#[test]
+fn hover_motion_leaving_the_last_cell_past_the_text_area_is_kept() {
+    let mut coalesce = Coalesce::default();
+    let moved = |x| Event::Mouse(pixels(MouseEventKind::Moved, x, 410));
+
+    assert!(coalesce.keep(Some(GRID), &moved(995)));
+    assert!(coalesce.keep(Some(GRID), &moved(1500)));
 }
 
 #[test]

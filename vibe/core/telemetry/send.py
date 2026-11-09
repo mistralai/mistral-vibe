@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 from urllib.parse import urljoin
 
@@ -27,12 +27,7 @@ from vibe.core.telemetry.types import (
     AttachmentKind,
     ExperimentAssignment,
     LaunchContext,
-    ProjectPickerTelemetryPayload,
-    RemoteProjectOutcome,
     TelemetryCallType,
-    TeleportContextSummaryStatus,
-    TeleportFailureDetails,
-    TeleportFailureStage,
 )
 from vibe.observability.logging import logger
 from vibe.utils.api_keys import resolve_api_key
@@ -431,6 +426,7 @@ class TelemetryClient:
         has_outside_workdir_deny: bool,
         nb_post_agent_scoped_hooks: int,
         nb_post_agent_main_hooks: int,
+        nb_hooks_by_type: Mapping[str, int] | None = None,
     ) -> None:
         lc = self._launch_context
         payload = {
@@ -441,6 +437,11 @@ class TelemetryClient:
             "has_outside_workdir_deny": has_outside_workdir_deny,
             "nb_post_agent_scoped_hooks": nb_post_agent_scoped_hooks,
             "nb_post_agent_main_hooks": nb_post_agent_main_hooks,
+            # One count per hook type (``nb_hooks_pre_tool``...), plugins included.
+            **{
+                f"nb_hooks_{hook_type}": count
+                for hook_type, count in (nb_hooks_by_type or {}).items()
+            },
             "entrypoint": lc.agent_entrypoint if lc else "unknown",
             "host_kind": "local",
             "version": __version__,
@@ -547,56 +548,3 @@ class TelemetryClient:
             {"rating": rating, "version": __version__, "model": model},
             correlation_id=self.last_correlation_id,
         )
-
-    def send_teleport_completed(
-        self,
-        *,
-        push_required: bool,
-        nb_session_messages: int,
-        context_summary: TeleportContextSummaryStatus = "skipped",
-        context_summary_chars: int | None = None,
-        project_picker: ProjectPickerTelemetryPayload | None = None,
-    ) -> None:
-        payload: dict[str, object] = {
-            "push_required": push_required,
-            "nb_session_messages": nb_session_messages,
-            "context_summary": context_summary,
-            "context_summary_chars": context_summary_chars,
-        }
-        if project_picker is not None:
-            payload.update(project_picker)
-        self.send_telemetry_event("vibe.teleport_completed", dict(payload))
-
-    def send_teleport_failed(
-        self,
-        *,
-        stage: TeleportFailureStage,
-        error_class: str,
-        push_required: bool,
-        nb_session_messages: int,
-        context_summary: TeleportContextSummaryStatus = "skipped",
-        context_summary_chars: int | None = None,
-        error_details: TeleportFailureDetails | None = None,
-        project_picker: ProjectPickerTelemetryPayload | None = None,
-    ) -> None:
-        payload: dict[str, object] = {
-            "stage": stage,
-            "error_class": error_class,
-            "push_required": push_required,
-            "nb_session_messages": nb_session_messages,
-            "context_summary": context_summary,
-            "context_summary_chars": context_summary_chars,
-            **(error_details or {}),
-        }
-        if project_picker is not None:
-            payload.update(project_picker)
-        self.send_telemetry_event("vibe.teleport_failed", dict(payload))
-
-    def send_remote_project_configured(
-        self,
-        *,
-        outcome: RemoteProjectOutcome,
-        project_picker: ProjectPickerTelemetryPayload,
-    ) -> None:
-        payload: dict[str, object] = {"outcome": outcome, **project_picker}
-        self.send_telemetry_event("vibe.remote_project_configured", dict(payload))

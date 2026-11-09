@@ -5,12 +5,16 @@
 # harness/core/src/core/features/permissions/policy/tests.rs: glob character
 # classes in front of "lient" ("[c]lient.ecko") and a deliberately mistyped
 # tool name ("inventory.delte_item").
+# pydantic-core's schema builders, used in the Harness session_api, are named
+# "*_ser_schema" ("plain_serializer_function_ser_schema"); "ser" is short for
+# serialization, not a misspelling of "set".
 extend-ignore-re = [
   "(?m)^.*(#|//)\\s*typos:disable-line$",
   "datas",
   "mis-aligned LINKEDIT string pool",
   "\\[[^\\]]+\\]lient\\.ecko",
   "inventory\\.delte_item",
+  "\\b\\w+_ser_schema\\b",
 ]
 
 [default.extend-words]

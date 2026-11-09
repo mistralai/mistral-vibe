@@ -195,9 +195,10 @@ fn draw_options(app: &mut App, f: &mut Frame, bx: u16, top: u16, w: u16, help_y:
 /// A failure or refusal in place of the key hints, in the inline notice's color.
 fn draw_status(f: &mut Frame, area: Rect, status: &mut Notice, covered: bool) {
     // The nested edit dialog may cover this row: wait until it closes to count it seen.
-    status.shown |= !covered;
+    if !covered {
+        status.mark_shown();
+    }
     let style = super::notice::style(status.severity).bg(theme::surface());
-    // The conversation's `✕` row keeps the full text.
     let message = crate::utils::text::ellipsize(&status.text, usize::from(area.width));
     f.buffer_mut().set_string(area.x, area.y, message, style);
 }

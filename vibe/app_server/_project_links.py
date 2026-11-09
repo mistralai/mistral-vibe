@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
 from vibe.core.git.errors import (
     GitError,
+    GitRepositoryError,
     GitRepositoryNotFoundError,
     GitUnavailableError,
 )
@@ -23,7 +24,6 @@ from vibe.core.git.remote import to_https_url
 from vibe.core.git.repo import GitRepo
 from vibe.core.platform_auth import PlatformCredentialFactory
 from vibe.core.platform_auth._mistral import mistral_credentials
-from vibe.core.teleport.errors import ServiceTeleportError
 from vibe.core.vibe_code_project.client import VibeCodeProjectApiError
 from vibe.core.vibe_code_project.picker_service import (
     VibeCodeProjectPickerInitialData,
@@ -46,7 +46,7 @@ from vibe.observability.sentry import capture_sentry_exception
 
 if TYPE_CHECKING:
     from vibe.app_server.protocol import ProjectLinksResolveRootRejectReason
-    from vibe.core.teleport.git import GitRepoInfo
+    from vibe.core.git.repository import GitRepoInfo
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,13 +80,13 @@ class ProjectLinksInternalError(ProjectLinksError):
     """An unexpected failure already reported to Sentry."""
 
 
-# A ServiceTeleportError so that callers mapping inspection failures to an
+# A GitRepositoryError so that callers mapping inspection failures to an
 # invalid request keep doing so; only the reject reason tells it apart.
-class _GitUnavailableInCheckout(ServiceTeleportError):
+class _GitUnavailableInCheckout(GitRepositoryError):
     pass
 
 
-def _reject_reason(error: ServiceTeleportError) -> ProjectLinksResolveRootRejectReason:
+def _reject_reason(error: GitRepositoryError) -> ProjectLinksResolveRootRejectReason:
     if isinstance(error, _GitUnavailableInCheckout):
         return "git_unavailable"
     return "nested_unresolvable"
@@ -120,9 +120,9 @@ def _read_inspected_directory(path: Path) -> _InspectedDirectory:
     try:
         directory_path = path.resolve(strict=True)
     except OSError as exc:
-        raise ServiceTeleportError(str(exc)) from exc
+        raise GitRepositoryError(str(exc)) from exc
     if not directory_path.is_dir():
-        raise ServiceTeleportError("Not a directory")
+        raise GitRepositoryError("Not a directory")
 
     plain_directory = _InspectedDirectory(
         path=directory_path, name=directory_path.name, git=None
@@ -142,7 +142,7 @@ def _read_inspected_directory(path: Path) -> _InspectedDirectory:
             raise _GitUnavailableInCheckout(str(exc)) from exc
         return plain_directory
     except GitError as exc:
-        raise ServiceTeleportError(str(exc)) from exc
+        raise GitRepositoryError(str(exc)) from exc
 
     repo_root = status.root.resolve()
     return _InspectedDirectory(
@@ -250,7 +250,7 @@ class ProjectLinksController:
         path = Path(root_path).expanduser()
         try:
             inspected = await self._inspect_directory(path)
-        except ServiceTeleportError as exc:
+        except GitRepositoryError as exc:
             return {
                 "eligible": False,
                 "rejectReason": _reject_reason(exc),
@@ -267,7 +267,7 @@ class ProjectLinksController:
         path = Path(root_path).expanduser()
         try:
             inspected = await self._inspect_directory(path)
-        except ServiceTeleportError as exc:
+        except GitRepositoryError as exc:
             return {
                 "eligible": False,
                 "rejectReason": _reject_reason(exc),
@@ -582,7 +582,7 @@ class ProjectLinksController:
 
     async def _git_info(self, repo_root: Path) -> GitRepoInfo:
         # Imported lazily so lightweight delivery-surface imports do not pull in gitpython.
-        from vibe.core.teleport.git import GitRepository
+        from vibe.core.git.repository import GitRepository
 
         async with GitRepository(workdir=repo_root) as git:
             return await git.get_metadata()
@@ -591,7 +591,7 @@ class ProjectLinksController:
         path = Path(root_path).expanduser()
         try:
             git_info = await self._git_info(path)
-        except ServiceTeleportError as exc:
+        except GitRepositoryError as exc:
             raise ProjectLinksInvalidRequest(
                 f"Not an eligible project root: {exc}"
             ) from exc
@@ -602,7 +602,7 @@ class ProjectLinksController:
         path = Path(root_path).expanduser()
         try:
             inspected = await self._inspect_directory(path)
-        except ServiceTeleportError as exc:
+        except GitRepositoryError as exc:
             raise ProjectLinksInvalidRequest(
                 f"Not an eligible project root: {exc}"
             ) from exc

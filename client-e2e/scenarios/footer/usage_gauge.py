@@ -12,14 +12,12 @@ handshake = {
             "plan": {"kind": "chat", "name": "TEAM", "title": "Team"},
             "planOffer": None,
             "rateLimitAction": None,
-            "teleportEligible": True,
-            "teleportAction": None,
             "budget": {"usagePercentage": 40.0, "paygEnabled": False},
         }
     }
 }
 
-_LEFT = "/test/workdir ⧉"
+_LEFT = "/test/workdir"
 _RIGHT = "usage ██▍    40% · ctx        0/600k"
 screen_rows = {ROWS - 1: _LEFT.ljust(COLUMNS - len(_RIGHT)) + _RIGHT}
 

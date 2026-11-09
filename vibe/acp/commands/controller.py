@@ -8,7 +8,6 @@ from acp import Client, PromptResponse
 from acp.helpers import update_available_commands
 from acp.schema import (
     AgentMessageChunk,
-    AllowedOutcome,
     AvailableCommand,
     AvailableCommandInput,
     TextContentBlock,
@@ -17,16 +16,7 @@ from acp.schema import (
 )
 
 from vibe.acp.commands.registry import AcpCommand, AcpCommandKind
-from vibe.acp.commands.teleport import (
-    TELEPORT_PUSH_OPTION_ID,
-    teleport_event_update,
-    teleport_failed_update,
-    teleport_field_meta,
-    teleport_push_options,
-    teleport_push_request,
-    teleport_start_update,
-)
-from vibe.acp.exceptions import InternalError, from_app_server_error
+from vibe.acp.exceptions import from_app_server_error
 from vibe.acp.session import AcpSession
 from vibe.acp.utils import (
     compact_end_update,
@@ -34,19 +24,11 @@ from vibe.acp.utils import (
     compact_start_update,
     get_proxy_help_text,
 )
-from vibe.app_server.models import (
-    PublicTurn,
-    PublicTurnStatus,
-    TeleportComplete,
-    TeleportFailed,
-    TeleportPushRequired,
-    TurnErrorCode,
-)
+from vibe.app_server.models import PublicTurn, PublicTurnStatus, TurnErrorCode
 from vibe.app_server.protocol import AppServerResponseError
 from vibe.utils.data_retention import DATA_RETENTION_MESSAGE
 from vibe.utils.retry_prompt import build_retry_prompt
 
-_TELEPORT_NO_HISTORY_MESSAGE = "No conversation history to teleport."
 _NOTHING_TO_RETRY_MESSAGE = "No failed or interrupted response to retry."
 # Matches the CLI's `RETRYABLE_ERROR_CODES`: other failures would fail the same way again.
 _RETRYABLE_ERROR_CODES = frozenset({
@@ -133,8 +115,6 @@ class AcpCommandController:
                 response = await self._log(session)
             case AcpCommandKind.MCP:
                 response = await self._mcp(session, arguments)
-            case AcpCommandKind.TELEPORT:
-                response = await self._teleport(session)
             case AcpCommandKind.PROXY_SETUP:
                 response = await self._proxy_setup(session, arguments)
             case AcpCommandKind.RETRY:
@@ -305,71 +285,6 @@ class AcpCommandController:
         except AppServerResponseError as exc:
             return await self._reply(session, exc.error.message)
         return await self._reply(session, f"MCP server `{alias}` logged out.")
-
-    async def _teleport(self, session: AcpSession) -> PromptResponse:
-        try:
-            _, project_id = await session.app_server.resources.vibe_code.open_projects(
-                for_teleport=True
-            )
-        except AppServerResponseError as exc:
-            status = (
-                "no_history"
-                if exc.error.message == _TELEPORT_NO_HISTORY_MESSAGE
-                else "unavailable"
-            )
-            return await self._reply(
-                session, exc.error.message, field_meta=teleport_field_meta(status)
-            )
-        if project_id is None:
-            return await self._reply(
-                session,
-                "No Vibe Code project is linked to this repository.",
-                field_meta=teleport_field_meta("unavailable"),
-            )
-        call_id = str(uuid4())
-        await self._client().session_update(
-            session_id=session.id, update=teleport_start_update(call_id)
-        )
-        try:
-            async for event in session.app_server.resources.vibe_code.teleport(
-                None, project_id=project_id
-            ):
-                await self._client().session_update(
-                    session_id=session.id, update=teleport_event_update(call_id, event)
-                )
-                match event:
-                    case TeleportPushRequired():
-                        permission = await self._client().request_permission(
-                            session_id=session.id,
-                            tool_call=teleport_push_request(call_id, event),
-                            options=teleport_push_options(),
-                        )
-                        approved = (
-                            isinstance(permission.outcome, AllowedOutcome)
-                            and permission.outcome.option_id == TELEPORT_PUSH_OPTION_ID
-                        )
-                        await session.app_server.resources.vibe_code.respond_to_push(
-                            event.operation_id, approved=approved
-                        )
-                    case TeleportFailed():
-                        return PromptResponse(
-                            stop_reason="end_turn",
-                            field_meta=teleport_field_meta("failed"),
-                        )
-                    case TeleportComplete(url=url):
-                        return PromptResponse(
-                            stop_reason="end_turn",
-                            field_meta=teleport_field_meta("completed", url=url),
-                        )
-        except AppServerResponseError as exc:
-            await self._client().session_update(
-                session_id=session.id,
-                update=teleport_failed_update(call_id, exc.error.message),
-            )
-            return PromptResponse(
-                stop_reason="end_turn", field_meta=teleport_field_meta("failed")
-            )
-        raise InternalError("Teleport ended without a result")
 
     async def _proxy_setup(self, session: AcpSession, arguments: str) -> PromptResponse:
         settings = await session.app_server.resources.config.read_proxy()

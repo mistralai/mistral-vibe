@@ -139,6 +139,10 @@ pub mod method {
     pub const WORKSPACE_WORKTREE_REMOVE: &str = "workspace/git/worktrees/remove";
     /// The session's PR/MR artifacts (app-server `artifacts/list`).
     pub const ARTIFACTS_LIST: &str = "artifacts/list";
+    /// Refresh the session's PR/MR statuses from their provider (app-server `artifacts/sync`).
+    pub const ARTIFACTS_SYNC: &str = "artifacts/sync";
+    /// Mark PR/MR artifacts as seen (app-server `artifacts/markViewed`).
+    pub const ARTIFACTS_MARK_VIEWED: &str = "artifacts/markViewed";
 }
 
 /// Callback kinds the client advertises at `initialize` and knows how to answer.
@@ -189,8 +193,6 @@ pub mod notification {
     /// Compatibility duplicate the catalog publishes alongside the canonical
     /// notification; consumed without acting on it.
     pub const MCP_AUTH_URL_LEGACY: &str = "mcp/authUrl";
-    /// Progress of a `vibeCode/teleport/start` operation.
-    pub const TELEPORT_EVENT: &str = "vibeCode/teleport/event";
     /// A session lease was acquired or released; `leaseHolder` is null on release.
     pub const SESSION_LEASE_UPDATED: &str = "session/lease/updated";
     /// The server's lease watch died; held locks can no longer be trusted.
@@ -360,6 +362,10 @@ pub struct SessionStartParams {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "skip_default_bool")]
     pub session_only: bool,
+    /// `"ephemeral"` for a session started only to warm the engine up before a
+    /// resume: the server counts it as opened only once it gets a message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
 }
 
 /// `WorktreeInput` (app-server `protocol.py`): create-or-reuse a named worktree,

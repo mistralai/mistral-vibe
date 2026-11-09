@@ -239,6 +239,42 @@ def _resolve_id_token() -> str:
             ) from None
 
 
+def _refresh_id_token(rejected_revision: str) -> str:
+    """A new ID token after the platform refused the one whose SHA-256 digest
+    is ``rejected_revision``.
+
+    Refreshes only while the store still holds the refused token: a concurrent
+    rejection may have refreshed it already. Raises ``OidcError`` when the
+    refresh fails, which asks the user to sign in again.
+    """
+    with _refresh_lock:
+        try:
+            service = OidcService.from_env()
+            tokens = run_sync(service.access_tokens())
+            if _revision(tokens) == rejected_revision or not (
+                _id_token_is_fresh(tokens.id_token_expires_at)
+            ):
+                tokens = run_sync(service.access_tokens(force_refresh=True))
+            token = tokens.id_token.get_secret_value()
+            if (
+                not token
+                or _revision(tokens) == rejected_revision
+                or not _id_token_is_fresh(tokens.id_token_expires_at)
+            ):
+                raise OidcError("OIDC re-login required: ID token was not renewed")
+            return token
+        except OidcError:
+            raise
+        except Exception:
+            raise OidcError(
+                "OIDC credential resolution failed; explicitly re-login"
+            ) from None
+
+
+def _revision(tokens: OidcTokens) -> str:
+    return sha256(tokens.id_token.get_secret_value().encode()).hexdigest()
+
+
 def _id_token_is_fresh(expires_at: float | None) -> bool:
     return (
         expires_at is not None

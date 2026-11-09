@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, watch};
 use crate::app::App;
 use crate::commands::CommandEvent;
 use crate::config;
-use crate::server::{method, Client, Notification, SHUTDOWN_GRACE};
+use crate::server::{method, Client, Notification, SESSION_STOP_GRACE};
 use crate::session_exit;
 use crate::startup::StartupEvent;
 use crate::voice::VoiceEvent;
@@ -191,7 +191,7 @@ impl EventLoop {
             let stop = stop_session(&self.client, &sid, &mut self.sources.telemetry);
             tokio::select! {
                 _ = stop => {}
-                _ = crate::clock::sleep_real(SHUTDOWN_GRACE) => {}
+                _ = crate::clock::sleep_real(SESSION_STOP_GRACE) => {}
                 _ = self.shutdown.wait() => {}
             }
         }

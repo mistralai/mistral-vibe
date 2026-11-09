@@ -7,7 +7,6 @@ use serde_json::json;
 use vibe_rs::app::App;
 use vibe_rs::mouse::{self, MouseTarget};
 use vibe_rs::pointer::{shape, Shape};
-use vibe_rs::vibe_code_project::items::Item;
 
 /// Screen rows the reasoning entry occupies, and a column inside the transcript.
 const ENTRY_TOP: u16 = 2;
@@ -45,44 +44,19 @@ fn hovering_the_composer_asks_for_the_beam() {
 }
 
 #[test]
-fn remote_project_targets_have_matching_pointer_shapes() {
-    let mut app = App::default();
-    app.vibe_code_project.search_area = Rect::new(2, 2, 10, 1);
-    app.view.bottom_app_selection_region.area = Rect::new(2, 2, 20, 4);
-    app.vibe_code_project.items = vec![Item::Create {
-        name: "project".into(),
-        recommended: true,
-    }];
-    app.vibe_code_project
-        .list
-        .layout_rows(1, Rect::new(2, 4, 20, 2));
-    mouse::register_region(&mut app, Rect::new(2, 2, 10, 1), MouseTarget::RemoteProject);
-    mouse::register_region(&mut app, Rect::new(2, 4, 20, 2), MouseTarget::RemoteProject);
-
-    app.view.mouse_position = Some((3, 2));
-    assert_eq!(shape(&app), Shape::Text);
-    app.view.mouse_position = Some((3, 4));
-    assert_eq!(shape(&app), Shape::Pointer);
-    app.view.mouse_position = Some((3, 5));
-    assert_eq!(shape(&app), Shape::Text);
-
-    mouse::register_scrollbar(
-        &mut app,
-        MouseTarget::RemoteProject,
-        Rect::new(21, 4, 1, 2),
-        100,
-        1,
-        0,
-    );
-    app.view.mouse_position = Some((21, 4));
-    assert_eq!(shape(&app), Shape::Default);
-}
-
-#[test]
 fn hovering_the_jump_to_bottom_chip_asks_for_the_hand() {
     let mut app = App::default();
     mouse::register_region(&mut app, Rect::new(0, 0, 40, 10), MouseTarget::Transcript);
     mouse::register_region(&mut app, Rect::new(10, 9, 18, 1), MouseTarget::JumpToBottom);
     app.view.mouse_position = Some((12, 9));
+    assert_eq!(shape(&app), Shape::Pointer);
+}
+
+#[test]
+fn hovering_the_pinned_prompt_asks_for_the_hand() {
+    let mut app = App::default();
+    mouse::register_region(&mut app, Rect::new(0, 0, 40, 10), MouseTarget::Transcript);
+    mouse::register_region(&mut app, Rect::new(0, 0, 39, 2), MouseTarget::StickyPrompt);
+    app.view.mouse_position = Some((5, 1));
     assert_eq!(shape(&app), Shape::Pointer);
 }

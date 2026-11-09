@@ -56,6 +56,8 @@ from vibe.app_server.protocol import (
     SessionListParams,
     SessionListResponse,
     SessionMarkAsSeenParams,
+    SessionMoveParams,
+    SessionMoveResponse,
     SessionPinParams,
     SessionPinResponse,
     SessionReadParams,
@@ -416,6 +418,8 @@ class SessionHistoryClearResult:
     state: PublicSessionState
     session_log: SessionLogSummary
     after_response: Callable[[], None] | None = None
+    # Run if the server fails to adopt ``backend``: the source session goes on.
+    on_failure: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -731,6 +735,15 @@ class SessionBackendHostRelocate(Protocol):
     async def relocate(
         self, params: SessionRelocateParams, attached: SessionBackend | None
     ) -> SessionRelocateResponse: ...
+
+
+@runtime_checkable
+class SessionBackendHostMove(Protocol):
+    """Optional selected-backend ownership of moving a session to another project."""
+
+    async def move(
+        self, params: SessionMoveParams, attached: SessionBackend | None
+    ) -> SessionMoveResponse: ...
 
 
 @runtime_checkable

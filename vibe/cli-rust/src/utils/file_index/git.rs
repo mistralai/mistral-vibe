@@ -20,21 +20,24 @@ pub fn git_ls_files(root: &Path, stop: Option<&AtomicBool>) -> Option<BTreeMap<S
     if stop.is_some_and(|stop| stop.load(Ordering::Relaxed)) {
         return None;
     }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        // A repo's fsmonitor can run its own command or hang on a wedged daemon.
-        .args(["-c", "core.fsmonitor="])
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let child = crate::job_control::spawn(
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            // A repo's fsmonitor can run its own command or hang on a wedged daemon.
+            .args(["-c", "core.fsmonitor="])
+            .args([
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    );
+    let output = child.ok()?.wait_with_output().ok()?;
     if !output.status.success() {
         return None;
     }

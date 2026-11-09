@@ -12,6 +12,7 @@ use crate::core::step_protocol::ToolDefinition;
 use crate::core::turn::{PendingLifecycleHook, TurnOutcome};
 use crate::core::wire::content::{ContentBlock, validate_non_empty_content};
 use crate::core::wire::message::StoredMessage;
+use crate::core::wire::user_message::OutputType;
 
 use super::context::CheckpointStoredMessage;
 use super::schema::{CheckpointCompletionCandidate, CheckpointProtocolError};
@@ -30,6 +31,7 @@ pub(super) struct CompactionRestore<'a> {
 #[serde(transparent)]
 pub(super) struct CheckpointTurnState(CheckpointTurnStateRepr);
 
+#[allow(clippy::large_enum_variant)] // A short-lived serialization form; boxing would only add indirection.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum CheckpointTurnStateRepr {
@@ -46,9 +48,14 @@ enum CheckpointTurnStateRepr {
         /// Retained for V1 compatibility; new checkpoints always write Empty.
         queued: CheckpointQueuedTurn,
         pending_steer: Vec<CheckpointStoredMessage>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_context: Vec<CheckpointStoredMessage>,
         model_input_ready: bool,
         #[serde(default, skip_serializing_if = "is_zero")]
         output_limit_retries: u32,
+        /// Absent when the Turn has none, as in checkpoints written before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_type: Option<OutputType>,
     },
     Terminal {
         turn_id: String,
@@ -83,8 +90,10 @@ impl CheckpointTurnState {
                     )?,
                     queued: CheckpointQueuedTurn::Empty,
                     pending_steer: capture_pending_steer(&active.pending_steer)?,
+                    pending_context: capture_pending_context(&active.pending_context)?,
                     model_input_ready: active.model_input_ready,
                     output_limit_retries: active.output_limit_retries,
+                    output_type: active.output_type.clone(),
                 }))
             }
             TurnState::Terminal { turn_id, outcome } => {
@@ -124,8 +133,10 @@ impl CheckpointTurnState {
                 phase,
                 queued,
                 pending_steer,
+                pending_context,
                 model_input_ready,
                 output_limit_retries,
+                output_type,
             } => {
                 if !matches!(queued, CheckpointQueuedTurn::Empty) {
                     return Err("checkpoint contains pending queued requests; resume with the previous build before upgrading".to_string());
@@ -140,8 +151,10 @@ impl CheckpointTurnState {
                     iterations,
                     phase,
                     pending_steer: restore_pending_steer(pending_steer)?,
+                    pending_context: restore_pending_context(pending_context)?,
                     model_input_ready,
                     output_limit_retries,
+                    output_type,
                 }))
             }
             CheckpointTurnStateRepr::Terminal { turn_id, outcome } => {
@@ -406,7 +419,7 @@ fn capture_pending_steer(
 ) -> Result<Vec<CheckpointStoredMessage>, String> {
     messages
         .iter()
-        .map(|message| CheckpointStoredMessage::capture_visible_user(message, "pending steering"))
+        .map(|message| CheckpointStoredMessage::capture_steering(message, "pending steering"))
         .collect()
 }
 
@@ -415,7 +428,27 @@ fn restore_pending_steer(
 ) -> Result<Vec<StoredMessage>, String> {
     messages
         .into_iter()
-        .map(|message| message.restore_visible_user("pending steering"))
+        .map(|message| message.restore_steering("pending steering"))
+        .collect()
+}
+
+fn capture_pending_context(
+    messages: &[StoredMessage],
+) -> Result<Vec<CheckpointStoredMessage>, String> {
+    messages
+        .iter()
+        .map(|message| {
+            CheckpointStoredMessage::capture_injected_context(message, "pending context")
+        })
+        .collect()
+}
+
+fn restore_pending_context(
+    messages: Vec<CheckpointStoredMessage>,
+) -> Result<Vec<StoredMessage>, String> {
+    messages
+        .into_iter()
+        .map(|message| message.restore_injected_context("pending context"))
         .collect()
 }
 

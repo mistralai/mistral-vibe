@@ -16,6 +16,7 @@ from vibe.app_server._org_config_service import (
 )
 from vibe.core.config import managed_config_cache
 from vibe.core.config.admin_config import AdminConfigOutcome
+from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.utils.remote_cache import Cached, CacheStore
 
@@ -171,6 +172,28 @@ async def test_a_follower_reads_a_refreshed_answer() -> None:
 
     assert followed.held() == 'theme = "dark"\n'
     await service.close()
+
+
+def test_the_org_config_is_fetched_next_to_the_dedicated_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A dedicated deployment's user often configures only the API URL by hand.
+    monkeypatch.setenv("MISTRAL_API_KEY", "key")
+    config = VibeConfigSchema.model_validate({
+        "providers": [
+            {
+                "name": "mistral",
+                "backend": "mistral",
+                "api_base": "https://api.tenant.dc.mistral.ai/v1",
+                "api_key_env_var": "MISTRAL_API_KEY",
+            }
+        ]
+    })
+
+    key = OrgConfigService.key_for_config(config)
+
+    assert key is not None
+    assert key.base_url == "https://chat.tenant.dc.mistral.ai"
 
 
 @pytest.mark.asyncio

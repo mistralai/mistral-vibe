@@ -21,7 +21,7 @@ import shutil
 from stat import S_ISREG
 from threading import RLock
 import time
-from typing import Annotated, Any, Literal, Self, cast
+from typing import Annotated, Any, Literal, Self, assert_never, cast
 
 from pydantic import (
     BaseModel,
@@ -901,28 +901,51 @@ class _RuntimeStateBase(_StoredModel):
 
     @property
     def quiescent(self) -> bool:
-        return not (
-            any(receipt.state == "reserved" for receipt in self.command_receipts)
-            or any(action.state in {"pending", "running"} for action in self.actions)
-            or any(callback.state == "pending" for callback in self.callbacks)
-            or any(
-                operation.state in {"pending", "running"}
-                for operation in self.provider_operations
-            )
-            or any(process.status == "running" for process in self.processes)
-            or any(
-                process.status != "running"
-                and not any(
-                    submitted.process_id == process.process_id
-                    for submitted in self.submitted_process_notifications
+        return next(self._iter_unsettled_work(), None) is None
+
+    def unsettled_work(self) -> tuple[str, ...]:
+        """Describe, for a user, each piece of work that keeps the session from
+        being quiescent; the session is quiescent when there is none.
+        """
+        return tuple(dict.fromkeys(self._iter_unsettled_work()))
+
+    def _iter_unsettled_work(self) -> Iterator[str]:
+        # Lazy, so `quiescent` stops at the first piece of work it finds.
+        for receipt in self.command_receipts:
+            if receipt.state == "reserved":
+                yield _describe_reserved_command(receipt.method)
+        for action in self.actions:
+            if action.state in {"pending", "running"}:
+                yield _describe_unsettled_action(action)
+        for callback in self.callbacks:
+            if callback.state == "pending":
+                yield _describe_pending_callback(callback.kind)
+        for operation in self.provider_operations:
+            if operation.state in {"pending", "running"}:
+                yield "a model call is still running"
+        for process in self.processes:
+            if process.status == "running":
+                yield (
+                    f"the background process {_quoted_command(process.command)} "
+                    "is still running"
                 )
-                for process in self.processes
-            )
-            or any(
-                child.stateful and child.state in {"pending", "running"}
-                for child in self.children
-            )
-        )
+        submitted = {item.process_id for item in self.submitted_process_notifications}
+        for process in self.processes:
+            if process.status != "running" and process.process_id not in submitted:
+                yield (
+                    f"the background process {_quoted_command(process.command)} "
+                    "has ended, but the agent has not been told yet"
+                )
+        running_children = [
+            child
+            for child in self.children
+            if child.stateful and child.state in {"pending", "running"}
+        ]
+        if not running_children:
+            return
+        actions = {action.action_id: action for action in self.actions}
+        for child in running_children:
+            yield _describe_running_child(actions.get(child.session_id))
 
 
 class RuntimeStateV3(_RuntimeStateBase):
@@ -1013,9 +1036,10 @@ class RuntimeStateV3(_RuntimeStateBase):
                 receipt.validate_child_ownership(self.identity)
         return self
 
-    @property
-    def quiescent(self) -> bool:
-        return self.pending_transition is None and super().quiescent
+    def _iter_unsettled_work(self) -> Iterator[str]:
+        if self.pending_transition is not None:
+            yield "the agent's last step is still being saved"
+        yield from super()._iter_unsettled_work()
 
 
 def _load_stored_public_state(value: object) -> object:
@@ -2397,6 +2421,9 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         # transcript being published, so a stale or empty plan costs a re-chunk
         # and never correctness.
         self._chunk_plans: dict[str, _ChunkPlan] = {}
+        self._serialized_catalog: tuple[RustHarnessCapabilitySet, JsonValue] | None = (
+            None
+        )
         self._chunk_cache = _ChunkCache()
         self.last_publication = ChunkPublicationStats()
         self.last_load_bytes = 0
@@ -2467,12 +2494,8 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             projection_envelope, projection_transcript = _detach_projection_history(
                 projection_state
             )
-            runtime_envelope, capability_catalog = _detach_pooled_value(
-                cast(
-                    dict[str, JsonValue],
-                    runtime_state.model_dump(mode="json", by_alias=True),
-                ),
-                _CAPABILITY_CATALOG_KEY,
+            runtime_envelope, capability_catalog = self._detach_capability_catalog(
+                runtime_state
             )
             checkpoint_plan = self._plan_transcript("checkpoint", checkpoint_transcript)
             projection_plan = self._plan_transcript("projection", projection_transcript)
@@ -2585,6 +2608,38 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             journal_path=journal_path,
         )
         return manifest
+
+    def _detach_capability_catalog(
+        self, runtime_state: RuntimeStateV3
+    ) -> tuple[dict[str, JsonValue], list[JsonValue] | None]:
+        """The runtime document's envelope and its capability catalog, serialized.
+
+        The catalog travels to the chunk pool as a one-item list; a Session with
+        no catalog detaches nothing. The serialization is reused for as long as
+        the Runtime passes the same catalog object, so a published catalog must
+        never be mutated in place: reconfiguration replaces it.
+        """
+        envelope = cast(
+            dict[str, JsonValue],
+            runtime_state.model_dump(
+                mode="json", by_alias=True, exclude={_CAPABILITY_CATALOG_KEY}
+            ),
+        )
+        envelope[_CAPABILITY_CATALOG_KEY] = None
+        catalog = runtime_state.core_capabilities
+        if catalog is None:
+            return envelope, None
+        return envelope, [self._serialize_catalog(catalog)]
+
+    def _serialize_catalog(self, catalog: RustHarnessCapabilitySet) -> JsonValue:
+        serialized = self._serialized_catalog
+        if serialized is None or serialized[0] is not catalog:
+            serialized = (
+                catalog,
+                cast(JsonValue, catalog.model_dump(mode="json", by_alias=True)),
+            )
+            self._serialized_catalog = serialized
+        return serialized[1]
 
     def _plan_transcript(
         self, key: str, transcript: list[JsonValue] | None
@@ -4949,6 +5004,111 @@ def _action_name(request: JsonValue) -> str | None:
     return name if isinstance(name, str) else None
 
 
+_UNSETTLED_COMMAND_DESCRIPTIONS = {
+    "turn/start": "a turn is still running",
+    "parent/turn/start": "a turn is still running",
+    "turn/steer": "a message sent during the turn is still being delivered",
+    "turn/queue/steer": "a message sent during the turn is still being delivered",
+    "turn/context": "context added to the turn is still being delivered",
+    "session/context/inject": "context added to the session is still being delivered",
+    "app_server/session/compact": "the conversation is still being compacted",
+}
+_UNSETTLED_TOOL_DESCRIPTIONS = {
+    "self.wait": "the agent is still waiting for a subagent or a background process",
+    "self.sleep": "the agent is still pausing between checks",
+}
+_PENDING_CALLBACK_DESCRIPTIONS = {
+    "approval": "a tool call is waiting for approval",
+    "user_input": "a question is waiting for an answer",
+}
+_QUOTED_NAME_MAX_LENGTH = 32
+
+
+def _describe_reserved_command(method: str) -> str:
+    return _UNSETTLED_COMMAND_DESCRIPTIONS.get(method, "a request is still running")
+
+
+def _describe_unsettled_action(action: RuntimeActionV1) -> str:  # noqa: PLR0911 - one return per Action kind
+    match action.kind:
+        case "child":
+            return _describe_subagent_call(action.request)
+        case "tool":
+            name = _action_name(action.request)
+            if name is None:
+                return "a tool call is still running"
+            return _UNSETTLED_TOOL_DESCRIPTIONS.get(
+                name, f"the tool {_shortened(name)} is still running"
+            )
+        case "completion":
+            return "a model call is still running"
+        case "hook":
+            return "a hook is still running"
+        case "filesystem":
+            return "a file operation is still running"
+        case "callback":
+            return "a callback is still running"
+        case "process":
+            return "a background process operation is still running"
+        case _:
+            assert_never(action.kind)
+
+
+def _describe_pending_callback(kind: str) -> str:
+    return _PENDING_CALLBACK_DESCRIPTIONS.get(
+        kind, "a request is waiting for an answer"
+    )
+
+
+def _describe_running_child(spawn: RuntimeActionV1 | None) -> str:
+    if spawn is None:
+        return "a subagent is still starting"
+    return _describe_subagent_call(spawn.request)
+
+
+def _describe_subagent_call(request: JsonValue) -> str:
+    """Name the subagent a call addresses, as the agent passed it to the tool."""
+    agent = _subagent_argument(request)
+    subagent = (
+        f"the subagent {_shortened(agent)}" if agent is not None else "a subagent"
+    )
+    match _action_name(request):
+        case "agents.spawn" | "subagent.spawn":
+            return f"{subagent} is still starting"
+        case "agents.send_message":
+            return f"a message to {subagent} is still being delivered"
+        case "agents.interrupt":
+            return f"{subagent} is still being interrupted"
+        case _:
+            return "a subagent operation is still running"
+
+
+def _subagent_argument(request: JsonValue) -> str | None:
+    if not isinstance(request, dict):
+        return None
+    call = request.get("call")
+    if not isinstance(call, dict):
+        return None
+    arguments = call.get("arguments")
+    if not isinstance(arguments, dict):
+        return None
+    for key in ("name", "agent_path"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _quoted_command(command: str) -> str:
+    first_line = command.strip().splitlines()[0] if command.strip() else command
+    return f"`{_shortened(first_line)}`"
+
+
+def _shortened(text: str) -> str:
+    if len(text) <= _QUOTED_NAME_MAX_LENGTH:
+        return text
+    return f"{text[: _QUOTED_NAME_MAX_LENGTH - 3]}..."
+
+
 def _action_call_id(request: JsonValue) -> str | None:
     if not isinstance(request, dict):
         return None
@@ -5115,12 +5275,28 @@ def _append_journal_record(path: Path, data: bytes, *, protected_bytes: int = 0)
                 file.seek(0)
                 valid_size = file.read().rfind(b"\n") + 1
                 file.truncate(valid_size)
-        file.seek(0, os.SEEK_END)
-        if file.tell() + len(data) + protected_bytes > _MAX_DOCUMENT_BYTES:
+        start = file.seek(0, os.SEEK_END)
+        if start + len(data) + protected_bytes > _MAX_DOCUMENT_BYTES:
             raise HarnessStoreCapacityError("recovery journal is at capacity")
-        file.write(data)
-        os.fsync(file.fileno())
+        try:
+            _write_all(file, data)
+            os.fsync(file.fileno())
+        except OSError:
+            # Drop the failed record so a later append rewrites and syncs those
+            # bytes itself: a later fsync says nothing about this one's data.
+            with suppress(OSError):
+                file.truncate(start)
+            raise
     return len(data)
+
+
+def _write_all(file: io.FileIO, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = file.write(view)
+        if not written:
+            raise OSError("recovery journal write made no progress")
+        view = view[written:]
 
 
 def _unrecorded_baselines(
@@ -5165,30 +5341,6 @@ def _write_generation_record(
 ) -> StoredFileV1:
     data = _write_document(directory / name, value)
     return StoredFileV1(path=name, sha256=_sha256(data), chunks=chunks)
-
-
-def _detach_pooled_value(
-    document: dict[str, JsonValue], key: str
-) -> tuple[dict[str, JsonValue], list[JsonValue] | None]:
-    """Split one whole field out of a document so the chunk pool can hold it.
-
-    A transcript is pooled because it grows by a tail; the capability catalog is
-    pooled for the opposite reason. It does not grow at all -- every publication
-    of a Session repeats the same catalog byte for byte -- so holding it by
-    digest means the second and every later generation add nothing, where
-    inlining rewrites it whole each time.
-
-    It is a single value rather than a list, so it travels as a one-item list
-    and the pool needs no special case. A Session with no catalog detaches
-    nothing and stores its document monolithically, which is also how a
-    generation written before this existed reads back.
-    """
-    value = document.get(key)
-    if value is None:
-        return document, None
-    envelope = dict(document)
-    envelope[key] = None
-    return envelope, [value]
 
 
 def _attach_pooled_value(document: JsonValue, key: str, items: list[JsonValue]) -> None:

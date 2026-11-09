@@ -74,9 +74,17 @@ fn a_response_without_state_is_an_error() {
 fn a_resumable_previous_session_is_named_with_its_resume_command() {
     assert_eq!(
         new_conversation_text(Some("0123456789abcdef")),
-        "New conversation started.\n\nPrevious session: `01234567`\n\
-         To resume it later, run: `vibe --resume 01234567`"
+        "New conversation started.\n\nPrevious session: `89abcdef`\n\
+         To resume it later, run: `vibe --resume 89abcdef`"
     );
+}
+
+#[test]
+fn uuidv7_sessions_started_together_get_distinct_resume_ids() {
+    let first = new_conversation_text(Some("019a5f2e-8c41-7d3a-9b1e-4f6a2c8d0e17"));
+    let second = new_conversation_text(Some("019a5f2e-8c41-7f02-a4c9-d71b3e5f9a28"));
+    assert!(first.ends_with("`vibe --resume 2c8d0e17`"));
+    assert!(second.ends_with("`vibe --resume 3e5f9a28`"));
 }
 
 #[test]

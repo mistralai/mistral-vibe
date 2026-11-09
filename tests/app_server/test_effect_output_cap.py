@@ -12,6 +12,7 @@ from vibe.app_server._effect_output_cap import (
 )
 from vibe.app_server.models import (
     CompletedEffectState,
+    FailedEffectState,
     PublicEffectEntry,
     PublicHistoryEntry,
     RunningEffectState,
@@ -99,6 +100,26 @@ def test_structured_output_over_budget_after_capping_strings_is_dropped() -> Non
     state = _completed_state(entry)
     assert state.output is None
     assert state.output_text == "labels"
+
+
+def test_failed_effect_error_and_display_messages_are_bounded() -> None:
+    payload = "A" * 1_200_000
+    message = f"Image URL: data:image/gif;base64,{payload}"
+    entry = capped_effect_entry(
+        _effect({
+            "status": "failed",
+            "error": {"message": message},
+            "outputText": "",
+            "display": {"success": False, "message": message},
+        })
+    )
+
+    assert isinstance(entry, PublicEffectEntry)
+    assert isinstance(entry.state, FailedEffectState)
+    bounded = f"Image URL: data:image/gif;base64,<{len(payload)} base64 chars omitted>"
+    assert entry.state.error.message == bounded
+    assert entry.state.display.message == bounded
+    assert capped_effect_entry(entry) is entry
 
 
 def test_running_effect_output_text_is_capped() -> None:

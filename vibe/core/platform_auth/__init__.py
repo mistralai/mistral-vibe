@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from vibe.core.platform_auth._api_key import ApiKeyPlatformCredentialProvider
 from vibe.core.platform_auth._credentials_port import (
+    UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
     CachedPrincipal,
     PlatformCredentialFactory,
     PlatformCredentialIdentity,
@@ -20,6 +21,7 @@ from vibe.core.platform_auth._http import (
 )
 
 __all__ = [
+    "UNAUTHORIZED_AFTER_REFRESH_MESSAGE",
     "ApiKeyPlatformCredentialProvider",
     "CachedPrincipal",
     "MistralPlatformHTTPClient",

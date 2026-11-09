@@ -217,6 +217,48 @@ def test_projects_unified_write_file_over_an_existing_file() -> None:
     assert projected.state.display.verb == "Updated"
 
 
+@pytest.mark.parametrize(
+    ("previous", "content", "written"),
+    [
+        ("one\r\ntwo\r\n", "alpha\nbeta\r\n", "alpha\r\nbeta\r\n"),
+        ("one\ntwo\n", "alpha\r\nbeta\r\n", "alpha\nbeta\n"),
+        ("one\rtwo\r", "alpha\nbeta\n", "alpha\rbeta\r"),
+        ("one", "alpha\r\nbeta\n", "alpha\r\nbeta\n"),
+    ],
+)
+def test_projects_a_write_with_the_line_endings_of_the_replaced_file(
+    previous: str, content: str, written: str
+) -> None:
+    """*Prepare*: A write over a file with known line endings.
+    *Do*: Project the completed call.
+    *Assert*: The written content carries the replaced file's dominant line
+    ending, as the Runtime wrote it, or stands as given without one.
+    """
+    # Prepare
+    entry = _effect(
+        "write_file",
+        {"path": "notes.txt", "content": content},
+        result={
+            "structured_content": {
+                "path": "/workspace/notes.txt",
+                "bytes_written": len(written),
+                "file_existed": True,
+            },
+            "_meta": {"mistralai.vibe.sdk.write_file": {"previous_content": previous}},
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileWriteEffectOutput.model_validate(projected.state.output)
+    assert output.content == written
+    assert output.previous_content == previous
+
+
 def test_projects_unified_write_file_the_runtime_could_not_diff() -> None:
     # The Runtime omits the annotation for a file too large or not text.
     entry = _effect(
@@ -1741,6 +1783,26 @@ def _generic_detail(name: str, input_value: object) -> dict[str, object]:
             "Scheduled",
             "cron 0 9 * * 1-5 (local time): review CI",
         ),
+        (
+            {
+                "action": "schedule",
+                "interval_seconds": 60,
+                "prompt": "CI watch\nCheck CI and report failures.",
+            },
+            "Scheduling",
+            "Scheduled",
+            "every 1 minute: CI watch",
+        ),
+        (
+            {
+                "action": "schedule",
+                "interval_seconds": 60,
+                "prompt": "\n  CI watch\nCheck CI and report failures.",
+            },
+            "Scheduling",
+            "Scheduled",
+            "every 1 minute: CI watch",
+        ),
         ({"action": "list"}, "Listing", "Listed", "scheduled prompts"),
         (
             {"action": "cancel", "id": "abc"},
@@ -1910,8 +1972,12 @@ async def test_cron_executor_result_projects_through_the_public_boundary(
     from vibe.app_server._unified_scheduled_loops import UnifiedScheduledLoops
 
     store = UnifiedScheduledLoops(tmp_path / "loops.json", persistent=lambda: False)
+
+    async def resolve_loops(_session_id: str) -> UnifiedScheduledLoops:
+        return store
+
     executor = VibeProvidedTools().executor_factory(
-        tmp_path, max_todos=lambda: 10, scheduled_loops=lambda _: store
+        tmp_path, max_todos=lambda: 10, scheduled_loops=resolve_loops
     )("session-1")
     arguments: JsonObject = {
         "action": "schedule",

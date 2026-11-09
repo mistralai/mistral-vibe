@@ -422,8 +422,10 @@ pub fn run_was_no_op(outcomes: &[UpdateCommandOutcome], source: UpdateSource) ->
 /// oracle's outdated-list, and ANSI escapes around the verb would defeat the
 /// match. A user's `FORCE_COLOR`/`CLICOLOR_FORCE` forces uv to color even
 /// into a pipe, so they are removed and `NO_COLOR` is set on top.
+/// `UV_NO_PROGRESS` drops uv's `\r`-redrawn bars from the captured lines.
 pub fn plain_output_env(command: &mut Command) -> &mut Command {
     command.env("NO_COLOR", "1");
+    command.env("UV_NO_PROGRESS", "1");
     command.env_remove("FORCE_COLOR");
     command.env_remove("CLICOLOR_FORCE");
     command
@@ -613,18 +615,26 @@ async fn terminate_child(child: &mut tokio::process::Child) {
 }
 
 /// Interleave the captured streams the way the terminal would have shown
-/// them: stdout first, then stderr, each trimmed of the trailing newline.
+/// them: stdout first, then stderr, each trimmed of the trailing newline,
+/// and each line reduced to its last `\r`-redrawn frame.
 fn combine_command_output(stdout: &[u8], stderr: &[u8]) -> String {
     let mut text = String::new();
     for stream in [stdout, stderr] {
         let stream = String::from_utf8_lossy(stream);
-        let stream = stream.trim_end();
+        let frames: Vec<&str> = stream.trim_end().lines().map(last_frame).collect();
+        let stream = frames.join("\n");
         if !stream.is_empty() {
             if !text.is_empty() {
                 text.push('\n');
             }
-            text.push_str(stream);
+            text.push_str(&stream);
         }
     }
     text
+}
+
+/// What a terminal leaves of a line redrawn with bare `\r`: its last frame.
+fn last_frame(line: &str) -> &str {
+    let line = line.trim_end_matches('\r');
+    line.rsplit_once('\r').map_or(line, |(_, last)| last)
 }

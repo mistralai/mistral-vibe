@@ -1,6 +1,7 @@
 //! Driving one headless run to its report: one work task raced against one
 //! stop request, one grace period to wind down.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,6 +42,8 @@ pub(super) struct RunState {
     pub(super) config: Option<Value>,
     pub(super) usage_baseline: UsageBaseline,
     pub(super) warnings: Vec<RunWarning>,
+    // The history entry ids of the denials already reported.
+    pub(super) reported_denials: HashSet<String>,
 }
 
 /// Drive one headless run to its report: one work task raced against one
@@ -274,7 +277,7 @@ async fn finalize_stopped(
     };
     let (client, session_id) = (client?, session_id?);
     let output = Output::new(format.clone());
-    let finalized = finalize_output(&client, &session_id, turn_id.as_deref(), &output);
+    let finalized = finalize_output(&client, &session_id, turn_id.as_deref(), &output, state);
     match tokio::time::timeout_at(grace_ends, finalized).await {
         Ok(Ok(response)) => response,
         // The stop's outcome stands; the output just could not be delivered.

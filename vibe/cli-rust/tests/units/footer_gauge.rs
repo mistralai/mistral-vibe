@@ -107,17 +107,17 @@ fn narrowing_turns_bars_into_levels_then_drops_their_numbers() {
     let mut app = app(json!({ "usagePercentage": 40.0 }));
     let mut row = |width| bottom_bar_row(&mut app, width).trim_end().to_owned();
 
-    let wide = "/tmp/project ⧉ usage ██▍    40% · ctx ▎      23k/600k";
+    let wide = "/tmp/project usage ██▍    40% · ctx ▎      23k/600k";
     let width = wide.chars().count() as u16;
     assert_eq!(row(width), wide);
     // The gauges give way first, context then usage; the cwd keeps its path.
     assert_eq!(
         row(width - 1),
-        "/tmp/project ⧉           usage ██▍    40% · ctx ▁ 4%"
+        "/tmp/project           usage ██▍    40% · ctx ▁ 4%"
     );
-    assert_eq!(row(40), "/tmp/project ⧉    usage ▃ 40% · ctx ▁ 4%");
-    assert_eq!(row(35), "…/project ⧉  usage ▃ 40% · ctx ▁ 4%");
-    assert_eq!(row(30), "/tmp/project ⧉ usage ▃ · ctx ▁");
+    assert_eq!(row(38), "/tmp/project    usage ▃ 40% · ctx ▁ 4%");
+    assert_eq!(row(34), "…/project ⧉ usage ▃ 40% · ctx ▁ 4%");
+    assert_eq!(row(32), "/tmp/project usage ▃ 40% · ctx ▁");
 }
 
 /// The usage fill's color at `percent`, with or without pay-as-you-go.

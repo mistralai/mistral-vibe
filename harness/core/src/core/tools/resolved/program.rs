@@ -6,10 +6,11 @@ use crate::core::config::{
 use crate::core::features::background_processes;
 use crate::core::features::file_system;
 use crate::core::features::programmatic_tool_calling::{
-    ProgrammaticName, TypeScriptTool, tool_group_inventory_prompt,
+    ProgrammaticName, TypeScriptTool, direct_tools_prompt, tool_group_inventory_prompt,
 };
 use crate::core::features::subagents;
 use crate::core::features::tool_discovery::{DiscoveryTool, ToolDiscovery};
+use crate::core::step_protocol::ToolDefinition;
 use crate::core::tools::command_environment::CommandEnvironment;
 use crate::core::tools::external::ToolTarget;
 use crate::core::tools::resolved::assembly::{SELF_NAMESPACE, ToolBinding};
@@ -37,7 +38,7 @@ impl ResolvedProgramTools {
             );
         }
         let accepted = AcceptedProgramGroups::compose(config);
-        let tool_group_inventory_prompt_section = render_tool_group_inventory_prompt(
+        let mut tool_group_inventory_prompt_section = render_tool_group_inventory_prompt(
             &accepted,
             &config.settings.prompts.programs.tool_groups,
         );
@@ -73,6 +74,20 @@ impl ResolvedProgramTools {
                 descriptors.push(descriptor);
             }
         }
+        let top_level_tools = super::build_top_level_tools(config);
+        if let Some(direct_tools) = direct_tools_prompt(
+            direct_only_tool_names(
+                &top_level_tools,
+                &super::assembly::direct_routes(config),
+                &routes,
+            ),
+            &config.settings.prompts.programs.direct_tools,
+        ) {
+            if !tool_group_inventory_prompt_section.is_empty() {
+                tool_group_inventory_prompt_section.push_str("\n\n");
+            }
+            tool_group_inventory_prompt_section.push_str(&direct_tools);
+        }
         for notice in accepted.notices {
             discovery.add_integration_notice(
                 notice.integration_name,
@@ -105,6 +120,25 @@ impl ResolvedProgramTools {
     pub(super) fn tool_group_inventory_prompt_section(&self) -> &str {
         &self.tool_group_inventory_prompt_section
     }
+}
+
+/// The model's top-level tools that `run_typescript` cannot call, in tool-list order: caller
+/// tools with `model_access="direct"` and built-ins such as `wait` and `skill`. A top-level tool
+/// without a route, such as `run_typescript` itself, is not one of them.
+fn direct_only_tool_names<'a>(
+    top_level_tools: &'a [ToolDefinition],
+    direct_routes: &'a [(String, ToolTarget)],
+    program_routes: &'a [(String, ToolTarget)],
+) -> impl Iterator<Item = &'a str> {
+    top_level_tools.iter().filter_map(move |tool| {
+        let (_, target) = direct_routes
+            .iter()
+            .find(|(route_name, _)| route_name == &tool.name)?;
+        let in_programs = program_routes
+            .iter()
+            .any(|(_, program_target)| program_target == target);
+        (!in_programs).then_some(tool.name.as_str())
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -124,7 +124,7 @@ pub(crate) fn advance(mut state: HarnessState, command: HarnessCommand) -> Resul
             };
             model_input.tool_catalog = ModelToolCatalogUpdate::Replace {
                 revision: 0,
-                tools: state.resolved_tools.top_level_tools().to_vec(),
+                tools: state.resolved_tools().top_level_tools().to_vec(),
             };
         }
     }
@@ -245,9 +245,9 @@ pub(crate) fn message_role(message: &Message) -> Role {
 
 pub(crate) fn message_content(message: &Message) -> Vec<ContentBlock> {
     match message {
-        Message::System { content } | Message::User { content } | Message::Tool { content, .. } => {
-            content.clone()
-        }
+        Message::System { content }
+        | Message::User { content, .. }
+        | Message::Tool { content, .. } => content.clone(),
         Message::Assistant { content } => content
             .iter()
             .filter_map(|part| match part {
@@ -371,9 +371,13 @@ pub(crate) fn tool_action_id(origin: &str, operation_id: &str) -> String {
     crate::core::action_id::tool(origin, operation_id)
 }
 
-pub(crate) fn rebuild_hook_binding_index(state: &mut HarnessState) {
-    state.hook_binding_index =
-        crate::core::capabilities::HookBindingIndex::from_config(&state.config);
+pub(crate) fn edit_config(state: &mut HarnessState, edit: impl FnOnce(&mut HarnessConfig)) {
+    let mut config = state.config().clone();
+    edit(&mut config);
+    state.compiled = std::sync::Arc::new(
+        crate::core::compiled_config::CompiledConfig::compile(config)
+            .expect("edited configuration compiles"),
+    );
 }
 
 pub(crate) fn assistant_tool(name: &str, arguments: Value) -> Message {
@@ -406,6 +410,7 @@ pub(crate) fn user_message_for(turn_id: &str, text: &str, mode: UserMessageMode)
         turn_id: turn_id.to_string(),
         content: vec![ContentBlock::text(text)],
         mode,
+        output_type: None,
     }
 }
 
@@ -499,8 +504,9 @@ pub(crate) fn advance_llm_retry(
     mut state: HarnessState,
     feedback: &str,
 ) -> Result<Step, CoreError> {
-    add_always_hook(&mut state.config, HookPoint::PostLlmCall);
-    rebuild_hook_binding_index(&mut state);
+    edit_config(&mut state, |config| {
+        add_always_hook(config, HookPoint::PostLlmCall)
+    });
     let action_id = awaiting_action_id(&state);
     let state = advance(
         state,
@@ -640,6 +646,17 @@ pub(crate) fn started() -> HarnessState {
 pub(crate) fn started_with(config: HarnessConfig) -> HarnessState {
     let state = initial_state(config).unwrap();
     advance(state, user_message("work", UserMessageMode::Queue))
+        .unwrap()
+        .state
+}
+
+/// A started session whose request is long enough that a compaction threshold
+/// just above its estimate still fits the system prompt, tool catalog and
+/// compaction prompt.
+pub(crate) fn started_with_long_request() -> HarnessState {
+    let state = initial_state(config()).unwrap();
+    let request = "a long request ".repeat(4_000);
+    advance(state, user_message(&request, UserMessageMode::Queue))
         .unwrap()
         .state
 }

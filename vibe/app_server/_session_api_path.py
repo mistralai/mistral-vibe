@@ -412,13 +412,14 @@ class SessionApiPath:
         adapter = self._adapter
         await adapter._mark_events_subscribed()
         try:
-            async for item in adapter._with_host_events(_batches_as_events(streams)):
+            async for item in adapter._with_host_events(
+                _batches_as_events(streams, self._events_released)
+            ):
                 if isinstance(item, SessionBackendEvent):
                     yield item
                     await adapter._settle_host_event()
                     continue
                 session_batch = cast(SessionBatch, item["batch"])
-                await self._events_released.wait()
                 pretranslated = self._pretranslated.pop(
                     session_batch.batch.events[-1].event_id, None
                 )
@@ -481,9 +482,8 @@ class SessionApiPath:
         else:
             translated, current = self._child_update(state, previous)
         adapter._translated_state = current
-        for backend_event in translated:
+        async for backend_event in adapter._with_turn_start_effects(translated):
             yield backend_event
-            await adapter._bump_promoted_queued_turn(backend_event.event)
         for kind, callbacks in (
             ("callback_requested", applied.opened_callbacks),
             ("callback_resolved", applied.resolved_callbacks),
@@ -624,10 +624,16 @@ def _with_settled_callbacks_kept(
 
 
 async def _batches_as_events(
-    streams: SessionApiStreams,
+    streams: SessionApiStreams, released: asyncio.Event
 ) -> AsyncIterator[dict[str, Any]]:
-    """The streams' batches, wrapped so the host-event merge can carry them."""
+    """The streams' batches, wrapped so the host-event merge can carry them.
+
+    A batch waits for ``released`` here, ahead of the merge: while compaction
+    holds its updates, the Host's own events still go out, and a request
+    waiting for them does not wait for the reply that releases the batch.
+    """
     async for session_batch in streams:
+        await released.wait()
         yield {"batch": session_batch}
 
 

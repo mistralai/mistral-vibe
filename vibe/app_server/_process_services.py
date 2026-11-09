@@ -12,7 +12,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from vibe.app_server._background_worker import BackgroundWorker
+from vibe.app_server._experiments_service import ExperimentsService
+from vibe.app_server._mcp_discovery_service import MCPDiscoveryService
+from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigService
+from vibe.app_server._worktree_housekeeping import WorktreeHousekeeping
 from vibe.app_server.connector_catalog import SharedConnectorCatalog
 from vibe.setup.auth._oidc_tenant import OidcTenantResolver
 
@@ -23,19 +28,36 @@ class ProcessServices:
     connector_catalog: SharedConnectorCatalog
     # The OIDC tenant per signed-in user, shared by CLI and Desktop connections.
     oidc_tenants: OidcTenantResolver
+    background: BackgroundWorker
+    worktrees: WorktreeHousekeeping
+    experiments: ExperimentsService
+    mcp_discovery: MCPDiscoveryService
+    # Every channel's open sessions, so one channel archives another's.
+    open_sessions: OpenSessions
 
     @classmethod
     def create(cls) -> ProcessServices:
         """The production services; an entry point calls this once."""
+        background = BackgroundWorker()
         return cls(
             org_config=OrgConfigService(),
             connector_catalog=SharedConnectorCatalog(),
             oidc_tenants=OidcTenantResolver(),
+            background=background,
+            worktrees=WorktreeHousekeeping(background),
+            experiments=ExperimentsService(),
+            mcp_discovery=MCPDiscoveryService(),
+            open_sessions=OpenSessions(),
         )
 
     async def close(self) -> None:
-        await self.org_config.close()
-        await self.connector_catalog.close()
+        try:
+            await self.org_config.close()
+            await self.connector_catalog.close()
+            await self.experiments.close()
+            await self.mcp_discovery.close()
+        finally:
+            await self.background.close()
 
 
 __all__ = ["ProcessServices"]

@@ -598,12 +598,28 @@ async fn update_commands_run_with_plain_colors() {
     // defeat the evidence match; the child must see plain colors instead.
     let (_, terminate) = tokio::sync::watch::channel(false);
     let outcome = spawn_update_command(
-        "echo \"$NO_COLOR:${FORCE_COLOR-unset}:${CLICOLOR_FORCE-unset}\"".to_owned(),
+        "echo \"$NO_COLOR:${FORCE_COLOR-unset}:${CLICOLOR_FORCE-unset}:$UV_NO_PROGRESS\""
+            .to_owned(),
         terminate,
     )
     .await;
     assert!(outcome.succeeded);
-    assert_eq!(outcome.output, "1:unset:unset");
+    assert_eq!(outcome.output, "1:unset:unset:1");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_progress_frame_does_not_hide_the_upgrade_line() {
+    // uv redraws progress in place with a bare \r, which str::lines keeps.
+    let (_, terminate) = tokio::sync::watch::channel(false);
+    let outcome = spawn_update_command(
+        "printf 'Downloading mistral-vibe (34.6MiB)\\rUpdated mistral-vibe v3.0.4 -> v3.0.5\\n' >&2"
+            .to_owned(),
+        terminate,
+    )
+    .await;
+    assert_eq!(outcome.output, "Updated mistral-vibe v3.0.4 -> v3.0.5");
+    assert!(performed_upgrade(&outcome));
 }
 
 #[cfg(unix)]

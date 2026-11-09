@@ -23,4 +23,4 @@ _DOWN = "\x1b[B"
 timeline: Timeline = ["/mcp\r", "d", "/gmail", _DOWN, _DOWN, "\r"]
 
 screen_contains = ("Connector: Gmail",)
-screen_excludes = ("gm_9c1b",)
+screen_excludes = ("gm_9c1b", "⚠")

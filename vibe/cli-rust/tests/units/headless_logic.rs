@@ -5,10 +5,10 @@ use std::path::PathBuf;
 use serde_json::{json, Value};
 use vibe_rs::cli::{HeadlessOptions, HeadlessSession, OutputFormat};
 use vibe_rs::headless::{agent_config, build_disabled_tools, open_failure, turn_id_from};
-use vibe_rs::headless_output::{last_assistant_text, turn_entries, Output};
+use vibe_rs::headless_output::{denied_tool_warning, last_assistant_text, turn_entries, Output};
 use vibe_rs::headless_prompt::{parse_piped_prompt, PipedPrompt, MAX_STDIN_PROMPT_BYTES};
 use vibe_rs::headless_trust::warning_from;
-use vibe_rs::run_export::RunOutcome;
+use vibe_rs::run_export::{RunOutcome, RunWarning};
 use vibe_rs::server::{AgentConfig, RpcError};
 use vibe_rs::utils::paths::user_home_from;
 
@@ -585,4 +585,91 @@ fn final_outcome_lets_an_enforced_limit_win_over_a_finished_turn() {
         final_outcome(RunOutcome::Length, &None, &stop),
         RunOutcome::Length
     );
+}
+
+fn effect(tool: &str, state: Value) -> Value {
+    json!({"type": "effect", "title": tool, "detail": {"toolName": tool}, "state": state})
+}
+
+#[test]
+fn a_tool_call_the_headless_run_could_not_approve_is_a_denial_warning() {
+    let entry = effect(
+        "file_system.bash",
+        json!({
+            "status": "failed",
+            "approvalSource": "user",
+            "error": {"code": "tool_denied", "message": "Tool execution denied by approval callback"},
+        }),
+    );
+
+    let RunWarning { message, source } = denied_tool_warning(&entry).unwrap();
+    assert_eq!(
+        message,
+        "Tool call denied: file_system.bash (needs approval, which a headless run cannot give)"
+    );
+    assert_eq!(source.as_deref(), Some("file_system.bash"));
+}
+
+#[test]
+fn a_smart_approve_denial_keeps_the_classifier_reason() {
+    let entry = effect(
+        "file_system.edit",
+        json!({
+            "status": "failed",
+            "approvalSource": "user",
+            "error": {"code": "tool_denied", "message": "Edits ~/.zshrc, outside the workspace."},
+        }),
+    );
+
+    assert_eq!(
+        denied_tool_warning(&entry).map(|warning| warning.message),
+        Some(
+            "Tool call denied: file_system.edit (Edits ~/.zshrc, outside the workspace.)"
+                .to_owned()
+        )
+    );
+}
+
+#[test]
+fn a_tool_call_the_policy_denied_keeps_the_policy_reason() {
+    let entry = effect(
+        "process.start",
+        json!({
+            "status": "failed",
+            "approvalSource": "never",
+            "error": {"code": "tool_denied", "message": "Tool execution denied by approval policy"},
+        }),
+    );
+
+    assert_eq!(
+        denied_tool_warning(&entry).map(|warning| warning.message),
+        Some(
+            "Tool call denied: process.start (Tool execution denied by approval policy)".to_owned()
+        )
+    );
+}
+
+#[test]
+fn only_denied_tool_calls_are_denial_warnings() {
+    let entries = json!([
+        {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "hi"}]},
+        effect("file_system.read_file", json!({"status": "completed"})),
+        effect(
+            "file_system.bash",
+            json!({"status": "failed", "error": {"code": "tool_failed", "message": "exit 1"}}),
+        ),
+        effect(
+            "file_system.write_file",
+            json!({"status": "failed", "approvalSource": "never", "error": {"code": "tool_denied"}}),
+        ),
+    ]);
+
+    let sources: Vec<_> = entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(denied_tool_warning)
+        .map(|warning| warning.source)
+        .collect();
+    assert_eq!(sources, vec![Some("file_system.write_file".to_owned())]);
 }

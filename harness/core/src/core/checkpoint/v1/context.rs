@@ -120,26 +120,84 @@ impl CheckpointStoredMessage {
         })
     }
 
-    pub(super) fn capture_visible_user(
-        message: &StoredMessage,
-        label: &str,
-    ) -> Result<Self, String> {
-        validate_visible_user(message, label)?;
+    pub(super) fn capture_steering(message: &StoredMessage, label: &str) -> Result<Self, String> {
+        validate_steering(message, label)?;
         Self::capture(message)
     }
 
-    pub(super) fn restore_visible_user(self, label: &str) -> Result<StoredMessage, String> {
+    pub(super) fn restore_steering(self, label: &str) -> Result<StoredMessage, String> {
         let message = self.restore()?;
-        validate_visible_user(&message, label)?;
+        validate_steering(&message, label)?;
+        Ok(message)
+    }
+
+    pub(super) fn capture_injected_context(
+        message: &StoredMessage,
+        label: &str,
+    ) -> Result<Self, String> {
+        validate_injected_context(message, label)?;
+        Self::capture(message)
+    }
+
+    pub(super) fn restore_injected_context(self, label: &str) -> Result<StoredMessage, String> {
+        let message = self.restore()?;
+        validate_injected_context(&message, label)?;
         Ok(message)
     }
 }
 
-fn validate_visible_user(message: &StoredMessage, label: &str) -> Result<(), String> {
-    if message.source != StoredMessageSource::History
-        || !matches!(message.message, Message::User { .. })
-    {
-        return Err(format!("{label} must contain visible user messages"));
+/// Steering is a visible user message, or an injected context message.
+fn validate_steering(message: &StoredMessage, label: &str) -> Result<(), String> {
+    let valid = match (&message.source, &message.message) {
+        (StoredMessageSource::History, Message::User { context, .. }) => !context,
+        (StoredMessageSource::Injection, Message::User { context, .. }) => *context,
+        _ => false,
+    };
+    if !valid {
+        return Err(format!(
+            "{label} must contain visible user messages or injected context messages"
+        ));
     }
     Ok(())
+}
+
+fn validate_injected_context(message: &StoredMessage, label: &str) -> Result<(), String> {
+    if message.source != StoredMessageSource::Injection
+        || !matches!(message.message, Message::User { context: true, .. })
+    {
+        return Err(format!("{label} must contain injected context messages"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::wire::content::text_content;
+
+    #[test]
+    fn pending_context_restores_only_injected_context_messages() {
+        let context = StoredMessage::injected(Message::context(text_content("frozen")));
+        let checkpoint =
+            CheckpointStoredMessage::capture_injected_context(&context, "pending context").unwrap();
+        assert_eq!(
+            checkpoint.restore_injected_context("pending context"),
+            Ok(context)
+        );
+
+        for message in [
+            StoredMessage::injected(Message::user(text_content("deploy"))),
+            StoredMessage::visible(Message::context(text_content("frozen"))),
+        ] {
+            let checkpoint = CheckpointStoredMessage::capture(&message).unwrap();
+            assert_eq!(
+                checkpoint.restore_injected_context("pending context"),
+                Err("pending context must contain injected context messages".to_string())
+            );
+            assert!(
+                CheckpointStoredMessage::capture_injected_context(&message, "pending context")
+                    .is_err()
+            );
+        }
+    }
 }

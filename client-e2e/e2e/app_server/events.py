@@ -1644,3 +1644,11 @@ def artifact_created(artifact: dict[str, Any]) -> AppServerEvent:
         "artifacts/created",
         {"sessionId": SESSION_ID, "emittedAt": _TIMESTAMP, "artifact": artifact},
     )
+
+
+def artifact_updated(artifact: dict[str, Any]) -> AppServerEvent:
+    """The `artifacts/updated` notification carrying a synced artifact."""
+    return _event(
+        "artifacts/updated",
+        {"sessionId": SESSION_ID, "emittedAt": _TIMESTAMP, "artifact": artifact},
+    )

@@ -39,6 +39,7 @@ from mistralai_vibe_local_harness.vibe._permissions import PermissionOutcome
 from vibe.app_server._cron import CRON_TOOL_NAME
 from vibe.app_server._session_peers import (
     LIST_SESSIONS_TOOL_NAME,
+    MARK_SESSIONS_SEEN_TOOL_NAME,
     READ_SESSION_TOOL_NAME,
 )
 from vibe.core.config import VibeConfigSchema
@@ -72,11 +73,13 @@ from vibe.permissions import OutsideWorkdirPolicy, RequiredPermission
 _SHELL_TOOL_SOURCES = frozenset({"bash", "powershell", "git_bash"})
 """The shell tools: everything a foreground shell call and a background start do."""
 
-# Cron only schedules this session's own prompts, and listing or reading
-# sessions changes nothing, so none of them asks by default.
+# Cron only schedules this session's own prompts, listing or reading sessions
+# changes nothing, and marking sessions seen only clears their unread mark, so
+# none of them asks by default.
 _ALLOWED_BY_DEFAULT = frozenset({
     CRON_TOOL_NAME,
     LIST_SESSIONS_TOOL_NAME,
+    MARK_SESSIONS_SEEN_TOOL_NAME,
     READ_SESSION_TOOL_NAME,
 })
 
@@ -653,6 +656,9 @@ class UnifiedPermissionResolver:
             if refusal := self._start_cwd_refusal(name, arguments.get("cwd")):
                 return PermissionOutcome(decision="deny", reason=refusal.reason)
         return PermissionOutcome(decision="ask")
+
+    def move_to(self, cwd: Path, workspace_roots: Sequence[Path]) -> None:
+        self._tools.move_to(cwd, workspace_roots)
 
     def _start_cwd_refusal(self, name: str, cwd: object) -> PermissionContext | None:
         """Refuse a start run from outside the working directory, if the policy does.

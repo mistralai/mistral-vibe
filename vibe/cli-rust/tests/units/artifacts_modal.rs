@@ -1,4 +1,4 @@
-//! The artifacts modal: fixed-height checks layout, highlight by id, keys, state dot and session switches.
+//! The artifacts modal: number/title/state rows, highlight by id, keys, state colors and session switches.
 
 use crossterm::event::KeyCode;
 use serde_json::{json, Value};
@@ -8,6 +8,7 @@ use vibe_rs::artifacts;
 use vibe_rs::artifacts_modal;
 use vibe_rs::input::{handle_artifacts_modal_key, handle_priority_key};
 use vibe_rs::server::PublicSessionArtifact;
+use vibe_rs::ui::pr_row;
 use vibe_rs::ui::theme;
 
 use crate::support::{ctrl, key, render, rows, stub};
@@ -73,84 +74,37 @@ fn selected_id(app: &App) -> Option<String> {
 }
 
 #[test]
-fn checks_sit_under_the_rows_in_order() {
+fn rows_show_the_number_title_and_state_only() {
     let mut app = open_with(vec![
         pr(1, 10, json!({})),
-        pr(2, 11, checks(&["build", "lint", "tests", "e2e", "deploy"])),
+        pr(2, 11, checks(&["build", "lint"])),
     ]);
     let lines = screen(&mut app, 30);
     let title = row_of(&lines, "Pull Requests");
-    let older = row_of(&lines, "PR #1");
-    assert_eq!(row_of(&lines, "PR #2"), title + 1);
-    assert_eq!(older, title + 2);
-    assert_eq!(row_of(&lines, "✓ build"), older + 1);
-    assert_eq!(row_of(&lines, "✓ lint"), older + 2);
-    assert_eq!(row_of(&lines, "✓ tests"), older + 3);
-    assert_eq!(row_of(&lines, "2 more passed"), older + 4);
-    assert_eq!(row_of(&lines, "https://github.com/o/r/pull/2"), older + 5);
+    assert_eq!(row_of(&lines, "● #2  Title 2  open"), title + 1);
+    assert_eq!(row_of(&lines, "● #1  Title 1  open"), title + 2);
+    assert_eq!(row_of(&lines, "Esc/Ctrl+C cancel"), title + 4);
+    let shown = |text: &str| lines.iter().any(|line| line.contains(text));
+    assert!(!shown("build") && !shown("https://"), "no checks, no URL");
 }
 
 #[test]
-fn moving_the_highlight_keeps_the_box_height() {
-    let mut app = open_with(vec![pr(1, 10, json!({})), pr(2, 11, checks(&["build"]))]);
-    let before = screen(&mut app, 30);
-    press(&mut app, KeyCode::Down);
-    let after = screen(&mut app, 30);
-    let title = row_of(&before, "Pull Requests");
-    assert_eq!(row_of(&after, "Pull Requests"), title);
-    assert!(!after.iter().any(|line| line.contains("✓ build")));
-    assert_eq!(row_of(&after, "https://github.com/o/r/pull/1"), title + 4);
-}
-
-#[test]
-fn a_short_box_shows_checks_only_once_every_row_fits() {
-    let names = ["build", "lint", "tests"];
-    let list = (1..=3)
-        .map(|n| pr(n, 10 + n as u8, checks(&names)))
-        .collect();
-    let mut app = open_with(list);
-    let mut outcomes = Vec::new();
-    for height in 10..=20 {
-        let lines = screen(&mut app, height);
-        let shown = |text: &str| lines.iter().any(|line| line.contains(text));
-        assert!(
-            shown("Pull Requests") && shown("Esc/Ctrl+C cancel"),
-            "height {height}"
-        );
-        let rows = ["PR #1", "PR #2", "PR #3"].iter().all(|row| shown(row));
-        let checks = shown("✓ build");
-        assert!(rows || !checks, "height {height}: a check line hides a row");
-        outcomes.push((rows, checks));
-    }
-    assert!(outcomes.contains(&(true, false)), "{outcomes:?}");
-    assert!(outcomes.contains(&(true, true)), "{outcomes:?}");
-}
-
-#[test]
-fn an_overflowing_list_keeps_the_checks_of_the_highlighted_one() {
-    let mut list: Vec<_> = (1..=29).map(|n| pr(n, 0, json!({}))).collect();
-    list.push(pr(30, 23, checks(&["build", "lint", "tests"])));
+fn an_overflowing_list_shows_half_the_screen() {
+    let list = (1..=30).map(|n| pr(n, 0, json!({}))).collect();
     let mut app = open_with(list);
     let lines = screen(&mut app, 40);
     let title = row_of(&lines, "Pull Requests");
-    let build = row_of(&lines, "✓ build");
-    assert_eq!(
-        build,
-        title + 21,
-        "20 rows, half the screen, then the checks"
-    );
-    assert_eq!(row_of(&lines, "✓ tests"), build + 2);
-    assert_eq!(row_of(&lines, "https://github.com/o/r/pull/30"), build + 3);
+    assert_eq!(row_of(&lines, "Esc/Ctrl+C cancel"), title + 22, "20 rows");
 }
 
 #[test]
-fn a_narrow_box_cuts_the_label_and_status_at_its_edge() {
-    let status = json!({ "state": "open", "prStatus": "action_needed" });
-    let mut app = open_with(vec![pr(1234567, 10, status), pr(2, 11, json!({}))]);
-    let lines = rows(&render(26, 30, |f| app.draw(f)));
-    let y = row_of(&lines, "● PR #12");
+fn a_narrow_box_shrinks_the_title_and_keeps_the_state() {
+    let mut app = open_with(vec![pr(1234567, 10, json!({})), pr(2, 11, json!({}))]);
+    let lines = rows(&render(32, 30, |f| app.draw(f)));
+    let y = row_of(&lines, "● #1234567");
+    assert!(lines[y].contains("Title…"), "{:?}", lines[y]);
+    assert!(lines[y].contains("open"), "{:?}", lines[y]);
     assert!(lines[y].ends_with('│'), "{:?}", lines[y]);
-    assert!(lines[y].contains('…'), "{:?}", lines[y]);
 }
 
 #[test]
@@ -207,32 +161,33 @@ fn ctrl_c_closes_the_modal_over_a_viewed_subagent_without_arming_quit() {
 }
 
 #[test]
-fn rows_lead_with_a_state_dot_in_the_footer_colors() {
+fn the_dot_and_state_take_the_lifecycle_color() {
     let mut app = open_with(vec![
         pr(
             1,
             10,
             json!({ "state": "open", "prStatus": "action_needed" }),
         ),
-        pr(2, 11, json!({ "state": "open", "prStatus": "mergeable" })),
+        pr(2, 11, json!({ "state": "draft" })),
         pr(3, 12, json!({ "state": "merged" })),
+        pr(4, 13, json!({ "state": "closed" })),
     ]);
     press(&mut app, KeyCode::Down);
     let buffer = render(100, 30, |f| app.draw(f));
     let lines = rows(&buffer);
-    for (label, color) in [
-        ("PR #3", theme::text_accent()),
-        ("PR #1", theme::text_error()),
+    for (label, word, color) in [
+        ("#1", "open", theme::text_success()),
+        ("#2", "draft", theme::muted()),
+        ("#4", "closed", theme::text_error()),
     ] {
-        let y = row_of(&lines, label);
-        let x = lines[y].chars().position(|c| c == '●').expect("dot");
-        assert!(lines[y].contains(&format!("● {label}")), "{label}");
-        let dot = &buffer[(x as u16, y as u16)];
-        assert_eq!((dot.symbol(), dot.fg), ("●", color), "{label}");
+        let y = row_of(&lines, &format!("● {label}  "));
+        let line = &lines[y];
+        let dot = line.chars().position(|c| c == '●').expect("dot");
+        let state = line[..line.find(word).expect("state")].chars().count();
+        for x in [dot, state] {
+            assert_eq!(buffer[(x as u16, y as u16)].fg, color, "{label}");
+        }
     }
-    let y = row_of(&lines, "PR #2");
-    assert!(!lines[y].contains("(mergeable)"));
-    assert!(lines[y].contains("PR #2 mergeable"));
 }
 
 #[test]
@@ -279,4 +234,22 @@ fn the_same_session_reads_nothing_again() {
     artifacts::follow_session(&mut app, &stub());
     assert_eq!(app.session.artifacts.len(), 1);
     assert!(app.artifacts_modal.open);
+}
+
+#[test]
+fn each_state_has_its_word_and_color() {
+    let cases = [
+        ("open", "open", theme::text_success()),
+        ("draft", "draft", theme::muted()),
+        ("merged", "merged", theme::merged()),
+        ("closed", "closed", theme::text_error()),
+    ];
+    for (wire, word, color) in cases {
+        let state = pr_row::state(&pr(1, 10, json!({ "state": wire })));
+        assert_eq!(
+            (pr_row::word(state), pr_row::color(state)),
+            (word, color),
+            "{wire}"
+        );
+    }
 }

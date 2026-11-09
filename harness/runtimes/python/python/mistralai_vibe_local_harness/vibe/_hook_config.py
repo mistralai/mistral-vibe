@@ -20,6 +20,7 @@ from mistralai_vibe_local_harness.vibe._foreign_hooks import (
     HookProcessResolver,
     build_post_agent_turn_handler,
     build_post_tool_call_handler,
+    build_pre_agent_turn_handler,
     build_pre_tool_call_handler,
 )
 from mistralai_vibe_local_harness.vibe._hook_matcher import binding_id, compile_selector
@@ -27,6 +28,7 @@ from mistralai_vibe_local_harness.vibe._local_actions import (
     HookHandlers,
     PostAgentTurnHookHandler,
     PostToolCallHookHandler,
+    PreAgentTurnHookHandler,
     PreToolCallHookHandler,
 )
 
@@ -34,6 +36,7 @@ from mistralai_vibe_local_harness.vibe._local_actions import (
 _AUTHORABLE_POINTS: dict[str, RustHookPoint] = {
     "pre_tool": "pre_tool_call",
     "post_tool": "post_tool_call",
+    "pre_agent": "pre_agent_turn",
     "post_agent": "post_agent_turn",
 }
 
@@ -47,9 +50,10 @@ class ForeignHookDefinition:
     # ``point`` is an authorable name, a key of ``_AUTHORABLE_POINTS``. ``source`` labels
     # the declaring file: a project-root path, ``user`` for ``~/.vibe``, or a value
     # naming a plugin. ``match`` selects tools for ``pre_tool``/``post_tool`` and agents
-    # for ``post_agent``. ``cwd`` and ``env`` default to the session's workspace and
-    # environment; a plugin hook runs in its plugin's directory instead. ``process``,
-    # when set, picks them per run from the session the hook runs in, and wins over both.
+    # for ``pre_agent``/``post_agent``. ``cwd`` and ``env`` default to the session's
+    # workspace and environment; a plugin hook runs in its plugin's directory instead.
+    # ``process``, when set, picks them per run from the session the hook runs in,
+    # and wins over both.
     name: str
     point: str
     command: str
@@ -78,8 +82,8 @@ def compile_foreign_hooks(
 
     Every declaration produces a binding, so no hook can compile to something that never
     fires: a ``match`` binds ``always`` and is applied at call time by the executor,
-    against the called tool or, for ``post_agent``, the agent that finished its turn
-    (see :mod:`._hook_matcher`).
+    against the called tool or, for ``pre_agent``/``post_agent``, the agent whose turn
+    it is (see :mod:`._hook_matcher`).
 
     ``tool_catalog`` is accepted and never called. The Vibe app-server still passes the
     catalogue provider this used to need, because ``vibe/uv.lock`` can resolve a
@@ -90,6 +94,7 @@ def compile_foreign_hooks(
     del tool_catalog
     bindings: list[RustHarnessHookBinding] = []
     pre_tool: dict[str, PreToolCallHookHandler] = {}
+    pre_agent: dict[str, PreAgentTurnHookHandler] = {}
     post_tool: dict[str, PostToolCallHookHandler] = {}
     post_agent: dict[str, PostAgentTurnHookHandler] = {}
     seen: set[str] = set()
@@ -133,6 +138,15 @@ def compile_foreign_hooks(
                 strict=definition.strict,
                 process=process,
             )
+        elif core_point == "pre_agent_turn":
+            pre_agent[bid] = build_pre_agent_turn_handler(
+                name=definition.name,
+                command=definition.command,
+                match=definition.match,
+                timeout_s=definition.timeout_s,
+                strict=definition.strict,
+                process=process,
+            )
         else:  # post_agent_turn
             post_agent[bid] = build_post_agent_turn_handler(
                 name=definition.name,
@@ -146,6 +160,9 @@ def compile_foreign_hooks(
     return CompiledHooks(
         bindings=tuple(bindings),
         handlers=HookHandlers(
-            pre_tool_call=pre_tool, post_tool_call=post_tool, post_agent_turn=post_agent
+            pre_tool_call=pre_tool,
+            pre_agent_turn=pre_agent,
+            post_tool_call=post_tool,
+            post_agent_turn=post_agent,
         ),
     )

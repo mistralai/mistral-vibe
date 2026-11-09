@@ -149,15 +149,39 @@ impl ModelContext {
         Ok(())
     }
 
+    /// Starts the next Turn with the inputs retained while idle, then `message`. Context
+    /// messages waiting for this Turn move after the retained inputs, so that each stays
+    /// right before the message it came with.
     pub(crate) fn extend_new_turn(
         &mut self,
-        messages: impl IntoIterator<Item = StoredMessage>,
+        retained: Vec<StoredMessage>,
+        message: StoredMessage,
     ) -> Result<(), CoreError> {
         let index = self.next_turn_index()?;
-        self.extend(messages.into_iter().map(|mut message| {
-            message.turn_index = Some(index);
-            message
-        }));
+        let mut waiting_from = self.messages.len();
+        while waiting_from > 0 {
+            let previous = &self.messages[waiting_from - 1];
+            let waiting_context = previous.turn_index == Some(index)
+                && matches!(previous.message, Message::User { context: true, .. });
+            if !waiting_context {
+                break;
+            }
+            waiting_from -= 1;
+        }
+        let reorders = waiting_from < self.messages.len() && !retained.is_empty();
+        let waiting = self.messages.split_off(waiting_from);
+        let messages = retained
+            .into_iter()
+            .chain(waiting)
+            .chain([message])
+            .map(|mut message| {
+                message.turn_index = Some(index);
+                message
+            });
+        self.extend(messages);
+        if reorders {
+            self.mark_replaced();
+        }
         Ok(())
     }
 

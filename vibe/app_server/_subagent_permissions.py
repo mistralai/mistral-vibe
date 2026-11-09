@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from mistralai_vibe_local_harness.vibe._permissions import (
@@ -76,17 +77,20 @@ class SubagentPermissions:
         session: UnifiedPermissionResolver,
         config: ConfigOrchestrator[VibeConfigSchema],
         tools_for: ToolsFactory,
+        cwd: Callable[[], Path] | None = None,
     ) -> None:
         self._session = session
         self._config = config
         self._tools_for = tools_for
+        self._cwd = cwd
 
     def resolver_for(self, overrides: Mapping[str, Any]) -> PermissionResolver:
         # Built on the first call rather than here: every bind resolves every
         # declared profile, and most of them never spawn a child. Rebuilt once
-        # the session's configuration is replaced (a reload, a config write), so
-        # a running child's next call follows the rules the session now has.
-        built_from: VibeConfigSchema | None = None
+        # the session's configuration is replaced (a reload, a config write) or
+        # the session moves to another directory, so a running child's next
+        # call follows the rules and the workdir the session now has.
+        built_from: tuple[VibeConfigSchema, Path | None] | None = None
         profile: UnifiedPermissionResolver | None = None
         lock = asyncio.Lock()
 
@@ -98,8 +102,16 @@ class SubagentPermissions:
             if outcome.decision == "deny":
                 return outcome
             async with lock:
-                current = self._config.config
-                if profile is None or built_from is not current:
+                current = (
+                    self._config.config,
+                    None if self._cwd is None else self._cwd(),
+                )
+                if (
+                    profile is None
+                    or built_from is None
+                    or built_from[0] is not current[0]
+                    or built_from[1] != current[1]
+                ):
                     profile = await asyncio.to_thread(self._profile, overrides)
                     built_from = current
             return narrower(outcome, await profile.resolve(builtin, arguments))

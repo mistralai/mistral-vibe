@@ -185,6 +185,26 @@ async def test_admin_enable_auto_approve_false_shadows_lower_layers() -> None:
 
 
 @pytest.mark.asyncio
+async def test_admin_enable_pr_monitoring_false_shadows_lower_layers() -> None:
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+    overrides = OverridesLayer(data={"enable_pr_monitoring": True})
+    admin = AdminConfigLayer()
+    admin.load_managed_toml("enable_pr_monitoring = false\n")
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[defaults, overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+
+    assert orchestrator.config.enable_pr_monitoring is False
+
+    # A lower-layer write cannot turn monitoring back on.
+    await orchestrator.set_field("/enable_pr_monitoring", True)
+    assert orchestrator.config.enable_pr_monitoring is False
+
+
+@pytest.mark.asyncio
 async def test_unmatched_admin_allowed_model_names_fail_closed() -> None:
     defaults = DefaultConfigLayer(schema=VibeConfigSchema)
     overrides = OverridesLayer(data={})

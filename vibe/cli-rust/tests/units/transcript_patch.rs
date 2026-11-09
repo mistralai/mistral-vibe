@@ -241,6 +241,36 @@ fn hook_notices_mount_only_inside_an_open_container() {
 }
 
 #[test]
+fn a_pre_agent_hook_line_mounts_in_its_own_turn_container() {
+    let mut transcript = Transcript::default();
+    transcript.add(
+        &json!({"entry": {"id": "n1", "type": "notice", "message": "hook",
+                          "detail": {"kind": "hook_run_started", "scope": "pre_agent"}}}),
+    );
+    transcript.add(
+        &json!({"entry": {"id": "n2", "type": "notice", "message": "hook",
+                          "detail": {"kind": "hook_completed", "scope": "pre_agent",
+                                     "content": "Rewrote the message",
+                                     "hookName": "redact"}}}),
+    );
+    assert_eq!(transcript.lines().count(), 1);
+
+    let mut other_scope = Transcript::default();
+    other_scope.add(
+        &json!({"entry": {"id": "n1", "type": "notice", "message": "hook",
+                          "detail": {"kind": "hook_run_started", "scope": "post_agent"}}}),
+    );
+    other_scope.add(
+        &json!({"entry": {"id": "n2", "type": "notice", "message": "hook",
+                          "detail": {"kind": "hook_completed", "scope": "pre_agent",
+                                     "content": "Rewrote the message",
+                                     "hookName": "redact"}}}),
+    );
+    // A post_agent run does not open the pre_agent container.
+    assert_eq!(other_scope.lines().count(), 0);
+}
+
+#[test]
 fn groups_with_tools_covers_groupable_entries() {
     let reasoning = HistoryEntry::from_value(&json!({"type": "reasoning", "text": "t"}));
     let hook = HistoryEntry::from_value(&json!({"type": "notice",

@@ -166,25 +166,48 @@ async def test_loop_schedule_survives_resume_from_a_new_host(
     assert restored == [loop]
 
 
+@pytest.mark.one_path
 @pytest.mark.asyncio
-async def test_clear_history_preserves_loop_schedules(
-    backend_contract_persistent_session: AppServerSession,
+async def test_clear_history_starts_without_the_cleared_sessions_loops(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
 ) -> None:
-    """*Prepare*: A session with one scheduled loop.
-    *Do*: Clear its history.
-    *Assert*: The replacement session preserves the loop schedule.
+    """*Prepare*: A persisted session with one scheduled loop.
+    *Do*: Clear its history, then resume the cleared session from a new Host.
+    *Assert*: The replacement session has no loops, and the cleared session
+    still has its own.
     """
     # Prepare
-    loop = await backend_contract_persistent_session.resources.loops.create(
-        "30s", "keep me"
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("stored")
     )
+    session = await backend_contract_persistent_connection.host.open_session()
+    try:
+        loop = await session.resources.loops.create("30s", "leave me behind")
+        _ = [event async for event in session.act("persist the session")]
+        cleared_session_id = session.session_id
 
-    # Do
-    await backend_contract_persistent_session.clear_history()
-    after_clear = await backend_contract_persistent_session.resources.loops.list()
+        # Do
+        await session.clear_history()
+        after_clear = await session.resources.loops.list()
+    finally:
+        await session.close()
+    resumed_connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    resumed = await resumed_connection.host.resume_session(cleared_session_id)
+    try:
+        restored = await resumed.resources.loops.list()
+    finally:
+        await resumed.close()
 
     # Assert
-    assert after_clear == [loop]
+    assert after_clear == []
+    assert restored == [loop]
 
 
 @pytest.mark.both_paths
@@ -338,6 +361,56 @@ async def test_unified_fired_loop_prompt_keeps_its_marker_across_fork(
         assert marker["type"] == "vibe.scheduled_loop"
         assert marker["loopId"] == loop.id
         assert isinstance(marker["firedAt"], int)
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_unified_fork_during_a_fired_loop_copies_the_session_before_it(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A resumed Unified session whose due loop turn is still running.
+    *Do*: Fork the session without an entry.
+    *Assert*: The fork stops before the loop turn.
+    """
+    # Prepare
+    session = await backend_contract_persistent_connection.host.open_session()
+    await session.resources.loops.create("30s", "scheduled prompt")
+    await session.inject_user_context("persist the session", as_message=True)
+    session_id = session.session_id
+    await session.close()
+    _mark_unified_loop_due(tmp_path, session_id)
+    started, release = asyncio.Event(), asyncio.Event()
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_gated_mistral_response(
+            "scheduled response", started=started, release=release
+        )
+    )
+    resumed_connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    resumed = await resumed_connection.host.resume_session(session_id)
+
+    # Do
+    try:
+        await asyncio.wait_for(started.wait(), timeout=3)
+        fork = await resumed.resources.sessions.fork(attach=False)
+    finally:
+        release.set()
+        await resumed.close()
+
+    # Assert
+    copied = [
+        entry.text
+        for entry in fork.state.history or []
+        if isinstance(entry, PublicMessageEntry)
+    ]
+    assert copied == ["persist the session"]
 
 
 @pytest.mark.both_paths

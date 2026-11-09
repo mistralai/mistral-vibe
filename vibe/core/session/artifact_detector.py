@@ -14,24 +14,29 @@ C — binary bundled in the PyInstaller distribution (``VIBE_ROOT/bin/``),
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from dataclasses import dataclass
 import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from typing import Literal
 from urllib.parse import quote
 
 from vibe import VIBE_ROOT
+from vibe.core.utils.bash_parser import bash_parser, walk
 
 __all__ = [
     "DetectedPullRequest",
     "cli_binary_source",
     "extract_draft_from_command",
-    "extract_pr_from_output",
+    "extract_prs_from_output",
     "find_cli_binary",
     "is_pr_creation_command",
+    "pr_creation_limit",
+    "pr_creation_output_first",
     "resolve_gitlab_repo_id",
 ]
 
@@ -104,6 +109,34 @@ def cli_binary_source(name: str) -> Literal["system", "bundled", "none"]:
 # blanked before matching: ``rg 'gh pr create'`` is a search, not a creation.
 _QUOTED_SPAN_RE = re.compile(r'"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'')
 
+
+def _shell_code_only(command: str) -> str:
+    """Blank what the shell reads as data: heredoc bodies, then quoted spans.
+
+    A heredoc body goes first, so an apostrophe in a PR body cannot open a
+    quoted span that swallows the ``gh pr create`` after it. A ``$(...)`` in
+    the body is code the shell runs, so it stays. A body the grammar could not
+    read, inside an ``ERROR`` node, stays too, as it did before parsing.
+    """
+    source = command.encode("utf-8")
+    root = bash_parser().parse(source).root_node
+    blanked = bytearray(source)
+    for body in walk(root, skip={"ERROR"}):
+        if body.type != "heredoc_body":
+            continue
+        start = body.start_byte
+        for code in walk(body):
+            if code.type == "command_substitution" and code.start_byte >= start:
+                _blank(blanked, start, code.start_byte)
+                start = code.end_byte
+        _blank(blanked, start, body.end_byte)
+    return _QUOTED_SPAN_RE.sub(" ", blanked.decode("utf-8"))
+
+
+def _blank(source: bytearray, start: int, end: int) -> None:
+    source[start:end] = re.sub(rb"[^\n]", b" ", bytes(source[start:end]))
+
+
 _COMMENT_RE = re.compile(r"(?:^|(?<=\s))#[^\n]*")
 _COMMAND_SEPARATOR_RE = re.compile(r"[;&|(\n]")
 
@@ -112,6 +145,8 @@ _COMMAND_SEPARATOR_RE = re.compile(r"[;&|(\n]")
 # but only as a whole word: ``foo-gh`` and ``gh.sh`` are other programs.
 # Commands that print their arguments say nothing about a creation.
 _PRINTING_COMMANDS = frozenset({"echo", "printf", "print"})
+# Commands that run their arguments once per input line, like a loop body.
+_REPEATING_COMMANDS = frozenset({"xargs", "parallel"})
 
 # Global flags may sit between the CLI and its subcommand (``gh -R o/r pr
 # create``, ``glab --hostname gitlab.example.com mr create``), and the binary
@@ -135,20 +170,91 @@ _GLAB_MR_CREATE_RE = _cli_command_re("glab", r"mr\s+create")
 # creating one.
 _GH_PR_REOPEN_RE = _cli_command_re("gh", r"pr\s+reopen")
 _GLAB_MR_REOPEN_RE = _cli_command_re("glab", r"mr\s+reopen")
+# The gh/glab subcommands that may print PR/MR URLs.
+_GH_URL_OUTPUT_RE = _cli_command_re("gh", r"(?:pr|api|search)")
+_GLAB_URL_OUTPUT_RE = _cli_command_re("glab", r"(?:mr|api)")
+
+
+def _segments(command: str) -> list[str]:
+    """The simple commands of *command*, heredocs, quoted spans and comments blanked."""
+    unquoted = _COMMENT_RE.sub(" ", _shell_code_only(command))
+    return _COMMAND_SEPARATOR_RE.split(unquoted)
+
+
+def _segment_provider(segment: str) -> Literal["github", "gitlab"] | None:
+    """The provider when *segment* creates or reopens a PR/MR."""
+    words = segment.split(maxsplit=1)
+    if not words or words[0].lower() in _PRINTING_COMMANDS:
+        return None
+    if _GH_PR_CREATE_RE.search(segment) or _GH_PR_REOPEN_RE.search(segment):
+        return "github"
+    if _GLAB_MR_CREATE_RE.search(segment) or _GLAB_MR_REOPEN_RE.search(segment):
+        return "gitlab"
+    return None
+
+
+def _prints_pr_urls(segment: str) -> bool:
+    """Whether *segment* runs a gh/glab subcommand that may print PR/MR URLs."""
+    words = segment.split(maxsplit=1)
+    if not words or words[0].lower() in _PRINTING_COMMANDS:
+        return False
+    return bool(
+        _GH_URL_OUTPUT_RE.search(segment) or _GLAB_URL_OUTPUT_RE.search(segment)
+    )
+
+
+def _creation_segments(
+    command: str,
+) -> Iterator[tuple[Literal["github", "gitlab"], bool]]:
+    """Each create/reopen segment's provider, and whether it may run repeatedly."""
+    loop_depth = 0
+    for segment in _segments(command):
+        words = segment.split(maxsplit=1)
+        if not words:
+            continue
+        first = words[0].lower()
+        if first == "do":
+            loop_depth += 1
+        elif first == "done":
+            loop_depth = max(0, loop_depth - 1)
+        if (provider := _segment_provider(segment)) is not None:
+            yield provider, loop_depth > 0 or first in _REPEATING_COMMANDS
 
 
 def is_pr_creation_command(command: str) -> Literal["github", "gitlab"] | None:
     """Return the provider if the command creates or reopens a PR/MR, else None."""
-    unquoted = _COMMENT_RE.sub(" ", _QUOTED_SPAN_RE.sub(" ", command))
-    for segment in _COMMAND_SEPARATOR_RE.split(unquoted):
-        words = segment.split(maxsplit=1)
-        if not words or words[0].lower() in _PRINTING_COMMANDS:
-            continue
-        if _GH_PR_CREATE_RE.search(segment) or _GH_PR_REOPEN_RE.search(segment):
-            return "github"
-        if _GLAB_MR_CREATE_RE.search(segment) or _GLAB_MR_REOPEN_RE.search(segment):
-            return "gitlab"
+    for provider, _repeated in _creation_segments(command):
+        return provider
     return None
+
+
+def pr_creation_limit(command: str) -> int | None:
+    """How many PRs/MRs the command may create or reopen; None when unbounded."""
+    count = 0
+    for _provider, repeated in _creation_segments(command):
+        # A loop body (or xargs) may create any number of PRs/MRs.
+        if repeated:
+            return None
+        count += 1
+    return count
+
+
+def pr_creation_output_first(command: str) -> bool:
+    """Whether the created PRs/MRs print their URLs before any other gh/glab output.
+
+    True when gh/glab runs only after the creations (``gh pr create && gh pr
+    view 9``): the first URLs are then the created ones, otherwise the last.
+    """
+    created = False
+    later_output = False
+    for segment in _segments(command):
+        if _segment_provider(segment) is not None:
+            created = True
+        elif _prints_pr_urls(segment):
+            if not created:
+                return False
+            later_output = True
+    return later_output
 
 
 # --- Output extraction ---
@@ -170,10 +276,20 @@ _GH_REOPEN_NUMBER_RE = re.compile(r"[Rr]eopened\s+(?:pull\s+request\s+)?#(\d+)")
 _GLAB_REOPEN_IID_RE = re.compile(r"[Rr]eopened\s+(?:merge\s+request\s+)?!?(\d+)")
 
 
-def extract_pr_from_output(
-    stdout: str, stderr: str, provider: Literal["github", "gitlab"] | None = None
-) -> DetectedPullRequest | None:
+def extract_prs_from_output(
+    stdout: str,
+    stderr: str,
+    provider: Literal["github", "gitlab"] | None = None,
+    limit: int | None = None,
+    from_start: bool = False,
+) -> list[DetectedPullRequest]:
     """Extract PR/MR coordinates from command output (stdout + stderr).
+
+    Returns every distinct PR/MR URL of the first matching provider, so a
+    loop creating several PRs records them all. With *limit* (see
+    ``pr_creation_limit``), only the last *limit* distinct URLs are kept:
+    ``gh pr list ... && gh pr create`` records the created PR, not the listed ones.
+    With *from_start* (see ``pr_creation_output_first``), the first ones are.
 
     For a *reopened* PR/MR the output carries no URL, so the coordinates may
     be partial (``number``/``iid`` only, or without the host): the caller
@@ -188,76 +304,97 @@ def extract_pr_from_output(
     """
     text = f"{stdout}\n{stderr}"
 
-    def _github_url() -> DetectedPullRequest | None:
+    def _distinct(pattern: re.Pattern[str]) -> list[re.Match[str]]:
+        matches = list(pattern.finditer(text))
+        # A creation prints its URL after any earlier command's output.
+        newest_first = limit is not None and not from_start
+        if newest_first:
+            matches.reverse()
+        found: dict[str, re.Match[str]] = {}
+        for match in matches:
+            found.setdefault(match.group(0), match)
+        distinct = list(found.values())
+        if limit is None:
+            return distinct
+        return distinct[:limit][::-1] if newest_first else distinct[:limit]
+
+    def _github_urls() -> list[DetectedPullRequest]:
         # GitHub (github.com or GitHub Enterprise — host captured from the URL)
-        match = _GH_PR_URL_RE.search(text)
-        if match:
+        found: list[DetectedPullRequest] = []
+        for match in _distinct(_GH_PR_URL_RE):
             host, owner, repo, number = match.groups()
-            return DetectedPullRequest(
-                provider="github",
-                url=match.group(0),
-                host=host,
-                owner=owner,
-                repo=repo,
-                number=int(number),
+            found.append(
+                DetectedPullRequest(
+                    provider="github",
+                    url=match.group(0),
+                    host=host,
+                    owner=owner,
+                    repo=repo,
+                    number=int(number),
+                )
             )
-        return None
+        return found
 
-    def _gitlab_url() -> DetectedPullRequest | None:
+    def _gitlab_urls() -> list[DetectedPullRequest]:
         # GitLab (gitlab.com or self-hosted — host captured from the URL)
-        match = _GITLAB_MR_URL_RE.search(text)
-        if match:
+        found: list[DetectedPullRequest] = []
+        for match in _distinct(_GITLAB_MR_URL_RE):
             host, project_path, iid = match.groups()
-            return DetectedPullRequest(
-                provider="gitlab",
-                url=match.group(0),
-                host=host,
-                project_path=project_path,
-                iid=int(iid),
-                repo_id=None,  # Resolved by resolve_gitlab_repo_id() if glab is available
+            found.append(
+                DetectedPullRequest(
+                    provider="gitlab",
+                    url=match.group(0),
+                    host=host,
+                    project_path=project_path,
+                    iid=int(iid),
+                    repo_id=None,  # Resolved by resolve_gitlab_repo_id() if glab is available
+                )
             )
-        return None
+        return found
 
-    def _github_reopen() -> DetectedPullRequest | None:
+    def _github_reopen() -> list[DetectedPullRequest]:
         # Reopen confirmations — no URL. Coordinates may be partial; the
         # caller fills the missing fields from the checkout remote.
-        match = _GH_REOPEN_FULL_RE.search(text)
-        if match:
-            owner, repo, number = match.groups()
-            return DetectedPullRequest(
+        full = {
+            match.groups(): DetectedPullRequest(
                 provider="github",
                 url="",
                 host="",  # Resolved from the checkout remote
-                owner=owner,
-                repo=repo,
-                number=int(number),
+                owner=match.group(1),
+                repo=match.group(2),
+                number=int(match.group(3)),
             )
-        match = _GH_REOPEN_NUMBER_RE.search(text)
-        if match:
-            return DetectedPullRequest(
-                provider="github", url="", host="", number=int(match.group(1))
-            )
-        return None
+            for match in _GH_REOPEN_FULL_RE.finditer(text)
+        }
+        if full:
+            return list(full.values())
+        numbers = dict.fromkeys(
+            int(match.group(1)) for match in _GH_REOPEN_NUMBER_RE.finditer(text)
+        )
+        return [
+            DetectedPullRequest(provider="github", url="", host="", number=number)
+            for number in numbers
+        ]
 
-    def _gitlab_reopen() -> DetectedPullRequest | None:
-        match = _GLAB_REOPEN_IID_RE.search(text)
-        if match:
-            return DetectedPullRequest(
-                provider="gitlab", url="", host="", iid=int(match.group(1))
-            )
-        return None
+    def _gitlab_reopen() -> list[DetectedPullRequest]:
+        iids = dict.fromkeys(
+            int(match.group(1)) for match in _GLAB_REOPEN_IID_RE.finditer(text)
+        )
+        return [
+            DetectedPullRequest(provider="gitlab", url="", host="", iid=iid)
+            for iid in iids
+        ]
 
     if provider == "github":
-        extractors = (_github_url, _github_reopen, _gitlab_url, _gitlab_reopen)
+        extractors = (_github_urls, _github_reopen, _gitlab_urls, _gitlab_reopen)
     elif provider == "gitlab":
-        extractors = (_gitlab_url, _gitlab_reopen, _github_url, _github_reopen)
+        extractors = (_gitlab_urls, _gitlab_reopen, _github_urls, _github_reopen)
     else:
-        extractors = (_github_url, _gitlab_url, _github_reopen, _gitlab_reopen)
+        extractors = (_github_urls, _gitlab_urls, _github_reopen, _gitlab_reopen)
     for extract in extractors:
-        detected = extract()
-        if detected is not None:
+        if detected := extract():
             return detected
-    return None
+    return []
 
 
 # --- GitLab repo_id resolution via glab api ---
@@ -293,6 +430,7 @@ async def resolve_gitlab_repo_id(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         try:
             stdout, _stderr = await asyncio.wait_for(
@@ -338,12 +476,18 @@ def extract_draft_from_command(
 
     ``--draft`` is unambiguous for both providers. ``-d`` means ``--draft`` for
     ``gh`` but ``--description`` for ``glab``, so it is only matched for GitHub.
-    Quoted spans are blanked first: a ``--draft`` / ``-d`` inside a quoted
-    ``--title``/``--body`` is text, not a flag.
+    Quoted spans and heredoc bodies are blanked first: a ``--draft`` / ``-d``
+    inside a quoted ``--title``/``--body`` or a heredoc is text, not a flag.
+    With several create/reopen segments, a URL cannot be matched to its
+    segment: draft only when every segment carries the flag.
     """
-    unquoted = _QUOTED_SPAN_RE.sub(" ", command)
-    if _DRAFT_LONG_RE.search(unquoted):
-        return True
-    if provider == "github" and _DRAFT_SHORT_GH_RE.search(unquoted):
-        return True
-    return False
+    segments = [s for s in _segments(command) if _segment_provider(s) is not None]
+    if len(segments) <= 1:
+        segments = [_shell_code_only(command)]
+
+    def is_draft(segment: str) -> bool:
+        if _DRAFT_LONG_RE.search(segment):
+            return True
+        return provider == "github" and bool(_DRAFT_SHORT_GH_RE.search(segment))
+
+    return all(is_draft(segment) for segment in segments)

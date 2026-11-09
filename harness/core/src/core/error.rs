@@ -8,6 +8,8 @@ use std::fmt;
 ///   current idle, running, or compacting state.
 /// - `InvalidCorrelation` — an action result does not name an action currently
 ///   pending in Core.
+/// - `OutputTypeMismatch` — a steer names an output type other than the active
+///   Turn's. Rendered as `invalid_command` with the code `output_type_mismatch`.
 /// - `InvalidCommand` — the command is not valid for the current state or
 ///   carries malformed input. The Core made no state change; the Runtime should
 ///   reject the command and keep the session.
@@ -36,6 +38,9 @@ pub(crate) enum CoreError {
     InvalidCommand {
         detail: String,
     },
+    /// An `invalid_command` with its own code, `output_type_mismatch`, so a
+    /// client can tell the caller to wait for the Turn instead.
+    OutputTypeMismatch,
     InvalidConfiguration {
         field: &'static str,
         detail: String,
@@ -66,6 +71,11 @@ impl CoreError {
         }
     }
 
+    /// A steer names an output type other than the active Turn's.
+    pub(crate) fn output_type_mismatch() -> Self {
+        Self::OutputTypeMismatch
+    }
+
     pub(crate) fn invalid_configuration(field: &'static str, detail: impl Into<String>) -> Self {
         Self::InvalidConfiguration {
             field,
@@ -86,6 +96,9 @@ impl CoreError {
             Self::QueueFull => "pending notification capacity is full",
             Self::InvalidState { .. } => "command is invalid in the current session state",
             Self::InvalidCorrelation { .. } => "command does not correlate with a pending action",
+            Self::OutputTypeMismatch => {
+                "the active turn has another output_type; send the message without one or wait for the turn to end"
+            }
             Self::InvalidCommand { detail }
             | Self::InvalidConfiguration { detail, .. }
             | Self::Invariant { detail } => detail,

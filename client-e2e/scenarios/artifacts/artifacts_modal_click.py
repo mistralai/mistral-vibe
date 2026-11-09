@@ -1,4 +1,4 @@
-"""A click on a modal row opens that artifact's link, like Enter."""
+"""A click highlights a modal row and a click on the highlighted row opens its link, like Enter."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ expected_actions = [Action("open_url", _LISTED_URL)]
 screen_contains = ("PRs (2)",)
 screen_excludes = ("Pull Requests",)
 
-_LEFT = "/test/workdir ⧉  "
+_LEFT = "/test/workdir  "
 _RIGHT = "ctx        0/600k"
 _LABEL = "PRs (2)"
 _LABEL_X = len(_LEFT)
@@ -45,4 +45,5 @@ _BAR_CLICK = f"\x1b[<0;{_CLICK_COL};{ROWS}M\x1b[<0;{_CLICK_COL};{ROWS}m"
 # rows 32-38, options on rows 34 (latest) and 35 (older).
 _ROW_CLICK = "\x1b[<0;10;36M\x1b[<0;10;36m"
 
-timeline: Timeline = [_BAR_CLICK, _ROW_CLICK]
+# A row has several actions (Enter, `c`, `f`): the first click highlights, the second opens.
+timeline: Timeline = [_BAR_CLICK, _ROW_CLICK, _ROW_CLICK]

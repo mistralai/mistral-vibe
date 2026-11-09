@@ -253,6 +253,9 @@ async def _run_file_tool(
     request = {
         "tool": tool.name,
         "arguments": arguments,
+        # A new file's default line ending comes from the platform on the
+        # user's machine, and from nearby files in a sandbox.
+        "sandbox": not on_host,
         "policy": _path_policy(
             config,
             authorized_path,

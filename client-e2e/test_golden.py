@@ -17,18 +17,26 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 from xml.etree import ElementTree
 
 from e2e.app_server import golden
 from e2e.app_server.capture import Capture, capture_scenario
-from e2e.app_server.config import CLIENT_BIN, GOLDEN_DIR, REPLAY_BIN, VIBE_DIR
+from e2e.app_server.config import (
+    CLIENT_BIN,
+    GOLDEN_DIR,
+    GOLDEN_LOCK,
+    REPLAY_BIN,
+    VIBE_DIR,
+)
 from e2e.app_server.golden import (
     golden_exists,
     golden_path,
     load_golden_requests,
     load_golden_svgs,
     normalize_snapshot,
+    render_golden_lock,
     store_golden,
 )
 from e2e.app_server.normalize import normalize_requests
@@ -65,6 +73,10 @@ def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None
         assert snapshot.rows[row] == text, f"screen row {row} differs"
     if (cursor := scenario.screen_cursor) is not None:
         assert snapshot.cursor == cursor, f"cursor {snapshot.cursor} != {cursor}"
+    if (links := scenario.screen_hyperlinks) is not None:
+        assert snapshot.hyperlinks == links, (
+            f"hyperlinks {snapshot.hyperlinks!r} != {links!r}"
+        )
     if (mouse := scenario.mouse_tracking) is not None:
         assert snapshot.mouse_tracking == mouse, f"mouse tracking is not {mouse}"
     if (seen := scenario.mouse_tracking_seen) is not None:
@@ -364,6 +376,95 @@ def test_goldens_are_environment_independent() -> None:
         f"goldens contain environment-dependent values: {offenders};"
         " mask them in normalize.py or pin the scenario instead"
     )
+
+
+def test_golden_lock_is_current() -> None:
+    assert GOLDEN_LOCK.is_file() and GOLDEN_LOCK.read_text() == render_golden_lock(), (
+        "goldens.lock is stale; from vibe/, run `uv run --no-project "
+        '--with "pyte==0.8.2" --with "rich==15.0.0" python '
+        "client-e2e/store_golden.py --lock`"
+    )
+
+
+def test_golden_lock_ignores_untracked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "requests.json").write_text("[]")
+    (tmp_path / "a" / "snapshot_00_x.svg").write_text("<svg/>")
+    monkeypatch.setattr(golden, "GOLDEN_DIR", tmp_path)
+    before = render_golden_lock()
+
+    (tmp_path / "a" / ".DS_Store").write_bytes(b"\0")
+    (tmp_path / "a" / "snapshot_00_x.svg.orig").write_text("<svg/>")
+
+    assert render_golden_lock() == before
+
+
+_BASE_GOLDENS = dict.fromkeys("acegi", "1")
+
+
+@pytest.mark.parametrize(
+    ("ours", "theirs", "conflicts"),
+    [
+        pytest.param(
+            dict.fromkeys("acegi", "2"),
+            {**_BASE_GOLDENS, "d": "1"},
+            True,
+            id="change_everything_vs_new_golden",
+        ),
+        pytest.param(
+            {**_BASE_GOLDENS, "c": "2"},
+            {**_BASE_GOLDENS, "c": "3"},
+            True,
+            id="same_golden_changed_differently",
+        ),
+        pytest.param(
+            {**_BASE_GOLDENS, "c": "2"},
+            {**_BASE_GOLDENS, "c": "2"},
+            False,
+            id="same_golden_changed_identically",
+        ),
+        pytest.param(
+            {**_BASE_GOLDENS, "c": "2"},
+            {**_BASE_GOLDENS, "e": "2"},
+            False,
+            id="neighbor_goldens",
+        ),
+        pytest.param(
+            {**_BASE_GOLDENS, "i": "2"},
+            {**_BASE_GOLDENS, "b": "1"},
+            False,
+            id="new_golden_far_from_change",
+        ),
+    ],
+)
+def test_golden_lock_conflicts_only_on_overlapping_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ours: dict[str, str],
+    theirs: dict[str, str],
+    conflicts: bool,
+) -> None:
+    def lock(name: str, goldens: dict[str, str]) -> str:
+        root = tmp_path / name
+        for scenario, content in goldens.items():
+            (root / scenario).mkdir(parents=True)
+            (root / scenario / "requests.json").write_text(content)
+        monkeypatch.setattr(golden, "GOLDEN_DIR", root)
+        path = tmp_path / f"{name}.lock"
+        path.write_text(render_golden_lock())
+        return str(path)
+
+    base = lock("base", _BASE_GOLDENS)
+    merge = subprocess.run(
+        ["git", "merge-file", "-p", lock("ours", ours), base, lock("theirs", theirs)],
+        capture_output=True,
+        check=False,
+    )
+
+    assert not merge.stderr, merge.stderr
+    assert (merge.returncode > 0) == conflicts
 
 
 @pytest.mark.parametrize("name", available_scenarios())

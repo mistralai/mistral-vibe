@@ -4,6 +4,7 @@ import asyncio
 import threading
 import time
 
+import httpx2
 import pytest
 import respx
 
@@ -12,6 +13,7 @@ from vibe.setup.auth._oidc_config import OidcError
 from vibe.setup.auth._oidc_tenant import (
     OidcTenant,
     OidcTenantResolver,
+    OidcUnauthorized,
     TenantSelection,
     discover_tenant,
 )
@@ -197,3 +199,55 @@ async def test_discovery_reads_a_bounded_number_of_pages() -> None:
 
     # Assert
     assert route.call_count == _oidc_tenant._MAX_PAGES
+
+
+@pytest.mark.asyncio
+@respx.mock
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [
+        (401, OidcUnauthorized),
+        (403, httpx2.HTTPStatusError),
+        (503, httpx2.HTTPStatusError),
+    ],
+)
+async def test_only_a_401_says_discovery_refused_the_token(
+    status: int, error: type[Exception]
+) -> None:
+    """*Prepare*: The workspace route answers ``status``.
+    *Do*: Discover the tenant.
+    *Assert*: Only a 401 says the token itself was refused; 403 and 5xx keep
+      their existing failure.
+    """
+    # Prepare
+    respx.get(f"{AUDIENCE}/v1/users/me/workspaces").respond(status)
+
+    # Do / Assert
+    with pytest.raises(error) as raised:
+        await discover_tenant(AUDIENCE, "id-token", "")
+    assert (type(raised.value) is OidcUnauthorized) == (status == 401)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_token_failure_does_not_answer_for_its_replacement() -> None:
+    """*Prepare*: A lookup that refuses the first token, then succeeds.
+    *Do*: Resolve with the refused token twice, then with a refreshed token.
+    *Assert*: The refused token reuses its failure; the refreshed token is
+      looked up at once, without waiting for the backoff.
+    """
+    # Prepare
+    discovery = _HeldDiscovery(OidcUnauthorized("refused"), OidcTenant("org-1"))
+    discovery.release.set()
+    resolver = OidcTenantResolver(discovery, clock=time.monotonic)
+
+    # Do
+    for _ in range(2):
+        with pytest.raises(OidcUnauthorized):
+            await _resolve(resolver)
+    tenant = await resolver.resolve(
+        AUDIENCE, "user", "refreshed-id-token", TenantSelection()
+    )
+
+    # Assert
+    assert tenant == OidcTenant("org-1")
+    assert discovery.calls == 2

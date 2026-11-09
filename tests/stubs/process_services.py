@@ -12,8 +12,13 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from vibe.app_server._background_worker import BackgroundWorker
+from vibe.app_server._experiments_service import ExperimentsService
+from vibe.app_server._mcp_discovery_service import MCPDiscoveryService
+from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigService
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._worktree_housekeeping import WorktreeHousekeeping
 from vibe.app_server.connector_catalog import SharedConnectorCatalog
 from vibe.core.config.admin_config import ManagedConfig, ManagedConfigResult
 from vibe.core.platform_auth import PlatformCredentialProvider
@@ -62,17 +67,26 @@ def fake_process_services(
     org_server: FakeOrgConfigServer | None = None,
     *,
     connector_catalog: SharedConnectorCatalog | None = None,
+    experiments: ExperimentsService | None = None,
     **org_config: Any,
 ) -> ProcessServices:
     """``org_config`` goes to ``OrgConfigService`` (policy, first wait...). The
     connector catalog fetches from the bootstrap endpoint unless given: tests
-    mock it with ``respx``, and connectors are off by default.
+    mock it with ``respx``, and connectors are off by default. So does the
+    experiments service: the shared test config keeps telemetry off, so a test
+    about experiments turns it on and mocks the eval endpoint.
     """
     server = org_server or FakeOrgConfigServer()
+    background = BackgroundWorker()
     return ProcessServices(
         org_config=OrgConfigService(fetch=server.fetch, **org_config),
         connector_catalog=connector_catalog or SharedConnectorCatalog(),
         oidc_tenants=OidcTenantResolver(),
+        background=background,
+        worktrees=WorktreeHousekeeping(background),
+        experiments=experiments or ExperimentsService(),
+        mcp_discovery=MCPDiscoveryService(),
+        open_sessions=OpenSessions(),
     )
 
 

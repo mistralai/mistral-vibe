@@ -102,6 +102,14 @@ class RemoteCache[K: Hashable, V]:
         self._store = store
         self._clock = clock
         self._states: dict[K, _KeyState[V]] = {}
+        self._on_changed: Callable[[K], None] | None = None
+
+    def on_changed(self, callback: Callable[[K], None]) -> None:
+        """Be told when a key's held value changes: after a refresh, or when
+        another process's newer copy is adopted. Fires once per changed value,
+        never for the first one held or an unchanged re-save.
+        """
+        self._on_changed = callback
 
     def cached(self, key: K) -> Cached[V] | None:
         """The value held in memory, without starting anything."""
@@ -319,7 +327,7 @@ class RemoteCache[K: Hashable, V]:
             await asyncio.to_thread(self._store.save, key, entry)
         except Exception:
             logger.warning("%s cache write failed", self._name, exc_info=True)
-        self._adopt(state, entry)
+        self._adopt(key, state, entry)
         return entry
 
     async def _load_once(self, key: K, state: _KeyState[V]) -> None:
@@ -331,10 +339,21 @@ class RemoteCache[K: Hashable, V]:
         if stored is not None and (
             state.entry is None or stored.stored_at > state.entry.stored_at
         ):
-            self._adopt(state, stored)
+            self._adopt(key, state, stored)
 
-    def _adopt(self, state: _KeyState[V], entry: Cached[V]) -> None:
+    def _adopt(self, key: K, state: _KeyState[V], entry: Cached[V]) -> None:
+        previous = state.entry
         state.entry = entry
+        if previous is not None and entry.value != previous.value:
+            self._notify_changed(key)
+
+    def _notify_changed(self, key: K) -> None:
+        if self._on_changed is None:
+            return
+        try:
+            self._on_changed(key)
+        except Exception:
+            logger.debug("%s change listener failed", self._name, exc_info=True)
 
 
 @dataclass(frozen=True, slots=True)

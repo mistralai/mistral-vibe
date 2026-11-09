@@ -23,7 +23,7 @@ fn artifact(
         "sessionId": "00000000-0000-4000-8000-000000000001",
         "kind": "pull_request",
         "provider": provider,
-        "externalKey": "github.com/mistral-ai/vibe/pull/123",
+        "externalKey": format!("github.com/mistral-ai/vibe/pull/{id}"),
         "externalUrl": URL,
         "displayTitle": "Fix the thing",
         "discoveredAt": discovered_at,
@@ -274,4 +274,34 @@ fn the_bar_label_carries_the_status() {
         T2,
     );
     assert_eq!(artifacts::labeled(&merged), "MR !7 (merged)");
+}
+
+#[test]
+fn the_same_pr_under_another_id_replaces_it_instead_of_listing_it_twice() {
+    let mut app = App::default();
+    app.session.session_id = Some(SESSION.into());
+    let mut first = github("a1", 72279, T1);
+    first.external_key = "github.com/mistralai/dashboard/pull/72279".into();
+    let mut again = github("a2", 72279, T2);
+    again.external_key = first.external_key.clone();
+
+    artifacts::apply_list(&mut app, SESSION, vec![first]);
+    artifacts::upsert(&mut app, again);
+
+    assert_eq!(app.session.artifacts.len(), 1);
+    assert_eq!(app.session.artifacts[0].id, "a2");
+}
+
+#[test]
+fn a_read_without_the_viewed_mark_keeps_the_pr_seen() {
+    let mut app = App::default();
+    let mut viewed = github("a1", 1, T1);
+    viewed.viewed_at = Some(T2.into());
+    artifacts::upsert(&mut app, viewed);
+
+    artifacts::upsert(&mut app, github("a1", 1, T1));
+
+    let stored = &app.session.artifacts[0];
+    assert_eq!(stored.viewed_at.as_deref(), Some(T2));
+    assert!(!artifacts::is_unseen(&app, stored));
 }

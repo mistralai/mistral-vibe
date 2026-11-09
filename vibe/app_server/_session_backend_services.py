@@ -14,6 +14,8 @@ from vibe.app_server.protocol import (
     SessionPeerArchiveResponse,
     SessionPeerListParams,
     SessionPeerListResponse,
+    SessionPeerMarkSeenParams,
+    SessionPeerMarkSeenResponse,
     SessionPeerReadParams,
     SessionPeerReadResponse,
     SessionPeerRestoreParams,
@@ -66,6 +68,10 @@ class SessionBackendServices(Protocol):
     async def restore_peer_sessions(
         self, params: SessionPeerRestoreParams
     ) -> SessionPeerRestoreResponse: ...
+
+    async def mark_peer_sessions_seen(
+        self, params: SessionPeerMarkSeenParams
+    ) -> SessionPeerMarkSeenResponse: ...
 
 
 @runtime_checkable

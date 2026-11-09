@@ -850,3 +850,58 @@ async def test_a_signed_out_connection_asks_to_sign_in_not_for_a_key(
     assert isinstance(resolved, ProviderAuthRequired)
     assert "Sign in" in resolved.message
     assert "MISTRAL_API_KEY" not in resolved.message
+
+
+@pytest.mark.asyncio
+async def test_a_connection_token_refused_after_a_refresh_asks_to_update_or_sign_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Prepare*: A connection whose owner already refreshed the token once.
+    *Do*: The model refuses the refreshed token (401), then the next turn
+      resolves the credential.
+    *Assert*: The next turn says to update Vibe or sign in again.
+    """
+    from vibe.core.platform_auth import (
+        UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
+        PlatformCredentialRequired,
+    )
+
+    # Prepare
+    connection = _ConnectionToken()
+    service = _service(monkeypatch, connection)
+    sent = await service.resolve()
+    assert isinstance(sent, ProviderCredentialSnapshot)
+
+    async def refused_after_refresh(target: Any, *, observed: Any, **_: Any) -> Any:
+        connection.rejected.append(observed)
+        return PlatformCredentialRequired(
+            reason="unauthorized_after_refresh", observed_revision=observed.revision
+        )
+
+    connection.reject = refused_after_refresh  # type: ignore[method-assign]
+
+    # Do
+    await service.reject(observed_revision=sent.revision, reason="http_unauthorized")
+    result = await service.resolve()
+
+    # Assert
+    assert isinstance(result, ProviderAuthRequired)
+    assert result.reason == "rejected"
+    assert result.message == UNAUTHORIZED_AFTER_REFRESH_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_a_connection_reporting_unauthorized_after_refresh_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vibe.core.platform_auth import UNAUTHORIZED_AFTER_REFRESH_MESSAGE
+
+    service = _service(
+        monkeypatch,
+        _ConnectionToken(signed_in=False, reason="unauthorized_after_refresh"),
+    )
+
+    resolved = await service.resolve()
+
+    assert isinstance(resolved, ProviderAuthRequired)
+    assert resolved.message == UNAUTHORIZED_AFTER_REFRESH_MESSAGE

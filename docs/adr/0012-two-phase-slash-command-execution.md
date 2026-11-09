@@ -42,8 +42,15 @@ logic.
 ## Side-channel rules
 
 A side-channel command must be safe to run alongside active work. Suitable
-commands display information, copy data, exit, or write settings no turn reads.
-They must not mutate session history or configuration the active turn reads.
+commands display information, copy data, exit, write settings no turn reads, or
+fork a detached copy of the session. They must not mutate session history or
+configuration the active turn reads.
+
+`/branch` forks while a turn runs: the Harness cuts the copy before that turn,
+whose history is not committed yet. The fork holds the source's turn-start lock
+while it copies, so queued prompts wait for it. A turn an automatic compaction
+merged into its summary refuses the fork until it ends.
+
 MCP, connector, and plugin changes stay idle-only: the Harness refuses them
 while a turn runs.
 
@@ -60,7 +67,7 @@ queued-message UI.
 - Add a config path to `config/write`'s turn-independent allowlist only when no
   turn, tool, or prompt reads it.
 - Mark a side-channel command `.after_jobs()` when its server write conflicts
-  with a compaction, teleport, project request, or agent install.
+  with a compaction, project request, or agent install.
 - Keep lifecycle commands such as `/clear`, `/compact`, `/rewind`, `/resume`,
   and `/retry` on the idle-only path.
 - Keep settings commands that a turn reads on the idle-only path and write

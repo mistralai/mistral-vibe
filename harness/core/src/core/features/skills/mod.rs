@@ -147,9 +147,9 @@ fn find_closest_skill_names<'a>(requested_name: &str, available: &[&'a str]) -> 
 }
 
 fn is_skill_name(value: &str) -> bool {
-    if let Some((namespace, skill_name)) = value.split_once(':') {
+    if let Some((qualifier, skill_name)) = value.split_once(':') {
         return !skill_name.contains(':')
-            && is_programmatic_identifier(namespace)
+            && is_skill_qualifier(qualifier)
             && is_unqualified_skill_name(skill_name);
     }
     is_unqualified_skill_name(value)
@@ -175,10 +175,12 @@ fn is_skill_path(value: &str) -> bool {
                 && matches!(value.as_bytes()[2], b'/' | b'\\')))
 }
 
-fn is_programmatic_identifier(value: &str) -> bool {
-    let mut chars = value.chars();
-    chars.next().is_some_and(|character| {
-        character == '_' || character == '$' || character.is_ascii_alphabetic()
-    }) && chars
-        .all(|character| character == '_' || character == '$' || character.is_ascii_alphanumeric())
+/// The part of a Runtime-qualified alias before `:`, usually the name of the
+/// plugin that provides the skill, such as `acme-tools` or `acme.tools`. A
+/// programmatic identifier such as a tool namespace is accepted too.
+fn is_skill_qualifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '.' | '_' | '$')
+        })
 }

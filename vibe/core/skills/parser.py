@@ -54,6 +54,81 @@ class SkillParseError(Exception):
 
 
 FM_BOUNDARY = re.compile(r"^-{3,}\s*$", re.MULTILINE)
+_KEY_VALUE_LINE = re.compile(
+    r"^(?P<key>[^:'\"]*[^\s:'\"]):(?P<gap>\s+)(?P<value>.*?)(?P<comment>\s+#.*)?$"
+)
+_COLON_SEPARATOR = re.compile(r":(\s|$)")
+_COMMENT = re.compile(r"(^|\s)#")
+_NON_PLAIN_VALUE_STARTS = ("'", '"', "|", ">", "!", "&", "*")
+
+
+def _is_prose_continuation(line: str) -> bool:
+    stripped = line.strip()
+    return not (
+        _COLON_SEPARATOR.search(stripped)
+        or _COMMENT.search(stripped)
+        or stripped.startswith("-")
+    )
+
+
+def _quote_rejected_value(lines: list[str], error: yaml.YAMLError) -> list[str] | None:
+    # Other harnesses accept prose like `description: Use when: X`, which strict YAML
+    # rejects. Only quote the plain value the parser points at, never valid content.
+    mark = error.problem_mark if isinstance(error, yaml.MarkedYAMLError) else None
+    if mark is None or mark.line >= len(lines):
+        return None
+    match = _KEY_VALUE_LINE.match(lines[mark.line])
+    if match is None or mark.column < match.start("value"):
+        return None
+    value = match["value"].rstrip()
+    if value.startswith(_NON_PLAIN_VALUE_STARTS) or not _COLON_SEPARATOR.search(value):
+        return None
+    # A line inside a multi-line flow collection would swallow its brackets or comma.
+    if (
+        value.endswith(",")
+        or value.count("[") != value.count("]")
+        or value.count("{") != value.count("}")
+    ):
+        return None
+
+    key = match["key"]
+    owner_column = len(key) - len(key.lstrip(" -"))
+    end = mark.line + 1
+    while end < len(lines) and (
+        not lines[end].strip()
+        or len(lines[end]) - len(lines[end].lstrip(" ")) > owner_column
+    ):
+        end += 1
+    while end > mark.line + 1 and not lines[end - 1].strip():
+        end -= 1
+    continuation = lines[mark.line + 1 : end]
+    if continuation and (
+        match["comment"] or not all(map(_is_prose_continuation, continuation))
+    ):
+        return None
+
+    text = "\n".join([value, *(line.rstrip() for line in continuation)])
+    quoted = "'" + text.replace("'", "''") + "'"
+    repaired = f"{key}:{match['gap']}{quoted}{match['comment'] or ''}"
+    return [*lines[: mark.line], *repaired.split("\n"), *lines[end:]]
+
+
+def _load_frontmatter(yaml_content: str) -> Any:
+    try:
+        return yaml.safe_load(yaml_content)
+    except yaml.YAMLError as e:
+        original_error = e
+
+    lines = yaml_content.replace("\r\n", "\n").split("\n")
+    error: yaml.YAMLError = original_error
+    while (lines := _quote_rejected_value(lines, error)) is not None:
+        try:
+            return yaml.safe_load("\n".join(lines))
+        except yaml.YAMLError as e:
+            error = e
+    raise SkillParseError(
+        f"Invalid YAML frontmatter: {original_error}"
+    ) from original_error
 
 
 def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
@@ -67,10 +142,7 @@ def parse_skill_markdown(content: str) -> tuple[dict[str, Any], str]:
     yaml_content = splits[1]
     markdown_body = splits[2]
 
-    try:
-        frontmatter = yaml.safe_load(yaml_content)
-    except yaml.YAMLError as e:
-        raise SkillParseError(f"Invalid YAML frontmatter: {e}") from e
+    frontmatter = _load_frontmatter(yaml_content)
 
     if frontmatter is None:
         frontmatter = {}

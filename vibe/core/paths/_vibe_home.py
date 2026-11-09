@@ -4,7 +4,10 @@ import os
 import stat
 
 from vibe import VIBE_ROOT
-from vibe.core.experiments._constants import EVAL_CACHE_FILE_NAME
+from vibe.core.experiments._constants import (
+    EVAL_CACHE_FILE_NAME,
+    HELD_EVAL_CACHE_FILE_NAME,
+)
 from vibe.observability.logging import logger
 from vibe.utils.paths import GlobalPath
 from vibe.utils.platform import is_windows
@@ -24,6 +27,9 @@ CONNECTOR_BOOTSTRAP_CACHE_FILE = GlobalPath(
     lambda: VIBE_HOME.path / "connector_bootstrap_cache.json"
 )
 EXPERIMENT_EVAL_CACHE_FILE = GlobalPath(lambda: VIBE_HOME.path / EVAL_CACHE_FILE_NAME)
+EXPERIMENT_HELD_EVAL_CACHE_FILE = GlobalPath(
+    lambda: VIBE_HOME.path / HELD_EVAL_CACHE_FILE_NAME
+)
 MANAGED_CONFIG_CACHE_FILE = GlobalPath(
     lambda: VIBE_HOME.path / "managed_config_cache.json"
 )

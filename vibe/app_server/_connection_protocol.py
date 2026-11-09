@@ -51,6 +51,8 @@ class ClientCapabilities(ProtocolModel):
     session_spawn: bool = False
     session_peers: bool = False
     session_peer_restore: bool = False
+    session_peer_mark_seen: bool = False
+    agent_worktrees: bool = False
     disabled_notifications: list[str] = Field(default_factory=list)
     platform_credentials: PlatformCredentialsCapability | None = None
 
@@ -133,7 +135,13 @@ class PlatformCredentialsSnapshot(ProtocolModel):
 
 class PlatformCredentialsUnavailable(ProtocolModel):
     status: Literal["unavailable"]
-    reason: Literal["missing", "reauthentication_required", "transient", "invalid"]
+    reason: Literal[
+        "missing",
+        "reauthentication_required",
+        "transient",
+        "invalid",
+        "unauthorized_after_refresh",
+    ]
 
 
 type PlatformCredentialsResolveResponse = (

@@ -8,6 +8,7 @@ use serde_json::Value;
 use super::connector_web;
 use super::effect_output::*;
 use crate::utils::clean::clean_output;
+use crate::utils::text::bounded_message;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,10 +109,13 @@ impl EffectEntry {
     /// Result body lines shown on expand.
     pub fn body(&self) -> Vec<BodyLine> {
         let lines = match self.status() {
-            Some("failed") => format!("Error: {}", clean_output(self.error_message()))
-                .lines()
-                .map(str::to_owned)
-                .collect(),
+            Some("failed") => {
+                let error = clean_output(&bounded_message(self.error_message()));
+                format!("Error: {error}")
+                    .lines()
+                    .map(str::to_owned)
+                    .collect()
+            }
             Some("cancelled" | "skipped") => vec![format!("Skipped: {}", self.reason())],
             Some("completed") if self.output().is_some() && self.is_subagent() => {
                 python_json_lines(self.output())

@@ -24,3 +24,4 @@ screen_contains = ("Could not connect DeepWiki (HTTP 503)", "not connected")
 _DOWN = "\x1b[B"
 
 timeline: Timeline = ["/mcp\r", _DOWN, "\r"]
+screen_excludes = ("✕",)

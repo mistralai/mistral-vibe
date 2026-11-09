@@ -68,12 +68,14 @@ pub fn shape(app: &App) -> Shape {
             Shape::Default
         };
     }
-    if target == crate::mouse::MouseTarget::JumpToBottom {
+    if matches!(
+        target,
+        crate::mouse::MouseTarget::JumpToBottom | crate::mouse::MouseTarget::StickyPrompt
+    ) {
         return Shape::Pointer;
     }
     if target == crate::mouse::MouseTarget::BottomBar {
-        let clickable = crate::ui::bottom_bar::link_at(app, at).is_some();
-        return if clickable {
+        return if crate::ui::bottom_bar::clickable_at(app, at) {
             Shape::Pointer
         } else {
             Shape::Default
@@ -82,23 +84,6 @@ pub fn shape(app: &App) -> Shape {
     if target == crate::mouse::MouseTarget::Trust {
         let at = crate::trust_folders::selection_position(app, at);
         return if app.view.selection_region.contains(at) {
-            Shape::Text
-        } else {
-            Shape::Default
-        };
-    }
-    if target == crate::mouse::MouseTarget::RemoteProject {
-        if crate::mouse::scrollbar_at(app, at) {
-            return Shape::Default;
-        }
-        let project = &app.vibe_code_project;
-        let position = at.into();
-        if project.search_area.contains(position) || project.branch_area.contains(position) {
-            return Shape::Text;
-        }
-        return if project.list.index_at(at).is_some() {
-            Shape::Pointer
-        } else if app.view.bottom_app_selection_region.contains(at) {
             Shape::Text
         } else {
             Shape::Default

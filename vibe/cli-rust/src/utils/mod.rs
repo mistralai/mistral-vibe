@@ -12,7 +12,7 @@ pub fn replay_now_ms() -> Option<u64> {
     std::env::var("VIBE_REPLAY_NOW_MS").ok()?.parse().ok()
 }
 
-/// `default`, or the milliseconds in env var `name`: a seam tests use to shorten a timeout.
+/// `default`, or the milliseconds in env var `name`: a seam tests use to set a timeout.
 pub fn timeout_or_env(name: &str, default: std::time::Duration) -> std::time::Duration {
     let ms = std::env::var(name).ok().and_then(|ms| ms.parse().ok());
     ms.map_or(default, std::time::Duration::from_millis)

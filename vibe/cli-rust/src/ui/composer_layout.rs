@@ -173,6 +173,7 @@ pub struct ComposerLayout<'a> {
 
 impl<'a> ComposerLayout<'a> {
     pub fn new(body: &'a str, marker: &str, cursor: usize, width: u16) -> Self {
+        // One column stays free so a full row's trailing caret fits.
         let content_width = width
             .saturating_sub(1)
             .saturating_sub(marker.width() as u16)

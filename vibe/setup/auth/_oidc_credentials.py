@@ -100,6 +100,16 @@ class OidcCredentialStore:
             asyncio.create_task(asyncio.to_thread(self._clear_locked))
         )
 
+    async def take(self) -> OidcTokens | None:
+        """Delete the stored session and return it, or ``None`` if the slot was
+        empty or unreadable. The read and the delete share one slot lock, so a
+        refresh in this process cannot rotate the tokens in between; the lock
+        does not cover another process.
+        """
+        return await self._wait_for_worker(
+            asyncio.create_task(asyncio.to_thread(self._take_locked))
+        )
+
     def _save_locked(self, tokens: OidcTokens) -> None:
         with _slot_lock:
             self._save(tokens)
@@ -130,6 +140,15 @@ class OidcCredentialStore:
     def _clear_locked(self) -> None:
         with _slot_lock:
             self._clear()
+
+    def _take_locked(self) -> OidcTokens | None:
+        with _slot_lock:
+            try:
+                tokens = self._reload()
+            except OidcStorageError:
+                tokens = None
+            self._clear()
+            return tokens
 
     async def _wait_for_worker[T](
         self, task: asyncio.Task[T], *, complete_on_cancel: bool = False

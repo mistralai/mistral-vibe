@@ -11,5 +11,5 @@ capture_startup = False
 request_methods = {"config/reload"}
 # Open on the pinned row, pick it, then keep its thinking level.
 timeline: Timeline = ["/model", "\r", "\r", "\r"]
-screen_contains = ("Configuration reloaded",)
+screen_contains = ("Applied: model devstral-small, thinking off.",)
 screen_excludes = ("Failed to apply",)

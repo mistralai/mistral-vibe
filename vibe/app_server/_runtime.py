@@ -1,14 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import (
-    Awaitable,
-    Callable,
-    Iterable,
-    Mapping,
-    Sequence,
-    Set as AbstractSet,
-)
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass, field, replace
 from enum import StrEnum, auto
 import hashlib
@@ -52,6 +45,15 @@ from vibe.app_server._client_provided_tools import (
 )
 from vibe.app_server._connection_credentials import ConnectionCredentials
 from vibe.app_server._host import HostRequestHandler
+from vibe.app_server._host_hooks import (
+    SESSION_START_CONTEXT_BINDING_ID,
+    HostHook,
+    HostHooks,
+    SessionHooks,
+    SessionStartContexts,
+    session_start_context_binding,
+    session_start_context_handler,
+)
 from vibe.app_server._ignored_tool_settings import ignored_tool_settings
 from vibe.app_server._imports import build_local_imports_service
 from vibe.app_server._launch_context import client_launch_context
@@ -61,7 +63,7 @@ from vibe.app_server._projection import (
     project_config_view,
     project_skill_summaries,
 )
-from vibe.app_server._provided_tools import vibe_tool_groups
+from vibe.app_server._provided_tools import enter_worktree_offered, vibe_tool_groups
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._session_backend_services import SessionBackendServices
 from vibe.app_server._session_config_cache import (
@@ -72,6 +74,12 @@ from vibe.app_server._session_config_cache import (
 from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._session_spawn import spawn_models
 from vibe.app_server._skills import discover_session_skills
+from vibe.app_server._surface_instructions import (
+    ClientSurface,
+    client_surface,
+    with_surface_instructions,
+)
+from vibe.app_server._worktree_session import session_harness_files
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.client_tools import ClientToolHandler
 from vibe.app_server.connector_catalog import ConnectorCatalogService
@@ -114,10 +122,10 @@ from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.admin import enforced_keys
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.shell_timeouts import shell_max_timeout, shell_timeout_seconds
-from vibe.core.experiments.client import RemoteEvalClient
-from vibe.core.experiments.manager import ExperimentManager
+from vibe.core.git.worktree import ManagedWorktree
 from vibe.core.hooks.config import load_hooks_file, load_hooks_from_fs
 from vibe.core.hooks.models import (
+    HOST_HOOK_TYPES,
     HookConfig,
     HookConfigResult,
     HookProtocol,
@@ -147,6 +155,7 @@ from vibe.core.tools.permissions import PermissionStore
 from vibe.core.types import Backend
 from vibe.core.utils import get_windows_bash_path, is_windows
 from vibe.core.utils.matching import name_matches
+from vibe.core.utils.shell import VIBE_SESSION_ENV
 from vibe.observability.logging import logger
 from vibe.utils import AgentEntrypoint
 from vibe.utils.http import (
@@ -293,11 +302,30 @@ def _agent_profile_prompt(
         )
 
 
-def _build_unified_system_instructions(
+_DESKTOP_FILE_LINK_INSTRUCTIONS = """\
+## Local Desktop file references
+
+When referring to an existing file inside the current session workspace in a
+user-facing response, use a descriptive Markdown link with an absolute file: URI,
+for example [src/main.ts:42](file:///absolute/worktree/src/main.ts).
+Resolve relative paths against the current session workspace, including its
+active worktree, not a previous workspace or the original repository checkout.
+Use standard file URI syntax: file:///absolute/path on POSIX and
+file:///C:/absolute/path on Windows, with forward slashes. Percent-encode spaces
+and URI-reserved characters in file names, such as # and %, in the URI.
+Keep line numbers in the link label, not as :42 or #L42 in the URI: Files opens
+the file, not a particular line. Keep URLs to remote resources as HTTP/HTTPS.
+Do not invent paths or use file: links for directories, missing files, remote
+sandbox files, or files outside the current session workspace.
+"""
+
+
+def _build_unified_system_instructions(  # noqa: PLR0913 - one input per prompt section
     config: VibeConfigSchema,
     harness_files: HarnessFilesManager,
     *,
     cwd: Path,
+    surface: ClientSurface,
     base: str | None = None,
     extra: str | None = None,
     sandbox_workspace: SandboxWorkspaceContext | None = None,
@@ -305,6 +333,8 @@ def _build_unified_system_instructions(
     project_instructions: str | None = None,
     background_processes: bool = False,
     command_environment: str = "unix",
+    local_desktop: bool = False,
+    worktree_rule: CheckoutState | None = None,
 ) -> str:
     """The session's system instructions.
 
@@ -314,7 +344,9 @@ def _build_unified_system_instructions(
     ``project_instructions`` go with the project AGENTS.md docs, ahead of them.
     Only with ``background_processes``, in a ``command_environment`` the
     Harness Core advises the process tools for, does the shell guidance say to
-    start long work in the background.
+    start long work in the background. ``surface`` picks the block the app
+    server appends to the SDK's product prompt; a ``base`` prompt replaces
+    both.
     """
     from mistralai_vibe_local_harness.vibe import (
         build_vibe_code_system_instructions,
@@ -329,15 +361,25 @@ def _build_unified_system_instructions(
     # prompt is restored here. The core appends its capability sections after
     # this text, keeping the docs above skills/plugins in the final prompt.
     instructions = with_shell_guidance(
-        base or build_vibe_code_system_instructions(variant=config.system_prompt_id),
+        base
+        or with_surface_instructions(
+            build_vibe_code_system_instructions(variant=config.system_prompt_id),
+            variant=config.system_prompt_id,
+            surface=surface,
+        ),
         background_processes=background_processes,
         command_environment=command_environment,
     )
+    if local_desktop:
+        instructions = f"{instructions}\n\n{_DESKTOP_FILE_LINK_INSTRUCTIONS.strip()}"
     if extra:
         instructions = f"{instructions}\n\n{extra}"
 
     if config.include_commit_signature:
         instructions = f"{instructions}\n\n{get_commit_signature_section()}"
+
+    if worktree_rule is not None:
+        instructions = f"{instructions}\n\n{_WORKTREE_RULES[worktree_rule]}"
 
     if config.include_project_context:
         if sandbox_workspace is None:
@@ -357,6 +399,66 @@ def _build_unified_system_instructions(
         if agents_md_section:
             instructions = f"{instructions}\n\n{agents_md_section}"
     return instructions
+
+
+type CheckoutState = Literal["clean", "in_progress"]
+
+_WORKTREE_RULE_ASK = """\
+When a request needs file edits here, your first step must be an \
+`ask_user_question` call with two options, "New worktree" and "This \
+checkout", and nothing else in that step. This is not an implementation \
+detail: it decides whether your changes land in their checkout, so ask even \
+for a one-line change. On "New worktree", call `enter_worktree` (a fresh \
+branch off the default branch, in a worktree of your own) and edit there; on \
+"This checkout", edit in place. Only skip the question when the user \
+explicitly asked for a worktree or for their checkout."""
+
+_WORKTREE_RULE_COMMON = """\
+Skip all this for questions, reviews and read-only investigation. Once you \
+are in a worktree, the question is settled: keep editing there without asking \
+again. When a task continues work you started in a worktree, re-enter that \
+one rather than creating another."""
+
+_WORKTREE_RULES: dict[CheckoutState, str] = {
+    "clean": f"""\
+## Worktrees
+
+The working directory is the user's own checkout. {_WORKTREE_RULE_ASK} \
+{_WORKTREE_RULE_COMMON}""",
+    "in_progress": f"""\
+## Worktrees
+
+The working directory is the user's own checkout, and it holds work in \
+progress: a branch other than the default one, or uncommitted changes (the git \
+status above shows which). A new worktree starts from the default branch \
+without that work. When the request is about that work (fixing, finishing or \
+testing it), edit the checkout in place. Otherwise: {_WORKTREE_RULE_ASK} \
+{_WORKTREE_RULE_COMMON}""",
+}
+
+
+def _checkout_state(cwd: Path) -> CheckoutState | None:
+    """What the agent leaves behind by moving off ``cwd`` into a worktree.
+
+    None where it cannot: no repository, one without commits, or a cwd that
+    already is a managed worktree.
+    """
+    from vibe.core.git.errors import GitError
+    from vibe.core.git.repo import GitRepo
+
+    if ManagedWorktree.at(cwd) is not None:
+        return None
+    try:
+        with GitRepo.open(cwd) as repository:
+            if not repository.has_commits():
+                return None
+            branch = repository.branch()
+            on_default = branch is not None and branch == repository.base_branch()
+            if on_default and not repository.has_uncommitted_changes():
+                return "clean"
+            return "in_progress"
+    except GitError:
+        return None
 
 
 def _build_launch_context_from_services(
@@ -901,9 +1003,22 @@ class HarnessProcess:
         # hooks at context build (see merge_agents_md_hook).
         from vibe.app_server._agents_md_hooks import agents_md_hook_handlers
 
+        # The session_start context each session owes its next message, shared by
+        # every session of this process: a Host-global builtin pre_agent hook
+        # hands it over.
+        self.session_start_contexts = SessionStartContexts()
         try:
+            builtin_hooks = agents_md_hook_handlers(self.harness_files)
             cast(Any, candidate).configure_hook_handlers(
-                agents_md_hook_handlers(self.harness_files)
+                replace(
+                    builtin_hooks,
+                    pre_agent_turn={
+                        **builtin_hooks.pre_agent_turn,
+                        SESSION_START_CONTEXT_BINDING_ID: session_start_context_handler(
+                            self.session_start_contexts
+                        ),
+                    },
+                )
             )
         except Exception as exc:
             # An older pinned harness without the builtin-hook registry
@@ -922,6 +1037,8 @@ class HarnessProcess:
             self.harness_files,
             org_config=services.org_config,
             credentials=self.credentials,
+            worktrees=services.worktrees,
+            experiments=services.experiments,
             image_fallback=self._experimental_harness_host is not None,
             builtin_plugin_roots=self._builtin_plugin_roots,
         )
@@ -970,30 +1087,38 @@ class HarnessProcess:
 
         if self._agent_socket is not None:
             self._agent_socket.subscribe(services.notify)
+        # One per app server, even in a shared process: closing one app server
+        # waits for its own background hooks only, and leaves the others running.
+        host_hooks = HostHooks()
 
-        def build_session_context(
+        async def build_session_context(
             options: SessionOptions,
             *,
             require_api_key: bool = True,
             entrypoint: AgentEntrypoint = "cli",
             org_config: OrgConfigSource,
-        ) -> Awaitable[UnifiedSessionContext]:
-            return self.build_unified_session_context(
+        ) -> UnifiedSessionContext:
+            context = await self.build_unified_session_context(
                 options,
                 require_api_key=require_api_key,
                 entrypoint=entrypoint,
                 org_config=org_config,
                 session_spawner=session_spawner_for(services),
                 session_peers=session_peers_for(services),
+                agent_worktrees=services.client_capabilities().agent_worktrees,
             )
+            return replace(context, host_hooks=host_hooks)
 
         return adapt_harness_host(
             host,
             build_session_context,
             services,
+            host_hooks=host_hooks,
             pin_session_options=None
             if self._agent_socket is None
             else self._agent_socket.pin_session_options,
+            worktree_housekeeping=self.services.worktrees,
+            open_sessions=self.services.open_sessions,
             build_read_context=self.build_unified_read_context,
             launch_context_getter=lambda: _build_launch_context_from_services(services),
             # Neither the TUI nor ``vibe -p`` reaches ``HarnessProcess.close``
@@ -1093,6 +1218,7 @@ class HarnessProcess:
         org_config: OrgConfigSource = OrgConfigSource.CACHED,
         session_spawner: SessionSpawner | None = None,
         session_peers: SessionPeers | None = None,
+        agent_worktrees: bool = False,
     ) -> UnifiedSessionContext:
         """Build a session context; no build fails because of the org config.
 
@@ -1126,6 +1252,7 @@ class HarnessProcess:
                     entrypoint=entrypoint,
                     session_spawner=session_spawner,
                     session_peers=session_peers,
+                    agent_worktrees=agent_worktrees,
                 )
                 await _accept_org_config(context)
                 break
@@ -1166,6 +1293,7 @@ class HarnessProcess:
         entrypoint: AgentEntrypoint,
         session_spawner: SessionSpawner | None,
         session_peers: SessionPeers | None,
+        agent_worktrees: bool,
     ) -> UnifiedSessionContext:
         from mistralai_vibe_local_harness import HarnessSession
         from mistralai_vibe_local_harness.protocol import (
@@ -1229,6 +1357,7 @@ class HarnessProcess:
             UnifiedRuntimeDerivation,
             UnifiedSessionContext,
             UnifiedSessionSettings,
+            WorkspaceSlot,
         )
         from vibe.app_server._unified_permissions import (
             ProvidedToolNames,
@@ -1266,6 +1395,14 @@ class HarnessProcess:
                 ),
                 path_space="sandbox",
             )
+        workspace_slot = WorkspaceSlot(workspace)
+        # A sandbox has no host checkout to keep clean.
+        agent_worktrees = agent_worktrees and sandbox is None
+        # Read once: the repository the session starts in does not change,
+        # and a derivation runs on every configuration change.
+        checkout_state = (
+            await asyncio.to_thread(_checkout_state, cwd) if agent_worktrees else None
+        )
         # Built before the plugins, which bind the workspace's own agent types
         # through the same projection as a plugin's and therefore need a manager
         # to read them from. Both the credential service and the agent manager
@@ -1304,6 +1441,8 @@ class HarnessProcess:
             profile_config = config_orchestrator.copy()
             apply_profile_overrides(profile_config, dict(overrides))
             config = profile_config.config
+            if isinstance(alias, str):
+                alias = config.resolve_model_name(alias)
             model = config.models.get(alias) if isinstance(alias, str) else None
             if model is None:
                 raise ValueError(
@@ -1357,13 +1496,16 @@ class HarnessProcess:
         permissions = PermissionStore()
 
         def session_tools(config_getter: Callable[[], VibeConfigSchema]) -> ToolManager:
-            return ToolManager(
+            tools = ToolManager(
                 config_getter,
                 defer_mcp=True,
                 cwd=workspace.cwd,
                 harness_files=harness_files,
                 permission_getter=permissions.get_tool_permission,
             )
+            if workspace_slot.moved:
+                tools.move_to(workspace_slot.workspace.cwd, workspace_slot.entered)
+            return tools
 
         # The MCP and connector projections write the routes they published into
         # this map; the resolver reads it to find the name they were configured
@@ -1380,7 +1522,10 @@ class HarnessProcess:
         # Built before the plugins, which hand each declared subagent profile the
         # resolver its calls go through.
         subagent_permissions = SubagentPermissions(
-            permission_resolver, config_orchestrator, session_tools
+            permission_resolver,
+            config_orchestrator,
+            session_tools,
+            cwd=lambda: workspace_slot.workspace.cwd,
         )
         (plugins, plugin_provider, plugin_mcp), _ = await asyncio.gather(
             self._build_plugins(
@@ -1586,7 +1731,7 @@ class HarnessProcess:
             derived_tools = ToolManager(
                 lambda: config,
                 defer_mcp=True,
-                cwd=workspace.cwd,
+                cwd=workspace_slot.workspace.cwd,
                 harness_files=harness_files,
             )
             available_tools = set(derived_tools.available_tools)
@@ -1680,7 +1825,8 @@ class HarnessProcess:
                     system_instructions=_build_unified_system_instructions(
                         config,
                         harness_files,
-                        cwd=workspace.cwd,
+                        cwd=workspace_slot.workspace.cwd,
+                        surface=client_surface(entrypoint),
                         base=options.system_prompt or profile_prompt,
                         extra=active_profile.instructions,
                         sandbox_workspace=sandbox_workspace,
@@ -1688,6 +1834,17 @@ class HarnessProcess:
                         project_instructions=self._project_instructions,
                         background_processes=config.enable_background_processes,
                         command_environment=command_environment_mode,
+                        local_desktop=entrypoint == "desktop" and sandbox is None,
+                        worktree_rule=checkout_state
+                        if agent_worktrees
+                        and not workspace_slot.moved
+                        # The rule has the model ask through this tool.
+                        and "ask_user_question" in available_tools
+                        and enter_worktree_offered(
+                            enabled_tools=config.enabled_tools,
+                            disabled_tools=config.disabled_tools,
+                        )
+                        else None,
                     ),
                     settings=RustHarnessSettings(
                         turn=RustTurnSettings(
@@ -1776,9 +1933,14 @@ class HarnessProcess:
                                     else None
                                 ),
                                 session_peers=session_peers is not None,
+                                enter_worktree=agent_worktrees,
                                 session_peer_restore=(
                                     session_peers is not None
                                     and session_peers.client_capabilities().session_peer_restore
+                                ),
+                                session_peer_mark_seen=(
+                                    session_peers is not None
+                                    and session_peers.client_capabilities().session_peer_mark_seen
                                 ),
                             ),
                             # The client chose these; the tool filters are for
@@ -1877,7 +2039,7 @@ class HarnessProcess:
                     # A budget of 0 turns retries off, the stall retry included.
                     retry_max_elapsed_time_s=config.api_retry_max_elapsed_time,
                     enable_system_trust_store=config.enable_system_trust_store,
-                    workspace=workspace,
+                    workspace=workspace_slot.workspace,
                     # The library environment goes on top: a plugin that declares a
                     # Python or Node library is only usable if the search paths
                     # materialization computed reach the process that runs a
@@ -1890,6 +2052,7 @@ class HarnessProcess:
                         {
                             **os.environ,
                             **session_plugins.materialized.process_environment,
+                            **VIBE_SESSION_ENV,
                         }
                         if sandbox is None
                         else {}
@@ -1968,6 +2131,10 @@ class HarnessProcess:
         scoped_post_agent_hooks, main_post_agent_hooks = _post_agent_hook_counts(
             hook_result, plugin_hooks
         )
+        session_hooks = _session_hooks(
+            hook_result, harness_files=harness_files, plugin_hooks=plugin_hooks
+        )
+        hooks = _with_session_start_context(hooks, session_hooks)
         return UnifiedSessionContext(
             storage_root=self._unified_storage_root(config.session_logging),
             session_logging_enabled=config.session_logging.enabled,
@@ -1981,7 +2148,9 @@ class HarnessProcess:
             harness_files=harness_files,
             agents=agents,
             org_config_service=self.services.org_config,
+            experiments_service=self.services.experiments,
             org_config_key=OrgConfigKeySlot(session_config.org_config_key),
+            workspace=workspace_slot,
             derive=derive,
             permissions=permission_resolver,
             provided_names=provided_names,
@@ -1991,6 +2160,9 @@ class HarnessProcess:
             hooks=hooks,
             post_agent_scoped_hooks_count=scoped_post_agent_hooks,
             post_agent_main_hooks_count=main_post_agent_hooks,
+            hook_type_counts=_hook_type_counts(hook_result, plugin_hooks),
+            session_hooks=session_hooks,
+            session_start_contexts=self.session_start_contexts,
             mcp_catalog=mcp_catalog,
             mcp_authorization_provider=self.mcp_authentication,
             mcp_authentication=self.mcp_authentication,
@@ -2000,6 +2172,7 @@ class HarnessProcess:
                 / "mcp-descriptors"
                 / "unified"
             ),
+            mcp_discovery_flights=self.services.mcp_discovery.flights(),
             mcp_enable_system_trust_store=config.enable_system_trust_store,
             connector_catalog=connector_catalog,
             connector_selection=connector_selection,
@@ -2009,15 +2182,6 @@ class HarnessProcess:
             platform_credentials=self.credentials,
             provider_credentials=credentials_for,
             preflight=preflight,
-            # Built here rather than defaulted on the context: the default
-            # ``ExperimentManager`` has no eval URL, so every resolution would
-            # be a silent no-op.
-            experiment_manager=ExperimentManager(
-                client=RemoteEvalClient.from_settings(
-                    api_host=config.experiments.api_host,
-                    client_key=config.experiments.client_key,
-                )
-            ),
             correlation=correlation,
             request_sent=request_sent,
             malformed_tool_calls=malformed_tool_calls,
@@ -2052,15 +2216,10 @@ class HarnessProcess:
             workspace_roots = [
                 Path(root).expanduser().resolve() for root in options.workspace_roots
             ]
-            # The session cwd is deliberately absent from workspace_roots here:
-            # a listed cwd becomes a session root, and ``project_roots`` returns
-            # the listed roots even when the tree is untrusted, which would load
-            # that tree's AGENTS.md past the trust gate. The same invariant is
-            # enforced by the AGENTS.md hook handler (see
-            # ``_agents_md_hooks._session_files``); the durable home would be
-            # ``for_session`` itself ignoring a listed root equal to the cwd.
-            harness_files = self.harness_files.for_session(
-                cwd, workspace_roots=workspace_roots
+            # The cwd and any worktree the agent entered are never opened as
+            # projects (see ``session_harness_files``).
+            harness_files = session_harness_files(
+                self.harness_files, cwd, workspace_roots
             )
             if options.trust_workspace:
                 harness_files.trust_store.trust_for_session(cwd)
@@ -2398,6 +2557,7 @@ def _foreign_hook_definitions(
     fallback for a session with no plugins bound.
     """
     from mistralai_vibe_local_harness.vibe import ForeignHookDefinition, HookProcess
+    from vibe.app_server._plugins import pinned_plugin_hook
 
     user_names = _user_hook_names(harness_files)
     cwd_source = str(cwd)
@@ -2425,7 +2585,7 @@ def _foreign_hook_definitions(
                 bound = session_plugins(context.session_id)
                 if bound is None and context.parent_session_id:
                     bound = session_plugins(context.parent_session_id)
-            pinned = _pinned_plugin_hook(bound, hook)
+            pinned = pinned_plugin_hook(bound, hook)
             return HookProcess(cwd=pinned.cwd, env=dict(pinned.environment))
 
         return ForeignHookDefinition(
@@ -2439,39 +2599,94 @@ def _foreign_hook_definitions(
             process=process,
         )
 
-    file_hooks = [from_file(hook) for hook in result.hooks]
+    # The Host runs its own hooks (see ``_host_hooks``).
+    file_hooks = [
+        from_file(hook) for hook in result.hooks if hook.type not in HOST_HOOK_TYPES
+    ]
+    turn_plugin_hooks = [
+        h for h in plugin_hooks if h.config.type not in HOST_HOOK_TYPES
+    ]
     ordered = [
         *(hook for hook in file_hooks if hook.source == cwd_source),
         *(
             from_plugin(h)
-            for h in plugin_hooks
+            for h in turn_plugin_hooks
             if h.source is HookSource.PROJECT_PLUGIN
         ),
         *(hook for hook in file_hooks if hook.source == "user"),
-        *(from_plugin(h) for h in plugin_hooks if h.source is HookSource.GLOBAL_PLUGIN),
+        *(
+            from_plugin(h)
+            for h in turn_plugin_hooks
+            if h.source is HookSource.GLOBAL_PLUGIN
+        ),
     ]
     return [replace(hook, order=index) for index, hook in enumerate(ordered)]
 
 
-def _pinned_plugin_hook(
-    bound: SessionPlugins | None, hook: RuntimeHookDefinition
-) -> RuntimeHookDefinition:
-    """The session's pinned copy of ``hook``, which names its checkout and data dir.
+def _with_session_start_context(hooks: Any, session_hooks: SessionHooks) -> Any:
+    """Bind the builtin hook that hands session_start context to the next message.
 
-    Matched by plugin and declared name. A plugin a reload dropped, or a session with
-    no plugins bound, keeps the hook as resolved at start.
+    Only when the session has session_start hooks. Bound after the user's own
+    pre_agent hooks, so the context lands after whatever they did to the message.
     """
-    if bound is None:
-        return hook
-    return next(
-        (
-            candidate
-            for candidate in bound.materialized.resolution.runtime_hooks
-            if candidate.plugin_name == hook.plugin_name
-            and candidate.declared_name == hook.declared_name
-        ),
-        hook,
+    if not session_hooks.session_start:
+        return hooks
+    order = max((binding.order for binding in hooks.bindings), default=-1) + 1
+    return replace(
+        hooks, bindings=(*hooks.bindings, session_start_context_binding(order))
     )
+
+
+def _session_hooks(
+    result: HookConfigResult,
+    *,
+    harness_files: HarnessFilesManager,
+    plugin_hooks: Sequence[RuntimeHookDefinition] = (),
+) -> SessionHooks:
+    """The hooks the Host fires itself, by type, in the same order as turn hooks."""
+    user_names = _user_hook_names(harness_files)
+
+    def from_config(hook: HookConfig) -> HostHook:
+        return HostHook(
+            name=hook.name,
+            command=hook.command,
+            match=hook.match,
+            timeout_s=hook.timeout if hook.timeout is not None else 60.0,
+        )
+
+    def from_plugin(hook: RuntimeHookDefinition) -> HostHook:
+        return replace(
+            from_config(hook.config),
+            cwd=hook.cwd,
+            env=dict(hook.environment),
+            plugin_hook=hook,
+        )
+
+    def of_type(hook_type: HookType) -> tuple[HostHook, ...]:
+        declared = [h for h in result.hooks if h.type is hook_type]
+        shipped = [h for h in plugin_hooks if h.config.type is hook_type]
+        return (
+            *(from_config(h) for h in declared if h.name not in user_names),
+            *(from_plugin(h) for h in shipped if h.source is HookSource.PROJECT_PLUGIN),
+            *(from_config(h) for h in declared if h.name in user_names),
+            *(from_plugin(h) for h in shipped if h.source is HookSource.GLOBAL_PLUGIN),
+        )
+
+    return SessionHooks(
+        notification=of_type(HookType.NOTIFICATION),
+        session_start=of_type(HookType.SESSION_START),
+        session_end=of_type(HookType.SESSION_END),
+    )
+
+
+def _hook_type_counts(
+    result: HookConfigResult, plugin_hooks: Sequence[RuntimeHookDefinition] = ()
+) -> dict[HookType, int]:
+    """How many hooks of each type the session runs, ``hooks.toml`` and plugins."""
+    counts = dict.fromkeys(HookType, 0)
+    for hook in [*result.hooks, *(h.config for h in plugin_hooks)]:
+        counts[hook.type] += 1
+    return counts
 
 
 def _runnable_plugin_hooks(

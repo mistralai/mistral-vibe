@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from hashlib import sha256
+import time
 from unittest.mock import AsyncMock
 
 from pydantic import SecretStr
@@ -16,22 +18,49 @@ from vibe.setup.auth._cli_oidc_platform_credentials import (
 )
 from vibe.setup.auth._oidc_config import OidcError
 from vibe.setup.auth._oidc_credentials import OidcTokens
-from vibe.setup.auth._oidc_tenant import OidcTenant, OidcTenantResolver, TenantSelection
+from vibe.setup.auth._oidc_tenant import (
+    OidcTenant,
+    OidcTenantResolver,
+    OidcUnauthorized,
+    TenantSelection,
+)
 
 API = PlatformCredentialTarget(base_url="https://api.mistral.ai/v1")
 
 
 def _provider(
-    tokens: OidcTokens, discover: AsyncMock | None = None
+    tokens: OidcTokens,
+    discover: AsyncMock | None = None,
+    *,
+    refresh_succeeds: bool = False,
+    clock: list[float] | None = None,
 ) -> tuple[CliOidcPlatformCredentialProvider, list[OidcTokens]]:
+    """The provider over a stored session ``current[0]``. Its refresh fails
+    (revoked refresh token) unless ``refresh_succeeds``, when each refresh
+    stores ``refreshed-id-<n>``.
+    """
     current = [tokens]
+    refreshes = [0]
     resolver = OidcTenantResolver(
         discover or AsyncMock(side_effect=AssertionError("discovery"))
     )
+
+    def refresh(rejected_revision: str) -> str:
+        del rejected_revision
+        if not refresh_succeeds:
+            raise OidcError("OIDC re-login required: refresh token rejected")
+        refreshes[0] += 1
+        current[0] = current[0].model_copy(
+            update={"id_token": SecretStr(f"refreshed-id-{refreshes[0]}")}
+        )
+        return current[0].id_token.get_secret_value()
+
     provider = CliOidcPlatformCredentialProvider(
         resolver,
         id_token=lambda: current[0].id_token.get_secret_value(),
+        refresh_id_token=refresh,
         stored_tokens=lambda: current[0],
+        clock=(lambda: clock[0]) if clock is not None else time.monotonic,
     )
     return provider, current
 
@@ -194,3 +223,113 @@ def test_cached_principal_never_discovers(monkeypatch, tokens):
     assert provider.cached_principal() is None
     monkeypatch.setenv("VIBE_CLI_OIDC_ORGANIZATION_ID", "test-org")
     assert provider.cached_principal() is not None
+
+
+@pytest.mark.asyncio
+async def test_a_401_after_a_successful_refresh_asks_to_update_or_sign_in(tokens):
+    """401 -> refresh succeeds -> 401 again: the mixed reason, no other refresh."""
+    provider, current = _provider(tokens, refresh_succeeds=True)
+    sent = await provider.resolve(API)
+    assert isinstance(sent, PlatformCredentialSnapshot)
+
+    refreshed = await provider.reject(
+        API, observed=sent.identity, reason="http_unauthorized"
+    )
+    assert isinstance(refreshed, PlatformCredentialSnapshot)
+    assert refreshed.revision != sent.revision
+
+    refused_again = await provider.reject(
+        API, observed=refreshed.identity, reason="http_unauthorized"
+    )
+    expected = PlatformCredentialRequired(
+        reason="unauthorized_after_refresh", observed_revision=refreshed.revision
+    )
+    assert refused_again == expected
+    assert await provider.resolve(API) == expected
+    assert current[0].id_token.get_secret_value() == "refreshed-id-1"
+
+
+@pytest.mark.asyncio
+async def test_a_401_whose_refresh_fails_keeps_asking_to_sign_in(tokens):
+    """401 -> refresh fails: the existing sign-in-again reason."""
+    provider, _ = _provider(tokens)
+    sent = await provider.resolve(API)
+    assert isinstance(sent, PlatformCredentialSnapshot)
+
+    result = await provider.reject(
+        API, observed=sent.identity, reason="http_unauthorized"
+    )
+
+    expected = PlatformCredentialRequired(
+        reason="rejected", observed_revision=sent.revision
+    )
+    assert result == expected
+    assert await provider.resolve(API) == expected
+
+
+@pytest.mark.asyncio
+async def test_a_refreshed_token_that_is_accepted_shows_no_message(tokens):
+    """401 -> refresh succeeds -> 200: the refreshed token keeps being sent."""
+    provider, _ = _provider(tokens, refresh_succeeds=True)
+    sent = await provider.resolve(API)
+    assert isinstance(sent, PlatformCredentialSnapshot)
+
+    refreshed = await provider.reject(
+        API, observed=sent.identity, reason="http_unauthorized"
+    )
+
+    assert isinstance(refreshed, PlatformCredentialSnapshot)
+    assert await provider.resolve(API) == refreshed
+
+
+@pytest.mark.asyncio
+async def test_a_401_from_workspace_discovery_refreshes_once(monkeypatch, tokens):
+    """Discovery is a session's first request: the same rule applies there."""
+    monkeypatch.delenv("VIBE_CLI_OIDC_ORGANIZATION_ID")
+    discover = AsyncMock(side_effect=OidcUnauthorized("refused"))
+    provider, _ = _provider(tokens, discover, refresh_succeeds=True)
+
+    result = await provider.resolve(API)
+
+    assert result == PlatformCredentialRequired(
+        reason="unauthorized_after_refresh",
+        observed_revision=sha256(b"refreshed-id-1").hexdigest(),
+    )
+    assert discover.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_discovery_401_recovers_after_refresh(monkeypatch, tokens):
+    monkeypatch.delenv("VIBE_CLI_OIDC_ORGANIZATION_ID")
+    discover = AsyncMock(
+        side_effect=[OidcUnauthorized("refused"), OidcTenant("org-1", "ws-1")]
+    )
+    provider, _ = _provider(tokens, discover, refresh_succeeds=True)
+
+    result = await provider.resolve(API)
+
+    assert isinstance(result, PlatformCredentialSnapshot)
+    assert result.headers["Authorization"] == "Bearer refreshed-id-1"
+
+
+@pytest.mark.asyncio
+async def test_a_refreshed_token_refused_much_later_is_refreshed_again(tokens):
+    """A refreshed token that worked for a while, then gets a 401: an ordinary
+    401, so it is refreshed, not reported as refused after a refresh.
+    """
+    now = [1_000.0]
+    provider, _ = _provider(tokens, refresh_succeeds=True, clock=now)
+    sent = await provider.resolve(API)
+    assert isinstance(sent, PlatformCredentialSnapshot)
+    refreshed = await provider.reject(
+        API, observed=sent.identity, reason="http_unauthorized"
+    )
+    assert isinstance(refreshed, PlatformCredentialSnapshot)
+
+    now[0] += 40 * 60
+    replacement = await provider.reject(
+        API, observed=refreshed.identity, reason="http_unauthorized"
+    )
+
+    assert isinstance(replacement, PlatformCredentialSnapshot)
+    assert replacement.headers["Authorization"] == "Bearer refreshed-id-2"

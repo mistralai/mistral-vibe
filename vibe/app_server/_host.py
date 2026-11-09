@@ -14,6 +14,7 @@ from vibe.app_server._cached_layers import apply_cached_layers
 from vibe.app_server._config_errors import USER_CONFIG_ERRORS, user_config_error
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
+from vibe.app_server._experiments_service import ExperimentsService
 from vibe.app_server._history_projection import project_message_history
 from vibe.app_server._local_projects_controller import (
     LOCAL_PROJECT_METHODS,
@@ -38,6 +39,11 @@ from vibe.app_server._projection import (
     project_config_view,
     project_skill_summaries,
 )
+from vibe.app_server._session_config_cache import (
+    BuiltSessionConfig,
+    SessionConfigCache,
+    SessionConfigKey,
+)
 from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._setup import SetupRequestHandler, _launch_context
 from vibe.app_server._state import build_stored_public_state, history_page
@@ -47,7 +53,7 @@ from vibe.app_server._workspace import (
     read_untrusted_config_dirs,
     read_workspace_trust,
 )
-from vibe.app_server._worktree_cleanup import session_finished, worktree_cleanup
+from vibe.app_server._worktree_housekeeping import WorktreeHousekeeping
 from vibe.app_server.protocol import (
     AgentsListParams,
     AgentsListResponse,
@@ -182,6 +188,8 @@ class HostRequestHandler:
         harness_files: HarnessFilesManager,
         *,
         org_config: OrgConfigService,
+        worktrees: WorktreeHousekeeping,
+        experiments: ExperimentsService,
         credentials: PlatformCredentialFactory | None = None,
         image_fallback: bool = False,
         builtin_plugin_roots: Sequence[Path] | None = None,
@@ -189,6 +197,8 @@ class HostRequestHandler:
         self._harness_files = harness_files
         self._org_config = org_config
         self._credentials = credentials or api_key_credentials
+        self._worktrees = worktrees
+        self._worktree_limit_configs = SessionConfigCache()
         self._image_fallback = image_fallback
         self._builtin_plugin_roots = builtin_plugin_roots
         self._project_links = ProjectLinksController(self._credentials)
@@ -197,7 +207,9 @@ class HostRequestHandler:
         self._local_skills = LocalSkillsController(
             self._local_skill_files, self._load_orchestrator
         )
-        self._missing_layers = MissingLayerFetches(org_config, self._credentials)
+        self._missing_layers = MissingLayerFetches(
+            org_config, experiments, self._credentials
+        )
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
@@ -589,13 +601,10 @@ class HostRequestHandler:
                 )
             case "workspace/git/worktrees/prune":
                 validate_wire(WorkspaceWorktreePruneParams, raw_params)
-                worktree_cleanup().sweep(trust_store=self._harness_files.trust_store)
-                orchestrator = await self._load_orchestrator(self._session_files(None))
-                removed = await asyncio.to_thread(
-                    ManagedWorktree.prune,
-                    orchestrator.config.worktree_limit,
-                    session_finished,
-                    trust_store=self._harness_files.trust_store.for_session(),
+                trust_store = self._harness_files.trust_store
+                self._worktrees.sweep(trust_store=trust_store)
+                removed = await self._worktrees.prune(
+                    await self._worktree_limit(), trust_store=trust_store
                 )
                 response = WorkspaceWorktreePruneResponse(removed=removed)
             case "workspace/git/checkouts":
@@ -738,6 +747,34 @@ class HostRequestHandler:
 
     async def _load_config(self, cwd: str | None) -> VibeConfigSchema:
         return (await self._load_orchestrator(self._session_files(cwd))).config
+
+    async def _worktree_limit(self) -> int:
+        # Desktop prunes on every session start: rebuilt only when the config
+        # it reads changed, not built whole each time on the event loop.
+        files = self._session_files(None)
+
+        async def build() -> BuiltSessionConfig:
+            orchestrator = await build_default_orchestrator(harness_files=files)
+            pre_org_config = orchestrator.config
+            key, tried, failure = await apply_cached_layers(
+                orchestrator, self._org_config, self._credentials
+            )
+            return BuiltSessionConfig(
+                orchestrator,
+                pre_org_config=pre_org_config,
+                org_config_key=key,
+                org_config_tried=tried,
+                org_config_failure=failure,
+            )
+
+        config = await self._worktree_limit_configs.config(
+            SessionConfigKey.of(self._cwd(None), {}, org_config=True),
+            files,
+            self._org_config,
+            build,
+            self._credentials,
+        )
+        return config.worktree_limit
 
     def _session_files(self, cwd: str | None) -> HarnessFilesManager:
         return self._harness_files.for_session(self._cwd(cwd))

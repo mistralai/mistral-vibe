@@ -5,17 +5,14 @@ import threading
 
 import pytest
 
+from vibe.core.git.repository import GitRepoInfo
 from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
-from vibe.core.teleport.git import GitRepoInfo
 from vibe.core.vibe_code_project import (
-    ProjectPickerContext,
     ProjectRepository,
     RemoteProjectLink,
-    TeleportProjectResolution,
     VibeCodeProject,
     VibeCodeProjectApiError,
     VibeCodeProjectPage,
-    VibeCodeProjectPickerInitialData,
     VibeCodeProjectPickerService,
     VibeCodeProjectPickerState,
     VibeCodeProjectResolverError,
@@ -100,7 +97,6 @@ def _git_info() -> GitRepoInfo:
         repo="mistral-vibe",
         branch="feature-branch",
         commit="abc123",
-        diff="",
         default_branch="main",
     )
 
@@ -131,7 +127,7 @@ async def test_load_initial_builds_context_and_fetches_first_page() -> None:
     assert fetcher.calls == [(None, 100)]
     assert initial.context.repo_name == "mistral-vibe"
     assert initial.context.repo_url == "https://github.com/mistralai/mistral-vibe.git"
-    assert initial.state.has_more is True
+    assert initial.state.next_cursor is not None
     assert initial.state.projects[0].project_id == "mistral-vibe"
 
 
@@ -197,109 +193,6 @@ async def test_load_initial_reads_saved_project_link_off_event_loop(
 
 
 @pytest.mark.asyncio
-async def test_load_initial_for_teleport_skips_fetch_with_valid_saved_link(
-    tmp_path: Path,
-) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    store = VibeProjectsStore(tmp_path / "projects.toml")
-    saved_link = RemoteProjectLink(
-        repo_root=repo_root,
-        repo_url="https://github.com/mistralai/mistral-vibe.git",
-        project_id="mistral-vibe",
-        project_name="Mistral Vibe",
-    )
-    store.upsert_remote_project(saved_link)
-    fetcher = FakePageFetcher([])
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
-        repo_root=repo_root,
-        page_fetcher=fetcher,
-        project_store=store,
-    )
-
-    initial = await service.load_initial_for_teleport(_git_info())
-
-    assert fetcher.calls == []
-    assert initial.context.saved_link == saved_link
-    assert initial.state.projects == []
-
-
-@pytest.mark.asyncio
-async def test_load_initial_for_teleport_fetches_when_no_saved_link(
-    tmp_path: Path,
-) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    fetcher = FakePageFetcher([
-        VibeCodeProjectPage(
-            projects=[
-                _project(
-                    "mistral-vibe",
-                    "Mistral Vibe",
-                    "https://github.com/mistralai/mistral-vibe.git",
-                )
-            ],
-            next_cursor="next-page",
-        )
-    ])
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
-        repo_root=repo_root,
-        page_fetcher=fetcher,
-    )
-
-    initial = await service.load_initial_for_teleport(_git_info())
-
-    assert fetcher.calls == [(None, 100)]
-    assert initial.state.projects[0].project_id == "mistral-vibe"
-    assert initial.state.has_more is True
-
-
-@pytest.mark.asyncio
-async def test_load_initial_for_teleport_fetches_when_saved_link_for_different_repo(
-    tmp_path: Path,
-) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    store = VibeProjectsStore(tmp_path / "projects.toml")
-    stale_link = RemoteProjectLink(
-        repo_root=repo_root,
-        repo_url="https://github.com/other/repo.git",
-        project_id="other-project",
-        project_name="Other Project",
-    )
-    store.upsert_remote_project(stale_link)
-    fetcher = FakePageFetcher([
-        VibeCodeProjectPage(
-            projects=[
-                _project(
-                    "mistral-vibe",
-                    "Mistral Vibe",
-                    "https://github.com/mistralai/mistral-vibe.git",
-                )
-            ],
-            next_cursor=None,
-        )
-    ])
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
-        repo_root=repo_root,
-        page_fetcher=fetcher,
-        project_store=store,
-    )
-
-    initial = await service.load_initial_for_teleport(_git_info())
-
-    assert fetcher.calls == [(None, 100)]
-    assert initial.context.saved_link == stale_link
-    assert initial.state.projects[0].project_id == "mistral-vibe"
-
-
-@pytest.mark.asyncio
 async def test_load_more_skips_until_new_selectable_project() -> None:
     existing = _project(
         "mistral-vibe", "Mistral Vibe", "https://github.com/mistralai/mistral-vibe.git"
@@ -346,8 +239,8 @@ async def test_load_more_skips_until_new_selectable_project() -> None:
         "read-only",
         "docs",
     ]
-    assert result.state.has_more is False
-    assert result.focus_option_id == "project:docs"
+    assert result.state.next_cursor is None
+    assert result.focus_project_id == "docs"
 
 
 @pytest.mark.asyncio
@@ -374,7 +267,7 @@ async def test_create_project_uses_git_repo_and_prepends_created_project() -> No
         ("Custom Mistral Vibe", "https://github.com/mistralai/mistral-vibe.git", "main")
     ]
     assert result.project.name == "Custom Mistral Vibe"
-    assert result.focus_option_id == "project:created"
+    assert result.project.project_id == "created"
     assert [project.project_id for project in result.state.projects] == [
         "created",
         "mistral-vibe",
@@ -398,111 +291,6 @@ async def test_create_project_requires_default_branch() -> None:
             git_info=_git_info(),
             state=VibeCodeProjectPickerState(projects=[], next_cursor=None),
         )
-
-
-def _initial_data(
-    repo_root: Path,
-    repo_url: str = "https://github.com/mistralai/mistral-vibe.git",
-    saved_link: RemoteProjectLink | None = None,
-) -> VibeCodeProjectPickerInitialData:
-    return VibeCodeProjectPickerInitialData(
-        context=ProjectPickerContext(
-            repo_root=repo_root,
-            repo_url=repo_url,
-            repo_name="mistral-vibe",
-            saved_link=saved_link,
-        ),
-        state=VibeCodeProjectPickerState(projects=[], next_cursor=None),
-    )
-
-
-def _link(
-    repo_root: Path,
-    repo_url: str = "https://github.com/mistralai/mistral-vibe.git",
-    project_id: str = "proj-123",
-) -> RemoteProjectLink:
-    return RemoteProjectLink(
-        repo_root=repo_root,
-        repo_url=repo_url,
-        project_id=project_id,
-        project_name="Mistral Vibe",
-    )
-
-
-def test_resolve_project_for_teleport_returns_saved_project_id_when_urls_match(
-    tmp_path: Path,
-) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    store = VibeProjectsStore(tmp_path / "projects.toml")
-    saved = _link(repo_root)
-    store.upsert_remote_project(saved)
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
-        repo_root=repo_root,
-        page_fetcher=FakePageFetcher([]),
-        project_store=store,
-    )
-
-    resolution = service.resolve_project_for_teleport(
-        _initial_data(repo_root, saved_link=saved)
-    )
-
-    assert resolution == TeleportProjectResolution(
-        project_id="proj-123",
-        initial_data=_initial_data(repo_root, saved_link=saved),
-        stale_link_cleared=False,
-    )
-    assert store.get_remote_project(repo_root=repo_root) is not None
-
-
-def test_resolve_project_for_teleport_clears_stale_link_when_url_differs(
-    tmp_path: Path,
-) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    store = VibeProjectsStore(tmp_path / "projects.toml")
-    stale = _link(repo_root, repo_url="https://github.com/other/repo.git")
-    store.upsert_remote_project(stale)
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
-        repo_root=repo_root,
-        page_fetcher=FakePageFetcher([]),
-        project_store=store,
-    )
-    initial = _initial_data(
-        repo_root,
-        repo_url="https://github.com/mistralai/mistral-vibe.git",
-        saved_link=stale,
-    )
-
-    resolution = service.resolve_project_for_teleport(initial)
-
-    assert resolution.project_id is None
-    assert resolution.stale_link_cleared is True
-    assert resolution.initial_data.context.saved_link is None
-    assert store.get_remote_project(repo_root=repo_root) is None
-
-
-def test_resolve_project_for_teleport_returns_none_when_no_saved_link(
-    tmp_path: Path,
-) -> None:
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir()
-    service = VibeCodeProjectPickerService(
-        base_url="https://chat.example.com",
-        credentials=ApiKeyPlatformCredentialProvider.from_api_key("api-key"),
-        repo_root=repo_root,
-        page_fetcher=FakePageFetcher([]),
-    )
-
-    resolution = service.resolve_project_for_teleport(_initial_data(repo_root))
-
-    assert resolution.project_id is None
-    assert resolution.stale_link_cleared is False
-    assert resolution.initial_data.context.saved_link is None
 
 
 _LINK_REPO = "https://github.com/mistralai/mistral-vibe.git"

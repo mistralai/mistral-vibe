@@ -62,7 +62,7 @@ fn resume_lines_carry_richs_sgr_spans() {
         ),
         "\nTotal tokens used this session: input=1,000 output=250 (total=1,250)\n\n\
          To continue this session, run: \u{1b}[1;38;5;208mvibe --continue\u{1b}[0m\n\
-         Or: \u{1b}[1;38;5;208mvibe --resume abcd1234\u{1b}[0m\n"
+         Or: \u{1b}[1;38;5;208mvibe --resume efgh5678\u{1b}[0m\n"
     );
 }
 
@@ -75,7 +75,7 @@ fn without_color_the_lines_are_plain() {
         ),
         "\nTotal tokens used this session: input=0 output=0 (total=0)\n\n\
          To continue this session, run: vibe --continue\n\
-         Or: vibe --resume abcd1234\n"
+         Or: vibe --resume 1234efgh\n"
     );
 }
 

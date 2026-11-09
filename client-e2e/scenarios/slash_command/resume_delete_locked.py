@@ -1,4 +1,4 @@
-"""Pressing `d` on a locked session row refuses the delete with a warning row."""
+"""Pressing `d` on a locked session row refuses the delete with an inline warning notice."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ handshake = {
 request_methods = {"session/lease/subscribe"}
 
 # Enter submits /resume, Up selects the locked row, and `d` refuses locally
-# with the busy warning row, without a session/delete request.
+# with the busy inline notice, without a session/delete request.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "d"]
 
 capture_startup = False
 capture_steps = {2, 3}
 screen_contains = ("open in another Vibe process",)
+screen_excludes = ("⚠",)

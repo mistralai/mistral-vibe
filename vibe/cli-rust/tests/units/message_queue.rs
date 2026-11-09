@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use serde_json::json;
-use vibe_rs::app::{App, Status};
+use vibe_rs::app::{App, Severity, Status};
 use vibe_rs::message_queue::{self as mq, QueueController, QueueItem};
 
 use crate::support::{queued, stub, with_status};
@@ -403,6 +403,40 @@ fn finish_consumed_edit_exits_selection_mode() {
     assert_eq!(app.queue.selected, None);
     assert!(!app.queue.editing);
     assert_eq!(app.chat_input.input, "draft text");
+}
+
+#[test]
+fn leaving_a_consumed_edit_keeps_a_held_failure_notice() {
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", None), item("b", "second", None)];
+    assert!(mq::enter(&mut app));
+    mq::edit_selected(&mut app);
+    mq::remove_selected(&mut app, &stub());
+    vibe_rs::notices::inline(&mut app, Severity::Error, "Failed to update queued message");
+
+    mq::end_edit(&mut app);
+
+    let notice = app
+        .overlays
+        .notice
+        .as_ref()
+        .map(|notice| notice.text.as_str());
+    assert_eq!(notice, Some("Failed to update queued message"));
+}
+
+#[test]
+fn finishing_a_consumed_edit_drops_its_hint() {
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", None), item("b", "second", None)];
+    assert!(mq::enter(&mut app));
+    mq::edit_selected(&mut app);
+    mq::remove_selected(&mut app, &stub());
+    assert!(mq::confirm_consumed_edit(&mut app));
+    assert!(app.overlays.notice.is_some());
+
+    assert!(mq::finish_consumed_edit(&mut app));
+
+    assert!(app.overlays.notice.is_none());
 }
 
 #[test]

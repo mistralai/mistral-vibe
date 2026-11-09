@@ -265,7 +265,9 @@ def _turn_details(state: PublicSessionState) -> dict[str, JsonValue] | None:
     """The latest Turn's fields the API cannot carry, or None if all are unset.
 
     ``stopReason`` is sent only for ``length``: the API's own
-    ``CompletedTermination.stop_reason`` already says ``iteration_limit``.
+    ``CompletedTermination.stop_reason`` already says ``iteration_limit``. It also says
+    ``output_limit`` now, but a Vibe app server older than that reads ``length`` only here.
+    TODO: drop ``stopReason`` once every Vibe app server reads ``output_limit``.
     """
     turn = state.latest_turn
     if turn is None:

@@ -1,4 +1,4 @@
-//! The bottom bar's segments: the cwd and its copy icon, the branch and PR link, and the order they shrink in as the row narrows.
+//! The bottom bar's segments: the cwd and its copy icon once shortened, the branch and PR link, and the order they shrink in as the row narrows.
 
 use ratatui::style::Modifier;
 use serde_json::json;
@@ -40,6 +40,7 @@ fn app() -> App {
     app.session.artifacts = vec![pr("a1", 123, Some("mergeable"))];
     app.session.startup_config.active_model = "mistral-medium-3.5[high]".into();
     app.session.tokens = (23_000, 600_000);
+    app.artifacts_modal.enabled = true;
     app
 }
 
@@ -48,7 +49,7 @@ fn a_wide_row_shows_every_segment_in_full() {
     let row = bottom_bar_row(&mut app(), 120);
 
     assert!(
-        row.starts_with("/tmp/project ⧉  ● PR #123 mergeable "),
+        row.starts_with("/tmp/project  ● PR #123 mergeable "),
         "{row:?}"
     );
     assert!(row.ends_with(" ctx ▎      23k/600k"), "{row:?}");
@@ -84,7 +85,7 @@ fn the_link_sits_after_the_cwd_and_its_hit_area_covers_the_dot_and_status() {
     let width = "● PR #123 mergeable".chars().count() as u16;
 
     assert_eq!((link.area.x, link.area.width), (x, width));
-    assert!(matches!(&link.action, BarLinkAction::OpenUrl(url) if url == URL));
+    assert!(matches!(link.action, BarLinkAction::ListArtifacts));
     assert!(bottom_bar::link_at(&app, (x, 0)).is_some());
     assert!(bottom_bar::link_at(&app, (x - 1, 0)).is_none());
 
@@ -116,23 +117,23 @@ fn narrowing_turns_gauges_into_levels_then_drops_the_pr_status_before_the_cwd_sh
     let mut row = |width| bottom_bar_row(&mut app, width).trim_end().to_owned();
 
     assert_eq!(
-        row(75),
-        "~/work/dashboard/vibe/cli-rust ⧉  ● PR #123 mergeable   ctx ▎      23k/600k"
+        row(73),
+        "~/work/dashboard/vibe/cli-rust  ● PR #123 mergeable   ctx ▎      23k/600k"
     );
     assert_eq!(
         row(70),
-        "~/work/dashboard/vibe/cli-rust ⧉  ● PR #123 mergeable         ctx ▁ 4%",
+        "~/work/dashboard/vibe/cli-rust  ● PR #123 mergeable           ctx ▁ 4%",
         "the gauge turns into a level first"
     );
     assert_eq!(
-        row(60),
-        "~/work/dashboard/vibe/cli-rust ⧉  ● PR #123         ctx ▁ 4%",
+        row(58),
+        "~/work/dashboard/vibe/cli-rust  ● PR #123         ctx ▁ 4%",
         "then the status goes"
     );
     assert_eq!(
-        row(50),
-        "…/dashboard/vibe/cli-rust ⧉  ● PR #123    ctx ▁ 4%",
-        "only then the cwd shortens"
+        row(49),
+        "…/dashboard/vibe/cli-rust ⧉  ● PR #123   ctx ▁ 4%",
+        "only then the cwd shortens and gains its copy icon"
     );
     assert_eq!(row(30), "…/cli-rust ⧉  ● #123  ctx ▁ 4%");
     assert_eq!(row(20), "…/cli-rust ⧉   ctx ▁");
@@ -153,7 +154,7 @@ fn the_footer_names_neither_the_branch_nor_the_model() {
 
     let row = bottom_bar_row(&mut app, 120);
 
-    assert!(row.starts_with("/tmp/project ⧉  ● PR #123"), "{row:?}");
+    assert!(row.starts_with("/tmp/project  ● PR #123"), "{row:?}");
     assert!(!row.contains('⎇') && !row.contains("mistral"), "{row:?}");
 }
 
@@ -189,6 +190,15 @@ fn a_long_path_keeps_its_last_components() {
 }
 
 #[test]
+fn a_long_component_shrinks_word_by_word() {
+    let path = "~/code/fix-uv-is-too-old/vibe";
+    assert_eq!(elide_path(path, 24), "…/fix-uv-is-too-old/vibe");
+    assert_eq!(elide_path(path, 20), "…uv-is-too-old/vibe");
+    assert_eq!(elide_path(path, 12), "…old/vibe");
+    assert_eq!(elide_path(path, 8), "…/vibe");
+}
+
+#[test]
 fn a_pending_quit_hint_hides_the_copy_icon_branch_and_link() {
     let mut app = app();
     assert_eq!(
@@ -217,7 +227,7 @@ fn without_a_context_window_the_left_side_stands_alone() {
 
     let row = bottom_bar_row(&mut app, 120);
 
-    assert_eq!(row.trim_end(), "/tmp/project ⧉  ● PR #123 mergeable");
+    assert_eq!(row.trim_end(), "/tmp/project  ● PR #123 mergeable");
 }
 
 #[test]
@@ -247,6 +257,8 @@ fn hovering_the_link_shows_the_hand_and_highlights_only_the_link() {
 
     let mut app = app();
     app.set_status(vibe_rs::app::Status::Ready);
+    // A seen link is not bold, so the hover's bold shows on the test theme's reset background.
+    app.session.artifacts[0].viewed_at = Some("2026-10-18T11:00:00+00:00".into());
     let row = bottom_bar_row(&mut app, 120);
     let dot = row.chars().position(|c| c == '●').expect("dot") as u16;
     let plain = crate::support::bottom_bar(&mut app, 120)[(dot + 4, 0)].style();

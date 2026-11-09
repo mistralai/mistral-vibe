@@ -39,6 +39,7 @@ pub enum MouseTarget {
     Blocked,
     Transcript,
     JumpToBottom,
+    StickyPrompt,
     Composer,
     Completion,
     Approval,
@@ -50,7 +51,6 @@ pub enum MouseTarget {
     LogLevelPicker,
     ArtifactsModal,
     ResumePicker,
-    RemoteProject,
     ProxySetup,
     BottomApp,
     Mcp,
@@ -148,7 +148,13 @@ pub fn handle(
     event: MouseEvent,
 ) {
     let (event, row) = pixels::to_cells(event);
-    if let Some(target) = route_at(app, event, row) {
+    let target = route_at(app, event, row);
+    // Below the last row the pointer rests on nothing, though its cell clamps onto the footer.
+    let off_grid = event.kind == MouseEventKind::Moved && pixels::past_last_row(row);
+    if off_grid {
+        app.view.mouse_position = None;
+    }
+    if let Some(target) = target.filter(|_| !off_grid) {
         dispatch(app, client, config_tx, target, event);
     }
 }
@@ -242,7 +248,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         // The console's wheel scrolls its log and may load older pages, which
         // needs the client: dispatch (not this client-free router) runs it.
         MouseTarget::DebugConsole => return false,
-        MouseTarget::Transcript | MouseTarget::JumpToBottom => {
+        MouseTarget::Transcript | MouseTarget::JumpToBottom | MouseTarget::StickyPrompt => {
             scroll_chat(app, up, MOUSE_SCROLL_STEP)
         }
         MouseTarget::Composer => scroll_input(app, up),
@@ -254,7 +260,6 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         MouseTarget::ArtifactsModal => crate::artifacts_modal::navigate(app, !up),
         MouseTarget::ResumePicker => resume_picker::wheel(app, !up),
         MouseTarget::Mcp
-        | MouseTarget::RemoteProject
         | MouseTarget::Config
         | MouseTarget::SubagentList
         | MouseTarget::Question => {

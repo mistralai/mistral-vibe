@@ -56,6 +56,8 @@ def _handler() -> HostRequestHandler:
         HarnessFilesManager(sources=("user",)),
         builtin_plugin_roots=[],
         org_config=fake_process_services().org_config,
+        worktrees=fake_process_services().worktrees,
+        experiments=fake_process_services().experiments,
     )
 
 
@@ -479,10 +481,11 @@ async def test_a_link_backs_the_first_unbacked_project_on_its_folder(
         ("lp_mine", _backed("cloud-1")),
         ("lp_second", None),
     ]
-    assert projects[1].name == root.name
+    assert projects[1].name == "Linked"
     assert projects[1].updated_at > 1
     assert _read_store(config_dir)["projects"][1] == {
         **_entry("lp_mine", root, future="kept"),
+        "name": "Linked",
         "cloud": {"project_id": "cloud-1", "state": "backed"},
         "updated_at": projects[1].updated_at,
     }
@@ -604,6 +607,45 @@ async def test_relinking_a_folder_moves_its_backing(
 
     assert [(p.id, p.cloud) for p in await _list()] == [
         (imported.id, _backed("cloud-new"))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_relinking_a_folder_takes_the_new_cloud_projects_name(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    _link(config_dir, _local_link(root, "cloud-old", "Old project"))
+    [imported] = await _list()
+    await _mutate("projects/rename", {"id": imported.id, "name": "Renamed"})
+
+    _link(config_dir, _local_link(root, "cloud-new", "New project"))
+
+    assert [(p.name, p.cloud) for p in await _list()] == [
+        ("New project", _backed("cloud-new"))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_folder_linked_to_a_renamed_cloud_project_takes_its_local_name(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    _link(config_dir, _local_link(first, name="Cloud name"))
+    [imported] = await _list()
+    await _mutate("projects/rename", {"id": imported.id, "name": "Renamed"})
+
+    _link(config_dir, _local_link(second, name="Cloud name"))
+    VibeProjectsStore(config_dir / "projects.toml").delete_project_link(
+        repo_root=first.resolve()
+    )
+
+    assert [(p.name, p.root_paths, p.cloud) for p in await _list()] == [
+        ("Renamed", [str(first.resolve())], None),
+        ("Renamed", [str(second.resolve())], _backed("cloud-1")),
     ]
 
 

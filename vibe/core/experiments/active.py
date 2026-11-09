@@ -22,9 +22,10 @@ class ExperimentName(StrEnum):
     # make-default).
     CLI_EXTRA_MODELS = "vibe_cli_extra_models"
     REGISTRY_SKILLS = "vibe_cli_registry_skills"
-    PR_MONITORING = "vibe_cli_pr_monitoring"
     MISTRAL_MCP_CONNECTOR = "vibe_cli_mistral_mcp_connector"
     LOCAL_RUNTIME_SESSION_API = "vibe_cli_local_runtime_session_api_migration"
+    MODEL_CATALOG = "vibe_cli_model_catalog"
+    MODEL_CATALOG_FILTER = "vibe_cli_model_catalog_filter"
 
 
 DEFAULT_VARIANTS: Final[dict[ExperimentName, object]] = {
@@ -35,9 +36,10 @@ DEFAULT_VARIANTS: Final[dict[ExperimentName, object]] = {
     ExperimentName.DEFAULT_AGENT: "",
     ExperimentName.CLI_EXTRA_MODELS: {},
     ExperimentName.REGISTRY_SKILLS: False,
-    ExperimentName.PR_MONITORING: False,
     ExperimentName.MISTRAL_MCP_CONNECTOR: False,
     ExperimentName.LOCAL_RUNTIME_SESSION_API: False,
+    ExperimentName.MODEL_CATALOG: False,
+    ExperimentName.MODEL_CATALOG_FILTER: {},
 }
 
 assert all(name in DEFAULT_VARIANTS for name in ExperimentName), (
@@ -59,10 +61,11 @@ EXPERIMENT_SURFACES: Final[dict[ExperimentName, frozenset[ExperimentSurface]]] =
     # the legacy backend has no classifier gate, so the variant only applies there.
     ExperimentName.SMART_APPROVE: frozenset({ExperimentSurface.UNIFIED}),
     ExperimentName.DEFAULT_AGENT: frozenset({ExperimentSurface.UNIFIED}),
-    ExperimentName.PR_MONITORING: frozenset(ExperimentSurface),
     ExperimentName.MISTRAL_MCP_CONNECTOR: frozenset(ExperimentSurface),
     # Only the Unified backend's app server talks to the local runtime.
     ExperimentName.LOCAL_RUNTIME_SESSION_API: frozenset({ExperimentSurface.UNIFIED}),
+    ExperimentName.MODEL_CATALOG: frozenset(ExperimentSurface),
+    ExperimentName.MODEL_CATALOG_FILTER: frozenset(ExperimentSurface),
 }
 
 assert all(name in EXPERIMENT_SURFACES for name in ExperimentName), (

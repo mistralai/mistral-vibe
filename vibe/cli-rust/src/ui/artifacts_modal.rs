@@ -1,38 +1,54 @@
-//! The artifacts modal: one row per PR/MR, the highlighted one's CI checks and URL, and a hint.
+//! The artifacts modal: one row per PR/MR (state dot, number, title, colored state) and a hint.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::Line;
 use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
-use unicode_width::UnicodeWidthStr;
 
-use super::artifacts_checks::{self, CheckLine};
+use super::pr_row::{self, Columns};
 use super::{hint_line, list_cursor, scrollbar, theme};
 use crate::app::App;
-use crate::artifacts::{self, Standing};
+use crate::artifacts;
 use crate::artifacts_modal::{option_count, selected};
 use crate::hints::{self, action, key, Hint};
-use crate::utils::text::ellipsize;
 
-/// The modal's footer hints: navigate, open the highlighted link, cancel with Esc or Ctrl+C.
-const HINTS: &[Hint] = &[
-    hints::NAVIGATE,
-    (key::ENTER, action::OPEN),
-    (key::ESC_CTRL_C, action::CANCEL),
-];
+/// The modal's footer hints: navigate, open the highlighted link, its check and fix keys when they apply, cancel.
+fn hints(app: &App) -> Vec<Hint> {
+    let selected = selected(app);
+    let mut hints = vec![hints::NAVIGATE, (key::ENTER, action::OPEN)];
+    if selected
+        .and_then(crate::artifacts_modal::check_url)
+        .is_some()
+    {
+        hints.push(("c", action::OPEN_CHECK));
+    }
+    if selected
+        .and_then(crate::artifacts_modal::fix_prompt)
+        .is_some()
+    {
+        hints.push(("f", action::FIX));
+    }
+    hints.push((key::ESC_CTRL_C, action::CANCEL));
+    hints
+}
 
 /// Draw the whole screen with the modal replacing the input box; the chat
 /// shrinks to make room for the bottom-app.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    let budget = visible_rows(app, area.height);
-    let height = box_height(app, area.height);
+    let visible = visible_rows(app, area.height);
     let kind = super::bottom_app::Kind::Artifacts;
-    super::bottom_app::draw(app, f, area, height, kind, |app, f, area| {
-        draw_box(app, f, area, budget)
-    });
+    super::bottom_app::draw(
+        app,
+        f,
+        area,
+        visible as u16 + CHROME,
+        kind,
+        |app, f, area| draw_box(app, f, area, visible),
+    );
 }
 
-/// Borders, title, URL and hint around the rows.
+/// Borders, title, the gap above the hint, and the hint around the rows.
 const CHROME: u16 = 5;
 
 /// Visible option rows: `min(count, 50vh)`.
@@ -40,24 +56,6 @@ fn visible_rows(app: &App, area_height: u16) -> usize {
     (area_height as usize / 2).min(option_count(app))
 }
 
-/// Rows kept for checks: the most any artifact shows, so moving the highlight never resizes the box.
-fn checks_rows(app: &App) -> u16 {
-    let most = app
-        .session
-        .artifacts
-        .iter()
-        .map(|artifact| artifacts_checks::lines(Some(artifact)).len())
-        .max()
-        .unwrap_or(0);
-    most as u16
-}
-
-/// Total box height: the rows, the checks block and the chrome.
-fn box_height(app: &App, area_height: u16) -> u16 {
-    visible_rows(app, area_height) as u16 + checks_rows(app) + CHROME
-}
-
-/// `budget` caps the list rows like `box_height` did, so an overflowing list leaves the checks their rows.
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect, budget: usize) {
     if area.height < CHROME + 1 {
         return;
@@ -70,12 +68,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, budget: usize) {
         Block::default().borders(Borders::ALL).border_style(border),
         area,
     );
-
-    let bx = area.x;
-    let by = area.y;
-    let w = area.width;
-    let h = area.height;
-
+    let (bx, by, w, h) = (area.x, area.y, area.width, area.height);
     f.buffer_mut().set_string(
         bx + 2,
         by + 1,
@@ -86,11 +79,8 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, budget: usize) {
             .add_modifier(Modifier::BOLD),
     );
 
-    // A short box keeps one row per option first; checks only take what is left.
     let total = option_count(app);
-    let rows = h.saturating_sub(CHROME);
-    let visible = usize::from(rows).min(budget.max(1));
-    let checks_height = checks_rows(app).min(rows - visible as u16);
+    let visible = usize::from(h - CHROME).min(budget.max(1));
     let top = by + 2;
     let list_area = Rect::new(bx + 1, top, w.saturating_sub(2), visible as u16);
     // Without overflow there is no scrollbar gutter, so the options span one
@@ -102,18 +92,20 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, budget: usize) {
     let offset = app.artifacts_modal.list.layout_rows(total, options);
     crate::mouse::register_region(app, list_area, crate::mouse::MouseTarget::ArtifactsModal);
 
+    let prs: Vec<_> = app.session.artifacts.iter().collect();
+    let columns = Columns::fit(&prs, options.width.into());
+    let selected = app.artifacts_modal.list.selected();
     for (row, i) in (offset..total).take(visible).enumerate() {
-        let y = top + row as u16;
-        draw_option(
-            app,
-            f,
-            Rect {
-                y,
-                height: 1,
-                ..options
-            },
-            i,
-        );
+        let row = Rect {
+            y: top + row as u16,
+            height: 1,
+            ..options
+        };
+        if i == selected {
+            list_cursor::paint(f, row);
+        }
+        let line = Line::from(pr_row::spans(prs[i], columns, i == selected));
+        f.buffer_mut().set_line(row.x, row.y, &line, row.width);
     }
 
     if has_scrollbar {
@@ -129,82 +121,5 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, budget: usize) {
         );
     }
 
-    // The highlighted artifact's CI checks in their own rows under the list: a colored mark, a dim name.
-    let checks_top = top + visible as u16;
-    let width = w.saturating_sub(6) as usize;
-    for (row, line) in artifacts_checks::lines(selected(app))
-        .iter()
-        .take(checks_height as usize)
-        .enumerate()
-    {
-        let y = checks_top + row as u16;
-        let text = match line {
-            CheckLine::Check(outcome, name) => {
-                let (mark, style) = outcome.mark();
-                f.buffer_mut().set_string(bx + 2, y, mark, style);
-                name
-            }
-            CheckLine::More(text) => text,
-        };
-        f.buffer_mut()
-            .set_string(bx + 4, y, ellipsize(text, width), theme::muted_style());
-    }
-
-    // The highlighted artifact's link, dim, between the rows and the hint.
-    let url = selected(app).map(|artifact| artifact.external_url.clone());
-    if let Some(url) = url {
-        let width = w.saturating_sub(4) as usize;
-        f.buffer_mut().set_string(
-            bx + 2,
-            by + h - 3,
-            ellipsize(&url, width),
-            theme::muted_style(),
-        );
-    }
-
-    hint_line::draw(f, bx + 2, by + h - 2, HINTS);
-}
-
-/// One option row: the state dot, the label with its status, and the dim title.
-fn draw_option(app: &App, f: &mut Frame, row: Rect, i: usize) {
-    let is_hl = i == app.artifacts_modal.list.selected();
-    let (x, y) = (row.x, row.y);
-    if is_hl {
-        list_cursor::paint(f, row);
-    }
-    let (base, dim) = list_cursor::styles(is_hl);
-    let artifact = &app.session.artifacts[i];
-    let dot = list_cursor::accent(base, standing_color(artifacts::standing(artifact)));
-    f.buffer_mut().set_string(x, y, STATE_DOT, dot);
-    let mut next_x = x + STATE_DOT.width() as u16;
-    let status = artifacts::status_label(artifact).map(|status| format!(" {status}"));
-    let title = artifact
-        .display_title
-        .as_deref()
-        .map(|title| format!("  {title}"));
-    // Every part is cut at the row's right edge, so a narrow box never paints over its border.
-    for (text, style) in [
-        (Some(artifacts::label(artifact)), base),
-        (status, dim),
-        (title, dim),
-    ] {
-        let Some(text) = text else { continue };
-        let room = row.right().saturating_sub(next_x) as usize;
-        let text = ellipsize(&text, room);
-        f.buffer_mut().set_string(next_x, y, &text, style);
-        next_x += text.width() as u16;
-    }
-}
-
-/// Leads each row: its color gives the PR/MR state.
-const STATE_DOT: &str = "● ";
-
-/// The state dot's colors, like GitHub's.
-fn standing_color(standing: Standing) -> Color {
-    match standing {
-        Standing::Ready => theme::text_success(),
-        Standing::Blocked => theme::text_error(),
-        Standing::Merged => theme::text_accent(),
-        Standing::Pending => theme::muted(),
-    }
+    hint_line::draw(f, bx + 2, by + h - 2, &hints(app));
 }

@@ -1,15 +1,20 @@
 //! Shared helpers for the inline notice and the conversation's feedback rows.
 
-use vibe_rs::app::App;
+use vibe_rs::app::{App, Severity};
 
 use crate::support::messages;
 
 /// The inline notice's text, if one is up.
 pub fn notice_text(app: &App) -> Option<&str> {
+    notice(app).map(|(_, text)| text)
+}
+
+/// The inline notice's severity and text, if one is up.
+pub fn notice(app: &App) -> Option<(Severity, &str)> {
     app.overlays
         .notice
         .as_ref()
-        .map(|notice| notice.text.as_str())
+        .map(|notice| (notice.severity, notice.text.as_str()))
 }
 
 /// Every `✕` row's text, in order.

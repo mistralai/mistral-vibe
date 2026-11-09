@@ -18,7 +18,15 @@ from pydantic.json_schema import SkipJsonSchema
 from pydantic_core import PydanticCustomError
 
 from .base import JsonSchema, SessionModel
-from .common import CallbackId, ProtocolError, SessionId, ToolCallId, ToolKind, TurnId
+from .common import (
+    CallbackId,
+    ProtocolError,
+    SessionId,
+    ToolCallId,
+    ToolKind,
+    TurnId,
+    UnknownValue,
+)
 from .configuration import AgentConfig, ToolAnnotations
 from .content import UNSUPPORTED_CONTENT_ERROR, ContentBlock, refuse_unsupported_blocks
 
@@ -65,7 +73,7 @@ class ApprovalCallback(BaseSessionCallback):
             "of builtin tools."
         ),
     )
-    tool_kind: ToolKind | None = Field(
+    tool_kind: ToolKind | UnknownValue | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
         description="Where the tool comes from. Absent when the Harness does not know.",
@@ -92,6 +100,19 @@ class ApprovalCallback(BaseSessionCallback):
             "The hints the tool declares, such as readOnlyHint. Absent when it declares none; "
             "an absent hint takes the MCP default."
         ),
+    )
+    tool_definition: dict[str, JsonValue] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "The whole tool as its MCP server or connector listed it, by MCP's field names, "
+            "such as title, annotations, outputSchema and _meta. Absent for other tools."
+        ),
+    )
+    tool_source: str | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="The MCP server or connector that lists the tool. Absent for other tools.",
     )
     hook: str | None = Field(
         default=None,
@@ -121,7 +142,8 @@ class UserInputCallback(BaseSessionCallback):
     @classmethod
     def _refuse_unsupported_blocks(cls, message: list[ContentBlock]) -> list[ContentBlock]:
         try:
-            return refuse_unsupported_blocks(message)
+            # An older reader reads audio, so this guard keeps it.
+            return refuse_unsupported_blocks(message, refuse_audio=False)
         except ValueError as error:
             raise PydanticCustomError(
                 UNSUPPORTED_CONTENT_ERROR, "{reason}", {"reason": str(error)}
@@ -135,10 +157,10 @@ type AuthMode = Literal["connect", "reconnect"]
 class AuthRequest(SessionModel):
     """One source the user is asked to sign in to."""
 
-    source: AuthSource
-    id: str = Field(description="Connector id, or MCP source name.")
-    name: str = Field(description="Display name. The id when the opener does not know a name.")
-    mode: AuthMode = Field(
+    source: AuthSource | UnknownValue
+    id: str = Field(description="Connector ID, or MCP source name.")
+    name: str = Field(description="Display name. The ID when the opener does not know a name.")
+    mode: AuthMode | UnknownValue = Field(
         default="connect",
         description="`reconnect` asks the user to sign in again to a source already connected.",
     )
@@ -168,7 +190,7 @@ class AuthCallback(BaseSessionCallback):
 
 
 class AuthResult(SessionModel):
-    """The answer to an ``AuthCallback``: the request ids the user connected or denied.
+    """The answer to an ``AuthCallback``: the request IDs the user connected or denied.
 
     Name each request in one list. A Harness Session refuses an answer that leaves one out,
     and the callback stays open.
@@ -185,12 +207,8 @@ class AuthResult(SessionModel):
 
 class ClientToolCallback(BaseSessionCallback):
     kind: Literal["client_tool"] = "client_tool"
-    tool_call_id: ToolCallId | None = Field(
-        default=None,
-        description=(
-            "The tool call this callback executes, whose tool result holds the answer. "
-            "Null when the callback was opened without a tool call behind it."
-        ),
+    tool_call_id: ToolCallId = Field(
+        description="The tool call this callback executes, whose tool result holds the answer.",
     )
     name: str
     input: JsonValue = None
@@ -288,7 +306,11 @@ class CallbackResult(SessionModel):
     def _refuse_unsupported_blocks(
         cls, content: list[ContentBlock] | None
     ) -> list[ContentBlock] | None:
-        return None if content is None else refuse_unsupported_blocks(content)
+        if content is None:
+            return None
+        # Audio fails the call when the answer reaches the Turn, as it did before, so an
+        # accepted answer in a Workflow history still reads on replay.
+        return refuse_unsupported_blocks(content, refuse_audio=False)
 
 
 type ApprovalScope = Literal["once", "session"]
@@ -300,19 +322,24 @@ class _ApprovalAnswerModel(BaseModel):
 
 
 class AllowApproval(_ApprovalAnswerModel):
-    """Allow this call once, or matching calls for the rest of the Session.
+    """Allow this call once, or matching calls for the rest of the session.
 
     A matching call uses the same tool with the same arguments.
     """
 
     decision: Literal["allow"] = "allow"
+    """Always ``"allow"``."""
     scope: ApprovalScope = "once"
+    """``"once"`` for this call. ``"session"`` also allows the same call with the same input for
+    the rest of the session.
+    """
 
 
 class DenyApproval(_ApprovalAnswerModel):
     """Deny this call."""
 
     decision: Literal["deny"] = "deny"
+    """Always ``"deny"``."""
 
 
 type ApprovalAnswer = AllowApproval | DenyApproval
@@ -342,13 +369,13 @@ class FailedCallbackOutcome(SessionModel):
 
 
 class UnknownCallbackOutcome(SessionModel):
-    """A callback outcome this reader does not know.
+    """A callback outcome added after your SDK version.
 
-    A newer Runtime can add outcomes. Such an outcome is kept, so that it does not fail the
-    event that holds it. Its outcome is saved in ``original_outcome`` and the outcome as it
-    came in ``raw``. Its own ``outcome`` is ``unknown``, so a ``match`` on ``outcome`` still
-    works for the known ones. Serialized, it is the outcome as it came: its own ``outcome``,
-    no ``original_outcome``. A writer never sends one.
+    Such an outcome is kept, so that it does not fail the event that holds it. Its outcome
+    is saved in ``original_outcome`` and the outcome as it came in ``raw``. Its own
+    ``outcome`` is ``unknown``, so a ``match`` on ``outcome`` still works for the known
+    ones. Serialized, it is the outcome as it came: its own ``outcome``, no
+    ``original_outcome``. A writer never sends one.
     """
 
     model_config = ConfigDict(frozen=True)

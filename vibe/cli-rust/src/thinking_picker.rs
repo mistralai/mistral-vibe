@@ -1,15 +1,15 @@
 //! `/thinking` picker state: a bottom-panel option list over the model's
 //! thinking levels, `›` on the current one, Enter
 //! saves and `s` keeps the level for the session. A chained `/model` pick is
-//! written with the level in one write, then one `config/reload`.
+//! written with the level in one write.
 
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use crate::app::{App, ThinkingPicker};
+use crate::app::{App, Severity, ThinkingPicker};
 use crate::config_write::{self, Scope};
-use crate::server::{method, Client};
+use crate::server::Client;
 
 /// Shown when a running turn parks a saved pick until it ends.
 pub const PARKED_MESSAGE: &str = "Saved; it applies when the current turn ends.";
@@ -43,11 +43,11 @@ impl Default for ThinkingPicker {
 
 /// A committed selection's server answer, applied on the main thread.
 pub enum Event {
-    /// Runtime returned by the follow-up `config/reload`.
-    Reloaded(Value),
+    /// The session runs the pick: the write's runtime, and the status to show.
+    Applied(Value, String),
     /// A running turn parked the pick; `runtime/updated` announces it once it lands.
     Parked,
-    /// The write or reload was rejected or failed; show why.
+    /// The write was rejected or failed; show why.
     Failed(String),
 }
 
@@ -55,10 +55,9 @@ pub enum Event {
 pub fn apply_event(app: &mut App, event: Event) {
     let id = crate::commands::submission::new_message_id();
     match event {
-        Event::Reloaded(runtime) => {
+        Event::Applied(runtime, status) => {
             crate::event_handler::apply_runtime_value(app, &runtime);
-            let status = crate::commands::event::RELOADED_MESSAGE;
-            crate::transcript::local::add_status(&mut app.view.transcript, &id, status);
+            crate::transcript::local::add_status(&mut app.view.transcript, &id, &status);
         }
         Event::Parked => {
             show_active_model(app);
@@ -66,7 +65,7 @@ pub fn apply_event(app: &mut App, event: Event) {
         }
         Event::Failed(error) => {
             show_active_model(app);
-            crate::transcript::local::add_command_error(&mut app.view.transcript, &id, &error);
+            crate::notices::inline(app, Severity::Error, &error);
         }
     }
 }
@@ -148,22 +147,19 @@ pub fn select(app: &mut App, client: &Arc<Client>, scope: Scope) {
         saved["reasoningEffort"] = json!(level);
     }
     let all_saved = scope == Scope::Saved && pick.as_ref().is_none_or(|p| p.scope == Scope::Saved);
-    let (reason, prefix) = match &pick {
+    let (reason, what) = match &pick {
         Some(pick) => (
             "app-server config update",
-            format!("Failed to apply: model {}, thinking {level} — ", pick.alias),
+            format!("model {}, thinking {level}", model_label(pick)),
         ),
-        None => (
-            "app-server thinking update",
-            format!("Failed to apply: thinking {level} — "),
-        ),
+        None => ("app-server thinking update", format!("thinking {level}")),
     };
-    commit(app, client, ops, all_saved.then_some(saved), reason, prefix);
+    commit(app, client, ops, all_saved.then_some(saved), reason, what);
 }
 
 /// Commit a `/model` pick without a thinking level (its model is unresolved).
 pub fn commit_model(app: &mut App, client: &Arc<Client>, pick: &ModelPick) {
-    let prefix = format!("Failed to apply: model {} — ", pick.alias);
+    let what = format!("model {}", model_label(pick));
     let saved = (pick.scope == Scope::Saved).then(|| json!({"modelAlias": pick.alias}));
     commit(
         app,
@@ -171,24 +167,30 @@ pub fn commit_model(app: &mut App, client: &Arc<Client>, pick: &ModelPick) {
         model_ops(pick),
         saved,
         "app-server config update",
-        prefix,
+        what,
     );
+}
+
+fn model_label(pick: &ModelPick) -> &str {
+    match pick.alias.as_str() {
+        crate::model_picker::UNPINNED_ACTIVE_MODEL => "Default",
+        alias => alias,
+    }
 }
 
 fn model_ops(pick: &ModelPick) -> Vec<Value> {
     config_write::pick_ops("/active_model", &pick.alias, pick.scope)
 }
 
-/// Write the pick, then `config/reload`; one event reaches the UI. A saved
-/// pick (`saved`) goes through `config/model/write`, which a running turn
-/// parks; a session-only one stays on the idle-only `config/write` `ops`.
+/// Write the pick, which applies it: no idle-only `config/reload` follows for a new turn to refuse.
+/// A saved pick goes through `config/model/write`, which a running turn parks; a session-only one through `config/write`.
 fn commit(
     app: &mut App,
     client: &Arc<Client>,
     ops: Vec<Value>,
     saved: Option<Value>,
     reason: &'static str,
-    failure_prefix: String,
+    what: String,
 ) {
     if ops.is_empty() {
         return;
@@ -198,35 +200,12 @@ fn commit(
     };
     let client = client.clone();
     crate::ui_event::spawn(app, async move {
-        let written =
-            crate::model_enforcement::write(&client, &session_id, saved, ops, reason).await;
-        // Only a clean, applied write is worth reloading: `config/reload` is
-        // idle-only, so a parked pick would read as failed.
-        match written {
-            Err(error) => failed(&failure_prefix, &error),
-            Ok(true) => Event::Parked,
-            Ok(false) => {
-                let reload = json!({
-                    "sessionId": session_id,
-                    "reloadRuntime": true,
-                });
-                match client.request(method::CONFIG_RELOAD, reload).await {
-                    Ok(runtime) => Event::Reloaded(runtime),
-                    // Write and reload fail as one: a reload failure mounts
-                    // the same "Failed to apply" error as a write rejection.
-                    Err(error) => failed(
-                        &failure_prefix,
-                        &crate::server::request_error::describe(&error),
-                    ),
-                }
-            }
+        match crate::model_enforcement::write(&client, &session_id, saved, ops, reason).await {
+            Err(error) => Event::Failed(format!("Failed to apply: {what} — {error}")),
+            Ok(written) if config_write::is_parked(&written) => Event::Parked,
+            Ok(written) => Event::Applied(written, format!("Applied: {what}.")),
         }
     });
-}
-
-/// A failed update mounts an error message.
-fn failed(prefix: &str, error: &str) -> Event {
-    Event::Failed(format!("{prefix}{error}"))
 }
 
 /// Escape a JSON pointer token.

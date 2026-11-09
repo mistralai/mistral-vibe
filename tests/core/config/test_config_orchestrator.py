@@ -1228,3 +1228,59 @@ async def test_reload_layer_reports_a_schema_break_as_a_config_error() -> None:
         await orch.reload_layer("admin")
 
     assert orch.config.value == "original"
+
+
+class _ReadInThreadLayer(FakeLayer):
+    """Reads its store off the loop, as the TOML layers do."""
+
+    async def _build_config_snapshot(self) -> LayerConfigSnapshot:
+        return await asyncio.to_thread(
+            lambda: LayerConfigSnapshot(data=dict(self._data), fingerprint="fp")
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_during_a_reload_waits_its_turn_on_the_loop() -> None:
+    # A reload holds the build across an await off the loop. A rebuild from
+    # the loop (an agent switch) waits for it there; a synchronous rebuild
+    # would block the loop the reload needs to finish, and hang the process.
+    layer = _ReadInThreadLayer(name="file", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    layer._data = {"value": "reloaded"}
+    reload = asyncio.create_task(orch.reload())
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(orch.arebuild(), timeout=5)
+    await reload
+
+    assert orch.config.value == "reloaded"
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_is_not_undone_by_a_reload_that_built_before_it() -> None:
+    # A reload builds, then awaits its preflight before installing. A rebuild
+    # that lands meanwhile (an agent switch) must not be replaced by the
+    # reload's candidate, built from the layers before the switch.
+    layer = _ReadInThreadLayer(name="file", data={"value": "original"})
+    orch = await ConfigOrchestrator.create(
+        schema=SimpleSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    preflight_started = asyncio.Event()
+    release_preflight = asyncio.Event()
+
+    async def slow_preflight(_candidate: SimpleSchema) -> None:
+        preflight_started.set()
+        await release_preflight.wait()
+
+    reload = asyncio.create_task(orch.reload(preflight=slow_preflight))
+    await preflight_started.wait()
+    switched = FakeLayer(name="agent-profile", data={"value": "switched"})
+    orch.insert_layer(switched, len(orch.layers))
+    rebuild = asyncio.create_task(orch.arebuild())
+    await asyncio.sleep(0.05)
+    release_preflight.set()
+    await asyncio.gather(reload, rebuild)
+
+    assert orch.config.value == "switched"

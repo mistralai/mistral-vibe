@@ -128,8 +128,12 @@ class ConfigBuilder[S: ConfigSchema]:
                 except (UntrustedLayerError, EmptyLayerError):
                     continue
 
+            prepared = self._schema.prepare_layers([
+                (ld.name, ld.data) for ld in layer_dicts
+            ])
             merged, origins, defined_entries = self._merge_fields(
-                self._schema, layer_dicts
+                self._schema,
+                [_LayerData(name=name, data=data) for name, data in prepared],
             )
             config = self._schema.validate_merged(
                 merged, origins=origins, defined_entries=defined_entries

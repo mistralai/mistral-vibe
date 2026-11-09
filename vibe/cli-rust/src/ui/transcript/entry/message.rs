@@ -6,11 +6,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use super::startup;
-use super::status::{
-    push_command_error, push_command_status, push_compact_status, push_teleport_status,
-};
+use super::status::{push_command_error, push_command_status, push_compact_status};
 use super::user::{push_user, UserView};
-use super::{QueueView, RenderedEntry};
+use super::RenderedEntry;
 use crate::selection::{fold, Fold};
 use crate::server::MessageEntry;
 use crate::transcript::TranscriptEntry;
@@ -21,8 +19,8 @@ pub(super) fn render(
     entry: &TranscriptEntry<'_>,
     message: &MessageEntry,
     width: u16,
-    queue: QueueView,
-    rewind: bool,
+    selected: bool,
+    expanded: bool,
     pulse_frame: usize,
     cache: Option<&mut markdown::MarkdownCache>,
 ) -> RenderedEntry {
@@ -32,15 +30,7 @@ pub(super) fn render(
             &mut lines,
             message,
             width,
-            UserView::of(entry, queue.selected || rewind),
-        ),
-        "teleport_user" => push_user(&mut lines, message, width, UserView::default()),
-        "teleport_status" | "teleport_complete" => push_teleport_status(
-            &mut lines,
-            &message_text(message),
-            message.role == "teleport_complete",
-            entry.entry.in_progress(),
-            pulse_frame,
+            UserView::of(entry, selected, expanded),
         ),
         "command_result" => push_command_result(&mut lines, &message_text(message), width, false),
         "agent_statistics" => push_command_result(&mut lines, &message_text(message), width, true),

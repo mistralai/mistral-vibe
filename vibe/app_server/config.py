@@ -96,10 +96,14 @@ class ConfigView(ProtocolModel):
     disable_welcome_banner_animation: bool
     # Preserve blinking when reading an older app-server response (ADR 0014).
     cursor_blink: bool = True
+    # Preserve the plain input when reading an older app-server response (ADR 0014).
+    vim_keybindings: bool = False
     show_greeting: bool
     autocopy_to_clipboard: bool
     # Preserve mouse capture when reading an older app-server response (ADR 0014).
     enable_mouse_capture: bool = True
+    # Preserve the pinned prompt when reading an older app-server response (ADR 0014).
+    enable_sticky_prompt: bool = True
     # Preserve @ file completion when reading an older app-server response (ADR 0014).
     enable_file_autocomplete: bool = True
     file_watcher_for_autocomplete: bool
@@ -120,6 +124,7 @@ class ConfigView(ProtocolModel):
     enable_telemetry: bool = True
     experimental_enable_registry_skills: bool = False
     experimental_enable_local_projects: bool = False
+    enable_pr_monitoring: bool = True
     models: list[ModelConfigView]
     transcribe_models: list[str]
     tts_models: list[str]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import hashlib
-from typing import Literal
+from typing import Literal, NamedTuple
 
 from vibe.app_server._skill_toggles import SkillToggles
 from vibe.app_server.config import (
@@ -46,6 +46,14 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.log_reader import PaginatedLogs
 from vibe.core.skills.models import SkillInfo, SkillSource
 
+
+class _RouteFacts(NamedTuple):
+    compaction_threshold: int | None
+    thinking: ThinkingLevel
+    thinking_levels: list[ThinkingLevel]
+    threshold_warning: str | None = None
+
+
 # Model picker display priority, each layer with the group it lists models
 # under: org-curated sources first, the user's own last. Display only -- which
 # layer's values win is the merge's call.
@@ -85,12 +93,13 @@ def project_config_view(
     # Grouped by source; a model no known layer defines keeps its place, last.
     models = [available[alias] for alias in sources if alias in available]
     models += [model for alias, model in available.items() if alias not in sources]
+    active_facts = _route_facts(config, active_model)
     return ConfigView(
         active_model=_project_model_config(
             active_model,
             image_fallback=image_fallback,
             source=sources.get(active_model.alias),
-            route_facts=_route_facts(config, active_model),
+            route_facts=active_facts,
         ),
         active_model_pinned=active_model_pinned,
         images_supported=active_model.supports_images or describable,
@@ -104,9 +113,11 @@ def project_config_view(
         log_level=config.log_level,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
         cursor_blink=config.cursor_blink,
+        vim_keybindings=config.vim_keybindings,
         show_greeting=config.show_greeting,
         autocopy_to_clipboard=config.autocopy_to_clipboard,
         enable_mouse_capture=config.enable_mouse_capture,
+        enable_sticky_prompt=config.enable_sticky_prompt,
         enable_file_autocomplete=config.enable_file_autocomplete,
         file_watcher_for_autocomplete=config.file_watcher_for_autocomplete,
         ask_confirmation_on_exit=config.ask_confirmation_on_exit,
@@ -122,12 +133,15 @@ def project_config_view(
         enable_telemetry=config.enable_telemetry,
         experimental_enable_registry_skills=config.experimental_enable_registry_skills,
         experimental_enable_local_projects=config.experimental_enable_local_projects,
+        enable_pr_monitoring=config.enable_pr_monitoring,
         models=[
             _project_model_config(
                 model,
                 image_fallback=image_fallback,
                 source=sources.get(model.alias),
-                route_facts=_route_facts(config, model),
+                route_facts=active_facts
+                if model == active_model
+                else _route_facts(config, model),
             )
             for model in models
         ],
@@ -145,7 +159,10 @@ def project_config_view(
                 config.get_tts_provider_for_model(tts_model)
             ),
         ),
-        validation_warnings=list(config.validation_warnings),
+        validation_warnings=[
+            *config.validation_warnings,
+            *filter(None, [active_facts.threshold_warning]),
+        ],
     )
 
 
@@ -174,14 +191,13 @@ def _model_sources(config: VibeConfigSchema) -> dict[str, ModelSource]:
 
 
 def offered_levels(config: VibeConfigSchema, model: ModelConfig) -> list[ThinkingLevel]:
-    return _route_facts(config, model)[2]
+    return _route_facts(config, model).thinking_levels
 
 
-def _route_facts(
-    config: VibeConfigSchema, model: ModelConfig
-) -> tuple[int | None, ThinkingLevel, list[ThinkingLevel]]:
+def _route_facts(config: VibeConfigSchema, model: ModelConfig) -> _RouteFacts:
     """Where ``model`` compacts, unset thresholds included, the thinking level
-    it runs, and the levels a picker offers.
+    it runs, the levels a picker offers, and the warning when its threshold
+    was fitted into its window.
 
     Clients show context usage against the threshold, so an unset one reports
     the model's default rather than nothing. The level shown is the one the
@@ -200,8 +216,13 @@ def _route_facts(
         levels = list(model.thinking_levels)
         if model.thinking not in levels:
             levels.append(model.thinking)
-        return model.auto_compact_threshold, model.thinking, levels
-    return facts.compaction_threshold, facts.thinking, list(facts.thinking_levels)
+        return _RouteFacts(model.auto_compact_threshold, model.thinking, levels)
+    return _RouteFacts(
+        facts.compaction_threshold,
+        facts.thinking,
+        list(facts.thinking_levels),
+        facts.threshold_warning,
+    )
 
 
 def _project_model_config(
@@ -209,9 +230,9 @@ def _project_model_config(
     *,
     image_fallback: bool,
     source: ModelSource | None,
-    route_facts: tuple[int | None, ThinkingLevel, list[ThinkingLevel]],
+    route_facts: _RouteFacts,
 ) -> ModelConfigView:
-    compaction_threshold, thinking, thinking_levels = route_facts
+    compaction_threshold, thinking, thinking_levels, _ = route_facts
     image_delivery: Literal["native", "resource_link"] | None = None
     if model.supports_images:
         image_delivery = "native"

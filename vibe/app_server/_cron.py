@@ -13,8 +13,10 @@ from vibe.core.loop import MIN_INTERVAL_SECONDS
 CRON_TOOL_NAME = "cron"
 CRON_TOOL_DESCRIPTION = """Schedule recurring prompts at an interval (integer seconds, minimum 30) or a \
 standard five-field cron expression in the local timezone. List, cancel by ID, \
-or clear schedules. At most 50 schedules per session, persisted across resumes. \
-Prompts run only while the session is live and idle; missed runs are not caught up. \
+or clear schedules. Every agent has its own schedules: you see and manage only \
+yours, and each prompt is sent back to you. At most 50 schedules per agent, \
+persisted across resumes. Prompts run only while the session is live and you are \
+idle; missed runs are not caught up. \
 Write each prompt in two parts: a short title on the first line naming the loop \
 (a few words, not a full sentence), then a line break, then the full instruction. \
 The full instruction is shown to the user as-is every time the loop fires, so \

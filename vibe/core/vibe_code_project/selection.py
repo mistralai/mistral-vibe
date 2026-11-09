@@ -6,16 +6,6 @@ from pathlib import Path
 from vibe.utils.repository import normalize_repo_url
 
 
-def is_saved_project_stale_error(message: str) -> bool:
-    normalized = message.casefold()
-    return (
-        "project not found" in normalized
-        or ("status 404" in normalized and "project" in normalized)
-        or ("status 403" in normalized and "project" in normalized)
-        or ("forbidden" in normalized and "project" in normalized)
-    )
-
-
 @dataclass(frozen=True)
 class ProjectRepository:
     repo_url: str

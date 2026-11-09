@@ -28,6 +28,8 @@ pub struct TranscriptLayout {
     pub entries: Vec<LayoutEntry>,
     /// Layout row of the first queued prompt, if any.
     pub queue_top: Option<u16>,
+    /// Positions in `entries` of the settled user prompts, in order.
+    pub prompts: Vec<usize>,
 }
 
 impl TranscriptLayout {
@@ -153,6 +155,7 @@ impl TranscriptCache {
         height: u16,
         entries: Vec<LayoutEntry>,
         queue_top: Option<u16>,
+        prompts: Vec<usize>,
     ) {
         let slot = self.width_slot(width);
         self.layouts[slot] = TranscriptLayout {
@@ -160,6 +163,7 @@ impl TranscriptCache {
             height,
             entries,
             queue_top,
+            prompts,
         };
     }
 

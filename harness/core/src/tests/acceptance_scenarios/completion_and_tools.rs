@@ -1259,7 +1259,7 @@ fn cut_off_committed(turn_id: &str, action: &Value, text: &str) -> Value {
 ///
 /// *Prepare*: Output limit recovery allows two retries per turn.
 /// *Do*: Answer three times with completions cut off at the output limit.
-/// *Assert*: The first two cut-off answers are discarded and retried with feedback appended to the model input, and the third is committed as the turn's output because the recovery budget is spent.
+/// *Assert*: The first two cut-off answers are discarded and retried with feedback appended to the model input, and the third is committed as the turn's output because the recovery budget is spent; the turn ends with the `output_limit` stop reason.
 ///
 #[test]
 fn output_limit_recovery_retries_cut_off_completions_up_to_the_cap() {
@@ -1304,7 +1304,7 @@ fn output_limit_recovery_retries_cut_off_completions_up_to_the_cap() {
             vec![json!({"type": "text", "text": "third fragment"})],
         )
         .observe(cut_off_committed(turn_id, &third, "third fragment"))
-        .observe(turn_completed(turn_id, "third fragment")),
+        .observe(turn_completed_at_output_limit(turn_id, "third fragment")),
     );
 
     // Assert: the budget is per turn, so the next turn starts afresh.
@@ -1331,7 +1331,7 @@ fn output_limit_recovery_retries_cut_off_completions_up_to_the_cap() {
 ///
 /// *Prepare*: Output limit recovery is enabled, and the turn has a single iteration.
 /// *Do*: Answer with a completion cut off at the output limit.
-/// *Assert*: Recovery never spends the last iteration, so the cut-off answer is committed as the turn's output.
+/// *Assert*: Recovery never spends the last iteration, so the cut-off answer is committed as the turn's output, with the `output_limit` stop reason.
 ///
 #[test]
 fn output_limit_recovery_does_not_spend_the_last_iteration() {
@@ -1345,7 +1345,7 @@ fn output_limit_recovery_does_not_spend_the_last_iteration() {
         cut_off_completion(&completion, "fragment"),
         completed(turn_id, vec![json!({"type": "text", "text": "fragment"})])
             .observe(cut_off_committed(turn_id, &completion, "fragment"))
-            .observe(turn_completed(turn_id, "fragment")),
+            .observe(turn_completed_at_output_limit(turn_id, "fragment")),
     );
 
     // Assert
@@ -1572,7 +1572,7 @@ fn cut_off_tool_call_committed(turn_id: &str, action: &Value) -> Value {
 ///
 /// *Prepare*: Output limit recovery is disabled, the default.
 /// *Do*: Answer with a completion cut off at the output limit.
-/// *Assert*: The cut-off answer is committed as the turn's output, as before.
+/// *Assert*: The cut-off answer is committed as the turn's output, and the turn ends with the `output_limit` stop reason.
 ///
 #[test]
 fn cut_off_completion_is_committed_without_output_limit_recovery() {
@@ -1586,7 +1586,7 @@ fn cut_off_completion_is_committed_without_output_limit_recovery() {
         cut_off_completion(&completion, "fragment"),
         completed(turn_id, vec![json!({"type": "text", "text": "fragment"})])
             .observe(cut_off_committed(turn_id, &completion, "fragment"))
-            .observe(turn_completed(turn_id, "fragment")),
+            .observe(turn_completed_at_output_limit(turn_id, "fragment")),
     );
 
     // Assert
@@ -1596,7 +1596,7 @@ fn cut_off_completion_is_committed_without_output_limit_recovery() {
 ///
 /// *Prepare*: Output limit recovery allows one retry, and the first answer is cut off.
 /// *Do*: Restore from a checkpoint while the retry is pending, then cut off the retried answer as well.
-/// *Assert*: The spent retry survives the checkpoint, so the second cut-off answer is committed.
+/// *Assert*: The spent retry survives the checkpoint, so the second cut-off answer is committed, with the `output_limit` stop reason.
 ///
 #[test]
 fn output_limit_recovery_budget_survives_checkpoint_restore() {
@@ -1623,7 +1623,7 @@ fn output_limit_recovery_budget_survives_checkpoint_restore() {
             vec![json!({"type": "text", "text": "second fragment"})],
         )
         .observe(cut_off_committed(turn_id, &second, "second fragment"))
-        .observe(turn_completed(turn_id, "second fragment")),
+        .observe(turn_completed_at_output_limit(turn_id, "second fragment")),
     );
 
     // Assert

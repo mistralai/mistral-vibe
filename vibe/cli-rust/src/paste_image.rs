@@ -84,7 +84,9 @@ pub fn apply_event(app: &mut App, event: Event) {
                 natural_size(MAX_IMAGE_BYTES)
             ),
         ),
-        Event::Failed => crate::notices::failed(app, "Failed to save pasted image to disk."),
+        Event::Failed => {
+            crate::notices::inline(app, Severity::Error, "Failed to save pasted image to disk.")
+        }
         Event::Pasted { path } => paste_files::apply_image_files(app, vec![path]),
         Event::ImageFiles(paths) => paste_files::apply_image_files(app, paths),
         Event::Probed { start, raw, paths } => paste_files::apply_probed(app, start, &raw, paths),

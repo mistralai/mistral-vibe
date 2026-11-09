@@ -290,7 +290,7 @@ pub(crate) fn write(
         };
         let failed = matches!(event, model_picker::Event::Failed(_));
         crate::input::deliver(events_tx, event).await;
-        // A failed write may still have moved layers; its `✕` row already reports the failure.
+        // A failed write may still have moved layers; its notice already reports the failure.
         load(session_id, &client, &tx, !failed);
     });
 }

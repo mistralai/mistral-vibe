@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 import re
 import tomllib
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 from pydantic import (
     BaseModel,
@@ -112,11 +112,15 @@ _MAX_PLUGIN_KNOWLEDGE_FOLDERS = 100
 _MAX_PLUGIN_KNOWLEDGE_ENTRYPOINT_BYTES = 256 * 1024
 _MAX_PLUGIN_AGENTS = 128
 _MAX_PLUGIN_AGENT_BYTES = 64 * 1024
+_MAX_PLUGIN_VOLUMES = 8
+_MAX_PLUGIN_VOLUME_NAME_LENGTH = 63
 _MAX_PLUGIN_COMPONENT_PATH_LENGTH = 1024
 _MAX_NODE_LIBRARY_ALIAS_LENGTH = 214
 _MAX_PYTHON_LIBRARY_ALIAS_LENGTH = 128
 _MAX_CONNECTOR_TOOL_NAME_LENGTH = 256
 _PLUGIN_COMPONENT_NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+# What Core accepts before the `:` of a qualified skill name.
+_SKILL_QUALIFIER_PATTERN = re.compile(r"[A-Za-z0-9._$-]+")
 _LOCALE_PATTERN = r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
 _NODE_LIBRARY_ALIAS_PATTERN = re.compile(
     r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"
@@ -133,6 +137,12 @@ class _ManifestAuthor(BaseModel):
 
 
 class _PluginManifest(BaseModel):
+    """The fields Agent Plugins 1.0 defines.
+
+    The loader reports any other top-level field and ignores it, as Agent Plugins
+    requires: see `_validate_defined_fields`.
+    """
+
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
     schema_id: Literal["https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"] = (
@@ -196,7 +206,23 @@ class _StarterPrompt(BaseModel):
         return self
 
 
+class _PluginVolume(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(
+        max_length=_MAX_PLUGIN_VOLUME_NAME_LENGTH,
+        pattern=_PLUGIN_COMPONENT_NAME_PATTERN,
+    )
+    mode: Literal["ro", "rw"] = "ro"
+
+
 class _VibePluginExtension(BaseModel):
+    """The keys the ai.mistral.vibe extension schema defines.
+
+    Like an unknown manifest field, any other key is reported and ignored, and
+    the extension is kept: see `_validate_defined_fields`.
+    """
+
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
     schema_version: Literal[1] = Field(alias="schemaVersion")
@@ -212,6 +238,11 @@ class _VibePluginExtension(BaseModel):
     tool_overrides: dict[str, _ToolOverride] = Field(
         default_factory=dict, alias="toolOverrides"
     )
+    # Mounted only by hosts that share volumes: accepted here so that the
+    # extension stays valid.
+    volumes: list[_PluginVolume] = Field(
+        default_factory=list, max_length=_MAX_PLUGIN_VOLUMES
+    )
 
     @field_validator("starter_prompt", mode="before")
     @classmethod
@@ -219,6 +250,16 @@ class _VibePluginExtension(BaseModel):
         # `None` above means absent: the schema refuses an explicit null.
         if value is None:
             raise ValueError("starterPrompt cannot be null")
+        return value
+
+    @field_validator("volumes")
+    @classmethod
+    def _volume_names_are_unique(
+        cls, value: list[_PluginVolume]
+    ) -> list[_PluginVolume]:
+        names = [volume.name for volume in value]
+        if len(names) != len(set(names)):
+            raise ValueError("volume names must be unique")
         return value
 
 
@@ -437,6 +478,19 @@ class PluginDescriptor:
     author: str | None = None
     # Presentation only (ai.mistral.vibe extension); `name` stays the identity.
     display_name: str | None = None
+
+    @property
+    def component_prefix(self) -> str:
+        """What qualifies the plugin's skills, knowledge and agents.
+
+        The plugin's name as its manifest writes it, which is how the model sees
+        the plugin named and mounted. Only tools, which code calls by name, use
+        the tool namespace. A name that cannot qualify a skill, such as a Codex
+        name with spaces, falls back to the namespace.
+        """
+        if _SKILL_QUALIFIER_PATTERN.fullmatch(self.name):
+            return self.name
+        return self.namespace
 
 
 @dataclass(frozen=True, slots=True)
@@ -851,7 +905,7 @@ class PluginResolver:
                 raise ValueError(
                     "plugin.json must resolve to a regular file inside the plugin root"
                 )
-            manifest = self._parse_manifest(resolved_manifest)
+            manifest, unknown_fields = self._parse_manifest(resolved_manifest)
         except (OSError, ValueError, ValidationError, json.JSONDecodeError) as error:
             self._issues.append(
                 PluginConfigIssue(
@@ -860,6 +914,15 @@ class PluginResolver:
             )
             return None
 
+        self._issues.extend(
+            _unknown_field_issue(
+                resolved_manifest,
+                PluginDiagnosticCode.MANIFEST_UNKNOWN_FIELD,
+                "plugin.json",
+                field,
+            )
+            for field in unknown_fields
+        )
         extension = self._parse_vibe_extension(manifest, resolved_manifest)
         try:
             manifest_digest = canonical_json_digest(manifest)
@@ -1038,7 +1101,7 @@ class PluginResolver:
     ) -> dict[str, SkillInfo]:
         skills: dict[str, SkillInfo] = {}
         for definition in definitions:
-            alias = f"{plugin.namespace}:{definition.source_name}"
+            alias = f"{plugin.component_prefix}:{definition.source_name}"
             if alias in skills:
                 self._issues.append(
                     PluginConfigIssue(
@@ -1193,9 +1256,9 @@ class PluginResolver:
             )
         return tuple(definitions)
 
-    def _parse_manifest(self, path: Path) -> _PluginManifest:
+    def _parse_manifest(self, path: Path) -> tuple[_PluginManifest, tuple[str, ...]]:
         raw = json.loads(read_safe(path, raise_on_error=True).text)
-        return _PluginManifest.model_validate(raw)
+        return _validate_defined_fields(_PluginManifest, raw)
 
     def _parse_vibe_extension(
         self, manifest: _PluginManifest, manifest_path: Path
@@ -1205,7 +1268,9 @@ class PluginResolver:
         if raw is None:
             return None
         try:
-            return _VibePluginExtension.model_validate(raw)
+            extension, unknown_fields = _validate_defined_fields(
+                _VibePluginExtension, raw
+            )
         except ValidationError as error:
             self._issues.append(
                 PluginConfigIssue(
@@ -1214,6 +1279,16 @@ class PluginResolver:
                 )
             )
             return None
+        self._issues.extend(
+            _unknown_field_issue(
+                manifest_path,
+                PluginDiagnosticCode.EXTENSION_UNKNOWN_FIELD,
+                f"{_VIBE_EXTENSION} extension",
+                field,
+            )
+            for field in unknown_fields
+        )
+        return extension
 
     def _load_runtime_hooks(
         self, plugin: PluginDescriptor, extension: _VibePluginExtension | None
@@ -1377,7 +1452,7 @@ class PluginResolver:
             definitions.append(
                 PluginKnowledgeDefinition(
                     plugin_name=plugin.name,
-                    name=f"{plugin.namespace}:{metadata.name}",
+                    name=f"{plugin.component_prefix}:{metadata.name}",
                     source_name=metadata.name,
                     description=metadata.description,
                     display_name=metadata.display_name,
@@ -1457,7 +1532,7 @@ class PluginResolver:
                     )
                 )
                 continue
-            name = f"{plugin.namespace}:{child.stem}"
+            name = f"{plugin.component_prefix}:{child.stem}"
             overrides: dict[str, object] = {}
             if document.active_model is not None:
                 overrides["active_model"] = document.active_model
@@ -1888,7 +1963,7 @@ class PluginResolver:
                             )
                         )
                     continue
-                alias = f"{plugin.namespace}:{source_name}"
+                alias = f"{plugin.component_prefix}:{source_name}"
                 if alias in skills:
                     self._issues.append(
                         PluginConfigIssue(
@@ -2042,6 +2117,39 @@ def plugin_skill_translation(skill: SkillInfo) -> Literal["synthetic_skill"] | N
 def _plugin_log_label(plugin: PluginDescriptor) -> str:
     version = plugin.version or "unversioned"
     return f"{plugin.name}@{version} ({plugin.source_format}, {plugin.scope})"
+
+
+def _validate_defined_fields[ModelT: BaseModel](
+    model: type[ModelT], raw: object
+) -> tuple[ModelT, tuple[str, ...]]:
+    """Validate the keys of a JSON object that ``model`` defines; name the others.
+
+    Agent Plugins requires a loader to report an unknown top-level manifest field,
+    ignore it and keep loading, and the ai.mistral.vibe extension follows the same
+    rule. Unknown keys are left out before validation, so a field's Python name
+    never stands in for its alias.
+    """
+    if not isinstance(raw, dict):
+        return model.model_validate(raw), ()
+    fields = cast(dict[str, object], raw)
+    known = {field.alias or name for name, field in model.model_fields.items()}
+    unknown = tuple(sorted(key for key in fields if key not in known))
+    defined = {key: value for key, value in fields.items() if key in known}
+    return model.model_validate(defined), unknown
+
+
+def _unknown_field_issue(
+    file: Path, code: PluginDiagnosticCode, owner: str, field: str
+) -> PluginConfigIssue:
+    return PluginConfigIssue(
+        file=file,
+        message=f"Ignored unknown {owner} field {field!r}",
+        severity="warning",
+        code=code,
+        fatal=False,
+        source_format=DetectedPluginFormat.AGENT_PLUGINS_1_0,
+        component="manifest",
+    )
 
 
 def _render_generated_skill(definition: AdaptedSkill) -> str:

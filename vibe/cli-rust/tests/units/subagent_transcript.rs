@@ -424,6 +424,7 @@ fn toggling_tools_collapses_the_viewed_children_group_cache() {
                 prewrapped: false,
             }],
             None,
+            Vec::new(),
         );
     }
     app.toggle_tools();
@@ -508,6 +509,7 @@ fn copying_a_child_view_selection_extracts_the_child_transcript() {
                 prewrapped: false,
             }],
             None,
+            Vec::new(),
         );
     }
     app.view.selection_region.area = Rect::new(0, 0, 40, 10);

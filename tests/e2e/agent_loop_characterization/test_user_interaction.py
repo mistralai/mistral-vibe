@@ -23,10 +23,13 @@ from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockSe
 
 QUESTION_CALL_ID = "call_question_mode"
 QUESTION_TEXT = "Which mode should Vibe use?"
+# Only the question dialog draws option rows; the transcript's tool call row
+# also shows QUESTION_TEXT, before the dialog opens.
+FIRST_OPTION_ROW = "Fast - Move quickly"
 
 
 def _answer_first_question_option(child: pexpect.spawn, captured: io.StringIO) -> None:
-    wait_for_dialog_to_accept_keys(child, captured, needle=QUESTION_TEXT)
+    wait_for_dialog_to_accept_keys(child, captured, needle=FIRST_OPTION_ROW)
     child.send("\r")
 
 

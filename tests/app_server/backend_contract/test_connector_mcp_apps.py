@@ -17,15 +17,21 @@ from tests.app_server.backend_contract.conftest import (
 )
 from tests.constants import CONNECTORS_BOOTSTRAP_PATH, MISTRAL_BASE_URL
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server.events import CallbackRequested
 from vibe.app_server.models import (
+    ApprovalCallbackDetail,
+    ApprovalCallbackOutput,
+    ApprovalDecision,
+    ApprovalDecisionType,
     CompletedEffectState,
     GenericEffectDetail,
     McpAppReference,
     PublicEffectEntry,
 )
 from vibe.app_server.protocol import ClientCapabilities, SessionOptions
+from vibe.utils.tool_presentation import EffectCallDisplay
 
-pytestmark = pytest.mark.both_paths
+pytestmark = [pytest.mark.both_paths, pytest.mark.usefixtures("connectors_enabled")]
 
 _CONNECTOR_ID = "charts-id"
 
@@ -244,3 +250,66 @@ async def test_a_resumed_session_shows_the_mcp_apps_of_its_past_calls(
     finally:
         await resumed.close()
         await resumed_connection.host.close()
+
+
+@pytest.mark.asyncio
+async def test_a_connector_call_approval_reads_as_running_the_tool(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    respx_mock: respx.MockRouter,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A connector tool with no wording of its own, and a model that
+      calls it in a Session that asks before each tool call.
+    *Do*: Run a turn, approving every call.
+    *Assert*: The connector call's approval reads as running the tool.
+    """
+    # Prepare
+    respx_mock.get(f"{MISTRAL_BASE_URL}{CONNECTORS_BOOTSTRAP_PATH}").mock(
+        return_value=httpx.Response(200, json=_bootstrap())
+    )
+    respx_mock.route(url=_GATEWAY_URL).mock(side_effect=_gateway)
+    backend_contract_mistral_api.mock(
+        side_effect=_script(backend_contract_mistral_response)
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(callback_kinds=["approval"]),
+        process_services=process_services,
+    )
+    session = await connection.host.open_session()
+    try:
+        await session.resources.runtime.wait_until_ready()
+        await wait_for_background_integrations()
+
+        # Do
+        approvals: list[ApprovalCallbackDetail] = []
+        async for event in session.act("Show the chart"):
+            if not isinstance(event, CallbackRequested):
+                continue
+            assert isinstance(event.callback.detail, ApprovalCallbackDetail)
+            approvals.append(event.callback.detail)
+            await session.respond_to_callback(
+                event.callback.callback_id,
+                ApprovalCallbackOutput(
+                    decision=ApprovalDecision(type=ApprovalDecisionType.APPROVE)
+                ),
+            )
+
+        # Assert
+        [approval] = [
+            approval
+            for approval in approvals
+            if approval.effect.tool_name == "connector_charts.show_chart"
+        ]
+        assert approval.effect.display == EffectCallDisplay(
+            summary="connector_charts.show_chart",
+            verb="Run",
+            message="connector_charts.show_chart",
+            settled_verb="Ran",
+            settled_message="connector_charts.show_chart",
+            status_text="Waiting for approval to run connector_charts.show_chart",
+        )
+    finally:
+        await session.close()
+        await connection.host.close()

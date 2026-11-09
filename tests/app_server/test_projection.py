@@ -71,6 +71,28 @@ def test_config_view_projects_cursor_blink(enabled: bool) -> None:
 
 
 @pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_vim_keybindings(enabled: bool) -> None:
+    config = project_config_view(build_test_vibe_config(vim_keybindings=enabled))
+
+    assert config.model_dump(mode="json", by_alias=True)["vimKeybindings"] is enabled
+    legacy_payload = config.model_dump(mode="json", by_alias=True)
+    del legacy_payload["vimKeybindings"]
+    assert type(config).model_validate(legacy_payload).vim_keybindings is False
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_enable_sticky_prompt(enabled: bool) -> None:
+    config = project_config_view(build_test_vibe_config(enable_sticky_prompt=enabled))
+
+    assert (
+        config.model_dump(mode="json", by_alias=True)["enableStickyPrompt"] is enabled
+    )
+    legacy_payload = config.model_dump(mode="json", by_alias=True)
+    del legacy_payload["enableStickyPrompt"]
+    assert type(config).model_validate(legacy_payload).enable_sticky_prompt is True
+
+
+@pytest.mark.parametrize("enabled", [True, False])
 def test_config_view_projects_enable_mouse_capture(enabled: bool) -> None:
     config = project_config_view(build_test_vibe_config(enable_mouse_capture=enabled))
 
@@ -189,7 +211,8 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
     defining layer. A setting without ``name`` and ``provider`` defines
     nothing: a user or admin tweak never moves a catalog or GrowthBook model,
     and the thinking level a pick writes for the session never moves the
-    picked model.
+    picked model. The built-in default model is not listed: the catalog
+    provides models, so it is not available anymore (VIBE-5548).
     """
     from vibe.core.config import build_default_orchestrator
     from vibe.core.config.layers.admin import AdminConfigLayer
@@ -202,7 +225,7 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
         "models": [
             _mistral_model("session-model"),
             # What a /model pick writes for the session.
-            {"alias": "mistral-medium-3.5", "thinking": "off"},
+            {"alias": "mistral-medium-latest", "thinking": "off"},
         ]
     })
     admin = orchestrator.get_layer(AdminConfigLayer.NAME)
@@ -235,8 +258,7 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
     config_file = config_dir / "config.toml"
     user_config = tomllib.loads(config_file.read_text(encoding="utf-8"))
     user_config.update(
-        # Unpinned: the fixture's pin names a model this list replaces.
-        active_model="",
+        active_model="local-model",
         models=[
             _mistral_model("local-model"),
             {"name": "zai-glm-5-3", "temperature": 0.9},
@@ -257,11 +279,12 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
         ("mistral-medium-latest", "catalog"),
         ("session-model", "project"),
         ("local-model", "local"),
-        ("mistral-medium-3.5", "local"),
     ]
+    # The built-in default is not available while the catalog lists models.
+    assert "mistral-medium-3.5" not in config.models
     # Display only: the settings still apply.
     assert config.models["zai-glm-5-3"].temperature == 0.1
-    assert config.models["mistral-medium-3.5"].thinking == "off"
+    assert config.models["mistral-medium-latest"].thinking == "off"
     assert view.active_model.source == "local"
     serialized = view.model_dump(mode="json", by_alias=True)
     assert serialized["models"][0]["source"] == "admin"

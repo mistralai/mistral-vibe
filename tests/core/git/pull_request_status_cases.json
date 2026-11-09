@@ -8,19 +8,22 @@
       "mergeStatus": "conflicting"
     },
     "status": "merged",
-    "cliStatus": null
+    "cliStatus": null,
+    "cliReason": null
   },
   {
     "name": "a draft keeps its lifecycle state",
     "input": { "state": "draft", "checksStatus": "failing" },
     "status": "draft",
-    "cliStatus": null
+    "cliStatus": null,
+    "cliReason": null
   },
   {
     "name": "a pull request without a lifecycle state is unknown",
     "input": {},
     "status": "unknown",
-    "cliStatus": null
+    "cliStatus": null,
+    "cliReason": null
   },
   {
     "name": "failing required checks need the user",
@@ -31,7 +34,8 @@
       "mergeStatus": "mergeable"
     },
     "status": "action_required",
-    "cliStatus": "action_needed"
+    "cliStatus": "action_needed",
+    "cliReason": "checks_failing"
   },
   {
     "name": "requested changes need the user",
@@ -42,7 +46,8 @@
       "mergeStatus": "blocked"
     },
     "status": "action_required",
-    "cliStatus": "action_needed"
+    "cliStatus": "action_needed",
+    "cliReason": "changes_requested"
   },
   {
     "name": "conflicts need the user, even while checks run",
@@ -53,7 +58,8 @@
       "mergeStatus": "conflicting"
     },
     "status": "action_required",
-    "cliStatus": "action_needed"
+    "cliStatus": "action_needed",
+    "cliReason": "conflicts"
   },
   {
     "name": "running required checks win over a blocked merge",
@@ -64,7 +70,8 @@
       "mergeStatus": "blocked"
     },
     "status": "checks_pending",
-    "cliStatus": "waiting"
+    "cliStatus": "waiting",
+    "cliReason": "checks_pending"
   },
   {
     "name": "a required review waits for reviewers",
@@ -75,7 +82,8 @@
       "mergeStatus": "blocked"
     },
     "status": "awaiting_review",
-    "cliStatus": "waiting"
+    "cliStatus": "waiting",
+    "cliReason": "review_required"
   },
   {
     "name": "a merge blocked by a branch rule is not a failure",
@@ -86,7 +94,8 @@
       "mergeStatus": "blocked"
     },
     "status": "merge_blocked",
-    "cliStatus": "waiting"
+    "cliStatus": "waiting",
+    "cliReason": "merge_blocked"
   },
   {
     "name": "failing optional checks do not block",
@@ -98,7 +107,8 @@
       "mergeStatus": "mergeable"
     },
     "status": "ready_to_merge",
-    "cliStatus": "mergeable"
+    "cliStatus": "mergeable",
+    "cliReason": null
   },
   {
     "name": "no required check and no review is ready when mergeable",
@@ -109,7 +119,8 @@
       "mergeStatus": "mergeable"
     },
     "status": "ready_to_merge",
-    "cliStatus": "mergeable"
+    "cliStatus": "mergeable",
+    "cliReason": null
   },
   {
     "name": "an unknown merge status stays open",
@@ -120,12 +131,38 @@
       "mergeStatus": "unknown"
     },
     "status": "open",
-    "cliStatus": null
+    "cliStatus": null,
+    "cliReason": null
   },
   {
     "name": "an open pull request not read yet stays open",
     "input": { "state": "open" },
     "status": "open",
-    "cliStatus": null
+    "cliStatus": null,
+    "cliReason": null
+  },
+  {
+    "name": "requested changes win over failing checks",
+    "input": {
+      "state": "open",
+      "checksStatus": "failing",
+      "reviewDecision": "changes_requested",
+      "mergeStatus": "blocked"
+    },
+    "status": "action_required",
+    "cliStatus": "action_needed",
+    "cliReason": "changes_requested"
+  },
+  {
+    "name": "running required checks win over a required review",
+    "input": {
+      "state": "open",
+      "checksStatus": "pending",
+      "reviewDecision": "review_required",
+      "mergeStatus": "blocked"
+    },
+    "status": "checks_pending",
+    "cliStatus": "waiting",
+    "cliReason": "checks_pending"
   }
 ]

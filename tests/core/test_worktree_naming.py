@@ -38,6 +38,13 @@ def test_name_from_text_is_empty_when_nothing_survives(text: str) -> None:
     assert worktree_name_from_text(text) == ""
 
 
+# Trailing filler is trimmed only where a cut left it; a short name the agent
+# chose keeps its last word.
+@pytest.mark.parametrize("text", ["qa-debug-a", "fix login in", "rename the"])
+def test_name_from_text_keeps_a_trailing_stop_word_it_did_not_cut(text: str) -> None:
+    assert worktree_name_from_text(text) == text.replace(" ", "-")
+
+
 def test_name_from_text_keeps_a_lone_stop_word() -> None:
     assert worktree_name_from_text("the") == "the"
 

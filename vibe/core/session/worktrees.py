@@ -50,13 +50,18 @@ class CreateNamedWorktree:
 
     name: str
     branch: str | None = None
+    branch_off_in_use: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class CreateWorktreeForPrompt:
-    """Raise a worktree and let the naming model choose what to call it."""
+    """Raise a worktree and let the naming model choose what to call it.
+
+    A ``name`` the caller already has (the agent's, say) replaces the model.
+    """
 
     prompt: str | None = None
+    name: str | None = None
 
 
 type WorktreeRequest = (
@@ -133,12 +138,18 @@ class SessionWorktrees:
                 ):
                     raise WorktreeError(f"Worktree is no longer available: {requested}")
                 return ResolvedWorktree(cwd=requested, pending_hold=pending_hold)
-            case CreateNamedWorktree(name=name, branch=branch):
+            case CreateNamedWorktree(
+                name=name, branch=branch, branch_off_in_use=branch_off
+            ):
                 with WorktreeRepository.open(
                     base_cwd, trust_store=trust_store, copy_on_write=copy_on_write
                 ) as repository:
                     created = repository.prepare(
-                        name, branch=branch, on_progress=on_progress, base=base
+                        name,
+                        branch=branch,
+                        on_progress=on_progress,
+                        base=base,
+                        branch_in_use="branch_off" if branch_off else "fail",
                     )
             case CreateWorktreeForPrompt(prompt=prompt):
                 with WorktreeRepository.open(
@@ -320,6 +331,8 @@ class SessionWorktrees:
         """
         if not isinstance(request, CreateWorktreeForPrompt):
             return None
+        if request.name is not None:
+            return request.name
         if request.prompt and on_progress is not None:
             on_progress(WorktreeCreationProgress(WorktreeCreationPhase.NAMING))
         return await suggest_worktree_name(

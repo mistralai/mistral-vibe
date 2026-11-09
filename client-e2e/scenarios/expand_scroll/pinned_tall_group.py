@@ -11,7 +11,7 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-screen_rows = {1: "⏷ Ran 40 commands"}
+screen_rows = {3: "⏷ Ran 40 commands"}
 
 _PROMPT = "run many commands"
 

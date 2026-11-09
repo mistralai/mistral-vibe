@@ -1,4 +1,4 @@
-"""A failed rewind read reports the server's reason as an error row and leaves rewind mode."""
+"""A failed rewind read reports the server's reason as a notice and leaves rewind mode."""
 
 from __future__ import annotations
 
@@ -28,4 +28,4 @@ request_methods = {"session/rewind/read"}
 
 capture_steps = {1}
 screen_contains = ("Rewindable history entry not found: stale",)
-screen_excludes = ("Rewind to:", "Edit message from here")
+screen_excludes = ("Rewind to:", "Edit message from here", "✕")

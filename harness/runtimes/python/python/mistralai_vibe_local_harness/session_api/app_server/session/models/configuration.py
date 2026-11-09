@@ -38,6 +38,8 @@ type HookType = Literal[
 DEFAULT_CONCURRENT_CHILD_TURN_LIMIT: Final = 10
 DEFAULT_MAX_SUBAGENT_DEPTH: Final = 2
 type ToolModelAccess = Literal["direct", "programmatic", "both"]
+"""How the model calls a tool: ``"programmatic"`` from ``run_typescript``, ``"direct"`` from its
+tool list, or ``"both"``."""
 type SandboxAccess = Literal["none", "files", "full"]
 SANDBOX_ACCESS_RANK: Final[dict[SandboxAccess, int]] = {"none": 0, "files": 1, "full": 2}
 
@@ -190,10 +192,17 @@ class PermissionRule(SessionModel):
     model_config = ConfigDict(frozen=True)
 
     tools: tuple[str, ...]
+    """Glob patterns of the stable tool IDs, such as ``client.deploy_service``, that select the
+    rule."""
     decision: PermissionDecision
+    """``"allow"``, ``"ask"`` or ``"deny"``: the decision when no argument pattern decides."""
     allowlist: tuple[str, ...] = ()
+    """Argument patterns that run without approval, unless ``denylist`` or ``sensitive`` matches;
+    when not empty, other calls ask."""
     denylist: tuple[str, ...] = ()
+    """Argument patterns that cannot run."""
     sensitive: tuple[str, ...] = ()
+    """Argument patterns that ask for approval."""
 
 
 class PermissionPolicy(SessionModel):
@@ -202,7 +211,9 @@ class PermissionPolicy(SessionModel):
     model_config = ConfigDict(frozen=True)
 
     default: PermissionDecision
+    """``"allow"``, ``"ask"`` or ``"deny"``: the decision for a call that matches no rule."""
     rules: tuple[PermissionRule, ...] = ()
+    """The rules, in order: the first whose ``tools`` match the call applies."""
 
 
 class CapabilityBindingReference(SessionModel):

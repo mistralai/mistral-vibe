@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import importlib.util
 import os
 from pathlib import Path
+import struct
 import subprocess
 import sys
 import tarfile
@@ -773,6 +774,123 @@ def test_stage_rust_cli_failure_preserves_existing_binary(
         backend._stage_rust_cli()
 
     assert bundled.read_bytes() == b"editable-rust-cli"
+
+
+def _pe_importing(*dlls: str) -> bytes:
+    header = 0x40
+    optional_size = 112 + 16 * 8
+    section_table = header + 24 + optional_size
+    raw_offset = 0x200
+    address = 0x1000
+    descriptors_size = 20 * (len(dlls) + 1)
+    names = b""
+    descriptors = b""
+    for dll in dlls:
+        name_rva = address + descriptors_size + len(names)
+        descriptors += struct.pack("<3I", 0, 0, 0) + struct.pack("<2I", name_rva, 0)
+        names += dll.encode("ascii") + b"\0"
+    section = descriptors + bytes(20) + names
+    image = bytearray(raw_offset + len(section))
+    image[:2] = b"MZ"
+    struct.pack_into("<I", image, 0x3C, header)
+    image[header : header + 4] = b"PE\0\0"
+    struct.pack_into("<H", image, header + 6, 1)
+    struct.pack_into("<H", image, header + 20, optional_size)
+    struct.pack_into("<H", image, header + 24, 0x20B)
+    struct.pack_into("<I", image, header + 24 + 112 + 8, address)
+    struct.pack_into(
+        "<4I", image, section_table + 8, len(section), address, len(section), raw_offset
+    )
+    image[raw_offset:] = section
+    return bytes(image)
+
+
+@pytest.mark.parametrize(
+    ("binary", "imports"),
+    [
+        (
+            _pe_importing("KERNEL32.dll", "VCRUNTIME140.dll"),
+            ["KERNEL32.dll", "VCRUNTIME140.dll"],
+        ),
+        (_pe_importing(), []),
+        (b"\x7fELF\0GLIBC_2.28\0", []),
+    ],
+)
+def test_pe_imports_lists_the_imported_dlls(
+    monkeypatch: pytest.MonkeyPatch, binary: bytes, imports: list[str]
+) -> None:
+    backend = _load_backend(monkeypatch)
+
+    assert backend._pe_imports(binary) == imports
+
+
+def _stage_windows_rust_cli(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, binary: bytes
+) -> tuple[ModuleType, list[dict[str, str]], Path]:
+    backend = _load_backend(monkeypatch)
+    project = tmp_path / "project"
+    manifest = project / "vibe/cli-rust/Cargo.toml"
+    target = project / ".native-build/vibe-rs-target"
+    bundled = project / "vibe/_bin" / backend._TUI_NAME
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("[package]\nname='vibe-rs'\n")
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(b"previous-rust-cli")
+    environments: list[dict[str, str]] = []
+
+    def run(command: list[str], *, cwd: Path, env: dict[str, str], check: bool) -> None:
+        environments.append(env)
+        built = target / "release" / backend._TUI_NAME
+        built.parent.mkdir(parents=True)
+        built.write_bytes(binary)
+
+    monkeypatch.setattr(backend, "_PROJECT_ROOT", project)
+    monkeypatch.setattr(backend, "_TUI_MANIFEST", manifest)
+    monkeypatch.setattr(backend, "_TUI_TARGET", target)
+    monkeypatch.setattr(backend, "_BUNDLED_TUI", bundled)
+    monkeypatch.setattr(backend.subprocess, "run", run)
+    monkeypatch.setenv("CARGO_BUILD_FLAGS", "--no-default-features")
+    monkeypatch.delenv("MATURIN_PEP517_ARGS", raising=False)
+    return backend, environments, bundled
+
+
+def test_stage_rust_cli_links_the_msvc_crt_statically(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    binary = _pe_importing("KERNEL32.dll", "api-ms-win-crt-runtime-l1-1-0.dll")
+    backend, environments, bundled = _stage_windows_rust_cli(
+        monkeypatch, tmp_path, binary
+    )
+    monkeypatch.setenv(
+        "CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS", "-C debuginfo=0"
+    )
+    monkeypatch.delenv("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS", raising=False)
+
+    backend._stage_rust_cli()
+
+    [environment] = environments
+    assert environment["CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS"] == (
+        "-C target-feature=+crt-static"
+    )
+    assert environment["CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS"] == (
+        "-C debuginfo=0 -C target-feature=+crt-static"
+    )
+    assert bundled.read_bytes() == binary
+
+
+@pytest.mark.parametrize(
+    "dll", ["VCRUNTIME140.dll", "vcruntime140_1.dll", "MSVCP140.dll"]
+)
+def test_windows_rust_cli_importing_the_vc_runtime_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dll: str
+) -> None:
+    backend, _environments, bundled = _stage_windows_rust_cli(
+        monkeypatch, tmp_path, _pe_importing("KERNEL32.dll", dll)
+    )
+
+    with pytest.raises(backend.NativeBuildError, match=f"imports {dll}"):
+        backend._stage_rust_cli()
+    assert bundled.read_bytes() == b"previous-rust-cli"
 
 
 @pytest.mark.parametrize("from_sdist", [False, True])
