@@ -108,6 +108,9 @@ impl ToolContracts {
             ToolTarget::RuntimeBuiltin {
                 name: RuntimeBuiltinToolName::FileSystemBash,
             } => file_system::bash_runtime_arguments(arguments, self.bash_timeout),
+            ToolTarget::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::FileSystemWriteFile,
+            } => file_system::write_file_runtime_arguments(arguments),
             ToolTarget::RuntimeBuiltin { .. } | ToolTarget::Provided { .. } => arguments,
         };
         ExternalTool::from_target(target, invocation_name, arguments)
@@ -142,6 +145,10 @@ impl ToolContracts {
                 name: RuntimeBuiltinToolName::FileSystemBash,
                 ..
             } => file_system::bash_runtime_arguments(arguments, self.bash_timeout),
+            ExternalTool::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::FileSystemWriteFile,
+                ..
+            } => file_system::write_file_runtime_arguments(arguments),
             _ => arguments,
         };
         Ok(ExternalToolCall {

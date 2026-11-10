@@ -424,15 +424,31 @@ expression: reviewable_snapshot(request)
             "additionalProperties": false,
             "properties": {
               "path": {
-                "type": "string"
+                "type": "string",
+                "description": "Path of the file to create or overwrite. `file_path` is accepted as an alias, as the `edit` tool names it."
               },
               "content": {
                 "type": "string"
+              },
+              "file_path": {
+                "type": "string",
+                "description": "Alias for `path`, the way the `edit` tool names the file."
               }
             },
             "required": [
-              "path",
               "content"
+            ],
+            "anyOf": [
+              {
+                "required": [
+                  "path"
+                ]
+              },
+              {
+                "required": [
+                  "file_path"
+                ]
+              }
             ]
           }
         },
