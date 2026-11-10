@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 timeline: Timeline = [
     "hi\r",
@@ -14,4 +14,5 @@ timeline: Timeline = [
     user_msg("again"),
     assistant_msg("Here we go again."),
     turn_completed(),
+    take_snapshot(),
 ]

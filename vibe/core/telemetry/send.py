@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any, Literal
+from enum import Enum
+import math
+from types import NoneType, UnionType
+from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin
 from urllib.parse import urljoin
 
 import httpx2
@@ -17,6 +20,7 @@ from vibe.core.platform_auth import (
 )
 from vibe.core.platform_auth._mistral import (
     MistralCredentials,
+    fetched_for_current_account,
     is_user_principal,
     mistral_credentials,
     resolve_principal,
@@ -50,6 +54,35 @@ type SubagentOperation = Literal[
 ]
 type SubagentOutcome = Literal["success", "failure", "timeout"]
 type SubagentProfileSource = Literal["generic", "vibe_profile"]
+
+
+type ConfigValue = bool | int | float | str | None
+
+
+def config_snapshot(config: VibeConfigSchema) -> dict[str, ConfigValue]:
+    """The live bool, number and enum settings; strings and lists can hold PII."""
+    snapshot: dict[str, ConfigValue] = {}
+    for name, field in type(config).model_fields.items():
+        if field.deprecated or not _is_safe_config_type(field.annotation):
+            continue
+        value = getattr(config, name)
+        if isinstance(value, Enum):
+            value = value.value
+        # JSON has no inf or nan: one would drop the whole event.
+        if isinstance(value, float) and not math.isfinite(value):
+            value = None
+        snapshot[name] = value
+    return snapshot
+
+
+def _is_safe_config_type(annotation: Any) -> bool:
+    if get_origin(annotation) in {Union, UnionType}:
+        return all(_is_safe_config_type(arg) for arg in get_args(annotation))
+    if annotation is NoneType:
+        return True
+    return isinstance(annotation, type) and issubclass(
+        annotation, (bool, int, float, Enum)
+    )
 
 
 def get_mistral_provider_and_api_key(
@@ -114,12 +147,11 @@ def credential_cache_key_is_current(
     config: VibeConfigSchema | None = None,
     credentials: PlatformCredentialFactory | None = None,
 ) -> bool:
-    """``may_cache_under`` for a key computed when the fetch started."""
-    if not is_user_principal(fetched_for):
-        return True
-    if config is None:
-        return False
-    return mistral_credential_cache_key(config, credentials) == fetched_for
+    """``fetched_for_current_account`` for a fetch that holds the config."""
+    mistral = mistral_credentials(config, credentials) if config is not None else None
+    if mistral is None:
+        return not is_user_principal(fetched_for)
+    return fetched_for_current_account(mistral.credentials, fetched_for)
 
 
 def _subagent_depth(caller_agent_path: str) -> int:
@@ -452,11 +484,34 @@ class TelemetryClient:
                 if lc and lc.terminal_emulator is not None
                 else None
             ),
+            "config": config_snapshot(self._config_getter()),
         }
         self.send_telemetry_event("vibe.new_session", payload)
 
-    def send_session_closed(self) -> None:
-        self.send_telemetry_event("vibe.session_closed", {})
+    def send_session_closed(self, *, reason: str) -> None:
+        # ``exit``, ``clear``, ``other`` or ``client_disconnected``.
+        self.send_telemetry_event("vibe.session_closed", {"reason": reason})
+
+    def send_config_updated(
+        self, *, fields: list[str], target_layers: list[str]
+    ) -> None:
+        # Field names only: values and the client's free-text reason can hold PII.
+        payload = {"fields": fields, "target_layers": target_layers}
+        self.send_telemetry_event("vibe.config.updated", payload)
+
+    def send_turn_failed(
+        self, *, error_code: str | None, http_status: int | None, message_id: str | None
+    ) -> None:
+        payload = {
+            "error_code": error_code,
+            "http_status": http_status,
+            "message_id": message_id,
+        }
+        self.send_telemetry_event("vibe.turn.failed", payload)
+
+    def send_hook_triggered(self, *, hook_type: str, from_plugin: bool) -> None:
+        payload = {"hook_type": hook_type, "from_plugin": from_plugin}
+        self.send_telemetry_event("vibe.hook.triggered", payload)
 
     def send_admin_config_applied(
         self,
@@ -486,11 +541,13 @@ class TelemetryClient:
         nb_context_messages: int,
         nb_prompt_chars: int,
         call_type: TelemetryCallType,
+        reasoning_effort: str,
         message_id: str | None = None,
         attachment_counts: dict[AttachmentKind, int] | None = None,
     ) -> None:
         payload = {
             "model": model,
+            "reasoning_effort": reasoning_effort,
             "nb_context_chars": nb_context_chars,
             "nb_context_messages": nb_context_messages,
             "nb_prompt_chars": nb_prompt_chars,

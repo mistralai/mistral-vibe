@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # Force deterministic OSC 52 copying across hosts.
 env = {"SSH_TTY": "/dev/pts/0"}
@@ -62,6 +62,5 @@ timeline: Timeline = [
     _WHEEL_UP * 2,
     _WHEEL_DOWN * 40,
     _WHEEL_DOWN * 2,
+    take_snapshot(),
 ]
-
-capture_steps = {0, 1, 2, 3, 8, 9, 10, 11}

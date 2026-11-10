@@ -60,12 +60,14 @@ by `test_golden.py`. Mark a known gap `skip = "<reason>"`. Generate its golden
 with `make store_golden` and review the diff before committing; `test_golden.py`
 fails for a scenario without a committed golden and never generates one.
 
+Snapshots are opt-in: put `take_snapshot()` (from `e2e.app_server.scenario`) right after the step whose settled frame must become an SVG, or first in the timeline for the startup frame. Prefer expectations over SVGs: test behavior with `request_methods`, `expected_actions`, `expected_clipboard`, `expected_titles`, `mouse_tracking` or `screen_contains` / `screen_excludes` / `screen_rows`, and keep a snapshot only when the layout or styling itself is what you test. Every SVG is rewritten by unrelated UI changes (one footer change rewrote ~2300). Screen, cursor, clipboard and mouse expectations check the final settled frame; `expected_titles` lists the title after startup and after each step. A scenario with no snapshot, no expectation and no pinned request fails.
+
 ## Golden snapshots
 
 `test_golden.py` captures the Rust CLI and compares against committed goldens in
 `goldens/<scenario>/`.
 
-- Each golden stores SVG per snapshot (`snapshot_NN_<label>.svg`) and normalized
+- Each golden stores one SVG per `take_snapshot()` (`snapshot_NN_<label>.svg`, label `step<N>`, `startup`, or the one passed) and normalized
   requests (`requests.json`).
 - Generate: `make store_golden`. For one scenario: `uv run --no-project --with "pyte==0.8.2" --with "rich==15.0.0" python client-e2e/store_golden.py <scenario>`; unpinned `pyte`/`rich` can render different SVGs.
 - Test: `make test_golden`.

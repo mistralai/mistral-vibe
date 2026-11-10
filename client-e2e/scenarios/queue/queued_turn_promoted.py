@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
-
-capture_steps = {1, 2, 3, 4}
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # Each turn releases five events: start, the queue update the harness adds, the
 # user echo, the reply, and completion.
@@ -23,4 +21,5 @@ timeline: Timeline = [
     assistant_msg("Ho. Ready when you are."),
     turn_completed(),
     {"release": 5},
+    take_snapshot(),
 ]

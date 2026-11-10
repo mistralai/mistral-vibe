@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline, resize
+from e2e.app_server.scenario import Timeline, resize, take_snapshot
 
 handshake = {
     "account/read": {
@@ -16,4 +16,4 @@ handshake = {
 }
 screen_contains = ("mistral-medium-3.5[medium] · Team",)
 
-timeline: Timeline = [resize(24, 50)]
+timeline: Timeline = [resize(24, 50), take_snapshot()]

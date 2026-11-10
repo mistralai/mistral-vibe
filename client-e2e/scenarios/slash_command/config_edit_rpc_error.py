@@ -12,7 +12,6 @@ handshake = {
     },
 }
 
-capture_startup = False
 screen_contains = (
     "Failed to save auto_compact_threshold (temporary):",
     "Session is busy; retry when idle",

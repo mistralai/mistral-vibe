@@ -15,8 +15,11 @@ from dataclasses import dataclass
 from vibe.app_server._background_worker import BackgroundWorker
 from vibe.app_server._experiments_service import ExperimentsService
 from vibe.app_server._mcp_discovery_service import MCPDiscoveryService
+from vibe.app_server._model_catalog_service import ModelCatalogService
 from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigService
+from vibe.app_server._skill_shadows import ShadowWarnings
+from vibe.app_server._skill_store_cleanup import SkillStoreCleanup
 from vibe.app_server._worktree_housekeeping import WorktreeHousekeeping
 from vibe.app_server.connector_catalog import SharedConnectorCatalog
 from vibe.setup.auth._oidc_tenant import OidcTenantResolver
@@ -32,8 +35,11 @@ class ProcessServices:
     worktrees: WorktreeHousekeeping
     experiments: ExperimentsService
     mcp_discovery: MCPDiscoveryService
+    skill_shadows: ShadowWarnings
+    skill_store: SkillStoreCleanup
     # Every channel's open sessions, so one channel archives another's.
     open_sessions: OpenSessions
+    model_catalog: ModelCatalogService
 
     @classmethod
     def create(cls) -> ProcessServices:
@@ -47,7 +53,10 @@ class ProcessServices:
             worktrees=WorktreeHousekeeping(background),
             experiments=ExperimentsService(),
             mcp_discovery=MCPDiscoveryService(),
+            skill_shadows=ShadowWarnings(),
+            skill_store=SkillStoreCleanup(background),
             open_sessions=OpenSessions(),
+            model_catalog=ModelCatalogService(),
         )
 
     async def close(self) -> None:
@@ -56,6 +65,7 @@ class ProcessServices:
             await self.connector_catalog.close()
             await self.experiments.close()
             await self.mcp_discovery.close()
+            await self.model_catalog.close()
         finally:
             await self.background.close()
 

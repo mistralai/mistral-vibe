@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.config import ROWS
-from e2e.app_server.scenario import Timeline, resize
+from e2e.app_server.scenario import Timeline, resize, take_snapshot
 
 env = {"SSH_TTY": "/dev/pts/0"}
 
@@ -21,4 +21,11 @@ expected_clipboard = "/test/workdir"
 screen_contains = ("Copied",)
 
 # The full-width frame has no icon; narrowing shortens the cwd and paints it, then hover and click.
-timeline: Timeline = [resize(ROWS, _COLUMNS), _HOVER, _CLICK]
+timeline: Timeline = [
+    resize(ROWS, _COLUMNS),
+    take_snapshot(),
+    _HOVER,
+    take_snapshot(),
+    _CLICK,
+    take_snapshot(),
+]

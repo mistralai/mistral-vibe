@@ -44,7 +44,7 @@ from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.log_reader import PaginatedLogs
-from vibe.core.skills.models import SkillInfo, SkillSource
+from vibe.core.skills.models import InstalledSkill, SkillInfo, SkillSource
 
 
 class _RouteFacts(NamedTuple):
@@ -301,7 +301,7 @@ def project_skill_summaries(skills: Iterable[SkillInfo]) -> list[SkillSummary]:
 
 
 def _skill_summary(
-    skill: SkillInfo, enabled: bool = True, locked: bool = False
+    skill: SkillInfo, *, enabled: bool = True, locked: bool = False, active: bool = True
 ) -> SkillSummary:
     return SkillSummary.model_validate({
         "name": skill.name,
@@ -313,17 +313,25 @@ def _skill_summary(
         "registry": skill.registry.model_dump() if skill.registry else None,
         "enabled": enabled,
         "locked": locked,
+        "active": active,
     })
 
 
 def writable_disabled_skills(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
 ) -> Sequence[str] | None:
-    """The writable layer's own ``disabled_skills``, or None when unavailable.
+    """The writable layer's own ``disabled_skills``, or None when unavailable."""
+    return writable_list_field(orchestrator, "disabled_skills")
 
-    ``disabled_skills`` concat-merges, so the effective list is every layer at
-    once while a toggle can only add to or remove from the writable one. Reads
-    the cached layer rather than loading, to stay usable from sync projection.
+
+def writable_list_field(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], field: str
+) -> Sequence[str] | None:
+    """The writable layer's own value of a concat-merged list, or None when unavailable.
+
+    Such a list's effective value is every layer at once, while a toggle can
+    only add to or remove from the writable one. Reads the cached layer rather
+    than loading, to stay usable from sync projection.
     """
     try:
         layer = orchestrator.get_layer(orchestrator.writable_layer_name)
@@ -332,12 +340,12 @@ def writable_disabled_skills(
     data = layer.cached_data
     if data is None:
         return None
-    names = getattr(data, "disabled_skills", None)
+    names = getattr(data, field, None)
     return list(names) if names else []
 
 
 def project_installed_skill_summaries(
-    skills: Iterable[SkillInfo],
+    skills: Iterable[InstalledSkill],
     config: VibeConfigSchema,
     user_disabled: Sequence[str] | None = None,
 ) -> list[SkillSummary]:
@@ -355,6 +363,9 @@ def project_installed_skill_summaries(
 
     Plugin skills are locked: they come from an installed plugin and are managed
     through ``/plugins``, not by this config.
+
+    ``active`` is whether the agent resolves the skill's name to it. A pin that
+    another skill of the same name shadows is still listed, so it can be managed.
     """
     disabled = config.disabled_skills
     toggles = SkillToggles(
@@ -369,7 +380,15 @@ def project_installed_skill_summaries(
     def _locked(info: SkillInfo) -> bool:
         return info.source is SkillSource.PLUGIN or toggles.locked(info.name)
 
-    return [_skill_summary(info, _enabled(info), _locked(info)) for info in skills]
+    return [
+        _skill_summary(
+            skill.info,
+            enabled=_enabled(skill.info),
+            locked=_locked(skill.info),
+            active=skill.active,
+        )
+        for skill in skills
+    ]
 
 
 def project_debug_logs(logs: PaginatedLogs) -> DebugLogPage:

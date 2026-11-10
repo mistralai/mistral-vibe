@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # Force deterministic OSC 52 copying across hosts.
 env = {"SSH_TTY": "/dev/pts/0"}
@@ -20,4 +20,4 @@ _RELEASE = f"\x1b[<0;{_COL_END};{_ROW}m"
 
 _SELECT = _PRESS + _DRAG_MID + _DRAG_END + _RELEASE
 
-timeline: Timeline = [_TEXT, _SELECT]
+timeline: Timeline = [_TEXT, _SELECT, take_snapshot()]

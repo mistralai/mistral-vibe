@@ -26,8 +26,6 @@ on_request = {
 client_args = ("--worktree", "feature")
 request_methods = {"workspace/git/worktrees/remove"}
 exit_after_last_step = True
-capture_startup = False
-capture_steps = set()
 timeline: Timeline = [
     "hi\r",
     worktree("feature", path="/home/user/worktrees/feature", created=False),

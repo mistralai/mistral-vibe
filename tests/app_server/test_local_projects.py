@@ -58,6 +58,7 @@ def _handler() -> HostRequestHandler:
         org_config=fake_process_services().org_config,
         worktrees=fake_process_services().worktrees,
         experiments=fake_process_services().experiments,
+        model_catalog=fake_process_services().model_catalog,
     )
 
 

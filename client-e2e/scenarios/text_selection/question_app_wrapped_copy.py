@@ -12,7 +12,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "SSH_TTY": "/dev/pts/0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
 
 _QUESTION = (
     "Which color scheme should the terminal use when the question is long enough to wrap"

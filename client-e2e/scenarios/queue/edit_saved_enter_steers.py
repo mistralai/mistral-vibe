@@ -27,7 +27,6 @@ _UP = "\x1b[A"
 # visible; the steer itself is proven by the requests.json golden.
 screen_contains = ("second edited",)
 screen_excludes = ("↑↓/jk to select", "Enter to save")
-capture_steps = {5, 6}
 
 timeline: Timeline = [
     "first\r",

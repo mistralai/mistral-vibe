@@ -10,7 +10,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "edit the file"
 _OLD = "alpha\nbeta\ngamma\ndelta\n"
@@ -47,6 +47,5 @@ timeline: Timeline = [
     # Folding the shell body leaves the rows above it in place.
     _select(22),
     _click(2, 12),
+    take_snapshot(),
 ]
-
-capture_steps = {3, 5, 7, 9, 11}

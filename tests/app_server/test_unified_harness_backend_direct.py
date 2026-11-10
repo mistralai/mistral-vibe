@@ -139,6 +139,9 @@ async def test_unified_adapter_tracks_open_callbacks_for_delivery_lifecycle(
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
 
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
+
         async def respond_to_callback(self, params: object) -> object:
             self.rejected = params
             return SimpleNamespace(
@@ -252,6 +255,9 @@ async def test_unified_adapter_adds_path_scope_choices_to_approval_callbacks(
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
 
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
+
     adapter = _inert_adapter(FakeSession(), None, str(tmp_path))
     callback = _approval_callback(
         session_id="session-1",
@@ -313,6 +319,9 @@ async def test_unified_adapter_records_only_an_approval_that_outlives_the_call(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         async def respond_to_callback(self, _params: object) -> object:
             return SimpleNamespace(
@@ -378,6 +387,9 @@ async def test_unified_adapter_forwards_an_unoffered_path_scope_without_granting
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         async def respond_to_callback(self, params: object) -> object:
             self.received = params
@@ -1283,6 +1295,9 @@ async def test_unified_flush_events_does_not_wait_before_event_stream_starts(
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
 
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
+
         def pin(self, _pin: SessionPin) -> str | None:
             return None
 
@@ -1348,6 +1363,9 @@ async def test_unified_flush_events_tracks_queue_event_watermarks(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         def __init__(self) -> None:
             self.events_started = asyncio.Event()
@@ -1459,6 +1477,9 @@ async def test_unified_adapter_preserves_canonical_queue_entries(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         def pin(self, pin: SessionPin) -> str | None:
             return self._pins.get(pin)
@@ -1945,6 +1966,9 @@ async def test_unified_root_subscription_translates_child_session_events(
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
 
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
+
         def pin(self, _pin: SessionPin) -> str | None:
             return None
 
@@ -2280,6 +2304,9 @@ async def test_unified_adapter_live_registration_overwrites_a_seeded_child(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         def pin(self, _pin: SessionPin) -> str | None:
             return None
@@ -2640,6 +2667,9 @@ async def test_unified_flush_events_returns_after_an_event_carrying_a_signal(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         def pin(self, _pin: SessionPin) -> str | None:
             return None

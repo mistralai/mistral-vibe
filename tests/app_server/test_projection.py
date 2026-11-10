@@ -13,13 +13,17 @@ from vibe.app_server._effect_output_cap import (
     TRUNCATION_MARKER,
 )
 from vibe.app_server._history_projection import project_message_history
-from vibe.app_server._projection import project_config_view, project_skill_summaries
+from vibe.app_server._projection import (
+    project_config_view,
+    project_installed_skill_summaries,
+    project_skill_summaries,
+)
 from vibe.app_server.models import (
     AgentStatsSnapshot,
     CompletedEffectState,
     PublicEffectEntry,
 )
-from vibe.core.skills.models import SkillInfo, SkillScope, SkillSource
+from vibe.core.skills.models import InstalledSkill, SkillInfo, SkillScope, SkillSource
 from vibe.core.types import FunctionCall, LLMMessage, Role, ToolCall
 
 
@@ -144,6 +148,50 @@ def test_skill_summaries_carry_the_origin_the_slash_menu_tags(
     payload = summary.model_dump(mode="json", by_alias=True)
     assert (payload["source"], payload["scope"]) == (source.value, scope.value)
     assert payload["userInvocable"] is True
+
+
+@pytest.mark.parametrize(
+    ("source", "enabled", "disabled", "own", "expected"),
+    [
+        (SkillSource.LOCAL, [], [], None, (True, False)),
+        (SkillSource.PLUGIN, [], ["deploy"], None, (True, True)),
+        (SkillSource.LOCAL, ["other"], [], None, (False, True)),
+        (SkillSource.LOCAL, ["deploy"], [], None, (True, True)),
+        (SkillSource.LOCAL, [], ["dep*"], None, (False, True)),
+        (SkillSource.LOCAL, [], ["deploy"], ["deploy"], (False, False)),
+        (SkillSource.LOCAL, [], ["deploy"], [], (False, True)),
+    ],
+    ids=[
+        "plain",
+        "plugin",
+        "outside-the-allowlist",
+        "inside-the-allowlist",
+        "disabled-by-a-pattern",
+        "disabled-by-name-in-the-writable-layer",
+        "disabled-by-name-in-another-layer",
+    ],
+)
+def test_installed_rows_are_locked_where_the_browser_cannot_switch_them(
+    source: SkillSource,
+    enabled: list[str],
+    disabled: list[str],
+    own: list[str] | None,
+    expected: tuple[bool, bool],
+) -> None:
+    skill = SkillInfo(
+        name="deploy",
+        description="Ship it.",
+        prompt="",
+        source=source,
+        scope=SkillScope.GLOBAL,
+    )
+    config = build_test_vibe_config(enabled_skills=enabled, disabled_skills=disabled)
+
+    [row] = project_installed_skill_summaries(
+        [InstalledSkill(info=skill, active=True)], config, own
+    )
+
+    assert (row.enabled, row.locked) == expected
 
 
 def test_snapshot_session_cost_discounts_cached_tokens() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 client_args = ("--setup",)
 handshake = {
@@ -29,11 +29,18 @@ request_methods = {"setup/status"}
 screen_contains = ("MISTRAL_API_KEY is set in your shell",)
 
 timeline: Timeline = [
-    "\r",  # welcome -> theme
-    "\r",  # theme -> auth method: the shell-key warning shows
-    "\r",  # auth: Launch browser -> sign-in target, the shell-key warning shows
-    "\r",  # Mistral AI: the override confirm arms and replaces the shell-key warning
-    "\x1b[B",  # navigating disarms the confirm: the shell-key warning is back
-    "\x1b",  # back to the auth method
-    "\x1b[B\r",  # Use an API key: the shell-key warning shows under the key card
+    "\r",
+    take_snapshot(),  # welcome -> theme
+    "\r",
+    take_snapshot(),  # theme -> auth method: the shell-key warning shows
+    "\r",
+    take_snapshot(),  # auth: Launch browser -> sign-in target, the shell-key warning shows
+    "\r",
+    take_snapshot(),  # Mistral AI: the override confirm arms and replaces the shell-key warning
+    "\x1b[B",
+    take_snapshot(),  # navigating disarms the confirm: the shell-key warning is back
+    "\x1b",
+    take_snapshot(),  # back to the auth method
+    "\x1b[B\r",
+    take_snapshot(),  # Use an API key: the shell-key warning shows under the key card
 ]

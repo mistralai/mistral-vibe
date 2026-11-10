@@ -28,6 +28,5 @@ timeline: Timeline = [
     "/clear\r",
 ]
 
-capture_startup = False
 screen_contains = ("New conversation started.",)
 screen_excludes = ("File the follow-ups",)

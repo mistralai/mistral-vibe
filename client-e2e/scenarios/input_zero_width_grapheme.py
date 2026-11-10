@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from e2e.app_server.events import paste
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _LEFT = "\x1b[D"
 _BACKSPACE = "\x7f"
 
-timeline: Timeline = [paste("ᠸᠠᠭᠢᠨᠳᠠᠷ\u180eᠠ ᠶᠢᠨ"), _LEFT * 5, _BACKSPACE]
+timeline: Timeline = [
+    paste("ᠸᠠᠭᠢᠨᠳᠠᠷ\u180eᠠ ᠶᠢᠨ"),
+    _LEFT * 5,
+    _BACKSPACE,
+    take_snapshot(),
+]

@@ -7,7 +7,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "@notes.md summarize this file"
 _FILE = "notes.md"
@@ -20,4 +20,5 @@ timeline: Timeline = [
     read_file(_FILE, _CONTENT, num_lines=1),
     assistant_msg("The file contains a single line: 'hello world'."),
     turn_completed(),
+    take_snapshot(),
 ]

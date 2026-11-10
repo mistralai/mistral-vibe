@@ -62,6 +62,13 @@ async fn run() -> Result<std::process::ExitCode> {
     // Built as soon as the arguments are parsed, so every later failure can
     // leave an export and the time limit counts from process start.
     let headless = vibe_rs::headless_run::HeadlessRun::for_cli(&cli);
+    if let Some(message) = vibe_rs::headless_run::invalid_price_limit(cli.max_price) {
+        if let Some(run) = &headless {
+            return Ok(run.fail(RunOutcome::UsageError, &message).into());
+        }
+        eprintln!("Error: {message}");
+        std::process::exit(1);
+    }
     // `--agent-socket` usage errors, before `--workdir` is looked at.
     if let Some(message) = vibe_rs::agent_socket::usage_error(&cli, cfg!(windows)) {
         if let Some(run) = &headless {
@@ -443,10 +450,7 @@ async fn run() -> Result<std::process::ExitCode> {
                     match vibe_rs::server::Client::spawn(launch.clone()).await {
                         Ok(spawned) => spawned,
                         Err(error) => {
-                            // The Sentry bridge only carries ERROR records,
-                            // so the startup window's own failure sites log
-                            // their own fatal errors.
-                            tracing::error!(vibe_boundary = "startup", fatal = true, "{error:#}");
+                            vibe_rs::startup::failure::log_spawn(&error);
                             return Err(error.context("spawn app-server"));
                         }
                     };
@@ -536,7 +540,7 @@ async fn run() -> Result<std::process::ExitCode> {
 
     timings.flush();
     if let Err(error) = &result {
-        // Only ERROR crosses the Sentry bridge, so WARN keeps the fault in the
+        // Only fatal ERROR crosses the Sentry bridge, so WARN keeps the fault in the
         // log without reporting a terminal that simply went away.
         if observability::sentry::is_environmental(error) {
             tracing::warn!(vibe_boundary = "event_loop", "{error}");

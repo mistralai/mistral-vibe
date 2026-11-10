@@ -176,6 +176,7 @@ fn handle_input_event(
                 Focus::ReleaseNotes => crate::release_notes::paste(app, &text),
                 Focus::Mcp => crate::mcp::search::paste(app, &text),
                 Focus::Plugins => crate::plugins::paste(app, &text),
+                Focus::Skills => crate::skills_browser::paste(app, client, &text),
                 Focus::SubagentList | Focus::Composer => input::handle_paste(app, text),
             }
             InputOutcome::Redraw { reset_blink: false }
@@ -241,6 +242,7 @@ fn dispatch_key(
         Focus::ResumePicker => crate::resume_picker::handle_key(app, client, key),
         Focus::Mcp => input::handle_mcp_key(app, client, key),
         Focus::Plugins => crate::plugins::handle_key(app, client, key),
+        Focus::Skills => crate::skills_browser::handle_key(app, client, key),
         Focus::ContextApp => crate::context_app::handle_key(app, key),
         Focus::McpOAuth => input::handle_mcp_oauth_key(app, client, key),
         Focus::ConnectorAuth => input::handle_connector_auth_key(app, client, key),

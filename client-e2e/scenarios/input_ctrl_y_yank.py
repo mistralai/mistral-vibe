@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 timeline: Timeline = [
     "hello world",
@@ -10,4 +10,5 @@ timeline: Timeline = [
     "\x01" + "\x1b[C" * 6 + "\x0b",
     # Home, Ctrl+Y yanks "world" at the caret, then a space -> "world hello ".
     "\x01\x19 ",
+    take_snapshot(),
 ]

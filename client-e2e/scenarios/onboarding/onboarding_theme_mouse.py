@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 client_args = ("--setup",)
 request_methods = {"setup/status"}
@@ -14,4 +14,11 @@ request_methods = {"setup/status"}
 _SELECT_PREVIOUS = "\x1b[<0;60;7M\x1b[<0;60;7m"
 _DRAG_PREVIEW = "\x1b[<0;93;17M\x1b[<32;93;35M\x1b[<0;93;35m"
 
-timeline: Timeline = ["\r", _SELECT_PREVIOUS, _DRAG_PREVIEW]
+timeline: Timeline = [
+    "\r",
+    take_snapshot(),
+    _SELECT_PREVIOUS,
+    take_snapshot(),
+    _DRAG_PREVIEW,
+    take_snapshot(),
+]

@@ -244,7 +244,7 @@ async def execute_title_completion(
             ]
         ),
     ]
-    report_request_sent(messages, config, route, purpose="title", iteration=0)
+    report_request_sent(messages, title_config, route, purpose="title", iteration=0)
     metadata = (
         config.completion_metadata("title", 0)
         if config.completion_metadata is not None

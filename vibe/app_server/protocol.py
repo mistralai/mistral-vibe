@@ -167,15 +167,13 @@ SERVER_METHODS: tuple[str, ...] = (
     "plugin/info",
     "plugin/reload",
     "platformCredentials/headers",
+    "plugins/local/list",
+    "plugins/local/setEnabled",
     "plugins/read",
     "plugin_catalog/read",
     "providerAuth/read",
-    "projectLinks/create",
     "projectLinks/inspectRoot",
-    "projectLinks/link",
     "projectLinks/list",
-    "projectLinks/picker/load",
-    "projectLinks/picker/loadMore",
     "projectLinks/resolveRoot",
     "projectLinks/save",
     "projectLinks/unlink",
@@ -401,8 +399,8 @@ class AgentConfig(ProtocolModel):
     enabled_tools: list[str] | None = None
     disabled_tools: list[str] = Field(default_factory=list)
     max_turns: int | None = None
-    max_price: float | None = None
-    max_session_tokens: int | None = None
+    max_price: float | None = Field(default=None, ge=0, allow_inf_nan=False)
+    max_session_tokens: int | None = Field(default=None, ge=0)
     headless: bool = False
     trust_workspace: bool = False
     mcp_servers: list[SessionMCPServer] = Field(default_factory=list)
@@ -1687,12 +1685,73 @@ class SkillsLocalSetEnabledResponse(ProtocolModel):
 
 
 type LocalSkillRefusalReason = Literal[
-    "in_the_way", "skipped_file", "locked", "not_a_project_folder", "unreadable"
+    "in_the_way",
+    "skipped_file",
+    "locked",
+    "not_a_project_folder",
+    "unreadable",
+    "namespace_collision",
 ]
 
 
 class LocalSkillRefusalData(ProtocolModel):
     reason: LocalSkillRefusalReason
+
+
+class PluginsLocalListParams(ProtocolModel):
+    project_root: str | None = None
+    # Apply the project's own config layers, as a session trusting it would.
+    trust_workspace: bool = False
+
+
+class LocalPluginComponent(ProtocolModel):
+    kind: PluginComponentKind
+    name: str
+    # What it does, as its own definition says; the command or address of a
+    # server, the tools of a connector, the language of a library.
+    description: str | None
+
+
+class LocalPluginSummary(ProtocolModel):
+    name: str
+    display_name: str | None
+    description: str
+    version: str | None
+    author: str | None
+    scope: Literal["builtin", "global", "project"]
+    source_format: str
+    root: str
+    components: list[LocalPluginComponent]
+    enabled: bool
+    # Another config layer decides ``enabled``.
+    locked: bool
+    # Vibe's own plugin: always on, whatever the config says.
+    required: bool
+    # On, but sharing its namespace with these plugins that are on too, so none
+    # of them reaches a session until one is turned off.
+    collides_with: list[str] = Field(default_factory=list)
+
+
+class LocalPluginIssue(ProtocolModel):
+    file: str
+    message: str
+
+
+class PluginsLocalListResponse(ProtocolModel):
+    plugins: list[LocalPluginSummary]
+    issues: list[LocalPluginIssue]
+
+
+class PluginsLocalSetEnabledParams(ProtocolModel):
+    name: str
+    enabled: bool
+    project_root: str | None = None
+    # Apply the project's own config layers, as a session trusting it would.
+    trust_workspace: bool = False
+
+
+class PluginsLocalSetEnabledResponse(ProtocolModel):
+    plugin: LocalPluginSummary
 
 
 SkillScopeArg = str
@@ -2466,50 +2525,6 @@ class ProjectLinksInspectRootResponse(ProtocolModel):
     saved_link: ProjectLinksSavedLink | None = None
     stale_link_cleared: bool
     stale_link_clear_failed: bool = False
-
-
-class ProjectLinksPickerCandidate(ProtocolModel):
-    project_id: str
-    name: str
-    recommended: bool
-
-
-class ProjectLinksPickerCandidates(ProtocolModel):
-    items: list[ProjectLinksPickerCandidate]
-    next_cursor: str | None
-
-
-class ProjectLinksPickerLoadParams(ProtocolModel):
-    root_path: str = Field(min_length=1)
-
-
-class ProjectLinksPickerLoadResponse(ProtocolModel):
-    root: ProjectLinksInspectedDirectory
-    saved_link: ProjectLinksSavedLink | None = None
-    stale_link_cleared: bool
-    candidates: ProjectLinksPickerCandidates
-
-
-class ProjectLinksPickerLoadMoreParams(ProtocolModel):
-    root_path: str = Field(min_length=1)
-    cursor: str = Field(min_length=1)
-
-
-class ProjectLinksPickerLoadMoreResponse(ProtocolModel):
-    candidates: ProjectLinksPickerCandidates
-    focus_project_id: str | None
-
-
-class ProjectLinksCreateParams(ProtocolModel):
-    root_path: str = Field(min_length=1)
-    name: str = Field(min_length=1)
-    default_branch: str = Field(min_length=1)
-
-
-class ProjectLinksLinkParams(ProtocolModel):
-    root_path: str = Field(min_length=1)
-    project_id: str = Field(min_length=1)
-    project_name: str = Field(min_length=1)
 
 
 class ProjectLinksSaveParams(ProtocolModel):

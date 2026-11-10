@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from e2e.app_server.context import handshake, stats_updated
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = handshake()
 request_methods = {"session/context/read"}
@@ -18,6 +18,7 @@ timeline: Timeline = [
     turn_completed(),
     "/context\r",
     {"resize": (30, 70)},
+    take_snapshot(),
 ]
 
 screen_contains = (

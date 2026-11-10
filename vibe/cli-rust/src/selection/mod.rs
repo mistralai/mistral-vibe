@@ -12,7 +12,7 @@ mod table;
 pub use bottom_bar::BottomBarSelection;
 pub use composer::{blur_composer, in_input, offset_at};
 pub use fold::{Fold, Folds};
-pub use gesture::{ClickChain, Granularity};
+pub use gesture::{chained, ClickChain, Granularity};
 pub use region::{Region, RegionId, RowSpan, ScrollTarget};
 pub use table::{TableCellHit, TableCellKey, TableCellSelection, TableCellSpan};
 

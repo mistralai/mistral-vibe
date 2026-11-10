@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import bash, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "run the silent command"
 
@@ -17,4 +17,5 @@ timeline: Timeline = [
     bash("cd /tmp", stdout=""),
     turn_completed(),
     _CLICK,
+    take_snapshot(),
 ]

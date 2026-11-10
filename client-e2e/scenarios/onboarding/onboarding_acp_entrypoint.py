@@ -8,7 +8,7 @@ import shutil
 import tempfile
 
 from e2e.app_server.config import MINIMAL_HOME_CONFIG, REPLAY_NOW_MS
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The same pending update `update/prompt.py` prompts for; an IDE setup skips it.
 _home = tempfile.mkdtemp(prefix="e2e_onboarding_acp_entrypoint_")
@@ -23,6 +23,6 @@ Path(_home, "cache.toml").write_text(
 client_args = ("--setup",)
 env = {"VIBE_HOME": _home, "VIBE_SETUP_ENTRYPOINT": "acp"}
 request_methods = {"initialize", "setup/status"}
-timeline: Timeline = []
+timeline: Timeline = [take_snapshot()]
 
 screen_excludes = ("A new Vibe release is available",)

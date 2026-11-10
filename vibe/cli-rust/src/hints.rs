@@ -14,6 +14,7 @@ pub mod key {
     pub const RIGHT: &str = "→";
     pub const ENTER: &str = "Enter";
     pub const ENTER_S: &str = "Enter/s";
+    pub const SPACE: &str = "Space";
     pub const SPACE_ENTER: &str = "Space/Enter";
     pub const ESC: &str = "Esc";
     pub const ESC_CTRL_C: &str = "Esc/Ctrl+C";
@@ -81,8 +82,13 @@ pub mod action {
     pub const REMOVE: &str = "remove";
     pub const DISCARD: &str = "discard";
     pub const SUBMIT_AS_NEW: &str = "submit as new";
+    pub const ADD: &str = "add";
+    pub const CHANGE: &str = "change";
+    pub const PIN: &str = "pin";
+    pub const UNPIN: &str = "unpin";
     pub const SHOW: &str = "show";
     pub const HIDE: &str = "hide";
+    pub const SWITCH_TAB: &str = "switch tab";
     pub const OPEN_CHECK: &str = "open check";
     pub const FIX: &str = "ask agent to fix";
 }

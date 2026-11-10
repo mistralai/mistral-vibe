@@ -58,6 +58,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustNotificationEvent,
     RustPluginContextDefinition,
     RustPluginsChange,
+    RustProvidedToolDefinition,
     RustReasoningPart,
     RustReconfigureEvent,
     RustRefreshActionDirective,
@@ -93,6 +94,10 @@ from mistralai_vibe_local_harness.vibe._subagents import (
     SessionRuntimeLifecycle,
     SubagentRuntimeState,
     SubagentSessionIdentity,
+)
+from mistralai_vibe_local_harness.vibe._tool_schemas import (
+    taking_objects_only,
+    type_is_not_object,
 )
 from mistralai_vibe_local_harness.vibe.completion_profile import (
     DEFAULT_CONTEXT_WINDOW,
@@ -1916,7 +1921,9 @@ class StoredSession:
         if self.runtime_state.core_task_id is not None:
             pinned["task_id"] = self.runtime_state.core_task_id
         if self.checkpoint_capabilities is not None:
-            pinned["capabilities"] = self.checkpoint_capabilities
+            pinned["capabilities"] = _with_dropped_integration_tools_restricted(
+                self.checkpoint_capabilities, config.capabilities
+            )
         if self.checkpoint_settings is not None:
             pinned["settings"] = self.checkpoint_settings
         if self.checkpoint_plugins is not None:
@@ -1959,7 +1966,11 @@ class StoredSession:
             for change in command.changes:
                 match change:
                     case RustCapabilitiesChange(value=value):
-                        updates["capabilities"] = value
+                        updates["capabilities"] = (
+                            _with_dropped_integration_tools_restricted(
+                                value, config.capabilities
+                            )
+                        )
                     case RustSettingsChange(value=value):
                         updates["settings"] = value
                     case RustPluginsChange(value=value):
@@ -2013,10 +2024,13 @@ class StoredSession:
         for record in self.journal:
             if not isinstance(record, CoreInputRecordV1):
                 continue
+            replayed_input = _with_dropped_integration_tools_restricted_in_input(
+                record.payload.input, config.capabilities
+            )
             result = parse_apply_result(
                 core.apply(
                     canonical_json(
-                        record.payload.input.model_dump(mode="json", by_alias=True)
+                        replayed_input.model_dump(mode="json", by_alias=True)
                     ).decode()
                 )
             )
@@ -4441,6 +4455,99 @@ def _transition_matches_recorded_decision(
         ):
             return False
     return True
+
+
+# TODO: find the integration groups from a structured source, not a name
+# prefix. Nothing stored marks a group as an MCP server's or a connector's. A
+# connector group could carry Core's connector tool-group metadata, which the
+# Runtime does not set yet; an MCP group needs a tool-group metadata kind Core
+# does not define, or a Runtime state field listing the groups it owns. Either
+# would mark sessions stored from then on only, so this prefix stays for
+# sessions stored before.
+_INTEGRATION_GROUP_PREFIXES = ("mcp_", "connector_")
+
+
+def _with_dropped_integration_tools_restricted(
+    capabilities: RustHarnessCapabilitySet, current: RustHarnessCapabilitySet
+) -> RustHarnessCapabilitySet:
+    """``capabilities`` with the tools Core now refuses restricted to objects.
+
+    An earlier release could store a tool an MCP server or a connector listed
+    with an input schema whose type is not ``object``, which the Runtime now
+    leaves out and Core refuses to restore. Those tools sit in the groups the
+    Runtime names ``mcp_`` and ``connector_``. One that ``current`` still
+    registers with such a schema is a direct registration and keeps Core's
+    error.
+
+    Replay keeps the tool rather than leaving it out: the journal may hold a
+    call to it. A tool call's arguments are an object, and the restricted
+    schema accepts the same objects, so the call replays as it ran, where a
+    tool left out would fail the program differently and the replay would
+    diverge. Recovery then applies ``current``, which no longer lists the
+    tool.
+    """
+    registered = {
+        (group.name, tool.name)
+        for group in current.tool_groups
+        for tool in group.tools
+        if type_is_not_object(tool.input_schema)
+    }
+
+    def dropped(group_name: str, tool: RustProvidedToolDefinition) -> bool:
+        return (
+            group_name.startswith(_INTEGRATION_GROUP_PREFIXES)
+            and type_is_not_object(tool.input_schema)
+            and (group_name, tool.name) not in registered
+        )
+
+    if not any(
+        dropped(group.name, tool)
+        for group in capabilities.tool_groups
+        for tool in group.tools
+    ):
+        return capabilities
+    groups = [
+        group.model_copy(
+            update={
+                "tools": [
+                    tool.model_copy(
+                        update={"input_schema": taking_objects_only(tool.input_schema)}
+                    )
+                    if dropped(group.name, tool)
+                    else tool
+                    for tool in group.tools
+                ]
+            }
+        )
+        for group in capabilities.tool_groups
+    ]
+    return capabilities.model_copy(update={"tool_groups": groups})
+
+
+def _with_dropped_integration_tools_restricted_in_input(
+    harness_input: RustHarnessInput, current: RustHarnessCapabilitySet
+) -> RustHarnessInput:
+    """A journalled reconfigure as replay applies it: see ``_with_dropped_integration_tools_restricted``."""
+    command = harness_input.command
+    if not isinstance(command, RustReconfigureEvent):
+        return harness_input
+    changes = [
+        change.model_copy(
+            update={
+                "value": _with_dropped_integration_tools_restricted(
+                    change.value, current
+                )
+            }
+        )
+        if isinstance(change, RustCapabilitiesChange)
+        else change
+        for change in command.changes
+    ]
+    if changes == command.changes:
+        return harness_input
+    return harness_input.model_copy(
+        update={"command": command.model_copy(update={"changes": changes})}
+    )
 
 
 def _actions_performed_after_each_core_input(

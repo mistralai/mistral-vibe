@@ -45,8 +45,6 @@ handshake = {
 }
 exit_responses = {"Remove worktree? [y/N] ": "y\n"}
 exit_after_last_step = True
-capture_startup = False
-capture_steps = set()
 timeline: Timeline = [
     "hi\r",
     worktree("feature", path="/home/user/worktrees/feature"),

@@ -233,6 +233,8 @@ mod mode_indicator;
 mod model_enforcement;
 #[path = "units/model_picker.rs"]
 mod model_picker;
+#[path = "units/model_selection.rs"]
+mod model_selection;
 #[path = "units/mouse_pixels.rs"]
 mod mouse_pixels;
 #[path = "units/mouse_routing.rs"]
@@ -255,6 +257,8 @@ mod observability_memory;
 mod observability_rotating;
 #[path = "units/observability_scrub.rs"]
 mod observability_scrub;
+#[path = "units/observability_sentry_filter.rs"]
+mod observability_sentry_filter;
 #[path = "units/older_history.rs"]
 mod older_history;
 #[path = "units/onboarding_boot_pending.rs"]
@@ -401,6 +405,8 @@ mod selection_lost_release;
 mod selection_prompt_marker;
 #[path = "units/selection_spans.rs"]
 mod selection_spans;
+#[path = "units/server_deadline.rs"]
+mod server_deadline;
 #[path = "units/settle.rs"]
 mod settle;
 #[path = "units/setup_entrypoint.rs"]
@@ -417,8 +423,44 @@ mod shell_submission;
 mod skill;
 #[path = "units/skill_mention_completion.rs"]
 mod skill_mention_completion;
+#[path = "units/skills_browser.rs"]
+mod skills_browser;
+#[path = "units/skills_browser_body.rs"]
+mod skills_browser_body;
+#[path = "units/skills_browser_clicks.rs"]
+mod skills_browser_clicks;
+#[path = "units/skills_browser_columns.rs"]
+mod skills_browser_columns;
+#[path = "units/skills_browser_deadline.rs"]
+mod skills_browser_deadline;
+#[path = "units/skills_browser_follow.rs"]
+mod skills_browser_follow;
+#[path = "units/skills_browser_page.rs"]
+mod skills_browser_page;
+#[path = "units/skills_browser_page_keys.rs"]
+mod skills_browser_page_keys;
+#[path = "units/skills_browser_pickers.rs"]
+mod skills_browser_pickers;
+#[path = "units/skills_browser_preview.rs"]
+mod skills_browser_preview;
+#[path = "units/skills_browser_remove.rs"]
+mod skills_browser_remove;
+#[path = "units/skills_browser_rows.rs"]
+mod skills_browser_rows;
+#[path = "units/skills_browser_same_name.rs"]
+mod skills_browser_same_name;
+#[path = "units/skills_browser_selection.rs"]
+mod skills_browser_selection;
+#[path = "units/skills_browser_support.rs"]
+mod skills_browser_support;
+#[path = "units/skills_browser_tabs.rs"]
+mod skills_browser_tabs;
+#[path = "units/skills_wire.rs"]
+mod skills_wire;
 #[path = "units/slash_completion.rs"]
 mod slash_completion;
+#[path = "units/startup_failure.rs"]
+mod startup_failure;
 #[path = "units/startup_resume_intent.rs"]
 mod startup_resume_intent;
 #[path = "units/sticky_prompt.rs"]
@@ -429,6 +471,8 @@ mod sticky_prompt_hover;
 mod stress_command;
 #[path = "units/system_proxy.rs"]
 mod system_proxy;
+#[path = "units/tab_bar.rs"]
+mod tab_bar;
 
 #[path = "units/subagent_click.rs"]
 mod subagent_click;
@@ -493,6 +537,8 @@ mod program_status_regressions;
 mod terminal_late_completion;
 #[path = "units/terminal_lifecycle.rs"]
 mod terminal_lifecycle;
+#[path = "units/text_case.rs"]
+mod text_case;
 #[path = "units/update_uv_oracle.rs"]
 mod update_uv_oracle;
 #[path = "units/update_version.rs"]
@@ -515,6 +561,8 @@ mod voice_settings;
 mod voice_text;
 #[path = "units/voice_tracking.rs"]
 mod voice_tracking;
+#[path = "units/waiting_line.rs"]
+mod waiting_line;
 #[path = "units/whats_new.rs"]
 mod whats_new;
 #[path = "units/whoami.rs"]

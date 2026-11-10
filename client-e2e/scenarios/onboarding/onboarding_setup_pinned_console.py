@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 client_args = ("--setup",)
 exit_after_last_step = True
@@ -30,11 +30,17 @@ handshake = {
 request_methods = {"setup/status", "setup/store-credential", "setup/submit-choices"}
 
 timeline: Timeline = [
-    "\r",  # welcome -> theme
-    "\r",  # theme -> auth method
-    "\r",  # auth: Launch browser -> the locked console form (no target picker)
-    "\r",  # the locked form's Enter starts the replayed browser sign-in
-    "m",  # switch to the API key screen, cancelling the sign-in
-    "test-key-123",  # the masked card fills and validates
+    "\r",
+    take_snapshot(),  # welcome -> theme
+    "\r",
+    take_snapshot(),  # theme -> auth method
+    "\r",
+    take_snapshot(),  # auth: Launch browser -> the locked console form (no target picker)
+    "\r",
+    take_snapshot(),  # the locked form's Enter starts the replayed browser sign-in
+    "m",
+    take_snapshot(),  # switch to the API key screen, cancelling the sign-in
+    "test-key-123",
+    take_snapshot(),  # the masked card fills and validates
     "\r",  # submit: the pinned provider lands through submit-choices, then exit
 ]

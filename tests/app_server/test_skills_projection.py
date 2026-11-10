@@ -8,16 +8,22 @@ projection refuses to hand over.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+import os
 from pathlib import Path
+import shutil
+import time
 from typing import TYPE_CHECKING
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 from vibe.app_server._skills import (
     SkillProjection,
     discover_session_skills,
     project_core_skills,
 )
+from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import SkillInfo, SkillScope, SkillSource
 
 if TYPE_CHECKING:
@@ -395,3 +401,99 @@ def test_denying_the_skill_tool_denies_plugin_skills_too(tmp_path: Path) -> None
     # Withheld from Core, not from the user: `/toolkit:deploy` injects the body
     # out of the payload map without Core ever loading the skill itself.
     assert "toolkit:deploy" in {skill.name for skill in denied.catalogue}
+
+
+@pytest.mark.usefixtures("config_dir")
+@pytest.mark.parametrize(("registry", "winner"), [(False, "host"), (True, "project")])
+def test_a_sandbox_ranks_its_project_skills_as_the_host_ranks_its_own(
+    tmp_path: Path, registry: bool, winner: str
+) -> None:
+    from vibe.core.config.harness_files import HarnessFilesManager
+
+    configured = tmp_path / "configured"
+    host = configured / "deploy" / "SKILL.md"
+    host.parent.mkdir(parents=True)
+    host.write_text(
+        "---\nname: deploy\ndescription: Ships it.\n---\n\n# deploy\n", encoding="utf-8"
+    )
+    paths = {"host": host, "project": tmp_path / "sandbox" / "deploy" / "SKILL.md"}
+    config = build_test_vibe_config(
+        skill_paths=[configured], experimental_enable_registry_skills=registry
+    )
+
+    manager = SkillManager(
+        lambda: config,
+        harness_files=HarnessFilesManager(sources=(), cwd=tmp_path),
+        project_skills={"deploy": _skill("deploy", path=paths["project"])},
+    )
+
+    assert manager.available_skills["deploy"].skill_path == paths[winner]
+
+
+def test_a_sessions_derivation_marks_the_registry_versions_it_loads_used(
+    tmp_path: Path,
+) -> None:
+    from tests.skills.registry.conftest import make_item
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.skills.registry import _manifest, _store
+    from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+
+    config = build_test_vibe_config(experimental_enable_registry_skills=True)
+    _manifest.save_sync(
+        _manifest.global_manifest_path(),
+        SkillManifest(skills=[ManifestEntry(name="deploy", skill_id="cid")]),
+    )
+    _store._materialize(make_item(skill_id="cid", version=1), "deploy")
+    marker = _store.used_marker("cid", 1)
+    marker.touch()
+    long_ago = time.time() - 40 * 24 * 3600
+    os.utime(marker, (long_ago, long_ago))
+
+    discover_session_skills(
+        lambda: config,
+        harness_files=HarnessFilesManager(sources=(), cwd=tmp_path),
+        plugin_skills={},
+        plugin_contexts=[],
+        skill_tool_available=True,
+    )
+
+    assert marker.stat().st_mtime > time.time() - 60
+
+
+def test_a_derivation_that_loses_a_version_as_it_reads_it_resolves_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.skills.registry.conftest import make_item
+    from vibe.app_server import _skills
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.skills.registry import _manifest, _store
+    from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+
+    config = build_test_vibe_config(experimental_enable_registry_skills=True)
+    _manifest.save_sync(
+        _manifest.global_manifest_path(),
+        SkillManifest(skills=[ManifestEntry(name="deploy", skill_id="cid")]),
+    )
+    for version in (1, 2):
+        _store._materialize(make_item(skill_id="cid", version=version), "deploy")
+    mark = _skills.mark_versions_used
+    evicted: list[bool] = []
+
+    def evicted_once_read(versions: Iterable[tuple[str, int]]) -> bool:
+        if not evicted:
+            shutil.rmtree(_store.skill_dir("cid", 2))
+            evicted.append(True)
+        return mark(versions)
+
+    monkeypatch.setattr(_skills, "mark_versions_used", evicted_once_read)
+
+    _, projection = discover_session_skills(
+        lambda: config,
+        harness_files=HarnessFilesManager(sources=(), cwd=tmp_path),
+        plugin_skills={},
+        plugin_contexts=[],
+        skill_tool_available=True,
+    )
+
+    assert dict(projection.registry_versions) == {"deploy": ("cid", 1)}
+    assert not _store.used_marker("cid", 2).exists()

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from e2e.app_server.scenario import Timeline
 
-capture_startup = False
 request_methods = {"config/reload"}
 # The prompt's turn started while the reload was in flight (VIBE-5617).
 handshake = {

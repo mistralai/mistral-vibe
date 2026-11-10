@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.config import COLUMNS
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"VIBE_THEME": "textual-dark"}
 handshake = {
@@ -14,4 +14,4 @@ handshake = {
 # The `> ` marker takes 2 columns and the last one is kept for the caret.
 _FULL_ROW = "a" * (COLUMNS - 3)
 
-timeline: Timeline = [_FULL_ROW, "b"]
+timeline: Timeline = [_FULL_ROW, "b", take_snapshot()]

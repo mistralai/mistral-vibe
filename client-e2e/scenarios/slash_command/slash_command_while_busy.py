@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 timeline: Timeline = [
     "first\r",
@@ -13,4 +13,5 @@ timeline: Timeline = [
     {"release": 4},
     "/resume",
     "\r",
+    take_snapshot(),
 ]

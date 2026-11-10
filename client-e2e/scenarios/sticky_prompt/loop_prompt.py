@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 from scenarios.sticky_prompt._turns import WHEEL_UP, tall_reply
 
 env = {"TZ": "UTC"}
@@ -22,8 +22,8 @@ timeline: Timeline = [
     assistant_msg(tall_reply("a", 24)),
     turn_completed(),
     WHEEL_UP * 6,
+    take_snapshot(),
 ]
 
-capture_steps = {1}
 screen_rows = {0: "⏵ Say hi"}
 screen_excludes = ("Say hi to the user.", "loop ae1aa08a")

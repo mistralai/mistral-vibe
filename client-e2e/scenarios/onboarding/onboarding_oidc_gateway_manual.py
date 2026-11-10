@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 from scenarios.onboarding.onboarding_oidc_gateway import (
     expected_actions as expected_actions,
     handshake as gateway_handshake,
@@ -10,8 +10,6 @@ from scenarios.onboarding.onboarding_oidc_gateway import (
 )
 
 client_args = ("--setup",)
-capture_startup = False
-capture_steps = {5}
 exit_after_last_step = True
 handshake = {
     **gateway_handshake,
@@ -29,6 +27,7 @@ timeline: Timeline = [
     "\r",
     "\r",
     "m",
+    take_snapshot(),
     "synthetic-gateway-key",
     "\r",
 ]

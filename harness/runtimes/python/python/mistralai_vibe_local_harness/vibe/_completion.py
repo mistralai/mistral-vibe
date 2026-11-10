@@ -24,12 +24,16 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolDefinition,
     RustUserMessage,
 )
+from mistralai_vibe_local_harness.vibe._completion_budget import (
+    CompletionBudgetAccountingDeferred,
+)
 from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderAuthRequired,
     ProviderCredentialResult,
     ProviderCredentialSnapshot,
     ProviderRejectionReason,
 )
+from mistralai_vibe_local_harness.vibe._route_profile import adapter_capabilities
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     CompletionDelta,
     CompletionDeltaSink,
@@ -59,7 +63,12 @@ from mistralai_vibe_local_harness.vibe.adapters.generic import (
 from mistralai_vibe_local_harness.vibe.adapters.mistral import (
     execute_mistral_completion,
 )
-from mistralai_vibe_local_harness.vibe.completion_profile import REASONING_LOWEST
+from mistralai_vibe_local_harness.vibe.completion_profile import (
+    REASONING_LOWEST,
+    REASONING_OFF,
+    ProfileError,
+    ReasoningSetting,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +235,7 @@ async def execute_completion(
     # runs without tools and without reasoning, so it shares nothing with the
     # in-context request that failed and cannot be answered from its cache.
     standalone = compaction and action.request == "standalone"
-    route = _request_route(action, config)
+    route = request_route(action, config)
     request_config = _request_config(action, config, route)
     if standalone:
         tools = []
@@ -412,7 +421,7 @@ def _reasoning_watch(
     return _ReasoningWatch(limit_tokens)
 
 
-class CompactionReasoningLimitExceeded(Exception):
+class CompactionReasoningLimitExceeded(CompletionBudgetAccountingDeferred):
     """An in-context compaction request reasoned past its limit.
 
     Raised from the stream observer, so the provider call stops reading the
@@ -506,7 +515,7 @@ class _ReasoningWatch:
             )
 
 
-def _request_route(
+def request_route(
     action: RustLLMCallAction, config: LocalRuntimeAdapterConfig
 ) -> LocalModelRoute:
     """The model route one Core request runs on.
@@ -598,8 +607,23 @@ def report_request_sent(
             nb_context_messages=len(messages),
             nb_prompt_chars=nb_prompt_chars,
             turn_id=turn_id,
+            reasoning_effort=sent_reasoning(config, route),
         )
     )
+
+
+def sent_reasoning(
+    config: LocalRuntimeAdapterConfig, route: LocalModelRoute
+) -> ReasoningSetting:
+    """The reasoning setting the request sends, or off when it sends none.
+
+    A configuration no adapter accepts sends nothing; its call fails on its own.
+    """
+    try:
+        setting = route.reasoning_setting(adapter_capabilities(config).wire)
+    except ProfileError:
+        return REASONING_OFF
+    return REASONING_OFF if setting is None else setting
 
 
 def _emit_request_sent(
@@ -819,4 +843,5 @@ __all__ = [
     "credential_rejection",
     "execute_completion",
     "invalid_api_key_message",
+    "request_route",
 ]

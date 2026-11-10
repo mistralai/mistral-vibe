@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 from scenarios.slash_command._config_fixtures import field, fields_read
 
 handshake = {
@@ -17,6 +17,5 @@ handshake = {
     "config/write": {"runtime": {"config": {"theme": "atom-one-dark"}}},
 }
 
-capture_startup = False
 # The server sends theme as a plain string; the client offers its themes. Down from ansi-dark.
-timeline: Timeline = ["/config\r", "\r", "\x1b[B", "\r"]
+timeline: Timeline = ["/config\r", "\r", "\x1b[B", "\r", take_snapshot()]

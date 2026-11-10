@@ -12,9 +12,15 @@ from e2e.app_server.events import (
 )
 from e2e.app_server.scenario import Timeline
 
-capture_startup = False
-capture_steps = {1, 2, 3, 4, 5}
-expected_titles = (">> Vibe", ">> Vibe", ">> Vibe", ">> Vibe", "Vibe")
+expected_titles = (
+    "Vibe",
+    ">> Vibe",
+    ">> Vibe",
+    ">> Vibe",
+    ">> Vibe",
+    ">> Vibe",
+    "Vibe",
+)
 
 # app_server/_turns.py::_after_turn_terminal pauses after turn/completed.
 _interrupted = turn_completed()

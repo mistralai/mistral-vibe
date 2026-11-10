@@ -9,12 +9,10 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 2}
 
 _PROMPT = "inspect the file, then ask me a question"
 _CONTENT = "   1→first selected line\n   2→second selected line"
@@ -34,4 +32,5 @@ timeline: Timeline = [
     ask_user_question(_QUESTION),
     {"release": 6},
     _CLICK,
+    take_snapshot(),
 ]

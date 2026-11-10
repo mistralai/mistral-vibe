@@ -62,6 +62,7 @@ def _attached_server(
             org_config=process_services.org_config,
             worktrees=process_services.worktrees,
             experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
     )
     # A session is attached and its client finished the handshake.

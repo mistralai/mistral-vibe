@@ -63,7 +63,6 @@ Path(_home, "ui_startup_config.json").write_text(
 
 env = {"VIBE_HOME": _home, "VIBE_WHATS_NEW_DIR": os.fspath(WHATS_NEW_FIXTURE)}
 
-capture_startup = False
 timeline: Timeline = ["x"]
 
 screen_contains = ("> x",)

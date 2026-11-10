@@ -210,6 +210,36 @@ The server routes them through its tool-I/O contract, validates responses and
 preserves Runtime permission enforcement and result ownership. Unsupported
 operations fail explicitly.
 
+Tool implementations share the Harness `ProvidedToolExecutor` contract:
+
+| Execution target | Executor | Implementation |
+| --- | --- | --- |
+| `client` | `ClientToolExecutor` | Connected client, over the existing JSON-RPC connection |
+| `mcpServer` | `McpToolExecutor` | Independent MCP server, over stdio or HTTP |
+
+Both reach the same provided-tool discovery, approval, hooks and history path.
+A local MCP subprocess is still an `mcpServer`, not a `client` tool.
+
+Desktop advertises `capabilities.clientTools: ["tools/call"]`,
+`capabilities.agentPlugins: [{name, root}]` and
+`capabilities.clientToolDefinitions: [{namespace, name, description, inputSchema, outputSchema}]`.
+The client supplies the tool definitions and implementation. Its bundled Plugins
+supply portable guidance and determine which tools belong to a pinned session;
+they do not declare client tools as MCP servers or carry a `tools.json` proxy.
+
+Client execution sends **`tools/call`** `{callId, name, input, toolCallId, caller}`.
+The client returns `{output?, annotations?, error?}`; `error` has
+`{message, code?, details?}`. Cancellation sends **`tools/cancel`** `{callId}`.
+The server allows a call only when its namespace names a Plugin declared by
+the client at initialization and that Plugin is enabled with built-in scope in
+the caller's live, pinned session. The advertised `root` remains required by the
+initialization contract and is checked for uniqueness; it is not compared with
+the session's installed root, checkout or data root and grants no permission.
+Disabling or releasing the Plugin revokes pending calls. Desktop dispatches on
+the `caller` sent with the call.
+Model arguments never select the caller or Code session.
+No HTTP listener, bridge token, MCP marker or capability file is used.
+
 A client that advertises `capabilities.sessionSpawn` in `initialize` hosts
 sessions the model starts: its sessions are offered Vibe's `start_session`
 tool, permission-gated like other Vibe tools (`ask` by default). The tool takes
@@ -378,10 +408,12 @@ only to an app server that asks it for `session/peer/*`, which is as recent.
 
 Every `PublicSession` carries its `project` stamp (`{kind, id}`), null while
 unstamped. With `experimental_enable_local_projects` on, a listing gives an
-unstamped session the local project whose folder is exactly the session's
-working folder, and saves that stamp. When several projects share the folder, it
-picks a single-folder project, then one whose primary folder it is, then the
-oldest, then the lowest id. A session another process holds gets the match in
+unstamped session, or one stamped with a removed local project, the local
+project whose folder is the session's working folder or contains it, and saves
+that stamp. The deepest project folder wins. A session in a managed worktree
+matches only a project on exactly its folder. When several projects share the
+folder, it picks a single-folder project, then one whose primary folder it is,
+then the oldest, then the lowest id. A session another process holds gets the match in
 the answer only, and a later listing saves it; a legacy session is matched on
 every listing.
 

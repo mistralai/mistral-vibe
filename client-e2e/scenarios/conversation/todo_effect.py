@@ -10,7 +10,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "update the todo list"
 
@@ -32,4 +32,5 @@ timeline: Timeline = [
     assistant_msg("Done."),
     turn_completed(),
     _CLICK,
+    take_snapshot(),
 ]

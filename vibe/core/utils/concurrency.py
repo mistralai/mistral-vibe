@@ -12,6 +12,13 @@ class ConversationLimitException(Exception):
     pass
 
 
+def cancel_pending[T](task: asyncio.Task[T] | None) -> asyncio.Task[T] | None:
+    if task is None or task.done():
+        return None
+    task.cancel()
+    return task
+
+
 def run_sync[T](coro: Coroutine[Any, Any, T]) -> T:
     """Run an async coroutine synchronously, handling nested event loops.
 

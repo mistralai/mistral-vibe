@@ -16,8 +16,6 @@ handshake = {
     "config/read": {"config": {"autocopyToClipboard": False}},
     "runtime/read": {"runtime": {"config": {"autocopyToClipboard": False}}},
 }
-capture_startup = False
-capture_steps = {1, 2}
 screen_contains = ("Which color scheme do you prefer?",)
 screen_excludes = ("Copied",)
 

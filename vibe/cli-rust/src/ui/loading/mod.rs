@@ -26,6 +26,8 @@ pub const RETRYING_LOADING_STATUS: &str = "Retrying";
 /// Label for a slash command fetching in the background (`/whoami`).
 pub const COMMAND_LOADING_STATUS: &str = "Loading";
 pub const SHELL_LOADING_STATUS: &str = "Running command";
+/// Still glyph in place of the spinner while the agent only waits.
+const WAITING_GLYPH: &str = "◷";
 
 /// Spinner glyph + label gradient state, recreated at the start of each turn.
 pub struct LoadingAnim {
@@ -199,19 +201,40 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         return;
     }
     let anim = &app.view.loading;
-    let color = |pos: usize| Style::default().fg(anim.color_at(pos));
-
-    let mut spans: Vec<Span> = Vec::new();
-
-    // Snake spinner glyph + gap.
-    spans.push(Span::styled(anim.snake.render(), color(0)));
-    spans.push(Span::raw(" "));
-
-    // Label, one color-cycled span per character, then the trailing "… ".
-    for (i, ch) in anim.label.chars().enumerate() {
-        spans.push(Span::styled(ch.to_string(), color(1 + i)));
-    }
-    spans.push(Span::styled("… ", color(1 + anim.label.chars().count())));
+    // An agent that only waits for its background work gets a still, grey line
+    // naming what it waits for. A program's sleep keeps the spinner: a message
+    // waits for the program to end.
+    let waiting = app.session.shell_operation_id.is_none()
+        && app
+            .session
+            .active_turn_id
+            .as_deref()
+            .is_some_and(|turn| app.view.transcript.only_model_waiting(turn));
+    let mut spans: Vec<Span> = match waiting {
+        true => {
+            let label = app.session.wait_target.as_deref().map_or_else(
+                || anim.label.clone(),
+                |target| format!("Waiting for {target}"),
+            );
+            let muted = theme::muted_style();
+            vec![
+                Span::styled(WAITING_GLYPH, muted),
+                Span::raw(" "),
+                Span::styled(format!("{label}… "), muted),
+            ]
+        }
+        false => {
+            let color = |pos: usize| Style::default().fg(anim.color_at(pos));
+            // Snake spinner glyph + gap, then the label one color-cycled span per
+            // character, then the trailing "… ".
+            let mut spans = vec![Span::styled(anim.snake.render(), color(0)), Span::raw(" ")];
+            for (i, ch) in anim.label.chars().enumerate() {
+                spans.push(Span::styled(ch.to_string(), color(1 + i)));
+            }
+            spans.push(Span::styled("… ", color(1 + anim.label.chars().count())));
+            spans
+        }
+    };
 
     // Background slash commands have no timer or controls; manual shell commands do.
     // Startup keeps queue cancellation available without offering turn interruption.
@@ -239,6 +262,14 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         format!("{} ", format_elapsed(elapsed.as_secs())),
         &hints,
     );
+    // A message reaches an agent that only waits at once: say so after the controls.
+    if waiting && !app.queue.paused && crate::input::composer_reachable(app) {
+        spans.push(Span::styled(
+            // A message reaches the agent at once: sending one steers it.
+            format!(" · send a message to {}", crate::hints::action::STEER),
+            crate::ui::hint_line::action_style(),
+        ));
+    }
 
     // A callback is waiting for the user to stop typing.
     if crate::question_app::waiting(app)

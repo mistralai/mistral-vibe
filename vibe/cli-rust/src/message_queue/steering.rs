@@ -112,6 +112,7 @@ pub(crate) fn settled(
 }
 
 /// Finalize the queued widgets only when their accepted steer enters history.
+/// The server also steers the queue head on its own into a turn that only waits.
 pub fn history_added(app: &mut App, client: &Arc<Client>, params: &serde_json::Value) -> bool {
     let entry = &params["entry"];
     if entry["type"] != "message" || entry["role"] != "user" || entry["source"] != "turn_steer" {
@@ -120,16 +121,27 @@ pub fn history_added(app: &mut App, client: &Arc<Client>, params: &serde_json::V
     let Some(entry_id) = entry["id"].as_str() else {
         return false;
     };
-    let Some(queue_item_id) = app.queue.steering.as_deref() else {
-        return false;
-    };
     let Some(item) = app.queue.items.first() else {
         return false;
     };
-    if item.queue_item_id.as_deref() != Some(queue_item_id) || item.server_message_id != entry_id {
+    if item.server_message_id != entry_id {
         return false;
     }
     let server_message_id = item.server_message_id.clone();
+    let Some(steering) = app.queue.steering.as_deref() else {
+        // The server steered the head on its own, maybe before the enqueue
+        // answer named its queue id: settle it as a promotion.
+        if app.queue.replacement_in_flight(&server_message_id) {
+            app.queue.remember_consumed(server_message_id.clone());
+            super::events::retire_group(app, &server_message_id);
+        } else {
+            super::events::consume_group(app, client, &server_message_id, &[]);
+        }
+        return true;
+    };
+    if item.queue_item_id.as_deref() != Some(steering) {
+        return false;
+    }
     finish(app, client, &server_message_id);
     true
 }

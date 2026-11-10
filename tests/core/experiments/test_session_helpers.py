@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -10,7 +11,10 @@ from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
-from vibe.core.experiments.session import initialize_experiments
+from vibe.core.experiments.session import (
+    initialize_experiments,
+    resolve_plan_attributes,
+)
 from vibe.core.identity import IdentityResult
 from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
 from vibe.core.platform_auth import (
@@ -807,3 +811,47 @@ async def test_initialize_keeps_the_cache_when_bucketing_never_resolved(
     )
 
     assert stored == []
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_plan_lookup_ends_after_both_of_its_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "vibe.core.experiments.session.mistral_credentials",
+        lambda _config, _credentials=None: _mistral(MagicMock()),
+    )
+    started = asyncio.Event()
+    identity_ended = False
+
+    async def slow_to_cancel_identity(**_kwargs: Any) -> None:
+        nonlocal identity_ended
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Like an HTTP connect that ends a few loop turns after the cancel.
+            for _ in range(10):
+                await asyncio.sleep(0)
+            raise
+        finally:
+            identity_ended = True
+
+    async def pending_whoami(**_kwargs: Any) -> None:
+        await asyncio.Event().wait()
+
+    lookup = asyncio.create_task(
+        resolve_plan_attributes(
+            config=_make_config(),
+            launch_context=None,
+            resolve_identity=slow_to_cancel_identity,
+            resolve_whoami=pending_whoami,
+            harness=ExperimentSurface.UNIFIED,
+        )
+    )
+    await started.wait()
+    lookup.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await lookup
+    assert identity_ended

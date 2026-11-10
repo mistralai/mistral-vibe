@@ -69,6 +69,7 @@ class SessionTelemetry:
         nb_context_messages: int,
         nb_prompt_chars: int,
         call_type: TelemetryCallType,
+        reasoning_effort: str,
         message_id: str | None = None,
         attachment_counts: dict[AttachmentKind, int] | None = None,
     ) -> None:
@@ -78,6 +79,7 @@ class SessionTelemetry:
             nb_context_messages=nb_context_messages,
             nb_prompt_chars=nb_prompt_chars,
             call_type=call_type,
+            reasoning_effort=reasoning_effort,
             message_id=message_id,
             attachment_counts=attachment_counts,
         )

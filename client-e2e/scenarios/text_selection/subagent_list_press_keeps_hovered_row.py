@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "delegate the investigation"
 _HOVER_CHILD = "\x1b[<35;10;39M"
@@ -26,5 +26,5 @@ timeline: Timeline = [
     _HOVER_CHILD,
     _PRESS_CHILD,
     _RELEASE_CHILD,
+    take_snapshot(),
 ]
-capture_steps = {1, 2, 3}

@@ -48,8 +48,6 @@ exit_responses = {
     "Also delete branch 'feature'? [y/N] ": "y\n",
 }
 exit_after_last_step = True
-capture_startup = False
-capture_steps = set()
 timeline: Timeline = [
     "hi\r",
     worktree("feature", path="/home/user/worktrees/feature"),

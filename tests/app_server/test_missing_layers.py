@@ -23,12 +23,15 @@ import pytest
 import pytest_asyncio
 import tomli_w
 
-from tests.stubs.process_services import FakeOrgConfigServer, fake_process_services
+from tests.stubs.process_services import (
+    FakeModelCatalogServer,
+    FakeOrgConfigServer,
+    fake_process_services,
+)
 from vibe.app_server._admin_config import OrgConfigSource
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import DispatchResult, RequestFailure
 from vibe.app_server._host import HostRequestHandler
-import vibe.app_server._missing_layers as missing_layers
 from vibe.app_server._org_config_service import ORG_CONFIG_POLICY
 from vibe.app_server._process_services import ProcessServices
 import vibe.app_server._runtime as runtime_module
@@ -54,9 +57,7 @@ from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 from vibe.core.identity import IdentityResult
 from vibe.core.identity_cache import IdentityCache
 from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
-from vibe.core.model_catalog.cache import store_cached_model_catalog
-from vibe.core.model_catalog.wait import mark_model_catalog_failed, model_catalog_failed
-from vibe.core.telemetry.send import resolve_credential_cache_key
+from vibe.core.platform_auth import PlatformCredentialProvider
 from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.setup.auth import _oidc_runtime
 from vibe.setup.auth._oidc_config import OidcConfig
@@ -181,8 +182,13 @@ class _Remote:
             ),
         )
         monkeypatch.setattr(WhoAmICache, "resolve", AsyncMock(return_value=None))
+        # Every model catalog server of the test answers here.
         monkeypatch.setattr(
-            missing_layers, "fetch_and_cache_model_catalog", self._catalog
+            FakeModelCatalogServer,
+            "fetch",
+            lambda _server, api_base, credentials: remote._catalog(
+                api_base, credentials
+            ),
         )
 
     async def _block(self, source: str) -> bool:
@@ -207,13 +213,10 @@ class _Remote:
             manager.hydrate(self.eval_response, attributes=attributes)
 
     async def _catalog(
-        self, config: Any, _credentials: Any = None
+        self, _api_base: str, _credentials: PlatformCredentialProvider
     ) -> ModelCatalogResponse | None:
         if not await self._block("catalog"):
             return None
-        store_cached_model_catalog(
-            config, _catalog(), fetched_for=await resolve_credential_cache_key(config)
-        )
         return _catalog()
 
 
@@ -259,12 +262,15 @@ def org_limit() -> float:
 
 @pytest_asyncio.fixture
 async def process_services(
-    org_server: FakeOrgConfigServer, org_limit: float
+    org_server: FakeOrgConfigServer,
+    org_limit: float,
+    model_catalog_server: FakeModelCatalogServer,
 ) -> AsyncIterator[ProcessServices]:
     services = fake_process_services(
         org_server,
         policy=replace(ORG_CONFIG_POLICY, fetch_timeout_s=org_limit),
         first_wait_s=org_limit,
+        model_catalog_server=model_catalog_server,
     )
     yield services
     await services.close()
@@ -276,6 +282,7 @@ def _handler(*, process_services: ProcessServices) -> HostRequestHandler:
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
 
@@ -329,7 +336,7 @@ async def test_shared_cache_application_resolves_session_tenant(
         harness_files=HarnessFilesManager(sources=("user",))
     )
     assert mistral_credential_cache_key(orchestrator.config) is None
-    key, _, _ = await apply_cached_layers(orchestrator, None)
+    key, _, _ = await apply_cached_layers(orchestrator, None, model_catalog=None)
     assert key is not None
     assert key.cache_key == mistral_credential_cache_key(orchestrator.config)
     resolve.assert_awaited_once()
@@ -385,7 +392,9 @@ async def test_tenant_timeout_does_not_wait_for_discovery_worker(
     orchestrator = await build_default_orchestrator(
         harness_files=HarnessFilesManager(sources=("user",))
     )
-    pending = asyncio.create_task(apply_cached_layers(orchestrator, None))
+    pending = asyncio.create_task(
+        apply_cached_layers(orchestrator, None, model_catalog=None)
+    )
     try:
         await asyncio.wait_for(started.wait(), 1)
         assert await asyncio.wait_for(pending, 0.2) == (None, None, None)
@@ -402,9 +411,9 @@ async def test_tenant_timeout_does_not_wait_for_discovery_worker(
 async def test_account_switch_during_picker_fetch_never_caches_previous_response(
     monkeypatch, oidc_credentials, source, process_services, org_server
 ):
+    from vibe.app_server._model_catalog_service import ModelCatalogKey
     from vibe.core.config.managed_config_cache import load_cached_managed_config
     from vibe.core.experiments.cache import load_cached_eval_response
-    from vibe.core.model_catalog.cache import load_cached_model_catalog
     from vibe.core.telemetry.send import mistral_credential_cache_key
 
     current, resolve = oidc_credentials
@@ -434,7 +443,10 @@ async def test_account_switch_during_picker_fetch_never_caches_previous_response
     config = VibeConfigSchema()
     assert load_cached_managed_config(mistral_credential_cache_key(config)) is None
     assert load_cached_eval_response(config) is None
-    assert load_cached_model_catalog(config) is None
+    catalog_key = ModelCatalogKey.current(
+        VibeConfigSchema(experimental_enable_model_catalog=True), None
+    )
+    assert await process_services.model_catalog.load(catalog_key) is None
 
 
 @pytest.mark.asyncio
@@ -665,7 +677,7 @@ async def test_a_slow_org_config_is_not_counted_against_the_other_fetches(
 
     assert "catalog-model" not in {model.alias for model in first.models}
     assert not process_services.experiments.failures.failed
-    assert not model_catalog_failed()
+    assert not process_services.model_catalog.failures.failed
     assert "catalog-model" in {model.alias for model in second.models}
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
 
@@ -736,6 +748,29 @@ async def test_only_the_source_without_a_cache_is_fetched(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("remote_config_enabled")
+async def test_the_picker_fetches_the_catalog_through_the_process_service(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # The catalog the picker fetched is the one every session is served: a
+    # session opened next asks nothing.
+    from vibe.app_server._model_catalog_service import ModelCatalogKey
+
+    remote = _Remote(monkeypatch, org_server)
+    config = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" in {model.alias for model in config.models}
+    key = await ModelCatalogKey.of(
+        VibeConfigSchema(experimental_enable_model_catalog=True), None
+    )
+    assert key is not None
+    assert await process_services.model_catalog.ensure(key) == _catalog()
+    assert remote.calls["catalog"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
 async def test_a_source_that_already_failed_is_not_fetched(
     monkeypatch: pytest.MonkeyPatch,
     process_services: ProcessServices,
@@ -744,7 +779,7 @@ async def test_a_source_that_already_failed_is_not_fetched(
     # The session path recorded these failures; the read shares them.
     remote = _Remote(monkeypatch, org_server)
     process_services.experiments.failures.mark()
-    mark_model_catalog_failed()
+    process_services.model_catalog.failures.mark()
 
     await _read_config(_handler(process_services=process_services))
 
@@ -758,6 +793,7 @@ class _RecordingHost(HostRequestHandler):
             org_config=process_services.org_config,
             worktrees=process_services.worktrees,
             experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         )
         self.dispatched: list[tuple[str, str | None, ClientInfo | None]] = []
 

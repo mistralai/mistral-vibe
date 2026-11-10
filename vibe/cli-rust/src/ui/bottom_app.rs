@@ -28,6 +28,7 @@ pub enum Kind {
     Rewind,
     Mcp,
     Plugins,
+    Skills,
     Context,
     McpOAuth,
     ConnectorAuth,
@@ -71,6 +72,7 @@ pub(crate) fn draw(
     let content = content(box_area);
     app.view.bottom_app_selection_region = selection::frame_region(content);
     app.view.bottom_app_selection_chrome.clear();
+    app.view.bottom_app_selection_halves = None;
     app.view.bottom_app_selection_folds = crate::selection::Folds::default();
     draw_box(app, f, box_area);
     for track in mouse::scrollbar_tracks(app, content) {

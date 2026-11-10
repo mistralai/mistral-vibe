@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {
     "account/read": {
@@ -18,4 +18,4 @@ handshake = {
 
 screen_contains = ("usage ██████ 100% · PAYG", "mistral-medium-3.5[medium] · Team")
 screen_excludes = ("PAYG Enabled",)
-timeline: Timeline = []
+timeline: Timeline = [take_snapshot()]

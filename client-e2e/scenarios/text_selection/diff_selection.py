@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"SSH_TTY": "/dev/pts/0"}
 # Only the two selection steps are compared; diff content is pinned by
@@ -38,6 +38,5 @@ timeline: Timeline = [
     _EXPAND_EDIT,
     _DRAG,
     _DOUBLE,
+    take_snapshot(),
 ]
-
-capture_steps = {2, 3}

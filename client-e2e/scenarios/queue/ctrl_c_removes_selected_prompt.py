@@ -12,7 +12,6 @@ _CTRL_C = "\x03"
 # The older `second` goes, not the newest `third`; the draft stays for Esc to restore.
 screen_contains = ("third", "draft", "Backspace/Ctrl+C to remove")
 screen_excludes = ("second", "cancel last queued message")
-capture_steps = {3, 4, 6, 7, 8, 9}
 
 timeline: Timeline = [
     "first\r",

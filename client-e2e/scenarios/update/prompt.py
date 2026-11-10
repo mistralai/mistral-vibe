@@ -9,7 +9,7 @@ import shutil
 import tempfile
 
 from e2e.app_server.config import MINIMAL_HOME_CONFIG, REPLAY_NOW_MS, WHATS_NEW_FIXTURE
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The startup prompt is cache-driven: seed a pending newer version in a pinned
 # VIBE_HOME, fresh enough that the pending-update query returns it. The dialog
@@ -37,7 +37,6 @@ env = {
 # The harness's startup settle lands on the dialog's first frame. Right moves
 # to Continue, Enter dismisses the dialog (the TUI acks its fence once
 # settled), and "x" proves the session input is live.
-capture_startup = False
-timeline: Timeline = ["\x1b[C", "\r", "x"]
+timeline: Timeline = ["\x1b[C", "\r", "x", take_snapshot()]
 
 screen_excludes = ("A new Vibe release is available",)

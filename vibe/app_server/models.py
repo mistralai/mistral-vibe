@@ -431,6 +431,8 @@ class TurnErrorCode(StrEnum):
     INVALID_MODEL = auto()
     INVALID_API_KEY = auto()
     INTERNAL_ERROR = auto()
+    # A price budget is set, but a model the run uses has no price.
+    PRICING_UNAVAILABLE = auto()
 
 
 class PublicError(ProtocolModel):
@@ -544,6 +546,7 @@ class SkillSummary(ProtocolModel):
     registry: RegistryRefView | None = None
     enabled: bool = True
     locked: bool = False
+    active: bool = True
 
 
 class SkillCatalogEntry(ProtocolModel):
@@ -1183,6 +1186,9 @@ class PublicTurnQueue(ProtocolModel):
     )
 
 
+BudgetStopReason = Literal["token_limit", "price_limit"]
+
+
 class PublicTurn(ProtocolModel):
     id: str
     session_id: str
@@ -1192,6 +1198,11 @@ class PublicTurn(ProtocolModel):
     completed_at: int | None = None
     error: PublicError | None = None
     stop_reason: PublicTurnStopReason | None = None
+    # Set only on an ``interrupted`` turn that a cumulative completion budget
+    # stopped before its next completion; any other interruption leaves it out.
+    budget_stop_reason: BudgetStopReason | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     queue_item_id: str | None = None
 
 

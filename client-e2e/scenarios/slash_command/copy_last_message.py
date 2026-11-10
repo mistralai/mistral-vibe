@@ -7,7 +7,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
 request_methods = {"telemetry/record"}
-capture_startup = False
 expected_clipboard = "The answer is 42."
 screen_contains = ("Last agent message copied to clipboard",)
 

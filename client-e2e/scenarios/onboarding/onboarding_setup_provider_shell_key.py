@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 client_args = ("--setup",)
 _MISTRAL = {
@@ -39,9 +39,14 @@ request_methods = {"setup/status"}
 screen_contains = ("LITELLM_API_KEY is set in your shell",)
 
 timeline: Timeline = [
-    "\r",  # welcome -> theme
-    "\r",  # theme -> provider choice
-    "\r",  # Mistral AI -> auth method: the Mistral shell-key warning shows
-    "\x1b",  # back to the provider choice
-    "\x1b[B\r",  # Set up litellm-anthropic -> its API key screen, its own warning
+    "\r",
+    take_snapshot(),  # welcome -> theme
+    "\r",
+    take_snapshot(),  # theme -> provider choice
+    "\r",
+    take_snapshot(),  # Mistral AI -> auth method: the Mistral shell-key warning shows
+    "\x1b",
+    take_snapshot(),  # back to the provider choice
+    "\x1b[B\r",
+    take_snapshot(),  # Set up litellm-anthropic -> its API key screen, its own warning
 ]

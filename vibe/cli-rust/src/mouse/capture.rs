@@ -26,6 +26,8 @@ pub(crate) fn cancel_capture(app: &mut App, keep_selection: bool) {
                 | MouseTarget::ResumePicker
                 | MouseTarget::Mcp
                 | MouseTarget::Plugins
+                | MouseTarget::Skills
+                | MouseTarget::SkillsBody
                 | MouseTarget::McpOAuth
                 | MouseTarget::ConnectorAuth
         ) {

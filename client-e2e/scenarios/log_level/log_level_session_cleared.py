@@ -6,7 +6,6 @@ from e2e.app_server.scenario import Timeline
 
 _ESCAPE = "\x1b[27u"
 
-capture_startup = False
 request_methods = {"config/write"}
 
 # Set ERROR for the session and apply; reopen on ERROR, toggle it off and apply.

@@ -527,6 +527,7 @@ async def test_passive_host_lists_linked_worktrees(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -579,6 +580,7 @@ async def test_passive_host_prunes_over_the_worktree_limit_in_the_worker(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     # Do
@@ -604,6 +606,7 @@ async def test_passive_host_updates_worktree_limit(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -633,6 +636,7 @@ async def test_passive_host_reports_the_repository_counterpart(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -664,6 +668,7 @@ async def test_passive_host_reports_the_counterpart_of_a_retained_worktree(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -698,6 +703,7 @@ async def test_retained_worktree_listing_ignores_a_repository_above_its_leftover
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -731,6 +737,7 @@ async def test_passive_host_reports_no_counterpart_outside_the_main_checkout(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -763,6 +770,7 @@ async def test_passive_host_lists_no_worktrees_without_git(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -793,6 +801,7 @@ async def test_passive_host_reads_the_main_checkout(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -835,6 +844,7 @@ async def test_passive_host_reads_the_worktree_holding_the_session(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -883,6 +893,7 @@ async def test_passive_host_keeps_an_unreadable_repository_as_the_holder(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -916,6 +927,7 @@ async def test_passive_host_reads_the_branch_of_a_worktree_the_listing_skips(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -944,6 +956,7 @@ async def test_passive_host_leaves_out_a_path_git_knows_nothing_about(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(
@@ -966,6 +979,7 @@ async def test_passive_host_lists_no_worktrees_for_non_git_root(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from contextvars import ContextVar
 
 import pytest
 
-from vibe.core.utils.concurrency import run_sync
+from vibe.core.utils.concurrency import cancel_pending, run_sync
 
 _MARK: ContextVar[str] = ContextVar("mark", default="unset")
 
@@ -31,3 +32,26 @@ async def test_run_sync_inside_a_running_loop_keeps_the_callers_context() -> Non
 
     # Assert
     assert seen == "caller"
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_cancels_a_running_task_and_hands_it_back() -> None:
+    running = asyncio.create_task(asyncio.Event().wait())
+    await asyncio.sleep(0)
+
+    returned = cancel_pending(running)
+
+    assert returned is running
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+@pytest.mark.asyncio
+async def test_cancel_pending_leaves_a_finished_task_and_no_task_alone() -> None:
+    finished = asyncio.create_task(asyncio.sleep(0, result="done"))
+    await finished
+
+    returned = (cancel_pending(finished), cancel_pending(None))
+
+    assert returned == (None, None)
+    assert finished.result() == "done"

@@ -37,8 +37,6 @@ SETTING_FIELDS: Final = frozenset({
     "output_price",
     "cached_input_price",
 })
-# The model config accepts any price; a negative one from a remote flag is a typo.
-_PRICE_FIELDS: Final = frozenset({"input_price", "output_price", "cached_input_price"})
 
 _ID_LIST_KEYS: Final = ("order", "hide")
 _PROBE_IDENTITY: Final = {"name": "probe", "provider": "probe", "alias": "probe"}
@@ -124,11 +122,7 @@ def _parse_setting(model_id: str, field: str, value: object) -> object | None:
     except ValidationError:
         _warn(f"setting '{field}' of '{model_id}' ignored, invalid: {value!r}")
         return None
-    parsed = model.model_dump(include={field})[field]
-    if field in _PRICE_FIELDS and parsed is not None and parsed < 0:
-        _warn(f"setting '{field}' of '{model_id}' ignored, negative: {value!r}")
-        return None
-    return parsed
+    return model.model_dump(include={field})[field]
 
 
 def with_catalog_filter(

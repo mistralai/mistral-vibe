@@ -9,34 +9,30 @@ use crate::server::{CheckpointEntry, EffectEntry, HistoryEntry, NoticeDetail};
 
 pub(crate) const KEY_PREFIX: &str = "tool-group:";
 
+/// Calls per kind in first-seen order.
+pub type KindCounts<'a> = Vec<(&'a str, usize)>;
+
 pub struct Group<'a> {
     pub key: String,
     pub first: bool,
     pub last: bool,
     pub finalized: bool,
-    /// Header counts per kind in first-seen order; empty except on the group's first entry.
-    pub kinds: Vec<(&'a str, usize)>,
+    /// Settled calls per kind; empty except on the group's first entry.
+    pub kinds: KindCounts<'a>,
+    /// Calls still running per kind; empty except on the group's first entry.
+    pub running: KindCounts<'a>,
     pub reasoning: bool,
+    /// A reasoning row of the live group is still streaming.
+    pub thinking: bool,
 }
 
 impl Group<'_> {
-    /// Kinds sharing a verb merge into one segment: `ran 2 commands and 1 search`.
-    pub fn label(&self, running: bool) -> String {
-        let mut verbs: Vec<(&str, Vec<String>)> = Vec::new();
-        for &(kind, count) in &self.kinds {
-            let (verb, noun) = category_terms(kind, count, running);
-            let counted = format!("{count} {noun}");
-            match verbs.iter_mut().find(|(seen, _)| *seen == verb) {
-                Some((_, nouns)) => nouns.push(counted),
-                None => verbs.push((verb, vec![counted])),
-            }
-        }
-        let mut labels = verbs
-            .into_iter()
-            .map(|(verb, nouns)| format!("{verb} {}", join_and(&nouns)))
-            .collect::<Vec<_>>();
+    /// Running calls, then settled ones, then reasoning: `Calling 1 tool, called 2 tools, thought`.
+    pub fn label(&self) -> String {
+        let mut labels = segments(&self.running, true);
+        labels.extend(segments(&self.kinds, false));
         if self.reasoning {
-            labels.push(if running { "thinking" } else { "thought" }.to_owned());
+            labels.push(if self.thinking { "thinking" } else { "thought" }.to_owned());
         }
         let mut label = labels.join(", ");
         if let Some(first) = label.get_mut(0..1) {
@@ -44,6 +40,41 @@ impl Group<'_> {
         }
         label
     }
+}
+
+/// Kinds sharing a verb merge into one segment: `ran 2 commands and 1 search`.
+/// A wait reads as what the agent does, not as a counted call. The main view
+/// hides a running one behind the waiting status line; a subagent's view
+/// shows it, so it reads as still waiting there.
+fn segments(kinds: &[(&str, usize)], running: bool) -> Vec<String> {
+    let mut verbs: Vec<(String, Vec<String>)> = Vec::new();
+    for &(kind, count) in kinds {
+        if let Some(phrase) = uncounted(kind, running) {
+            verbs.push((phrase.to_owned(), Vec::new()));
+            continue;
+        }
+        let (verb, noun) = category_terms(kind, count, running);
+        let counted = format!("{count} {noun}");
+        match verbs.iter_mut().find(|(seen, _)| seen == verb) {
+            Some((_, nouns)) => nouns.push(counted),
+            None => verbs.push((verb.to_owned(), vec![counted])),
+        }
+    }
+    verbs
+        .into_iter()
+        .map(|(verb, nouns)| match nouns.is_empty() {
+            true => verb,
+            false => format!("{verb} {}", join_and(&nouns)),
+        })
+        .collect()
+}
+
+/// The whole segment of a kind that reads without a count.
+fn uncounted(kind: &str, running: bool) -> Option<&'static str> {
+    (kind == "wait").then_some(match running {
+        true => "waiting for background work",
+        false => "waited for background work",
+    })
 }
 
 /// Reasoning, hook notices, and agent effects share one group. A user's `!`
@@ -118,21 +149,34 @@ pub fn label_kind(kind: Option<&str>) -> &str {
     }
 }
 
-/// Kinds in first-seen order: file kinds count distinct paths, the rest count calls.
+/// Kinds in first-seen order, as `(running, settled)`: a call runs while its
+/// group is `live` and it has no verdict. File kinds count distinct paths, the
+/// rest count calls.
 pub(super) fn count_kinds<'a>(
     effects: impl Iterator<Item = &'a EffectEntry>,
-) -> Vec<(&'a str, usize)> {
-    let mut kinds: Vec<(&str, usize)> = Vec::new();
+    live: bool,
+) -> (KindCounts<'a>, KindCounts<'a>) {
+    let mut running = KindCounts::new();
+    let mut settled = KindCounts::new();
     let mut paths = HashSet::new();
     for effect in effects {
-        let kind = label_kind(effect.kind());
-        let repeat = file_path(kind, effect).is_some_and(|path| !paths.insert((kind, path)));
+        let kind = match effect.is_model_wait() {
+            true => "wait",
+            false => label_kind(effect.kind()),
+        };
+        let is_running = live && !effect.is_terminal();
+        let kinds = match is_running {
+            true => &mut running,
+            false => &mut settled,
+        };
+        let repeat =
+            file_path(kind, effect).is_some_and(|path| !paths.insert((is_running, kind, path)));
         match kinds.iter_mut().find(|(seen, _)| *seen == kind) {
             Some((_, count)) => *count += usize::from(!repeat),
             None => kinds.push((kind, 1)),
         }
     }
-    kinds
+    (running, settled)
 }
 
 /// The target of a call whose kind counts files (`read 2 files`).

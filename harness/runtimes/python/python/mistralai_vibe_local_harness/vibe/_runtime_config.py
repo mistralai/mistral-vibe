@@ -12,6 +12,10 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolDefinition,
 )
 from mistralai_vibe_local_harness.session_protocol import PublicRetryCategory
+from mistralai_vibe_local_harness.vibe._completion_budget import (
+    CompletionPricing,
+    SharedCompletionBudget,
+)
 from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderCredentialProvider,
     StaticProviderCredentials,
@@ -24,6 +28,7 @@ from mistralai_vibe_local_harness.vibe._sandbox import (
 )
 from mistralai_vibe_local_harness.vibe.completion_profile import (
     FIRST_OUTPUT_WAIT_SECONDS,
+    REASONING_OFF,
     REQUIRED_MAX_TOKENS_FALLBACK,
     STREAM_IDLE_SECONDS,
     ReasoningSetting,
@@ -127,7 +132,8 @@ class RequestSentTelemetry:
     remaining request metrics once per provider call. ``turn_id`` is the turn
     an agent or compaction call serves, which tells a Session's own calls
     from its subagents' when they share one sink; utility completions have
-    none.
+    none. ``reasoning_effort`` is the reasoning setting the request sends, or
+    ``off`` when it sends none.
     """
 
     model: str
@@ -137,6 +143,7 @@ class RequestSentTelemetry:
     nb_context_messages: int
     nb_prompt_chars: int
     turn_id: str | None = None
+    reasoning_effort: ReasoningSetting = REASONING_OFF
 
 
 # Host sink for per-completion request telemetry, called once per LLM call.
@@ -221,6 +228,7 @@ class LocalModelRoute:
     # One request's own setting, such as the lowest for a summary; None keeps
     # ``thinking``.
     request_thinking: RequestReasoning | None = None
+    pricing: CompletionPricing | None = None
 
     def reasoning_setting(self, wire: WireFormat) -> ReasoningSetting | None:
         """The setting one request on this route sends; None leaves the field out."""
@@ -376,9 +384,11 @@ class LocalRuntimeAdapterConfig:
     # routes the classify call to Mistral with Mistral credentials. ``None``
     # keeps the classifier on the session provider (already Mistral).
     classifier_provider: LocalProviderRoute | None = None
-    # Model for the classify gate; empty keeps the Runtime default. A name, not a
-    # route: the gate pins its own sampling settings.
+    # Model for the classify gate; empty keeps the Runtime default. The gate pins
+    # its own sampling settings, while pricing follows this selected model.
     classifier_model: str = ""
+    classifier_pricing: CompletionPricing | None = None
+    completion_budget: SharedCompletionBudget | None = None
     max_tokens: int | None = None
     # Caps sent as ``max_tokens`` on every agent or compaction request whatever
     # the format; None sends one only where the format requires it.
@@ -641,6 +651,8 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "title_model",
     "title_prompt",
     "classifier_model",
+    "classifier_pricing",
+    "completion_budget",
     "max_tokens",
     "agent_max_tokens",
     "compaction_max_tokens",

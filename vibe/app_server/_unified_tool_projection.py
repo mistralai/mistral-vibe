@@ -1829,7 +1829,9 @@ _TOOL_LABELS: dict[str, _ToolLabel] = {
     # ── Built-in harness tools ──────────────────────────────────────────
     "ui.ask_user_question": _ToolLabel("Asking", "a question", "Asked"),
     "self.sleep": _ToolLabel("Sleeping", "", "Slept"),
-    "self.wait": _ToolLabel("Waiting", "for input", "Waited"),
+    # The model waits for its subagents or background processes, not for the
+    # user: a message the user sends joins the waiting turn.
+    "self.wait": _ToolLabel("Waiting", "for background work", "Waited"),
     "agents.list_configs": _ToolLabel("Listing", "subagent configs", "Listed"),
     "agents.list": _ToolLabel("Listing", "subagents", "Listed"),
     "agents.send_message": _ToolLabel("Sending", "a message to a subagent", "Sent"),

@@ -4,7 +4,7 @@ import json
 
 from e2e.app_server.config import FIXTURE_PATH
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _state = json.loads(FIXTURE_PATH.read_text())["handshake"]["session/start"]["state"]
 _forked = json.loads(json.dumps(_state))
@@ -20,6 +20,7 @@ timeline: Timeline = [
     "/rewind\r",
     "2",
     "2",
+    take_snapshot(),
 ]
 
 handshake = {

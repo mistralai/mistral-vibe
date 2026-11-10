@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, Final
+from collections.abc import Callable, Coroutine
+from typing import TYPE_CHECKING, Any, Final
 
 from vibe import __version__
 from vibe.core.experiments.active import ExperimentSurface
@@ -31,8 +31,8 @@ if TYPE_CHECKING:
 
 EXPERIMENT_IDENTITY_TIMEOUT_S: Final = 10.0
 
-IdentityResolver = Callable[..., Awaitable[IdentityResult | None]]
-WhoAmIResolver = Callable[..., Awaitable[WhoAmIResult | None]]
+IdentityResolver = Callable[..., Coroutine[Any, Any, IdentityResult | None]]
+WhoAmIResolver = Callable[..., Coroutine[Any, Any, WhoAmIResult | None]]
 
 
 async def _fetch_plan_attributes(
@@ -73,18 +73,24 @@ async def _fetch_plan_attributes(
         return None, None
     _resolve_identity = resolve_identity or fetch_identity
     _resolve_whoami = resolve_whoami or fetch_whoami
-    identity, whoami = await asyncio.gather(
-        _resolve_identity(
-            base_url=mistral.provider.api_base,
-            credentials=mistral.credentials,
-            timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
-        ),
-        _resolve_whoami(
-            base_url=config.console_base_url,
-            credentials=mistral.credentials,
-            timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
-        ),
-    )
+    # Not gather: cancelled, it returns before its requests end, which outlive
+    # the session that awaited them.
+    async with asyncio.TaskGroup() as lookups:
+        identity_lookup = lookups.create_task(
+            _resolve_identity(
+                base_url=mistral.provider.api_base,
+                credentials=mistral.credentials,
+                timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
+            )
+        )
+        whoami_lookup = lookups.create_task(
+            _resolve_whoami(
+                base_url=config.console_base_url,
+                credentials=mistral.credentials,
+                timeout=EXPERIMENT_IDENTITY_TIMEOUT_S,
+            )
+        )
+    identity, whoami = identity_lookup.result(), whoami_lookup.result()
     logger.debug(
         "GrowthBook experiment attributes: identity_fetched=%s whoami_fetched=%s",
         identity is not None,

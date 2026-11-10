@@ -14,5 +14,4 @@ on_request = {"session/shellCommand": [_running]}
 
 timeline: Timeline = ["!sleep 10\r"]
 
-capture_startup = False
 screen_contains = ("sleep 10",)

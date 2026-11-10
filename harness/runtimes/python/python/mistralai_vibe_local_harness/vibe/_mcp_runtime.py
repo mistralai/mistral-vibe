@@ -45,6 +45,10 @@ from mistralai_vibe_local_harness.vibe._mcp_naming import (
     build_route_snapshot,
 )
 from mistralai_vibe_local_harness.vibe._mcp_pool import MCPStdioPool, MCPStdioPoolLease
+from mistralai_vibe_local_harness.vibe._tool_schemas import (
+    ToolsLeftOutSignal,
+    type_is_not_object,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -923,6 +927,13 @@ class MCPRuntime:
         )
         if push_to_core:
             await self._accept(candidate)
+        left_out: list[ToolsLeftOutSignal] = []
+        for server, descriptors in callable_descriptors:
+            # Named once per listing, not on every rebuild that keeps it.
+            if descriptors != self._accepted_descriptors.get(server.name):
+                dropped = _warn_dropped_tools(server.name, descriptors)
+                if dropped:
+                    left_out.append(ToolsLeftOutSignal(server.name, dropped))
         self._configuration = configuration
         self._accepted_descriptors = {
             server.name: descriptors
@@ -933,6 +944,9 @@ class MCPRuntime:
         # Set with the snapshot, not after the awaits below: one failing or
         # cancelled must not leave routes Core has not seen unflagged.
         self._snapshot_deferred = not push_to_core
+        # Published after the state above, as the authorization signals are.
+        for signal in left_out:
+            await self._publish(signal)
         for server, _, _, required in resolutions:
             if required is not None:
                 await self._authorization_required(server, required)
@@ -1233,9 +1247,7 @@ class MCPRuntime:
     async def _authorization_required(
         self, server: ResolvedMCPServerConfig, required: MCPAuthorizationRequired
     ) -> None:
-        if self._event_sink is None:
-            return
-        result = self._event_sink(
+        await self._publish(
             MCPAuthorizationRequiredSignal(
                 server_name=server.name,
                 reason=required.reason,
@@ -1243,6 +1255,13 @@ class MCPRuntime:
                 observed_connection_revision=required.observed_connection_revision,
             )
         )
+
+    async def _publish(
+        self, signal: MCPAuthorizationRequiredSignal | ToolsLeftOutSignal
+    ) -> None:
+        if self._event_sink is None:
+            return
+        result = self._event_sink(signal)
         if inspect.isawaitable(result):
             await result
 
@@ -1437,6 +1456,24 @@ class MCPRuntime:
         # previous one.
         if self._accept_snapshot is not None:
             await self._accept_snapshot(snapshot)
+
+
+def _warn_dropped_tools(
+    server_name: str, descriptors: tuple[MCPRemoteToolDescriptor, ...]
+) -> tuple[str, ...]:
+    """Name each listed tool the route snapshot leaves out for its schema."""
+    dropped = tuple(
+        descriptor.remote_name
+        for descriptor in descriptors
+        if type_is_not_object(descriptor.input_schema)
+    )
+    for name in dropped:
+        logger.warning(
+            'MCP server %r, tool %r: input schema type is not "object"; tool unavailable',
+            server_name,
+            name,
+        )
+    return dropped
 
 
 def _is_discovery_pending(source: MCPSourceState | None) -> bool:

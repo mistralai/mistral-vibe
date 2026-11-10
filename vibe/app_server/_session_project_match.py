@@ -6,12 +6,13 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from vibe.app_server._local_projects import LocalProject
+from vibe.core.paths import WORKTREES_DIR
 
 __all__ = ["ProjectFolders"]
 
 
 class ProjectFolders:
-    """Only an exact folder matches: a session in a subfolder stays projectless."""
+    """A folder matches itself and its subfolders; the deepest project folder wins."""
 
     def __init__(self, projects: Sequence[LocalProject]) -> None:
         candidates: dict[Path, list[LocalProject]] = {}
@@ -22,11 +23,23 @@ class ProjectFolders:
             folder: _preferred(folder, projects)
             for folder, projects in candidates.items()
         }
+        self._worktrees = _canonical(WORKTREES_DIR.path)
 
     def match(self, cwd: str | None) -> LocalProject | None:
         if cwd is None:
             return None
-        return self._by_folder.get(_canonical(Path(cwd)))
+        folder = _canonical(Path(cwd))
+        # A managed worktree joins a project only through its stamp or its exact folder.
+        if folder.is_relative_to(self._worktrees):
+            return self._by_folder.get(folder)
+        return next(
+            (
+                self._by_folder[candidate]
+                for candidate in (folder, *folder.parents)
+                if candidate in self._by_folder
+            ),
+            None,
+        )
 
 
 def _preferred(folder: Path, projects: Sequence[LocalProject]) -> LocalProject:

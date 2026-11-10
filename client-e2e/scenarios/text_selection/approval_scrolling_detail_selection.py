@@ -16,8 +16,6 @@ env = {
     "SSH_TTY": "/dev/pts/0",
 }
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 2}
 expected_clipboard = "echo line-08\necho line-09"
 
 _COMMAND = {"command": "\n".join(f"echo line-{i:02}" for i in range(1, 41))}

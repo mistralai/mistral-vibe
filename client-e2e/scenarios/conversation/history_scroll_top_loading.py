@@ -32,7 +32,6 @@ handshake = {
 }
 client_args = ("-c",)
 request_methods = {"session/continue", "session/history/list"}
-capture_startup = False
 # Each key settles, so a page landing mid-burst cannot race the remaining keys.
 settle_per_key = True
 screen_contains = ("Saved message 00", "Saved message 01")

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"VIBE_THEME": "textual-dark", "COLORTERM": ""}
 handshake = {
     "config/read": {"config": {"theme": "textual-dark"}},
     "runtime/read": {"runtime": {"config": {"theme": "textual-dark"}}},
 }
-timeline: Timeline = ["x"]
+timeline: Timeline = ["x", take_snapshot()]

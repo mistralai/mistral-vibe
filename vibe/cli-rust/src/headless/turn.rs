@@ -9,7 +9,6 @@ use tokio::sync::mpsc;
 use super::drive::RunState;
 use super::pre_turn;
 use super::subagents::wait_for_subagents;
-use super::usage::UsageBaseline;
 use crate::cli::OutputFormat;
 use crate::headless_history::read_history;
 use crate::headless_output::{denied_tool_warning, turn_entries, Output};
@@ -21,6 +20,7 @@ use crate::server::{notification, Client, Notification, PublicTurn};
 pub(super) enum TurnEnd {
     /// The turn completed; carries its stop reason and the final response.
     Completed {
+        budget_outcome: Option<RunOutcome>,
         stop_reason: Option<TurnStop>,
         final_response: Option<String>,
     },
@@ -33,7 +33,7 @@ pub(super) enum TurnEnd {
 
 /// Consume notifications until the turn ends. The app-server ignores
 /// maxTurns, so the client counts assistant turns and stops the run as a
-/// limit when one more would exceed it; usage stats feed the budgets.
+/// limit when one more would exceed it.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn run_turn_loop(
     client: &Arc<Client>,
@@ -43,7 +43,6 @@ pub(super) async fn run_turn_loop(
     settled: Vec<Notification>,
     stop: &Arc<StopRequests>,
     turn_id: &str,
-    usage_baseline: &UsageBaseline,
     state: &Mutex<RunState>,
 ) -> TurnEnd {
     let mut turns = TurnCounter::new(stop.limits().max_turns);
@@ -102,17 +101,15 @@ pub(super) async fn run_turn_loop(
                     pre_turn::integrations_unavailable(&output.format(), &[notification]);
                 state.lock().unwrap().warnings.extend(unavailable);
             }
-            notification::SESSION_STATS_UPDATED => {
-                // Observe usage for budget enforcement.
-                if let Some(stats) = notification.params.get("stats") {
-                    let stats = usage_baseline.run_stats(&crate::utils::json::read(stats));
-                    stop.observe_usage(stats.total_tokens(), stats.cost());
-                }
-            }
             notification::TURN_COMPLETED if matches_turn(&notification.params, turn_id) => {
                 // The run ends once its subagents do, so the export sees how each ended.
                 wait_for_subagents(client, notifications, session_id, stop).await;
                 let turn = PublicTurn::read(&notification.params);
+                let budget_outcome = match turn.budget_stop_reason.as_deref() {
+                    Some("token_limit") => Some(RunOutcome::TokenLimit),
+                    Some("price_limit") => Some(RunOutcome::PriceLimit),
+                    _ => None,
+                };
                 if turn.status() == Some("failed") {
                     // The turn has no output to write, but its denials still go in the report.
                     let format = output.format();
@@ -147,6 +144,7 @@ pub(super) async fn run_turn_loop(
                         }
                     };
                 return TurnEnd::Completed {
+                    budget_outcome,
                     stop_reason,
                     final_response,
                 };

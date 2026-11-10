@@ -9,8 +9,9 @@ from tests.conftest import build_test_vibe_config
 from tests.skills.conftest import create_skill
 from tests.skills.registry.conftest import make_item
 from vibe.core.config import VibeConfigSchema
+from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.skills.manager import SkillManager
-from vibe.core.skills.models import SkillSource
+from vibe.core.skills.models import SkillInfo, SkillScope, SkillSource
 from vibe.core.skills.registry import _manifest, _store
 from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
 from vibe.core.trusted_folders import trusted_folders_manager
@@ -570,7 +571,7 @@ class TestRegistrySkillDiscovery:
         assert "reg-skill" not in manager.available_skills
 
     @pytest.mark.asyncio
-    async def test_local_skill_wins_over_registry(self, skills_dir: Path) -> None:
+    async def test_a_global_file_wins_over_a_global_pin(self, skills_dir: Path) -> None:
         create_skill(skills_dir, "dup", "local one")
         await self._pin_materialized(
             skill_id="cid", name="dup", description="registry one"
@@ -599,6 +600,269 @@ class TestRegistrySkillDiscovery:
         manager = SkillManager(lambda: config)
 
         assert "evil" not in manager.available_skills
+
+
+async def _pin(
+    manifest: Path, *, name: str, skill_id: str, description: str, version: int = 1
+) -> None:
+    await _store.materialize(
+        make_item(
+            skill_id=skill_id, name=name, description=description, version=version
+        ),
+        name,
+    )
+    current = await _manifest.load(manifest)
+    entry = ManifestEntry(name=name, skill_id=skill_id, version=version)
+    await _manifest.save(manifest, SkillManifest(skills=[*current.skills, entry]))
+
+
+class TestSkillResolution:
+    @pytest.fixture
+    def project(self, tmp_working_directory: Path) -> Path:
+        trusted_folders_manager.add_trusted(tmp_working_directory)
+        return tmp_working_directory
+
+    @pytest.mark.parametrize("registry", [False, True])
+    def test_a_sandboxed_sessions_own_project_skill_outranks_the_hosts_copy(
+        self, project: Path, registry: bool
+    ) -> None:
+        create_skill(project / ".vibe" / "skills", "deploy", "host copy")
+        sandboxed = SkillInfo(
+            name="deploy",
+            description="sandbox project",
+            skill_path=Path("/sandbox/project/.vibe/skills/deploy/SKILL.md"),
+            prompt="# deploy",
+            source=SkillSource.LOCAL,
+            scope=SkillScope.PROJECT,
+        )
+        config = build_test_vibe_config(
+            skill_paths=[], experimental_enable_registry_skills=registry
+        )
+
+        manager = SkillManager(lambda: config, project_skills={"deploy": sandboxed})
+
+        assert manager.available_skills["deploy"] is sandboxed
+        listed = [
+            (installed.info, installed.active)
+            for installed in manager.installed_skills()
+            if installed.info.name == "deploy"
+        ]
+        assert listed == [(sandboxed, True)]
+
+    @pytest.mark.asyncio
+    async def test_a_project_pin_outranks_a_global_file(
+        self, project: Path, skills_dir: Path
+    ) -> None:
+        create_skill(skills_dir, "deploy", "global file")
+        await _pin(
+            project / ".vibe" / "skills.toml",
+            name="deploy",
+            skill_id="cid",
+            description="project pin",
+        )
+        config = build_test_vibe_config(
+            skill_paths=[skills_dir], experimental_enable_registry_skills=True
+        )
+
+        manager = SkillManager(lambda: config)
+
+        assert manager.available_skills["deploy"].description == "project pin"
+
+    @pytest.mark.asyncio
+    async def test_a_project_file_outranks_a_project_pin(self, project: Path) -> None:
+        create_skill(project / ".vibe" / "skills", "deploy", "project file")
+        await _pin(
+            project / ".vibe" / "skills.toml",
+            name="deploy",
+            skill_id="cid",
+            description="project pin",
+        )
+        config = build_test_vibe_config(
+            skill_paths=[], experimental_enable_registry_skills=True
+        )
+
+        manager = SkillManager(lambda: config)
+
+        assert manager.available_skills["deploy"].description == "project file"
+
+    @pytest.mark.parametrize(
+        ("registry", "winner"), [(True, "project file"), (False, "configured path")]
+    )
+    def test_a_configured_skill_path_yields_to_the_project_only_with_registry_skills(
+        self, project: Path, skills_dir: Path, registry: bool, winner: str
+    ) -> None:
+        create_skill(skills_dir, "deploy", "configured path")
+        create_skill(project / ".vibe" / "skills", "deploy", "project file")
+        config = build_test_vibe_config(
+            skill_paths=[skills_dir], experimental_enable_registry_skills=registry
+        )
+
+        manager = SkillManager(lambda: config)
+
+        assert manager.available_skills["deploy"].description == winner
+
+    def test_without_registry_skills_shadowing_stays_a_debug_line(
+        self, project: Path, skills_dir: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        create_skill(skills_dir, "deploy", "configured path")
+        create_skill(project / ".vibe" / "skills", "deploy", "project file")
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+
+        with caplog.at_level("DEBUG", logger="vibe"):
+            SkillManager(lambda: config)
+
+        levels = {r.levelname for r in caplog.records if "shadowed" in r.getMessage()}
+        assert levels == {"DEBUG"}
+
+    @pytest.mark.asyncio
+    async def test_one_version_pinned_in_both_scopes_is_not_reported(
+        self, project: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        for manifest in (
+            _manifest.global_manifest_path(),
+            project / ".vibe" / "skills.toml",
+        ):
+            await _pin(manifest, name="deploy", skill_id="cid", description="pin")
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+
+        with caplog.at_level("DEBUG", logger="vibe"):
+            SkillManager(lambda: config)
+
+        assert not [r for r in caplog.records if "shadowed" in r.getMessage()]
+
+    @pytest.mark.asyncio
+    async def test_the_first_project_root_wins_a_name_two_of_them_pin(
+        self, project: Path, tmp_path: Path
+    ) -> None:
+        other = tmp_path / "other"
+        other.mkdir()
+        await _pin(
+            project / ".vibe" / "skills.toml",
+            name="deploy",
+            skill_id="first",
+            description="first root",
+        )
+        await _pin(
+            other / ".vibe" / "skills.toml",
+            name="deploy",
+            skill_id="second",
+            description="second root",
+        )
+        files = HarnessFilesManager(
+            sources=("user", "project"), cwd=project, _additional_dirs=(other,)
+        )
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+
+        manager = SkillManager(lambda: config, harness_files=files)
+
+        assert manager.available_skills["deploy"].description == "first root"
+
+    @pytest.mark.asyncio
+    async def test_installed_skills_keep_every_pin_and_mark_the_resolved_one(
+        self, project: Path, skills_dir: Path
+    ) -> None:
+        create_skill(skills_dir, "deploy", "global file")
+        await _pin(
+            _manifest.global_manifest_path(),
+            name="deploy",
+            skill_id="cid",
+            description="global pin",
+        )
+        await _pin(
+            project / ".vibe" / "skills.toml",
+            name="deploy",
+            skill_id="cid",
+            description="project pin",
+            version=2,
+        )
+        config = build_test_vibe_config(
+            skill_paths=[skills_dir], experimental_enable_registry_skills=True
+        )
+
+        manager = SkillManager(lambda: config)
+
+        rows = [
+            (row.info.scope, row.info.source, row.info.description, row.active)
+            for row in manager.installed_skills()
+            if row.info.name == "deploy"
+        ]
+        assert rows == [
+            (SkillScope.PROJECT, SkillSource.REGISTRY, "project pin", True),
+            (SkillScope.GLOBAL, SkillSource.LOCAL, "global file", False),
+            (SkillScope.GLOBAL, SkillSource.REGISTRY, "global pin", False),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("pinned_as", "resolved_as"),
+        [("bar", "bar"), ("Not A Name", "foo")],
+        ids=["renamed", "invalid-name"],
+    )
+    async def test_a_pin_takes_the_name_its_manifest_gives_it(
+        self, project: Path, pinned_as: str, resolved_as: str
+    ) -> None:
+        await _store.materialize(
+            make_item(skill_id="cid", name="foo", version=5), "foo"
+        )
+        await _manifest.save(
+            _manifest.global_manifest_path(),
+            SkillManifest(
+                skills=[ManifestEntry(name=pinned_as, skill_id="cid", version=5)]
+            ),
+        )
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+
+        skills = SkillManager(lambda: config).available_skills
+
+        assert list(skills) == [resolved_as]
+        registry = skills[resolved_as].registry
+        assert registry is not None
+        assert (registry.skill_id, registry.version) == ("cid", 5)
+
+    @pytest.mark.asyncio
+    async def test_two_pins_of_one_stored_file_resolve_once_as_the_session_loads_it(
+        self, project: Path
+    ) -> None:
+        pytest.importorskip("mistralai_vibe_local_harness.protocol")
+        from vibe.app_server._skills import discover_session_skills
+
+        await _store.materialize(
+            make_item(skill_id="cid", name="foo", version=5), "foo"
+        )
+        await _manifest.save(
+            _manifest.global_manifest_path(),
+            SkillManifest(skills=[ManifestEntry(name="foo", skill_id="cid")]),
+        )
+        await _manifest.save(
+            project / ".vibe" / "skills.toml",
+            SkillManifest(skills=[ManifestEntry(name="bar", skill_id="cid")]),
+        )
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+        files = HarnessFilesManager(sources=("user", "project"), cwd=project)
+
+        manager = SkillManager(lambda: config, harness_files=files)
+        _, projection = discover_session_skills(
+            lambda: config,
+            harness_files=files,
+            plugin_skills={},
+            plugin_contexts=[],
+            skill_tool_available=True,
+        )
+
+        rows = [
+            (row.info.name, row.info.scope, row.active)
+            for row in manager.installed_skills()
+        ]
+        assert rows == [
+            ("bar", SkillScope.PROJECT, True),
+            ("foo", SkillScope.GLOBAL, False),
+        ]
+        assert list(manager.available_skills) == ["bar"]
+        assert [skill.name for skill in projection.catalogue] == ["bar"]
+        assert projection.registry_versions == {"bar": ("cid", 5)}
+        warned = [shadow.message % shadow.args for shadow in projection.shadowed]
+        assert [message.split(" from ")[0] for message in warned] == ["Skill 'foo'"]
+        assert warned[0].endswith("is shadowed by 'bar', which loads the same file")
 
 
 class TestSkillManagerRediscovery:

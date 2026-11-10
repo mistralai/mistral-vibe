@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "read the big log"
 
@@ -21,4 +21,5 @@ timeline: Timeline = [
     bash("tail other.log", stdout="last line", suffix="truncated"),
     assistant_msg("Done."),
     turn_completed(),
+    take_snapshot(),
 ]

@@ -8,8 +8,6 @@ from e2e.app_server.scenario import Timeline
 _QUERY = "@data/fixture.j"
 _SECOND_LINE = "x" * len(_QUERY)
 
-capture_startup = False
-capture_steps = {2, 3, 6, 7}
 expected_clipboard = f"@data/fixture.json !\n{_SECOND_LINE}"
 
 timeline: Timeline = [

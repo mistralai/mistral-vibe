@@ -86,6 +86,19 @@ fn budget_flags_parsed() {
 }
 
 #[test]
+fn negative_price_is_parsed_for_usage_validation() {
+    let cli = Cli::try_parse_from(["vibe-rs", "-p", "hi", "--max-price", "-1"]).unwrap();
+    assert_eq!(cli.max_price, Some(-1.0));
+}
+
+#[test]
+fn a_price_flag_followed_by_another_flag_is_missing_its_value() {
+    let error = Cli::try_parse_from(["vibe-rs", "-p", "hi", "--max-price", "--yolo"]).unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::InvalidValue);
+    assert!(!error.to_string().contains("invalid float"), "{error}");
+}
+
+#[test]
 fn auto_approve_and_yolo_flags() {
     let cli = Cli::parse_from(["vibe-rs", "-p", "hi", "--yolo"]);
     assert!(cli.headless_options(None).unwrap().auto_approve);

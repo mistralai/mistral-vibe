@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {
     "workspace/trust/status": {
@@ -19,4 +19,4 @@ handshake = {
 
 # A repo root equal to the cwd hides the repo line; Right then Enter declines,
 # and the session still opens.
-timeline: Timeline = ["\x1b[C", "\r"]
+timeline: Timeline = ["\x1b[C", "\r", take_snapshot()]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _CTRL_H = "\x08"
 _CTRL_ALT_H = "\x1b\x08"
@@ -21,6 +21,5 @@ timeline: Timeline = [
     "jkl mno",
     _HOME,
     _ALT_D,
+    take_snapshot(),
 ]
-
-capture_steps = {1, 3, 4, 6, 8}

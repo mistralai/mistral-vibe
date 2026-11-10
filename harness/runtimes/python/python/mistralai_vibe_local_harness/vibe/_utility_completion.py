@@ -19,6 +19,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolDefinition,
 )
 from mistralai_vibe_local_harness.vibe._completion import credential_rejection
+from mistralai_vibe_local_harness.vibe._completion_budget import CompletionBudgetDenied
 from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderCredentialSnapshot,
     ProviderRejectionReason,
@@ -117,6 +118,10 @@ async def execute_utility_completion(
     ``config.backend`` selects.
     """
     try:
+        if config.completion_budget is not None:
+            reason = await config.completion_budget.admission_reason(route.pricing)
+            if reason is not None:
+                raise CompletionBudgetDenied(reason)
         adapter = complete or _completion_for_backend(config.backend)
         result = await adapter(
             messages,
@@ -135,6 +140,8 @@ async def execute_utility_completion(
             rejection=credential_rejection(failure),
             explanation=failure.explanation,
         ) from exc
+    if config.completion_budget is not None:
+        await config.completion_budget.record(result.usage, route.pricing)
     text = "".join(
         part.text for part in result.parts if isinstance(part, RustTextContentBlock)
     )

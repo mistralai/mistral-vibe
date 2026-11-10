@@ -14,5 +14,4 @@ timeline: Timeline = [
     turn_failed(code="backend_error", message=_PREFIX + "R0lGODlh" * 150_000),
 ]
 
-capture_startup = False
 screen_contains = ("[truncated]", "/retry")

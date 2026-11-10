@@ -12,7 +12,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_INPUT_GRACE_PERIOD_MS": "0", "VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
 
 _COMMAND = {"command": "echo hello"}
 _SHIFT_LEFT = "\x1b[1;2D"
@@ -31,7 +30,6 @@ timeline: Timeline = [
     "1",
     "X",
 ]
-capture_steps = {3, 4, 5, 6}
 
 # A surviving selection would be replaced by the typed key: "draft X".
 screen_contains = ("draft Xtext",)

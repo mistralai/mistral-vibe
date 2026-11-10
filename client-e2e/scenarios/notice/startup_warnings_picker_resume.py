@@ -18,7 +18,5 @@ request_methods = {"session/resume"}
 # Enter submits /resume, Up selects the saved session, the next Enter resumes it.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "\r"]
 
-capture_startup = False
-capture_steps = {0, 3}
 screen_contains = ("Resumed session",)
 screen_excludes = ("Warnings", "Failed to parse: bad toml")

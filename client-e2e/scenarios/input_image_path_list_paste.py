@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from e2e.app_server.events import paste
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # Fixed shallow `/tmp` paths keep the rendered mentions checkout-independent.
 _DIR = Path("/tmp/vibe_e2e_fixtures/path_list")
@@ -16,4 +16,5 @@ _DIR.mkdir(parents=True, exist_ok=True)
 timeline: Timeline = [
     paste(f"{_DIR}/shot\\ \\(1\\).png {_DIR}/b.png"),
     paste(f"{_DIR}/notes.md\n{_DIR}/b.png\n"),
+    take_snapshot(),
 ]

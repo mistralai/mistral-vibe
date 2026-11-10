@@ -914,3 +914,169 @@ async def test_reconnect_replays_turn_output_emitted_while_detached(
         and event.entry.role == "assistant"
     ]
     assert [entry.text for entry in recovered] == ["Recovered output"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_queued_while_the_agent_waits_joins_the_waiting_turn(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    """*Prepare*: A model that calls a one-hour `wait`, then answers.
+    *Do*: Queue a message while the model waits.
+    *Assert*: The message joins the waiting turn and the model answers it in
+    that turn, long before the wait's deadline.
+    """
+    # Prepare
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(json.dumps(json.loads(request.content).get("messages", [])))
+        if len(requests) == 1:
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "call_wait",
+                        "index": 0,
+                        "function": {
+                            "name": "wait",
+                            "arguments": json.dumps({"timeout_ms": 3_600_000}),
+                        },
+                    }
+                ],
+            )
+        return backend_contract_mistral_response("The docs hold the user guides.")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    waiting = asyncio.Event()
+
+    async def consume_turn() -> list[object]:
+        events: list[object] = []
+        async for event in backend_contract_session.act("start the subagents"):
+            events.append(event)
+            if (
+                isinstance(event, HistoryEntryAdded)
+                and isinstance(event.entry, PublicEffectEntry)
+                and event.entry.detail.tool_name == "self.wait"
+            ):
+                waiting.set()
+        return events
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        await asyncio.wait_for(waiting.wait(), timeout=5)
+
+        # Do
+        await backend_contract_session.enqueue("what about the docs?")
+        await asyncio.wait_for(turn, timeout=10)
+    finally:
+        if not turn.done():
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+
+    # Assert
+    assert len(requests) == 2
+    assert "what about the docs?" in requests[1]
+    assert backend_contract_session.turn_queue.items == []
+    steered = [
+        entry
+        for entry in backend_contract_session.history
+        if isinstance(entry, PublicMessageEntry) and entry.source == "turn_steer"
+    ]
+    assert [entry.text for entry in steered] == ["what about the docs?"]
+
+
+@pytest.mark.asyncio
+async def test_a_background_process_shows_in_the_state_while_the_agent_waits(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A model that starts a background process, then waits for it.
+    *Do*: Run the turn until the wait starts, then interrupt it.
+    *Assert*: A snapshot reports the process running while the agent waits, so a
+    client can name what the wait is for.
+    """
+
+    # Prepare
+    def respond(request: httpx.Request) -> httpx.Response:
+        messages = json.dumps(json.loads(request.content).get("messages", []))
+        if "call_wait" in messages:
+            return backend_contract_mistral_response("Done.")
+        if "call_start" in messages:
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "call_wait",
+                        "index": 0,
+                        "function": {
+                            "name": "wait",
+                            "arguments": json.dumps({"timeout_ms": 3_600_000}),
+                        },
+                    }
+                ],
+            )
+        return backend_contract_mistral_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_start",
+                    "index": 0,
+                    "function": {
+                        "name": "run_typescript",
+                        "arguments": json.dumps({
+                            "code": (
+                                "async function main() { return tools.process.start("
+                                "{command: 'sleep 30'}); }"
+                            )
+                        }),
+                    },
+                }
+            ],
+        )
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    session = await connection.host.open_session()
+    seen_while_waiting = asyncio.Event()
+
+    async def consume_turn() -> None:
+        waited = False
+        async for event in session.act("run the build in the background"):
+            if (
+                isinstance(event, HistoryEntryAdded)
+                and isinstance(event.entry, PublicEffectEntry)
+                and event.entry.detail.tool_name == "self.wait"
+            ):
+                waited = True
+            if waited and any(
+                process.status == "running"
+                for process in session.state.background_processes
+            ):
+                seen_while_waiting.set()
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        # Do
+        await asyncio.wait_for(seen_while_waiting.wait(), timeout=10)
+        await session.interrupt()
+        await asyncio.wait_for(turn, timeout=10)
+    finally:
+        if not turn.done():
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+        await session.close()
+        await connection.host.close()
+
+    # Assert
+    [process] = session.state.background_processes
+    assert process.command == "sleep 30"

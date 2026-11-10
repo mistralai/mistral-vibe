@@ -8,7 +8,6 @@ from e2e.app_server.scenario import Timeline
 _UP = "\x1b[A"
 
 screen_contains = ("third", "second edited")
-capture_steps = {12}
 
 timeline: Timeline = [
     "first\r",

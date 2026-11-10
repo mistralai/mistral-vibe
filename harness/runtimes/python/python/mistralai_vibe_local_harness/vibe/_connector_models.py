@@ -9,6 +9,8 @@ from typing import Literal, Protocol
 
 from pydantic import JsonValue
 
+from mistralai_vibe_local_harness.vibe._tool_schemas import ToolsLeftOutSignal
+
 type JsonObject = dict[str, JsonValue]
 type JsonSchema = bool | JsonObject
 type ConnectorAuthAction = Literal[
@@ -133,7 +135,7 @@ class ConnectorAuthorizationRequiredSignal:
 
 
 type ConnectorRuntimeEventSink = Callable[
-    [ConnectorAuthorizationRequiredSignal], Awaitable[None] | None
+    [ConnectorAuthorizationRequiredSignal | ToolsLeftOutSignal], Awaitable[None] | None
 ]
 
 

@@ -174,7 +174,6 @@ pub(super) async fn run_session(
                 settled,
                 &stop,
                 &turn_id,
-                &usage_baseline,
                 &state,
             )
             .await;

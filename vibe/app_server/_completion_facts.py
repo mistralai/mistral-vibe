@@ -102,6 +102,7 @@ class ModelFactsError(SessionBackendError):
             ProtocolErrorCode.INTERNAL_ERROR,
             message,
             {OUTCOME_ERROR_FIELD: RunOutcome.CONFIG_ERROR.value},
+            expected=True,
         )
 
 

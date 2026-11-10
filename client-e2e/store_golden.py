@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from e2e.app_server.capture import capture_scenario
 from e2e.app_server.config import CLIENT_BIN, GOLDEN_LOCK, REPLAY_BIN
 from e2e.app_server.golden import normalize_snapshot, render_golden_lock, store_golden
-from e2e.app_server.scenario import available_scenarios, load_scenario
+from e2e.app_server.scenario import ASSERTS_NOTHING, available_scenarios, load_scenario
 
 
 def main() -> None:
@@ -47,14 +47,13 @@ def main() -> None:
         if scenario.skip_reason:
             print(f"  skip {name}: {scenario.skip_reason}")
             continue
-        scenario.clamp_capture_startup()
         try:
             captured = capture_scenario(scenario)
         except (TimeoutError, OSError) as exc:
             print(f"  FAIL {name}: {exc}")
             continue
-        if not captured.snapshots and not captured.requests:
-            print(f"  FAIL {name}: captured nothing, refusing to store an empty golden")
+        if not scenario.has_expectations() and not captured.requests:
+            print(f"  FAIL {name}: {ASSERTS_NOTHING}")
             continue
         normalized = [normalize_snapshot(s) for s in captured.snapshots]
         path = store_golden(name, normalized, captured.requests)

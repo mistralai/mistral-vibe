@@ -13,6 +13,5 @@ _EXPAND = "\x1b[<0;1;7M\x1b[<0;1;7m"
 
 timeline: Timeline = ["!true\r", _EXPAND]
 
-capture_startup = False
 screen_contains = ("Ran true", "(no content)")
 screen_excludes = ("Error:", "Command failed")

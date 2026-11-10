@@ -7,7 +7,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "edit the file"
 
@@ -22,4 +22,5 @@ timeline: Timeline = [
     edit_file("notes.txt", [(3, _OLD, _NEW)]),
     assistant_msg("Done."),
     turn_completed(),
+    take_snapshot(),
 ]

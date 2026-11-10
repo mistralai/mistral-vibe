@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The scenario renders a macOS-specific path (/private/var/folders/...) which
 # may wrap differently on Linux due to platform-dependent text layout.
@@ -25,5 +25,7 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     assistant_msg(_ANSWER),
     turn_completed(),
+    take_snapshot(),
     _DRAG,
+    take_snapshot(),
 ]

@@ -76,11 +76,18 @@ pub struct Cli {
     #[arg(long = "max-turns", overrides_with = "max_turns")]
     pub max_turns: Option<u32>,
 
-    /// Maximum cost in dollars (headless mode only).
-    #[arg(long = "max-price", overrides_with = "max_price")]
+    /// Maximum cumulative cost in dollars of the run's root session and
+    /// subagents (headless mode only). A model priced at 0 is free; a limit of 0
+    /// stops the run before the next call once any call has cost money.
+    #[arg(
+        long = "max-price",
+        overrides_with = "max_price",
+        allow_negative_numbers = true
+    )]
     pub max_price: Option<f64>,
 
-    /// Maximum total prompt + completion tokens (headless mode only).
+    /// Maximum cumulative prompt + completion tokens of the run's root session
+    /// and subagents (headless mode only).
     #[arg(long = "max-tokens", overrides_with = "max_tokens")]
     pub max_tokens: Option<u64>,
 

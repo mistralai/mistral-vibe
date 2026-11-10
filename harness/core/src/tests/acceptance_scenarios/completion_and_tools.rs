@@ -457,7 +457,7 @@ fn tool_discovery_details_render_the_description_once() {
         "search_tool_functions",
         json!({"mode": "details", "functions": ["github.search_issues"]}),
     )];
-    let discovery_result = "---\nmode: details\nrelevantFunctionCount: 1\nrelatedFunctionCount: 1\nrelatedConnectorCount: 1\nrelevantConnectorNoticeCount: 0\nrequestedFunctionCount: 1\nloadedFunctionCount: 1\nloadedFunctions:\n  - name: github.search_issues\n    connector: github\n---\n\n# Tool Function Details\n\n```ts\n// Result 1.\n// connector: github\n// function: github.search_issues\n// tool: tools.github.search_issues\n\ndeclare namespace tools.github {\n  type SearchIssuesArg = Record<string, unknown>;\n  type SearchIssuesReturned = unknown;\n  /**\n   * Search GitHub issues.\n   *\n   * Use it for open bugs.\n   */\n  function search_issues(arg: SearchIssuesArg): Promise<SearchIssuesReturned>;\n}\n```";
+    let discovery_result = "---\nmode: details\nrelevantFunctionCount: 1\nrelatedFunctionCount: 1\nrelatedConnectorCount: 1\nrelevantConnectorNoticeCount: 0\nrequestedFunctionCount: 1\nloadedFunctionCount: 1\nloadedFunctions:\n  - name: github.search_issues\n    connector: github\n---\n\n# Tool Function Details\n\n```ts\n// Result 1.\n// connector: github\n// function: github.search_issues\n// tool: tools.github.search_issues\n\ndeclare namespace tools.github {\n  type SearchIssuesArg = Record<string, unknown>;\n  type SearchIssuesReturned = unknown;\n  /**\n   * Search GitHub issues.\n   *\n   * Use it for open bugs.\n   */\n  function search_issues(arg?: SearchIssuesArg): Promise<SearchIssuesReturned>;\n}\n```";
 
     // Do
     let second_completion = runtime

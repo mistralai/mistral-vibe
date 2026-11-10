@@ -116,7 +116,9 @@ from mistralai_vibe_local_harness.vibe._errors import (
     HarnessSessionBusyError,
     HarnessStaleTurnError,
     HarnessTurnConflictError,
+    HarnessTurnQueueEditConflictError,
     HarnessTurnQueueIdempotencyConflictError,
+    HarnessTurnQueueItemNotFoundError,
     HarnessTurnQueuePendingError,
 )
 from mistralai_vibe_local_harness.vibe._fact_recorder import (
@@ -215,6 +217,10 @@ _MAX_IMAGE_BYTES = _sandbox_helper.MAX_IMAGE_BYTES
 # Wait this long for the Core to accept the turn before interrupting; a start
 # that never applies falls through and the interrupt reports the rejection.
 _INTERRUPT_WAIT_FOR_CORE_TURN_SECONDS = 5.0
+
+# A session no client ever subscribes to or observes still publishes notices;
+# hold only this many for a subscriber or an observer that may never come.
+_NOTICES_HELD_BEFORE_SUBSCRIBER = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,6 +401,8 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._turn_task_ids: dict[asyncio.Task[None], str] = {}
         self._settling_turn_tasks: set[asyncio.Task[None]] = set()
         self._queue_drain_task: asyncio.Task[None] | None = None
+        self._waiting_turn_steer_task: asyncio.Task[None] | None = None
+        self._on_waiting_turn_steered: Callable[[], None] | None = None
         self._turn_queue_edit_save_receipts: dict[str, _QueuedTurnEditSaveReceipt] = {}
         self._settle_configuration: Callable[[], Awaitable[None]] | None = None
         self._after_recovery: Callable[[], Awaitable[None]] | None = None
@@ -428,6 +436,10 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         if runtime is not None:
             runtime.configure_work_state_callback(self._notify_work_state_changed)
         self._buffered_events: list[JsonObject] | None = None
+        # A notice published before any client subscribed or observed, such as
+        # one naming the tools an integration left out at start, waits for the
+        # first subscriber or observer; ``None`` once one has come.
+        self._notices_before_subscriber: list[JsonObject] | None = []
 
     @property
     def session_id(self) -> str:
@@ -636,6 +648,10 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     def configure_turn_settlement(self, settle: Callable[[], Awaitable[None]]) -> None:
         """Register what the Host must apply before any turn opens."""
         self._settle_configuration = settle
+
+    def configure_waiting_turn_steer(self, steered: Callable[[], None]) -> None:
+        """Register what runs once queued user input joined a Turn that only waits."""
+        self._on_waiting_turn_steered = steered
 
     def _configure_work_state_callback(
         self, callback: Callable[[str], Awaitable[None] | None]
@@ -1253,9 +1269,9 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         # Snapshot creation and subscriber registration contain no await, so a
         # Runtime event cannot land between them on the Session event loop.
         snapshot = self._snapshot(params.history_limit)
-        return HarnessSessionSubscription(
-            snapshot=snapshot, events=self._event_subscriptions.subscribe()
-        )
+        events = self._event_subscriptions.subscribe()
+        self._publish_held_notices()
+        return HarnessSessionSubscription(snapshot=snapshot, events=events)
 
     async def rename(self, title: str) -> SessionSnapshot:
         async with self._lifecycle_lock:
@@ -1275,7 +1291,12 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     def observe_events(
         self, observer_id: str, observer: Callable[[JsonObject], None]
     ) -> SessionSnapshot:
-        """Atomically attach a non-consuming event observer and return its watermark."""
+        """Atomically attach a non-consuming event observer and return its watermark.
+
+        Notices published before any subscriber stay held: the caller releases them with
+        `_publish_held_notices` once its own readers can place them, as a parent does after it
+        publishes the child's registration.
+        """
         self._event_observers[observer_id] = observer
         return self._snapshot(500)
 
@@ -3020,6 +3041,15 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     def _publish_event(
         self, event: JsonObject, *, settles_turn_task: bool = True
     ) -> None:
+        held = self._notices_before_subscriber
+        if (
+            event.get("type") == "notice"
+            and held is not None
+            and not self._event_observers
+        ):
+            if len(held) < _NOTICES_HELD_BEFORE_SUBSCRIBER:
+                held.append(event)
+            return
         terminal = _terminal_turn(event)
         if terminal is not None and settles_turn_task:
             turn_id, _status = terminal
@@ -3040,6 +3070,11 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             if waiter is not None:
                 waiter.set()
             self._handle_terminal_turn(*terminal)
+
+    def _publish_held_notices(self) -> None:
+        held, self._notices_before_subscriber = self._notices_before_subscriber, None
+        for notice in held or ():
+            self._publish_event(notice)
 
     def _publish_sequenced_event(self, event: JsonObject) -> None:
         self._emit_event(
@@ -3117,6 +3152,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             or self._reserved_turn_id is not None
             or self.active_turn_id is not None
         ):
+            self._schedule_waiting_turn_steer()
             return
         existing = self._queue_drain_task
         if existing is not None and not existing.done():
@@ -3124,6 +3160,78 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         task = asyncio.create_task(self._drain_turn_queue())
         self._queue_drain_task = task
         task.add_done_callback(self._turn_queue_drain_finished)
+
+    def _waiting_turn_steer_target(self) -> tuple[str, str] | None:
+        """The active Turn and the queued item that should join it, if any.
+
+        A Turn whose model only waits cannot reach its end on its own soon, so
+        queued user input joins it instead of waiting for the Turn to finish.
+        """
+        runtime = self._runtime
+        if self._closed or runtime is None or not runtime.model_wait_in_progress:
+            return None
+        if self._buffered_events is not None:
+            return None
+        turn_id = self.active_turn_id
+        record = self._turn_queue.peek_next()
+        if turn_id is None or record is None:
+            return None
+        if any(entry.role == "context" for entry in record.prepared_entries):
+            return None
+        return turn_id, record.queued_turn.id
+
+    def _schedule_waiting_turn_steer(self) -> None:
+        if self._waiting_turn_steer_target() is None:
+            return
+        existing = self._waiting_turn_steer_task
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._steer_queue_into_waiting_turn(),
+            name=f"harness-waiting-turn-steer:{self._session_id}",
+        )
+        self._waiting_turn_steer_task = task
+        task.add_done_callback(self._waiting_turn_steer_finished)
+
+    async def _steer_queue_into_waiting_turn(self) -> None:
+        target = self._waiting_turn_steer_target()
+        if target is None:
+            return
+        turn_id, queue_item_id = target
+        try:
+            await self.steer_queued_turn(
+                TurnQueueSteerParams(
+                    session_id=self._session_id,
+                    queue_item_id=queue_item_id,
+                    expected_turn_id=turn_id,
+                )
+            )
+        except (
+            HarnessStaleTurnError,
+            HarnessTurnConflictError,
+            HarnessTurnQueueEditConflictError,
+            HarnessTurnQueueItemNotFoundError,
+        ):
+            # The Turn ended, compaction began, or the user took the item back
+            # meanwhile: the queue keeps its ordinary behavior.
+            return
+        if (steered := self._on_waiting_turn_steered) is not None:
+            steered()
+
+    def _waiting_turn_steer_finished(self, task: asyncio.Task[None]) -> None:
+        if self._waiting_turn_steer_task is task:
+            self._waiting_turn_steer_task = None
+        if task.cancelled():
+            return
+        if error := task.exception():
+            logger.warning(
+                "Steering queued input into a waiting turn failed",
+                extra={"harness_backend": "unified", "session_id": self._session_id},
+                exc_info=error,
+            )
+            return
+        # The wait wakes and later waits again; a still-queued item then joins.
+        self._schedule_waiting_turn_steer()
 
     async def _settle_turn_configuration(self) -> None:
         """Let the Host land configuration it parked, before a turn opens on it.
@@ -3486,13 +3594,14 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 await task
 
     async def _cancel_queue_drain_task(self) -> None:
-        task = self._queue_drain_task
+        for task in (self._queue_drain_task, self._waiting_turn_steer_task):
+            if task is None or task.done():
+                continue
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
         self._queue_drain_task = None
-        if task is None or task.done():
-            return
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        self._waiting_turn_steer_task = None
 
     def _reject_integration_change(self) -> None:
         """Refuse an MCP or connector change that could split a turn.
@@ -3614,6 +3723,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         _ = asyncio.ensure_future(settle())
 
     def _notify_work_state_changed(self) -> None:
+        self._schedule_waiting_turn_steer()
         runtime = self._runtime
         if runtime is not None:
             background_processes = tuple(runtime.background_processes)

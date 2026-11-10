@@ -503,3 +503,39 @@ fn queue_positions_resolve_by_message_id() {
     controller.selected = Some("missing".into());
     assert_eq!(controller.selected_position(), None);
 }
+
+#[tokio::test]
+async fn a_server_steer_that_beats_the_enqueue_answer_settles_the_prompt() {
+    let mut app = generating_app();
+    let client = stub();
+    mq::enqueue_prompt(&mut app, &client, "what about the docs?".into());
+    let message_id = app.queue.items[0].message_id.clone();
+    assert!(app.view.transcript.is_pending(&message_id));
+    assert!(app.queue.items[0].queue_item_id.is_none());
+
+    // The server steers the head into a turn that only waits on its own, and
+    // its history entry can land before the enqueue answer.
+    let steered = mq::steering_history_added(
+        &mut app,
+        &client,
+        &json!({"entry": {
+            "id": message_id, "type": "message", "role": "user", "source": "turn_steer",
+        }}),
+    );
+    let late_answer = mq::apply_event(
+        &mut app,
+        &client,
+        mq::QueueEvent::Accepted {
+            message_id: message_id.clone(),
+            queue_item_id: "q-1".into(),
+            session_id: "sess".into(),
+            images: Vec::new(),
+            mentions: None,
+        },
+    );
+
+    assert!(steered);
+    assert!(app.queue.is_empty());
+    assert!(late_answer.is_none());
+    assert!(!app.view.transcript.is_pending(&message_id));
+}

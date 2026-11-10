@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     user_msg,
     write_file,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "write the makefile"
 
@@ -31,4 +31,5 @@ timeline: Timeline = [
     _EXPAND_GROUP,
     _EXPAND_WRITE,
     _EXPAND_BASH,
+    take_snapshot(),
 ]

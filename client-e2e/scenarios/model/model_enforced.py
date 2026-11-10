@@ -15,6 +15,8 @@ _fields["fields"][0]["layerValues"] = [
 assert _fields["fields"][0]["name"] == "active_model"
 
 handshake = {"config/fields/read": _fields}
+# The refused pick records the picker opening, not a selection.
+request_methods = {"telemetry/record"}
 
 # Pick the next model, then keep its current thinking level in the chained picker.
 timeline: Timeline = ["/model", "\r", "\x1b[B", "\r", "\r"]

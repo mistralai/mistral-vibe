@@ -172,6 +172,44 @@ async fn resuming_in_the_home_folder_keeps_both_the_warning_and_the_history() {
 }
 
 #[tokio::test]
+async fn a_picker_resume_before_ready_keeps_its_running_turn() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+    let home = isolated_dir("picker-before-ready-running");
+    let client = Arc::new(Client::stub_answering().0);
+    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
+    let mut app = App::default();
+    app.session.startup_resume = StartupResume::Picker;
+    apply_startup_event(
+        &mut app,
+        &client,
+        &config_tx,
+        StartupEvent::Attached("fresh".into()),
+    );
+    resume_picker::open(&mut app, &client);
+    app.resume_picker.resuming = true;
+    let saved = json!({"eventId": 1, "history": [],
+        "session": {"id": SAVED, "status": {"type": "running", "activeTurnId": "turn-1"}}});
+    let resumed = resume_picker::Event::Resumed {
+        id: SAVED.into(),
+        state: serde_json::from_value(saved).unwrap(),
+    };
+    resume_picker::apply_event(&mut app, &client, resumed);
+    assert!(matches!(app.session.status, Status::Generating { .. }));
+
+    apply_startup_event(
+        &mut app,
+        &client,
+        &config_tx,
+        ready("fresh", Vec::new(), Attach::Started),
+    );
+
+    // The discarded fresh session's handshake must not drop the resumed turn.
+    assert!(matches!(app.session.status, Status::Generating { .. }));
+    assert_eq!(app.session.active_turn_id.as_deref(), Some("turn-1"));
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[tokio::test]
 async fn a_picker_resume_before_ready_keeps_the_adopted_paused_queue() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
     let home = isolated_dir("picker-before-ready");

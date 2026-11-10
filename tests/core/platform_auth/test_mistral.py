@@ -19,6 +19,7 @@ from vibe.core.platform_auth import (
 from vibe.core.platform_auth._mistral import (
     OIDC_PRINCIPAL_PREFIX,
     credential_request,
+    fetched_for_current_account,
     may_cache_under,
     mistral_credentials,
 )
@@ -95,6 +96,22 @@ def test_a_user_response_is_cached_only_for_the_account_it_was_fetched_for(
     key, fetched_for, allowed
 ) -> None:
     assert may_cache_under(key, fetched_for=fetched_for) is allowed
+
+
+@pytest.mark.parametrize(
+    ("fetched_for", "provider", "current"),
+    [
+        ("api-key-hash", ApiKeyPlatformCredentialProvider.from_api_key("k"), True),
+        ("api-key-hash", object(), True),
+        (f"{OIDC_PRINCIPAL_PREFIX}a", _UserToken(f"{OIDC_PRINCIPAL_PREFIX}a"), True),
+        (f"{OIDC_PRINCIPAL_PREFIX}a", _UserToken(f"{OIDC_PRINCIPAL_PREFIX}b"), False),
+        (f"{OIDC_PRINCIPAL_PREFIX}a", object(), False),
+    ],
+)
+def test_a_user_fetch_is_current_only_while_its_account_is_signed_in(
+    fetched_for, provider, current
+) -> None:
+    assert fetched_for_current_account(provider, fetched_for) is current
 
 
 def test_a_missing_api_key_means_no_first_party_call(monkeypatch) -> None:

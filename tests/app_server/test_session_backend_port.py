@@ -140,6 +140,7 @@ def test_app_server_passes_services_to_session_backend_host_factory(
             org_config=process_services.org_config,
             worktrees=process_services.worktrees,
             experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
     )
 
@@ -165,6 +166,7 @@ def test_app_server_rejects_empty_session_backend_host_factory_result(
                 org_config=process_services.org_config,
                 worktrees=process_services.worktrees,
                 experiments=process_services.experiments,
+                model_catalog=process_services.model_catalog,
             ),
         )
 
@@ -183,6 +185,7 @@ async def test_pin_requires_the_optional_host_capability(
             org_config=process_services.org_config,
             worktrees=process_services.worktrees,
             experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
     )
 
@@ -208,6 +211,7 @@ async def test_mark_as_seen_requires_the_optional_host_capability(
             org_config=process_services.org_config,
             worktrees=process_services.worktrees,
             experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
     )
 
@@ -243,6 +247,7 @@ async def test_mark_as_seen_routes_to_the_selected_backend_host(
             org_config=process_services.org_config,
             worktrees=process_services.worktrees,
             experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
     )
 
@@ -285,6 +290,7 @@ async def test_app_server_shutdown_waits_for_host_cleanup(
             org_config=process_services.org_config,
             worktrees=process_services.worktrees,
             experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
     )
 
@@ -359,6 +365,7 @@ async def test_only_a_reopened_session_announces_its_running_turn(
             org_config=process_services.org_config,
             worktrees=process_services.worktrees,
             experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
     )
 

@@ -123,6 +123,14 @@ class LocalProjectStore:
             if (project := _parse(entry)) is not None
         ]
 
+    def project_ids(self) -> set[str]:
+        # Raw, so an entry this server can't parse still counts as existing.
+        return {
+            project_id
+            for entry in _entries(self._read())
+            if isinstance(project_id := entry.get("id"), str)
+        }
+
     def create(self, *, name: str, root_path: Path) -> LocalProject:
         entry = _new_entry(_clean_name(name), root_path, now_ms())
         with exclusive_file_lock(self._path):

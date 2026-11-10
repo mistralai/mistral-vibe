@@ -122,6 +122,22 @@ pub mod method {
     pub const PLUGIN_CATALOG_READ: &str = "plugin_catalog/read";
     /// Re-pin the session's plugins (`/reload-plugins`).
     pub const PLUGIN_RELOAD: &str = "plugin/reload";
+    /// The session's installed skills browsed by `/skills`, one per pin.
+    pub const SKILLS_INSTALLED: &str = "skills/installed";
+    /// The shared skills `/skills` can import, and newer versions of frozen pins.
+    pub const SKILLS_CATALOG: &str = "skills/catalog";
+    /// The published versions of one registry skill and their aliases.
+    pub const SKILLS_VERSIONS: &str = "skills/versions";
+    /// One registry skill's body at a version.
+    pub const SKILLS_DETAIL: &str = "skills/detail";
+    /// Pinned skills with a newer version not announced yet.
+    pub const SKILLS_UPDATES: &str = "skills/updates";
+    /// Pin a registry skill into a scope at a version or alias, or re-pin it there.
+    pub const SKILLS_IMPORT: &str = "skills/import";
+    /// Unpin a registry skill from one scope.
+    pub const SKILLS_REMOVE: &str = "skills/remove";
+    /// Turn a skill on or off for every scope it is installed in.
+    pub const SKILLS_SET_ENABLED: &str = "skills/setEnabled";
     /// Install or uninstall an `install_required` agent such as `lean`.
     pub const AGENTS_INSTALL: &str = "agents/install";
     pub const AGENTS_UNINSTALL: &str = "agents/uninstall";
@@ -624,6 +640,15 @@ pub struct PublicSessionState {
     /// Child (subagent) sessions in creation order.
     #[serde(default)]
     pub child_sessions: Vec<crate::server::PublicChildSession>,
+    /// The session's background processes; only their status is read.
+    #[serde(default, deserialize_with = "crate::utils::json::lenient")]
+    pub background_processes: Vec<PublicBackgroundProcess>,
+}
+
+/// `PublicBackgroundProcess`: a process the agent started in the background.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PublicBackgroundProcess {
+    pub status: String,
 }
 
 /// A provider retry in progress: which turn, why, and the transport detail.
@@ -674,6 +699,17 @@ pub struct PublicSession {
     pub worktree: Option<Box<PublicSessionWorktree>>,
     #[serde(default)]
     pub token_usage: Option<TokenUsage>,
+    // Boxed like `worktree`: the state rides `UiEvent`, whose variant sizes clippy bounds.
+    #[serde(default)]
+    pub status: Option<Box<PublicSessionStatus>>,
+}
+
+/// `PublicSessionStatus`: only the turn a running or blocked session is on is read.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicSessionStatus {
+    #[serde(default)]
+    pub active_turn_id: Option<String>,
 }
 
 /// A history entry, typed by its `type` discriminator (app-server `PublicHistoryEntry`).

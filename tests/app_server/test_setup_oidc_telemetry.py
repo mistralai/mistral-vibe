@@ -326,6 +326,7 @@ async def test_host_telemetry_uses_initialize_identity(monkeypatch, process_serv
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
     monkeypatch.setattr(
         handler, "_load_config", lambda cwd: asyncio.sleep(0, result=config)

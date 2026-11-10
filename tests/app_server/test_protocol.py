@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 from pydantic import ValidationError
 import pytest
 
 from tests.app_server._helpers import setup_client
+from vibe.app_server import server as server_module
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.client import AppServerClient, AppServerConnectionClosed
 from vibe.app_server.protocol import (
@@ -15,6 +17,7 @@ from vibe.app_server.protocol import (
     ProtocolErrorCode,
     validate_json_rpc_envelope,
 )
+from vibe.app_server.server import AppServer
 from vibe.app_server.transport import memory_transport_pair
 
 
@@ -30,6 +33,47 @@ async def test_retired_rpc_returns_method_not_found(
         with pytest.raises(AppServerResponseError) as error:
             await client.request(method)
         assert error.value.error.code == ProtocolErrorCode.METHOD_NOT_FOUND
+    finally:
+        await client.close()
+        await client_transport.close()
+        await server_transport.close()
+
+
+@pytest.mark.asyncio
+async def test_unhandled_dispatch_error_is_reported_to_sentry(
+    process_services: ProcessServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def boom(*_: Any) -> None:
+        raise RuntimeError("boom")
+
+    captured: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(AppServer, "_dispatch_request", boom)
+    monkeypatch.setattr(
+        server_module,
+        "capture_sentry_exception",
+        lambda exc, **kwargs: captured.append((str(exc), kwargs)),
+    )
+    monkeypatch.setattr(server_module, "cli_crash_reporting_available", lambda: True)
+    client, client_transport, server_transport = await setup_client(
+        entrypoint="cli", process_services=process_services
+    )
+    try:
+        with pytest.raises(AppServerResponseError) as error:
+            await client.request("projects/list")
+        assert error.value.error.code == ProtocolErrorCode.INTERNAL_ERROR
+        assert captured == [
+            (
+                "boom",
+                {
+                    "fatal": False,
+                    "tags": {
+                        "vibe_boundary": "app_server_dispatch",
+                        "app_server_method": "projects/list",
+                    },
+                    "fingerprint": None,
+                },
+            )
+        ]
     finally:
         await client.close()
         await client_transport.close()

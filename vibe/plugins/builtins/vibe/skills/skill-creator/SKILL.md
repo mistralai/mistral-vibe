@@ -41,12 +41,14 @@ selected.
 4. `~/.vibe/skills/` — user global
 5. `~/.agents/skills/` — user global
 
-Precedence: built-in skills are seeded first and their names are **reserved** —
-a user skill whose name collides with a built-in is silently skipped at load
-time and never appears. Among the paths above, the first directory to define a
-given name wins; later duplicates are skipped. Built-in skills are read-only.
-Registry skills are materialized under `VIBE_HOME` and should not be
-hand-edited.
+Precedence: built-in skills are named `vibe:<name>`, so a skill you write never
+collides with one and keeps its own name. Among the paths above, the first
+directory to define a given name wins; later duplicates are skipped. Built-in
+skills are read-only. Registry skills are materialized under `VIBE_HOME` and
+should not be hand-edited.
+With `experimental_enable_registry_skills`, the nearest scope wins instead: the
+project's skills, files then registry pins, come before global ones, files then
+pins.
 
 Choose the scope before writing: use `.vibe/skills/<name>/` for a skill scoped
 to this project, or `~/.vibe/skills/<name>/` for one available everywhere. Ask

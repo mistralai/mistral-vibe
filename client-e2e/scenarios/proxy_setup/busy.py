@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_started, user_msg
 from e2e.app_server.proxy_setup import METHODS, handshake as proxy_handshake
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = proxy_handshake()
 request_methods = METHODS
@@ -20,4 +20,5 @@ timeline: Timeline = [
     "\r",
     "http://proxy.example.com:8080",
     "\r",
+    take_snapshot(),
 ]

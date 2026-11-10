@@ -62,22 +62,15 @@ pub fn apply_startup_event(
         }
         StartupEvent::ConfigError(message) => {
             let message = format!("Invalid configuration: {message}");
-            tracing::error!(
-                vibe_boundary = "startup",
-                fatal = true,
-                "config error: {message}"
-            );
+            // The user's config is wrong, not Vibe: not fatal, so not reported.
+            tracing::error!(vibe_boundary = "startup", "config error: {message}");
             app.session.startup_error = Some(message);
             app.view.transcript.remove(RESUME_STATUS_ID);
             app.set_status(Status::Failed);
             false
         }
         StartupEvent::Failed(error) => {
-            tracing::error!(
-                vibe_boundary = "startup",
-                fatal = true,
-                "startup failed: {error}"
-            );
+            // The handshake already logged it, fatal only for a client bug.
             app.session.startup_error = Some(error);
             app.view.transcript.remove(RESUME_STATUS_ID);
             app.set_status(Status::Failed);
@@ -226,6 +219,7 @@ fn apply_ready(
     if !app.session.resumed {
         message_queue::reconcile_snapshot(app, client, &state);
         app.set_session_id(state.session.id.clone());
+        crate::background_work::adopt_state(app, &state);
         app.subagents.seed_snapshot(state.child_sessions.clone());
         subagents::refresh(app);
         match app.resume_picker.open {
@@ -266,6 +260,7 @@ fn apply_ready(
     agents::apply_runtime(app, &runtime);
     agents::flush_pending(app, client);
     mcp::show_post_init_notices(app, &runtime);
+    crate::skills_browser::notify_updates(app, client, &runtime);
     notices::show_config_issues(app, &runtime);
     startup::banners::mount(app, &runtime, client);
     // Read the what's-new gate inside mount before scheduling the update
@@ -278,7 +273,14 @@ fn apply_ready(
     artifacts::fetch(app, client);
     resume_picker::subscribe(app, client);
     completion_manager::refresh(app);
-    app.set_status(Status::Ready);
+    // A picker resume that landed first already adopted its own turn: leave
+    // the status it set rather than drop that turn to `Ready`.
+    if !app.session.resumed {
+        match app.resume_picker.open {
+            true => app.set_status(Status::Ready),
+            false => adopt_active_turn(app, &state),
+        }
+    }
     approval::show_pending(app);
     record_startup(app, &attach, is_cold_start);
     attach_notice(app, attach);
@@ -299,7 +301,10 @@ fn apply_ready(
 /// after the feature's removal and is always `false`; `session_init_duration_ms`
 /// stays null since the server does not report it to this client.
 fn record_startup(app: &mut App, attach: &startup::Attach, is_cold_start: bool) {
+    let install_source = crate::update_notifier::cache::cached_source();
+    crate::telemetry::install::record_version_update(app);
     let properties = crate::telemetry::bmap(serde_json::json!({
+        "install_source": install_source,
         "agent_ready_duration_ms": startup::agent_ready_duration_ms(),
         "session_init_duration_ms": Value::Null,
         "has_initial_prompt": app.session.initial_prompt.as_deref().is_some_and(|p| !p.is_empty()),
@@ -506,6 +511,33 @@ fn sync_loading_label(app: &mut App, params: &EntryParams) {
     }
 }
 
+/// Pick up the turn a session state reports as still running, so the loader
+/// shows and Esc interrupts it; an idle session lands `Ready`.
+pub fn adopt_active_turn(app: &mut App, state: &crate::server::PublicSessionState) {
+    let active_turn_id = state
+        .session
+        .status
+        .as_ref()
+        .and_then(|status| status.active_turn_id.clone());
+    app.session.active_turn_id.clone_from(&active_turn_id);
+    if active_turn_id.is_none() {
+        return app.set_status(Status::Ready);
+    }
+    // `set_status` keeps a running loader, but the resumed turn is not the one
+    // it timed (the picker can open over a generating session): start afresh.
+    let since = crate::clock::now();
+    app.set_status(Status::Generating { since });
+    app.restart_loading();
+    app.session.status = Status::Generating { since };
+    let label = active_turn_id
+        .as_deref()
+        .and_then(|turn| app.view.transcript.live_status_text(turn))
+        .map(str::to_owned);
+    if let Some(status) = label {
+        app.view.loading.set_label(&status);
+    }
+}
+
 /// A snapshot with `retrying` set swaps
 /// the label in; a null one restores only when the label currently says Retrying.
 fn sync_retrying_label(app: &mut App, state: &crate::server::PublicSessionState) {
@@ -663,6 +695,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                         }
                     }
                     crate::worktree::adopt_state(app, &state);
+                    crate::background_work::adopt_state(app, &state);
                     sync_retrying_label(app, &state);
                     app.expand_rebuilt_tools();
                     app.subagents.seed_snapshot(state.child_sessions.clone());
@@ -840,6 +873,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 serde_json::from_value::<crate::server::PublicSessionState>(state).ok()
             }) {
                 app.set_session_id(state.session.id.clone());
+                crate::background_work::adopt_state(app, &state);
                 app.subagents.seed_snapshot(state.child_sessions.clone());
                 subagents::reset_views(app);
                 subagents::refresh(app);

@@ -29,6 +29,8 @@ from mistralai_vibe_local_harness.protocol import (
 )
 from mistralai_vibe_local_harness.session_protocol import SessionStartParams
 from mistralai_vibe_local_harness.vibe import (
+    CompletionPricing,
+    SharedCompletionBudget,
     UnifiedHarnessSessionBackendHost,
     _completion,
     _local_actions,
@@ -147,6 +149,87 @@ async def test_a_model_switch_goes_through_config_write_with_its_limits(
 
 
 @pytest.mark.asyncio
+async def test_a_classifier_pricing_change_is_not_part_of_a_model_switch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A resident session with classifier pricing on a large model.
+    *Do*: Apply a smaller active model together with different classifier pricing.
+    *Assert*: The combined change goes directly to the Runtime, because classifier
+        pricing is independent utility-completion configuration.
+    """
+    # Prepare
+    original_pricing = CompletionPricing(input_per_million=1, output_per_million=2)
+    changed_pricing = CompletionPricing(input_per_million=3, output_per_million=4)
+    host, session, commands, _provider = await _session_on_a_large_model(
+        tmp_path, monkeypatch, classifier_pricing=original_pricing
+    )
+    core, local = session.core_config, session.adapter_config
+    assert core is not None
+    assert local is not None
+    small = _route("small-model", 65_536, 32_768)
+    switched = _switch(core, local, small, 65_536)
+
+    # Do
+    await commands.apply_config(
+        replace(
+            switched, local=replace(switched.local, classifier_pricing=changed_pricing)
+        )
+    )
+
+    # Assert
+    view = commands.transport.view
+    assert view.agent_config is None
+    assert session.adapter_config is not None
+    assert session.adapter_config.active_model.model == "small-model"
+    assert session.adapter_config.classifier_pricing == changed_pricing
+    await commands.close()
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("limits", "through_config_write"),
+    [({"max_price": 10}, False), ({"max_total_tokens": 1_000}, True)],
+    ids=["price-budget", "token-budget"],
+)
+async def test_a_priced_model_switch_under_a_price_budget_keeps_the_new_price(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limits: dict[str, Any],
+    through_config_write: bool,
+) -> None:
+    """*Prepare*: A resident budgeted session on a large priced model.
+    *Do*: Switch to a smaller model with a different price.
+    *Assert*: Under a price budget the switch goes to the Runtime directly, so
+        the route keeps the new price ``config/write`` cannot carry; under a
+        token budget it still goes through ``config/write``.
+    """
+    # Prepare
+    budget = SharedCompletionBudget(**limits)
+    large_price = CompletionPricing(input_per_million=3, output_per_million=9)
+    small_price = CompletionPricing(input_per_million=1, output_per_million=2)
+    host, session, commands, _provider = await _session_on_a_large_model(
+        tmp_path, monkeypatch, pricing=large_price, completion_budget=budget
+    )
+    core, local = session.core_config, session.adapter_config
+    assert core is not None
+    assert local is not None
+    small = _route("small-model", 65_536, 32_768, pricing=small_price)
+
+    # Do
+    await commands.apply_config(_switch(core, local, small, 65_536))
+
+    # Assert
+    assert (commands.transport.view.agent_config is not None) is through_config_write
+    assert session.adapter_config is not None
+    assert session.adapter_config.active_model.model == "small-model"
+    if not through_config_write:
+        assert session.adapter_config.active_model.pricing == small_price
+    await commands.close()
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_a_turn_start_reply_without_a_start_time_gets_the_current_time(
     tmp_path: Path, model_using_one_tool: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -238,13 +321,17 @@ def _switch(
 
 
 async def _session_on_a_large_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **config: Any
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pricing: CompletionPricing | None = None,
+    **config: Any,
 ) -> tuple[
     UnifiedHarnessSessionBackendHost, Any, SessionApiCommands, _ProviderRequests
 ]:
     provider = _ProviderRequests()
     monkeypatch.setattr(_completion, "execute_mistral_completion", provider)
-    large = _route("large-model", 262_144, 131_072)
+    large = _route("large-model", 262_144, 131_072, pricing=pricing)
     host = UnifiedHarnessSessionBackendHost(tmp_path)
     host.configure_runtime(
         _core_config("runtime-template"),
@@ -532,11 +619,13 @@ _KNOWN_LOCAL_FIELDS = frozenset({
     "base_url",
     "bypass_approval",
     "classifier_model",
+    "classifier_pricing",
     "classifier_provider",
     "command_environment",
     "compaction_max_tokens",
     "compaction_model",
     "compaction_reasoning_limit_tokens",
+    "completion_budget",
     "completion_metadata",
     "correlation_id_sink",
     "credentials",

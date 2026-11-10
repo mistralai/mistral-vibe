@@ -75,6 +75,7 @@ from mistralai_vibe_local_harness.vibe._connector_models import (
     ConnectorAuthorizationRequiredSignal,
     ConnectorGateway,
     ConnectorRouteSnapshot,
+    ConnectorRuntimeEventSink,
     ResolvedConnectorCatalog,
     ResolvedConnectorSelection,
 )
@@ -116,13 +117,14 @@ from mistralai_vibe_local_harness.vibe._local_actions import (
     merge_hook_handlers,
     streams_provisional_content,
 )
-from mistralai_vibe_local_harness.vibe._mcp_actions import build_mcp_action_executor
+from mistralai_vibe_local_harness.vibe._mcp_actions import McpToolExecutor
 from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPAuthorizationProvider,
     MCPAuthorizationRequiredSignal,
     MCPDescriptorCachePolicy,
     MCPHTTPTransportPolicy,
     MCPRouteSnapshot,
+    MCPRuntimeEventSink,
     MCPSamplingCompletion,
     MCPTransportFactory,
     ResolvedMCPCatalog,
@@ -233,6 +235,10 @@ from mistralai_vibe_local_harness.vibe._subagents._models import (
     SpawnTarget,
     SubagentFailure,
     SubagentSessionIdentity,
+)
+from mistralai_vibe_local_harness.vibe._tool_schemas import (
+    TOOL_SCHEMA_NOT_OBJECT,
+    ToolsLeftOutSignal,
 )
 from mistralai_vibe_local_harness.vibe.plugins import (
     PluginPackageStore,
@@ -2835,7 +2841,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 raise RuntimeError("Ephemeral session is not bound")
             session._publish_event(event)
 
-        def publish_mcp_event(signal: MCPAuthorizationRequiredSignal) -> None:
+        def publish_mcp_event(
+            signal: MCPAuthorizationRequiredSignal | ToolsLeftOutSignal,
+        ) -> None:
+            if isinstance(signal, ToolsLeftOutSignal):
+                publish_event(_tools_left_out_notice(signal))
+                return
             publish_event({
                 "type": "mcp_authorization_required",
                 "serverName": signal.server_name,
@@ -2845,8 +2856,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             })
 
         def publish_connector_event(
-            signal: ConnectorAuthorizationRequiredSignal,
+            signal: ConnectorAuthorizationRequiredSignal | ToolsLeftOutSignal,
         ) -> None:
+            if isinstance(signal, ToolsLeftOutSignal):
+                publish_event(_tools_left_out_notice(signal))
+                return
             publish_event({
                 "type": "connector_authorization_required",
                 "rawConnectorId": signal.raw_connector_id,
@@ -2860,9 +2874,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         connector_runtime = self._new_connector_runtime(
             event_sink=publish_connector_event
         )
-        mcp_executor = (
-            build_mcp_action_executor(mcp_runtime) if mcp_runtime is not None else None
-        )
+        mcp_executor = McpToolExecutor(mcp_runtime) if mcp_runtime is not None else None
         connector_executor = (
             build_connector_action_executor(connector_runtime)
             if connector_runtime is not None
@@ -2870,7 +2882,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         )
 
         registered_groups = _registered_group_names(
-            self._provided_tool_groups, runtime_config_template.capabilities
+            self._provided_tool_groups, runtime_config_template.capabilities, plugins
         )
         registered_executors = _session_provided_tool_executors(
             self._provided_tool_groups, registered_groups, session_id
@@ -2886,7 +2898,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 if session is None:
                     raise RuntimeError("Session is not ready for user input")
                 return await session._request_user_input(action)
-            registered = registered_executors.get(action.call.group_name)
+            registered = _executor_for_group(
+                self._provided_tool_groups,
+                registered_executors,
+                action.call.group_name,
+                session_id,
+            )
             if registered is not None:
                 return await registered(action)
             if connector_executor is not None and action.call.group_name.startswith(
@@ -2911,8 +2928,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             )
             else None
         )
+        # Every Host-registered group's mode, not just the ones advertised at
+        # start: a plugin enabled mid-session is gated at its own pinned bar on
+        # its first call, and Core only calls groups it advertises anyway.
         provided_tool_modes = _session_provided_tool_modes(
-            self._provided_tool_groups, registered_groups
+            self._provided_tool_groups, frozenset(self._provided_tool_groups)
         )
         # Built before the session so the session can own the handle. An ephemeral
         # session can be re-configured before it is ever promoted, so the adapter has to
@@ -3317,7 +3337,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         )
         action_config = adapter_config or LocalRuntimeAdapterConfig(workspace=workspace)
 
-        def publish_mcp_event(signal: MCPAuthorizationRequiredSignal) -> None:
+        def publish_mcp_event(
+            signal: MCPAuthorizationRequiredSignal | ToolsLeftOutSignal,
+        ) -> None:
+            if isinstance(signal, ToolsLeftOutSignal):
+                publish_event(_tools_left_out_notice(signal))
+                return
             publish_event({
                 "type": "mcp_authorization_required",
                 "serverName": signal.server_name,
@@ -3327,8 +3352,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             })
 
         def publish_connector_event(
-            signal: ConnectorAuthorizationRequiredSignal,
+            signal: ConnectorAuthorizationRequiredSignal | ToolsLeftOutSignal,
         ) -> None:
+            if isinstance(signal, ToolsLeftOutSignal):
+                publish_event(_tools_left_out_notice(signal))
+                return
             publish_event({
                 "type": "connector_authorization_required",
                 "rawConnectorId": signal.raw_connector_id,
@@ -3348,9 +3376,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             if integrations_enabled
             else None
         )
-        mcp_executor = (
-            build_mcp_action_executor(mcp_runtime) if mcp_runtime is not None else None
-        )
+        mcp_executor = McpToolExecutor(mcp_runtime) if mcp_runtime is not None else None
         connector_executor = (
             build_connector_action_executor(connector_runtime)
             if connector_runtime is not None
@@ -3363,7 +3389,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             plugins=plugins,
         )
         registered_groups = _registered_group_names(
-            self._provided_tool_groups, runtime_config.capabilities
+            self._provided_tool_groups, runtime_config.capabilities, plugins
         )
         registered_executors = _session_provided_tool_executors(
             self._provided_tool_groups, registered_groups, stored.manifest.session_id
@@ -3379,7 +3405,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 if session is None:
                     raise RuntimeError("Session is not ready for user input")
                 return await session._request_user_input(action)
-            registered = registered_executors.get(action.call.group_name)
+            registered = _executor_for_group(
+                self._provided_tool_groups,
+                registered_executors,
+                action.call.group_name,
+                stored.manifest.session_id,
+            )
             if registered is not None:
                 return await registered(action)
             if connector_executor is not None and action.call.group_name.startswith(
@@ -3404,8 +3435,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             )
             else None
         )
+        # Every Host-registered group's mode, not just the ones advertised at
+        # resume: a plugin enabled mid-session is gated at its own pinned bar on
+        # its first call, and Core only calls groups it advertises anyway.
         provided_tool_modes = _session_provided_tool_modes(
-            self._provided_tool_groups, registered_groups
+            self._provided_tool_groups, frozenset(self._provided_tool_groups)
         )
         store = UnifiedSessionStore(
             self._storage_root, stored.manifest.session_id, lease=lease
@@ -3686,9 +3720,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         await controller.reconcile_actions(runtime.pending_action_ids)
 
     def _new_mcp_runtime(
-        self,
-        *,
-        event_sink: Callable[[MCPAuthorizationRequiredSignal], None] | None = None,
+        self, *, event_sink: MCPRuntimeEventSink | None = None
     ) -> MCPRuntime | None:
         provider = self._mcp_authorization_provider
         if provider is None:
@@ -3755,10 +3787,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             self._mcp_stdio_pool = None
 
     def _new_connector_runtime(
-        self,
-        *,
-        event_sink: Callable[[ConnectorAuthorizationRequiredSignal], None]
-        | None = None,
+        self, *, event_sink: ConnectorRuntimeEventSink | None = None
     ) -> ConnectorRuntime | None:
         gateway_factory = self._connector_gateway_factory
         if gateway_factory is None:
@@ -4353,6 +4382,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             lambda event: parent.publish_child_event(identity.session_id, event),
         )
         parent.publish_child_registration(identity.session_id, snapshot)
+        child._publish_held_notices()
 
     async def _attach_live_session(
         self, session_id: str
@@ -5417,11 +5447,32 @@ class _ProvidedToolGroup:
     mode: ProvidedToolApproval | None
 
 
+def _tools_left_out_notice(signal: ToolsLeftOutSignal) -> JsonObject:
+    """The notice ``UnifiedHarnessSessionBackend.publish_notice`` publishes for ``signal``."""
+    return {
+        "type": "notice",
+        "level": "warning",
+        "message": signal.message,
+        "code": TOOL_SCHEMA_NOT_OBJECT,
+    }
+
+
 def _registered_group_names(
-    groups: Mapping[str, _ProvidedToolGroup], capabilities: RustHarnessCapabilitySet
+    groups: Mapping[str, _ProvidedToolGroup],
+    capabilities: RustHarnessCapabilitySet,
+    plugins: SessionPluginBinding | None,
 ) -> frozenset[str]:
     return frozenset(
-        group.name for group in capabilities.tool_groups if group.name in groups
+        group.name
+        for group in (
+            *capabilities.tool_groups,
+            *(
+                group
+                for plugin in (plugins.definitions if plugins is not None else ())
+                for group in plugin.capabilities.tool_groups
+            ),
+        )
+        if group.name in groups
     )
 
 
@@ -5446,6 +5497,37 @@ def _session_provided_tool_executors(
             built[id(factory)] = executor
         executors[name] = executor
     return executors
+
+
+def _executor_for_group(
+    groups: Mapping[str, _ProvidedToolGroup],
+    executors: dict[str, ProvidedToolExecutor],
+    group_name: str,
+    session_id: str,
+) -> ProvidedToolExecutor | None:
+    """The session's executor for ``group_name``, built on the first call that names it.
+
+    The executor map is captured when the session starts or resumes, but a plugin
+    enabled mid-session only advertises its group in Core afterwards. The group is
+    still Host-registered, so the executor is created on demand and cached in the
+    captured map: the factory still runs once per session, and a group sharing a
+    factory with an already-built one shares its executor.
+    """
+    executor = executors.get(group_name)
+    if executor is None and group_name in groups:
+        factory = groups[group_name].factory
+        executor = next(
+            (
+                existing
+                for name, existing in executors.items()
+                if groups[name].factory is factory
+            ),
+            None,
+        )
+        if executor is None:
+            executor = factory(session_id)
+        executors[group_name] = executor
+    return executor
 
 
 def _core_config(session_id: str) -> RustHarnessConfig:

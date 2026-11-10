@@ -5,9 +5,7 @@ from __future__ import annotations
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-capture_startup = False
-capture_steps = {1, 2, 3, 4}
-expected_titles = (">> Vibe", ">> Vibe", ">> Vibe", "Vibe")
+expected_titles = ("Vibe", ">> Vibe", ">> Vibe", ">> Vibe", ">> Vibe", "Vibe")
 
 timeline: Timeline = [
     "first\r",

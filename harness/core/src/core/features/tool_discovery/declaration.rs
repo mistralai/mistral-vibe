@@ -1,7 +1,10 @@
 use serde_json::Value;
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+
+use crate::core::tools::arguments::validate_json_schema;
 
 const MAX_SCHEMA_RENDER_DEPTH: usize = 64;
 const VALIDATION_KEYWORDS: [&str; 8] = [
@@ -48,7 +51,18 @@ pub(crate) fn declaration(
     let input_type_name = format!("{type_name}Arg");
     let output_type_name = format!("{type_name}Returned");
     let mut input_renderer = SchemaRenderer::new(input_schema, "Input");
-    let input_type = input_renderer.render(input_schema);
+    // Core refuses arguments that are not an object, so a schema with no
+    // usable shape still takes one.
+    let input_type = match input_renderer.render(input_schema) {
+        rendered if rendered == "unknown" => "Record<string, unknown>".to_string(),
+        rendered => rendered,
+    };
+    // `tools.x()` sends `{}`, so the argument is optional when `{}` passes.
+    let input_parameter = if validate_json_schema(input_schema, &json!({})).is_ok() {
+        "arg?"
+    } else {
+        "arg"
+    };
     let mut output_renderer = output_schema.map(|schema| SchemaRenderer::new(schema, "Output"));
     let output_type = match (&mut output_renderer, output_schema) {
         (Some(renderer), Some(schema)) => renderer.render(schema),
@@ -80,7 +94,7 @@ pub(crate) fn declaration(
         lines.push(indent_block(&docstring, 2));
     }
     lines.push(format!(
-        "  function {name}(arg: {input_type_name}): Promise<{output_type_name}>;"
+        "  function {name}({input_parameter}: {input_type_name}): Promise<{output_type_name}>;"
     ));
     lines.push("}".to_string());
     lines.join("\n")
@@ -674,18 +688,73 @@ mod tests {
   /**
    * Find records before *\/ returning them.
    */
-  function find_records(arg: FindRecordsArg): Promise<FindRecordsReturned>;
+  function find_records(arg?: FindRecordsArg): Promise<FindRecordsReturned>;
 }"#
+        );
+    }
+
+    ///
+    /// *Prepare*: Three tools: one with no schema, one whose arguments are all
+    /// optional, and one with a required argument.
+    /// *Do*: Render each tool's declaration.
+    /// *Assert*: A tool with no schema takes an object; the argument is
+    /// optional exactly when `{}` passes the schema.
+    ///
+    #[test]
+    fn argument_type_and_optionality_follow_what_core_accepts() {
+        // Prepare
+        let free = json!({});
+        let all_optional = json!({
+            "type": "object",
+            "properties": {"limit": {"type": "integer"}}
+        });
+        let required = json!({
+            "type": "object",
+            "properties": {"repo": {"type": "string"}},
+            "required": ["repo"]
+        });
+
+        // Do
+        let rendered = [
+            declaration("client", "free", "", &free, None),
+            declaration("client", "list_items", "", &all_optional, None),
+            declaration("client", "release_notes", "", &required, None),
+        ];
+
+        // Assert
+        assert_eq!(
+            rendered,
+            [
+                r#"declare namespace tools.client {
+  type FreeArg = Record<string, unknown>;
+  type FreeReturned = unknown;
+  function free(arg?: FreeArg): Promise<FreeReturned>;
+}"#,
+                r#"declare namespace tools.client {
+  type ListItemsArg = {
+    limit?: number;
+  };
+  type ListItemsReturned = unknown;
+  function list_items(arg?: ListItemsArg): Promise<ListItemsReturned>;
+}"#,
+                r#"declare namespace tools.client {
+  type ReleaseNotesArg = {
+    repo: string;
+  };
+  type ReleaseNotesReturned = unknown;
+  function release_notes(arg: ReleaseNotesArg): Promise<ReleaseNotesReturned>;
+}"#,
+            ]
         );
     }
 
     ///
     /// *Prepare*: A tool schema has an unresolved nested reference.
     /// *Do*: Render the tool declaration.
-    /// *Assert*: The complete input declaration falls back to a named `unknown` type.
+    /// *Assert*: The complete input declaration falls back to a named object type.
     ///
     #[test]
-    fn unresolved_nested_reference_falls_back_to_unknown() {
+    fn unresolved_nested_reference_falls_back_to_an_object() {
         // Prepare
         let input_schema = json!({
             "type": "object",
@@ -709,7 +778,7 @@ mod tests {
         assert_eq!(
             declaration("broken", "broken_tool", "Broken tool", &input_schema, None),
             r#"declare namespace tools.broken {
-  type BrokenToolArg = unknown;
+  type BrokenToolArg = Record<string, unknown>;
   type BrokenToolReturned = unknown;
   /**
    * Broken tool

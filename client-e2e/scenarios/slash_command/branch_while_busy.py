@@ -21,7 +21,6 @@ request_methods = REQUEST_METHODS
 
 _REPLY = "reply-1"
 
-capture_startup = False
 # The first release is the three events below plus the queue update the harness adds after `turn/started`.
 timeline: Timeline = [
     "long task\r",

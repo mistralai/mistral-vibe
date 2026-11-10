@@ -168,6 +168,78 @@ fn provided_tool_name_collisions_reject_session_creation() {
 }
 
 ///
+/// *Prepare*: A provided tool's input schema sets top-level types other than `object`, by its
+/// `type`, by `anyOf`/`oneOf` branches (also nested) or by a local `$ref`; other schemas have
+/// the type `object` or set no type.
+/// *Do*: Create a Harness session with each schema.
+/// *Assert*: Session creation rejects the first kind with an error naming the tool and its schema,
+/// and accepts the second kind.
+///
+#[test]
+fn input_schema_whose_type_is_not_object_rejects_session_creation() {
+    // Prepare
+    let config_with_schema = |input_schema: Value| {
+        let mut config = config();
+        config.capabilities.tool_groups = serde_json::from_value(json!([{
+            "name": "client",
+            "tools": [{
+                "name": "release_notes",
+                "description": "Provided tool.",
+                "input_schema": input_schema,
+                "exposure": "direct",
+            }],
+        }]))
+        .expect("the tool group remains structurally valid");
+        config
+    };
+    // Every Runtime checks the same cases, from the shared fixture.
+    let cases: Value = serde_json::from_str(
+        &std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../fixtures/tool-input-schema-types.json"
+        ))
+        .expect("the shared schema fixture reads"),
+    )
+    .expect("the shared schema fixture is JSON");
+    let refused = cases["not_object"]
+        .as_array()
+        .expect("the fixture lists schemas whose type is not object")
+        .clone();
+    let accepted = cases["object"]
+        .as_array()
+        .expect("the fixture lists schemas whose type is object or unset")
+        .clone();
+    assert!(!refused.is_empty() && !accepted.is_empty());
+
+    // Do
+    let refused_errors = refused
+        .iter()
+        .map(|schema| {
+            HarnessSession::create(config_with_schema(schema.clone()))
+                .err()
+                .expect("a schema whose type is not object rejects session creation")
+        })
+        .collect::<Vec<_>>();
+    let accepted_results = accepted
+        .iter()
+        .map(|schema| HarnessSession::create(config_with_schema(schema.clone())).err())
+        .collect::<Vec<_>>();
+
+    // Assert
+    for (schema, error) in refused.iter().zip(refused_errors) {
+        assert_eq!(
+            error,
+            format!(
+                "tool \"client.release_notes\": input schema type must be \"object\", got {schema}"
+            )
+        );
+    }
+    for (schema, error) in accepted.iter().zip(accepted_results) {
+        assert_eq!(error, None, "schema {schema} is accepted");
+    }
+}
+
+///
 /// *Prepare*: A direct filesystem call is pending with a private path argument.
 /// *Do*: Inspect the session through the public Core interface.
 /// *Assert*: Inspection identifies the pending Runtime tool but exposes neither its arguments nor the private path.

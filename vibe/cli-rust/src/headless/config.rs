@@ -7,8 +7,7 @@ use crate::cli::HeadlessOptions;
 use crate::server::{AgentConfig, SessionStartParams};
 use crate::utils::paths::resolve_add_dirs;
 
-/// Headless `agentConfig`: token and price budgets are enforced client-side
-/// by StopRequests, not sent as session options.
+/// Headless `agentConfig`: Runtime is the sole token and price budget authority.
 pub fn agent_config(
     options: &HeadlessOptions,
     cwd: Option<String>,
@@ -20,11 +19,9 @@ pub fn agent_config(
         auto_approve: options.auto_approve,
         enabled_tools: options.enabled_tools.clone(),
         disabled_tools: build_disabled_tools(&options.disabled_tools),
-        // max_turns stays server-side; only the token and price budgets move client-side.
         max_turns: options.max_turns,
-        // Token and price budgets are enforced client-side via StopRequests.
-        max_price: None,
-        max_session_tokens: None,
+        max_price: options.max_price,
+        max_session_tokens: options.max_tokens,
         system_prompt: options.system_prompt.clone(),
         headless: true,
         trust_workspace: options.trust,

@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"VIBE_THEME": "ansi-dark"}
 handshake = {
@@ -26,5 +26,7 @@ timeline: Timeline = [
     subagent("find the grouping code"),
     child_session_updated(context_tokens=2_500),
     turn_completed(),
+    take_snapshot(),
     _HOVER_CHILD,
+    take_snapshot(),
 ]

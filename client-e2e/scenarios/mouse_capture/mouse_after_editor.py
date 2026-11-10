@@ -7,6 +7,5 @@ from e2e.app_server.scenario import Timeline
 _CTRL_G = "\x07"
 
 env = {"VISUAL": "true"}
-capture_startup = False
 mouse_tracking = True
 timeline: Timeline = ["x", _CTRL_G]

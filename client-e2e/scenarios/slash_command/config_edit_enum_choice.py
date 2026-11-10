@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 from scenarios.slash_command._config_fixtures import field, fields_read
 
 handshake = {
@@ -13,5 +13,4 @@ handshake = {
     )
 }
 
-capture_startup = False
-timeline: Timeline = ["/config\r", "\r", "\x1b[B", "\r"]
+timeline: Timeline = ["/config\r", "\r", "\x1b[B", "\r", take_snapshot()]

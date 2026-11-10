@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {
     "session/continue": {
@@ -22,6 +22,7 @@ timeline: Timeline = [
     user_msg("hi"),
     assistant_msg("Reply in a fresh session."),
     turn_completed(),
+    take_snapshot(),
 ]
 
 screen_contains = ("No previous sessions found.", "Reply in a fresh session.")

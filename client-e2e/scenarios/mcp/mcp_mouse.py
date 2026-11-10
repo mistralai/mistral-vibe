@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.mcp import connector, handshake as mcp_handshake, server, tool
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _NAMES = ("alpha", "beta", "gamma", "delta")
 _TOOLS = [tool(name, f"The {name} tool") for name in _NAMES]
@@ -37,4 +37,5 @@ timeline: Timeline = [
     _click(20, 34),  # the "filesystem" server row opens its tools
     _click(20, 37),  # the "gamma" tool row
     "d",
+    take_snapshot(),
 ]

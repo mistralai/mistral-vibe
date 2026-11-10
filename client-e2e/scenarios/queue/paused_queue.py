@@ -8,9 +8,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
-
-capture_steps = {1, 2, 3, 4}
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 timeline: Timeline = [
     "first\r",
@@ -22,4 +20,5 @@ timeline: Timeline = [
     turn_queue_updated(paused=True),
     {"release": 1},
     "\r",
+    take_snapshot(),
 ]

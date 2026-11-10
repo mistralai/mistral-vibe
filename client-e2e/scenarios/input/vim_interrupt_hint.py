@@ -6,8 +6,6 @@ from e2e.app_server.scenario import Timeline
 
 handshake = {"runtime/read": {"runtime": {"config": {"vimKeybindings": True}}}}
 
-capture_startup = False
-
 timeline: Timeline = ["first\r"]
 
 screen_contains = ("Ctrl+C to interrupt",)

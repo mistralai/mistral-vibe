@@ -196,7 +196,7 @@ pub async fn early_start(
     let (client, child, notifications, crash_rx) = match Client::spawn(launch).await {
         Ok(spawned) => spawned,
         Err(error) => {
-            tracing::error!(vibe_boundary = "startup", fatal = true, "{error:#}");
+            crate::startup::failure::log_spawn(&error);
             return Err(error.context("spawn app-server"));
         }
     };

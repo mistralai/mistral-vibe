@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _SELECT_ALL = "\x1b[18~"
 
-timeline: Timeline = ["/config", "\x01\x7f", f"{_SELECT_ALL}!", "ls\x01\x7f"]
+timeline: Timeline = [
+    "/config",
+    "\x01\x7f",
+    f"{_SELECT_ALL}!",
+    "ls\x01\x7f",
+    take_snapshot(),
+]

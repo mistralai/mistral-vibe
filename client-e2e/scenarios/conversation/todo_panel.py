@@ -10,7 +10,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "update the todo list"
 # Terminals without a distinct Cmd key deliver the cmd+\\ remap as ESC \.
@@ -32,4 +32,5 @@ timeline: Timeline = [
     turn_completed(),
     _TOGGLE,
     _TOGGLE,
+    take_snapshot(),
 ]

@@ -40,6 +40,5 @@ handshake["config/fields/read"]["fields"].append({
     "layerValues": [{"layer": "default", "value": "WARNING"}],
 })
 
-capture_startup = False
 screen_contains = ("True", "False", "defaults", "user config", "project config")
 timeline: Timeline = ["/config\r", "\r", "\x1b[B", "\t"]

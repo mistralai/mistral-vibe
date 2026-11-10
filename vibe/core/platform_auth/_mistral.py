@@ -112,6 +112,22 @@ def may_cache_under(key: str | None, *, fetched_for: str | None) -> bool:
     return key == fetched_for or (fetched_for is None and not is_user_principal(key))
 
 
+def fetched_for_current_account(
+    credentials: PlatformCredentialProvider, fetched_for: str
+) -> bool:
+    """Whether a response fetched for the principal ``fetched_for`` is still
+    the signed-in account's. An API key's principal names the material the
+    request carried; a user token's does not, so a sign-in during the fetch
+    makes the response another account's.
+    """
+    if not is_user_principal(fetched_for):
+        return True
+    return (
+        isinstance(credentials, CachedPrincipal)
+        and credentials.cached_principal() == fetched_for
+    )
+
+
 async def resolve_snapshot(
     credentials: PlatformCredentialProvider, url: str
 ) -> PlatformCredentialSnapshot | PlatformCredentialRequired:
@@ -193,6 +209,7 @@ __all__ = [
     "MistralCredentials",
     "api_key_credentials",
     "credential_request",
+    "fetched_for_current_account",
     "is_user_principal",
     "may_cache_under",
     "mistral_credentials",

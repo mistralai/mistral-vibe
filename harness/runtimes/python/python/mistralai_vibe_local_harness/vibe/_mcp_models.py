@@ -14,6 +14,8 @@ from typing import Literal, Protocol
 
 from pydantic import JsonValue
 
+from mistralai_vibe_local_harness.vibe._tool_schemas import ToolsLeftOutSignal
+
 type JsonObject = dict[str, JsonValue]
 type JsonSchema = bool | JsonObject
 type MCPTransportKind = Literal["http", "streamable-http", "stdio"]
@@ -261,7 +263,7 @@ class MCPAuthorizationRequiredSignal:
 
 
 type MCPRuntimeEventSink = Callable[
-    [MCPAuthorizationRequiredSignal], Awaitable[None] | None
+    [MCPAuthorizationRequiredSignal | ToolsLeftOutSignal], Awaitable[None] | None
 ]
 
 

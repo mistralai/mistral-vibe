@@ -45,6 +45,7 @@ pub(super) fn run_command(
         "/plugins" => crate::plugins::show(app, client),
         "/context" => crate::context_app::open(app, client),
         "/reload-plugins" => crate::plugins::reload(app, client),
+        "/skills" => crate::skills_browser::show(app, client),
         "/leanstall" => super::leanstall::install_lean(app, client),
         "/unleanstall" => super::leanstall::uninstall_lean(app, client),
         "/help" => add_text(app, &help_text(app)),

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {
     "workspace/trust/status": {
@@ -19,4 +19,4 @@ handshake = {
 
 # Three options and the repo title; Left wraps to the end, Right comes back,
 # then "1" selects "Trust full repo" straight away.
-timeline: Timeline = ["\x1b[D", "\x1b[C", "1"]
+timeline: Timeline = ["\x1b[D", "\x1b[C", "1", take_snapshot()]

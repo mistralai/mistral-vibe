@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Action, Timeline, advance
+from e2e.app_server.scenario import Action, Timeline, advance, take_snapshot
 
 client_args = ("--setup",)
-capture_startup = False
-capture_steps = {2, 3}
 exit_after_last_step = True
 request_methods = {
     "setup/status",
@@ -40,4 +38,13 @@ handshake = {
 expected_actions = [Action("open_url", _AUTHORIZATION_URL)]
 screen_excludes = ("Paste API key",)
 
-timeline: Timeline = ["\r", "\x1b[B", "\r", "\r", "\r", advance(2000)]
+timeline: Timeline = [
+    "\r",
+    "\x1b[B",
+    "\r",
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+    "\r",
+    advance(2000),
+]

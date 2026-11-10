@@ -38,6 +38,5 @@ handshake = {
     }
 }
 
-capture_startup = False
 screen_contains = ("'theme' is pinned by env; nothing to clear.",)
 timeline: Timeline = ["/config\r", "\x12"]

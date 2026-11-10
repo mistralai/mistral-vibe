@@ -14,6 +14,5 @@ timeline: Timeline = [
     advance(3900),
     advance(100),
 ]
-capture_steps = {1, 2, 3}
 expected_clipboard = "draft"
 screen_excludes = ("Copied",)

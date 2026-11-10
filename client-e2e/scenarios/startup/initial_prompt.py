@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The prompt is sent on its own once ready; the typed "x" proves the composer started empty.
 client_args = ("say hi",)
@@ -13,4 +13,5 @@ timeline: Timeline = [
     user_msg("say hi"),
     assistant_msg("Hi. What do you need?"),
     turn_completed(),
+    take_snapshot(),
 ]

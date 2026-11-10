@@ -14,7 +14,6 @@ from vibe.core.experiments.manager import config_variants_from_response
 from vibe.core.experiments.models import EvalResponse
 import vibe.core.experiments.wait as wait_module
 from vibe.core.experiments.wait import ExperimentsWait, experiments_wait_needed
-from vibe.core.model_catalog.wait import mark_model_catalog_failed, model_catalog_failed
 from vibe.core.utils.fetch_wait import FetchFailures
 
 
@@ -112,14 +111,7 @@ async def test_no_wait_once_an_eval_failed_in_this_process() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_catalog_fetch_does_not_stop_the_eval_wait() -> None:
-    mark_model_catalog_failed()
-
-    assert experiments_wait_needed(await _config(), FetchFailures()) is True
-
-
-@pytest.mark.asyncio
-async def test_an_eval_slower_than_the_cap_fails_only_the_eval(
+async def test_an_eval_slower_than_the_cap_fails_the_eval(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(wait_module, "EVAL_WAIT_CAP_SECONDS", 0.01)
@@ -131,7 +123,6 @@ async def test_an_eval_slower_than_the_cap_fails_only_the_eval(
 
     assert not task.done()
     assert failures.failed is True
-    assert model_catalog_failed() is False
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task

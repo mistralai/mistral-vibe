@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 screen_rows = {3: "  alpha reply 2", 15: "⏵ Ran 3 commands"}
 
@@ -37,11 +37,19 @@ def _turn(tag: str) -> Timeline:
 
 timeline: Timeline = [
     *_turn("alpha"),
+    take_snapshot(),
     *_turn("beta"),
+    take_snapshot(),
     *_turn("gamma"),
+    take_snapshot(),
     _CTRL_O,
+    take_snapshot(),
     _CTRL_O,
+    take_snapshot(),
     _WHEEL_UP * 5,
+    take_snapshot(),
     _CTRL_O,
+    take_snapshot(),
     _CTRL_O,
+    take_snapshot(),
 ]

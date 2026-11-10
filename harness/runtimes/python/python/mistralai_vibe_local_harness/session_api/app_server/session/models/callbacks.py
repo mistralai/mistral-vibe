@@ -167,7 +167,7 @@ class AuthRequest(SessionModel):
 
 
 class AuthCallback(BaseSessionCallback):
-    """Ask the user to sign in to one or more sources: connectors now, MCP sources later.
+    """Ask the user to sign in to one or more sources.
 
     Answer it with an ``AuthResult`` as the callback result's ``output``.
     """

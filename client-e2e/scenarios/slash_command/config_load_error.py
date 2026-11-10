@@ -10,6 +10,5 @@ handshake = {
     }
 }
 
-capture_startup = False
 screen_contains = ("Failed to load settings: Config could not be read",)
 timeline: Timeline = ["/config\r"]

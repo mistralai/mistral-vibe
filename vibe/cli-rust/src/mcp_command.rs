@@ -10,13 +10,13 @@ use serde_json::{json, Value};
 use crate::external_url;
 pub mod add_args;
 
+use crate::server::deadline::{within, REQUEST_TIMEOUT};
 use crate::server::{
     method, notification, signal, Client, ClientCapabilities, ClientInfo, InitializeParams, Launch,
     RpcError,
 };
 use add_args::McpAddArgs;
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, clap::Subcommand)]
@@ -69,9 +69,8 @@ async fn run_command(command: &McpCommand, launch: Launch) -> Result<()> {
 }
 
 async fn request(client: &Client, method: &str, params: Value) -> Result<Value> {
-    tokio::time::timeout(REQUEST_TIMEOUT, client.request_err(method, params))
-        .await
-        .with_context(|| format!("{method} timed out"))?
+    within(method, REQUEST_TIMEOUT, client.request_err(method, params))
+        .await?
         .map_err(|error| request_error(method, &error))
 }
 
