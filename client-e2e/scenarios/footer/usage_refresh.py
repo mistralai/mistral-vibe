@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import turn_failed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 from scenarios.footer.usage_gauge import handshake as handshake
 
 # The post-ready read, then the one the rate limit forces inside the minute.
@@ -14,5 +14,6 @@ timeline: Timeline = [
     turn_started(),
     user_msg("hello"),
     turn_failed(code="rate_limit", message="Too many requests"),
+    take_snapshot(),
 ]
 screen_contains = ("usage ██▍    40%",)

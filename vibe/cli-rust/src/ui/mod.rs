@@ -9,6 +9,7 @@ pub mod bottom_bar;
 mod bottom_bar_parts;
 pub mod braille_renderer;
 pub mod branch_app;
+pub(crate) mod browser_box;
 pub mod chat_input;
 pub mod completion_popup;
 pub(crate) mod composer_layout;
@@ -54,6 +55,7 @@ pub mod rng;
 pub mod scrollbar;
 pub(crate) mod search_field;
 pub mod selection;
+pub mod skills_browser;
 mod styled_text;
 pub mod subagent_list;
 pub mod tab_cells;
@@ -67,6 +69,7 @@ mod trust_folders_layout;
 mod trust_folders_paint;
 pub(crate) mod trust_folders_selection;
 mod trust_folders_text;
+pub(crate) mod visual_lines;
 pub mod voice_app;
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -117,6 +120,7 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::ResumePicker => resume_picker::draw(app, f, area),
         Focus::Mcp => mcp::draw(app, f, area),
         Focus::Plugins => plugins::draw(app, f, area),
+        Focus::Skills => skills_browser::draw(app, f, area),
         Focus::ContextApp => context_app::draw(app, f, area),
         Focus::McpOAuth => mcp_oauth::draw(app, f, area),
         Focus::ConnectorAuth => connector_auth::draw(app, f, area),

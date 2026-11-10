@@ -81,9 +81,6 @@ pub(super) async fn build_report(
             rt_config = rt.get("config").cloned();
             usage = Some(run_usage.clone());
             cost_usd = Some(cost);
-            // A spent budget wins over a turn that ended on its own (see
-            // `final_outcome`); an error still wins, as it says more.
-            stop.observe_usage(run_usage.total_tokens, cost);
         }
 
         // Read while the session is live: stopping it closes its subagents.
@@ -131,11 +128,9 @@ pub(super) async fn build_report(
     }
 }
 
-/// The report's outcome: a limit the run enforced itself (turn, token or
-/// price) wins over a turn that ended on its own — the run went past the
-/// limit it was given, whether or not the stop came in time to cut anything
-/// short. An externally requested stop (deadline, signal) loses to a
-/// finished turn, and an error still wins, as it says more.
+/// The report's outcome: the client-owned turn limit wins over a turn that
+/// ended on its own. Runtime-owned budget outcomes already arrived with the
+/// completed turn. External stops lose to a finished turn, and errors still win.
 pub fn final_outcome(
     outcome: RunOutcome,
     error: &Option<RunError>,
@@ -145,9 +140,7 @@ pub fn final_outcome(
         return outcome;
     }
     match stop.requested_outcome() {
-        Some(spent @ (RunOutcome::TurnLimit | RunOutcome::TokenLimit | RunOutcome::PriceLimit)) => {
-            spent
-        }
+        Some(RunOutcome::TurnLimit) => RunOutcome::TurnLimit,
         _ => outcome,
     }
 }

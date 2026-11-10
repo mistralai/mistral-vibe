@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # textual-dark draws the block caret in a visible color.
 _CONFIG = {"cursorBlink": False, "theme": "textual-dark"}
@@ -12,7 +12,6 @@ handshake = {
     "runtime/read": {"runtime": {"config": _CONFIG}},
 }
 
-capture_steps = {2, 3, 4}
 timeline: Timeline = [
     "first\r",
     turn_started(),
@@ -22,4 +21,5 @@ timeline: Timeline = [
     "second\r",
     "\x1b[A",
     "\x1b[B",
+    take_snapshot(),
 ]

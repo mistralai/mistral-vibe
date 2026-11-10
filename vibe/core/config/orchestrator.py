@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 import copy
 from dataclasses import dataclass
 from typing import Any
@@ -48,6 +48,14 @@ class FieldMutation:
     """What ``mutate_field`` read on its last attempt, and that attempt's failures."""
 
     previous: Any
+    failures: list[BaseException]
+
+
+@dataclass(frozen=True)
+class FieldsMutation:
+    """What ``mutate_fields`` read on its last attempt, by path, and its failures."""
+
+    previous: Mapping[str, Any]
     failures: list[BaseException]
 
 
@@ -253,6 +261,14 @@ class ConfigOrchestrator[S: ConfigSchema]:
         async with self._mutation_lock:
             await self._reload_locked(preflight=preflight)
 
+    async def reload_files(self) -> None:
+        """Re-read the file layers other processes write, and re-merge without events."""
+        async with self._mutation_lock:
+            for layer in self._builder.layers:
+                if layer.shared_store:
+                    await layer.invalidate_cache()
+            await self._rebuild_locked(force_load=False, preflight=None)
+
     async def reload_layer(
         self, name: str, *, preflight: Callable[[S], Awaitable[None]] | None = None
     ) -> None:
@@ -326,27 +342,52 @@ class ConfigOrchestrator[S: ConfigSchema]:
         preflight: Callable[[S], Awaitable[None]] | None = None,
     ) -> FieldMutation:
         """Read, transform, and persist one field; an unchanged value writes nothing."""
-        previous: Any = None
+        mutation = await self.mutate_fields(
+            {path: mutate},
+            reason,
+            default=default,
+            target_layer=target_layer,
+            preflight=preflight,
+        )
+        return FieldMutation(
+            previous=mutation.previous.get(path), failures=mutation.failures
+        )
+
+    async def mutate_fields(
+        self,
+        mutations: Mapping[str, Callable[[Any], Any]],
+        reason: str = "No reason",
+        *,
+        default: Any = None,
+        target_layer: str | None = None,
+        preflight: Callable[[S], Awaitable[None]] | None = None,
+    ) -> FieldsMutation:
+        """``mutate_field`` for several fields of one layer, written together or not at all."""
+        previous: dict[str, Any] = {}
 
         async def write() -> list[BaseException]:
-            nonlocal previous
             layer_name = target_layer or self._resolve_default_layer_name()
             try:
                 raw = await self._read_fresh_layer(layer_name)
             except (KeyError, ConfigLayerError) as exc:
                 return [exc]
-            current = JsonPointer(path).resolve(raw, default=copy.deepcopy(default))
-            previous = current
-            value = mutate(copy.deepcopy(current))
-            if value == current:
-                # Another session may have saved this value: adopt it without a write.
+            operations: list[PatchOp] = []
+            for path, mutate in mutations.items():
+                current = JsonPointer(path).resolve(raw, default=copy.deepcopy(default))
+                previous[path] = current
+                value = mutate(copy.deepcopy(current))
+                if value != current:
+                    operations.append(
+                        AddOperationPatch(
+                            path=path, value=value, target_layer_name=layer_name
+                        )
+                    )
+            if not operations:
+                # Another session may have saved these values: adopt them without a write.
                 before = self._config.model_dump(mode="json")
                 await self._reload_locked(preflight=preflight)
                 self._publish_changes(before, reason)
                 return []
-            operations: list[PatchOp] = [
-                AddOperationPatch(path=path, value=value, target_layer_name=layer_name)
-            ]
             self._validate_patch_shape(operations)
             outcome = await self._apply_patch_locked(
                 operations,
@@ -357,8 +398,10 @@ class ConfigOrchestrator[S: ConfigSchema]:
             return outcome.failures
 
         async with self._mutation_lock:
-            failures = await retry_on_conflict(write, description=f"writing {path}")
-        return FieldMutation(previous=previous, failures=failures)
+            failures = await retry_on_conflict(
+                write, description=f"writing {', '.join(mutations)}"
+            )
+        return FieldsMutation(previous=previous, failures=failures)
 
     async def upsert_field(
         self,

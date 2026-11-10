@@ -43,7 +43,6 @@ env = {"HOME": "/home/e2e-user"}
 client_args = ("--continue",)
 # The client attaches in-handshake, so the step capture after typing `x`
 # carries the comparison.
-capture_startup = False
 
 _ATTACHED_ROWS = (
     "┝ attached image: ~/pics/cat.png",

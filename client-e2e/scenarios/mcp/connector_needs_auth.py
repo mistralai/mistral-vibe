@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from e2e.app_server.mcp import connector, handshake as mcp_handshake, server, tool
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _URL = "https://auth.example.invalid/connectors/gmail?state=e2e"
 
@@ -33,4 +33,4 @@ _DOWN = "\x1b[B"
 # Open the browser, walk to the connector, open its auth app, reveal the URL,
 # then refresh once the sign-in is done. Enter on the first option is left out:
 # it opens the browser.
-timeline: Timeline = ["/mcp\r", _DOWN, "\r", _DOWN + _DOWN, "\r", "r"]
+timeline: Timeline = ["/mcp\r", _DOWN, "\r", _DOWN + _DOWN, "\r", "r", take_snapshot()]

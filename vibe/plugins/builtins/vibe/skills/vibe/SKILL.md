@@ -1077,8 +1077,8 @@ vibe -v / --version                 # Show version
 vibe --setup                        # Run onboarding/setup
 vibe update / vibe --check-upgrade  # Check for a Vibe update now, prompt to install it, and exit
 vibe --max-turns N                  # Max assistant turns (programmatic mode)
-vibe --max-price DOLLARS            # Max cost limit (programmatic mode)
-vibe --max-tokens N                 # Max total session tokens (programmatic mode)
+vibe --max-price DOLLARS            # Max cumulative run cost, root + subagents; models priced 0 are free (programmatic mode)
+vibe --max-tokens N                 # Max cumulative run tokens, root + subagents (programmatic mode)
 vibe --system-prompt-file PATH      # Replace Vibe's own system prompt instructions with PATH's text (programmatic mode)
 vibe --model ALIAS                  # Model alias for this run, not saved (programmatic mode)
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
@@ -1259,6 +1259,50 @@ session's model.
 - `/reload-plugins` - Re-pin this session's plugins and report what changed
   (Unified Harness only). Re-discovers plugins from disk, re-pins the
   snapshot, and prints a diff of added, removed, and updated plugins.
+- `/skills` - Browse and manage skills. My Skills shows one row per installed
+  skill, the one its name resolves to: enabled (`●`) or disabled (`○`), Scope,
+  Source (Local, Shared or Plugin) and, for shared skills, the pinned version,
+  with `● New vN` when a number-pinned shared skill has a newer version. A
+  locked skill (from a plugin, or fixed by `enabled_skills` or a
+  `disabled_skills` pattern) shows its marker in the warning color and cannot be
+  toggled. Narrow terminals drop the Version, Source and Scope columns, in that
+  order, and on Shared the Version and Sharing columns. `/` searches names and
+  descriptions; `Space` turns the highlighted skill on or off for every scope
+  (written to `disabled_skills`) when its name loads that skill; the highlighted
+  skill's body shows under the list, or beside it from 140 columns, and `Enter`
+  opens its page with its description and the body of the highlighted scope's
+  pin under or beside the rows, which PageUp and PageDown scroll. With
+  `experimental_enable_registry_skills`, My Skills and Shared are tabs switched
+  with `Tab`, Shared listing the shared skills you can still add, `d` then `d`
+  again on the My Skills row of a shared skill removes it from every scope, and
+  a shared skill's page has a row per scope (Global, and Project inside a
+  project): `vN pinned`, `alias → vN tracking`, or `not pinned`, marked
+  `(shadowed)` when the name loads another pin. Enter on a scope opens its
+  picker of aliases and versions on the choice in effect, else on the other
+  scope's, previewing the highlighted version's body: picking one pins that
+  scope at once, and `Unpin from <scope>` drops just that pin (not the last one,
+  which is what Remove is for). Enabled, on the page of the skill its name
+  loads, switches the skill in every scope, and Remove, pressed twice, unpins it
+  from every scope. A shared skill not added yet starts out tracking latest in
+  Global, or in Project when another shared skill of its name holds Global,
+  since a scope pins one skill per name and pinning over another is refused;
+  each scope takes its own choice, `Don't pin here` drops one, and nothing is
+  written until Add to My Skills. Each new version of a pinned skill is
+  announced once, when a session starts. A session fetches the pinned skill
+  bodies missing from this machine and moves alias pins to their current version
+  when it starts, and again when its project changes. A sandboxed session copies
+  the versions it loads into its sandbox, and keeps its older copy of a skill
+  that tracks an alias when it cannot copy the new one. When the session's fetch
+  succeeds, at most once a day per machine, it deletes stored versions no
+  session has used for 30 days, if the registry still serves them, so a later
+  sync can fetch them again. It keeps each skill's newest stored version, every
+  version pinned globally, in this project or in another project a session read,
+  the version each alias pin last resolved to, and every version a running
+  session loads. The 30 days count from when a session last stored or used the
+  version, or else from the first cleanup that saw it. Vibe releases from before
+  this cleanup do not record what they load, so a version only they load through
+  a project pin on its number can still be deleted. The command shadows a user
+  skill named `skills`.
 - `/data-retention` - Show data retention information
 - `/release-notes` (alias `/whatsnew`) - Browse the release notes of every Vibe
   version, newest first, in a full-screen, searchable pager. When a new
@@ -1379,8 +1423,8 @@ the running turn. These still wait for a compaction or agent install to finish.
 Commands that change what a turn reads (e.g. `/config`, `/model`,
 `/thinking`, `/clear`, `/compact`, `/rewind`, `/resume`,
 `/reload`, `/leanstall`, `/unleanstall`, `/retry`, `/mcp`,
-`/connectors`, `/plugins`, `/reload-plugins`) are rejected while busy and can
-be retried when the session is idle.
+`/connectors`, `/plugins`, `/reload-plugins`, `/skills`) are rejected while
+busy and can be retried when the session is idle.
 
 While the queue is non-empty and the agent is busy, pressing **Up**
 enters queue selection mode: the last queued item is highlighted and
@@ -1402,6 +1446,13 @@ discovered from two locations:
   user scope on name collisions)
 
 Each subdirectory inside a plugins directory is a single plugin root.
+
+To turn a plugin off without uninstalling it, list its manifest `name` in
+`disabled_plugins` in `config.toml` (e.g. `disabled_plugins = ["my-plugin"]`).
+A plugin whose `ai.mistral.vibe` extension sets `"defaultEnabled": false` is
+off until its name is in `enabled_plugins`. Both lists add up across config
+layers, `disabled_plugins` wins, and an off plugin contributes nothing to
+sessions.
 
 ### Plugin Manifest (`plugin.json`)
 
@@ -1536,6 +1587,15 @@ Detailed instructions for the model...
 3. `.agents/skills/` in trusted project directory
 4. `~/.vibe/skills/` (user global)
 5. `~/.agents/skills/` (user global, Agent Skills standard)
+
+With `experimental_enable_registry_skills`, the nearest scope wins instead, and
+within a scope a skill file wins over a registry pin: the project's skill files,
+then the skills pinned in its `.vibe/skills.toml`, then the global skill files
+(`skill_paths`, `~/.vibe/skills/`, `~/.agents/skills/`), then the skills pinned in
+`~/.vibe/skills.toml`. A registry pin goes by the name its manifest entry gives
+it; when two pins load the same stored version under different names, the one
+ranked first loads it. A skill that loses its name is logged as shadowed: once
+per process as a warning under this rule, and at debug level otherwise.
 
 ### Invoking Skills
 

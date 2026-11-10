@@ -99,11 +99,7 @@ from vibe.acp.models import (
     ConnectorsListResponse,
     ConnectorsRefreshRequest,
     ConnectorsToggleRequest,
-    ProjectLinksCreateRequest,
-    ProjectLinksLinkRequest,
     ProjectLinksListRequest,
-    ProjectLinksPickerLoadMoreRequest,
-    ProjectLinksPickerLoadRequest,
     ProjectLinksResolveRootRequest,
     ProjectLinksUnlinkRequest,
 )
@@ -125,9 +121,7 @@ from vibe.acp.utils import (
 from vibe.acp.voice import VoiceController
 from vibe.app_server._integration_resources import MCPResource
 from vibe.app_server._project_links import (
-    ProjectLinksAuthError,
     ProjectLinksController,
-    ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
 from vibe.app_server.config import ConfigView
@@ -1346,9 +1340,7 @@ class VibeAcpAgent(AcpAgent):
     async def _project_links_extension(
         self, method: str, params: dict
     ) -> dict[str, Any]:
-        from vibe.app_server._credential_selection import cli_process_credentials
-
-        controller = ProjectLinksController(cli_process_credentials)
+        controller = ProjectLinksController()
         try:
             match method:
                 case "projectLinks/list":
@@ -1359,30 +1351,6 @@ class VibeAcpAgent(AcpAgent):
                         ProjectLinksResolveRootRequest, params
                     )
                     result = await controller.resolve_root(resolve.root_path)
-                case "projectLinks/picker/load":
-                    load = self._project_links_request(
-                        ProjectLinksPickerLoadRequest, params
-                    )
-                    result = await controller.picker_load(load.root_path)
-                case "projectLinks/picker/loadMore":
-                    load_more = self._project_links_request(
-                        ProjectLinksPickerLoadMoreRequest, params
-                    )
-                    result = await controller.picker_load_more(
-                        load_more.root_path, load_more.cursor
-                    )
-                case "projectLinks/create":
-                    create = self._project_links_request(
-                        ProjectLinksCreateRequest, params
-                    )
-                    result = await controller.create(
-                        create.root_path, create.name, create.default_branch
-                    )
-                case "projectLinks/link":
-                    link = self._project_links_request(ProjectLinksLinkRequest, params)
-                    result = await controller.link(
-                        link.root_path, link.project_id, link.project_name
-                    )
                 case "projectLinks/unlink":
                     unlink = self._project_links_request(
                         ProjectLinksUnlinkRequest, params
@@ -1390,12 +1358,8 @@ class VibeAcpAgent(AcpAgent):
                     result = await controller.unlink(unlink.root_path)
                 case _:
                     raise NotImplementedMethodError(method)
-        except ProjectLinksAuthError as exc:
-            raise UnauthenticatedError(str(exc)) from exc
         except ProjectLinksInvalidRequest as exc:
             raise InvalidRequestError(str(exc)) from exc
-        except ProjectLinksInternalError as exc:
-            raise InternalError(str(exc)) from exc
         return result
 
     # -- whoami (identity + account) ----------------------------------------

@@ -22,6 +22,4 @@ timeline: Timeline = [
     turn_completed(session_id=_SAVED),
 ]
 
-capture_startup = False
-capture_steps = {3, 4}
 screen_contains = ("Saved session restored.", "Reply in the resumed session.")

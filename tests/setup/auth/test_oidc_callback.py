@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from collections.abc import AsyncIterator
+import hashlib
+import re
 
 import pytest
 import pytest_asyncio
@@ -46,6 +49,34 @@ async def get(callback: OidcCallback, target: str, method: str = "GET") -> bytes
     )
 
 
+def parse(response: bytes) -> tuple[dict[str, str], str]:
+    head, body = response.split(b"\r\n\r\n", 1)
+    headers = dict(line.decode().split(": ", 1) for line in head.split(b"\r\n")[1:])
+    return headers, body.decode()
+
+
+def assert_branded_page(response: bytes, title: str, message: str) -> None:
+    headers, html = parse(response)
+    assert headers["Content-Type"] == "text/html; charset=utf-8"
+    assert headers["Referrer-Policy"] == "no-referrer"
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Cache-Control"] == "no-store"
+    assert int(headers["Content-Length"]) == len(html.encode())
+    styles = re.findall(r"<style>(.*?)</style>", html, re.DOTALL)
+    assert len(styles) == 1
+    css_hash = base64.b64encode(hashlib.sha256(styles[0].encode()).digest()).decode()
+    assert headers["Content-Security-Policy"] == (
+        f"default-src 'none'; style-src 'sha256-{css_hash}'; base-uri 'none'; "
+        "form-action 'none'; frame-ancestors 'none'"
+    )
+    assert "<script" not in html
+    assert "style=" not in html
+    urls = re.findall(r"https?://[^\s\"'<>)]+", html)
+    assert urls == ["http://www.w3.org/2000/svg"]
+    assert re.findall(r"<h1>(.*?)</h1>", html) == [title]
+    assert re.findall(r"<p>(.*?)</p>", html) == [message]
+
+
 @pytest.mark.parametrize(
     "target,method",
     [
@@ -68,6 +99,9 @@ async def test_unrelated_or_ambiguous_request_cannot_complete_login(
 ) -> None:
     response = await get(callback, target, method)
     assert response.startswith(b"HTTP/1.1 400 Bad Request")
+    assert_branded_page(
+        response, "Sign-in failed", "Return to your terminal and try again."
+    )
     assert not callback.result.done()
     assert b"code-secret" not in response
     valid = await get(callback, "/callback?state=expected-state&code=valid-code")
@@ -85,15 +119,14 @@ async def test_callback_success_is_single_use_and_does_not_echo_secrets(
     target = "/callback?state=expected-state&code=authorization-secret"
     response = await get(callback, target)
     assert response.startswith(b"HTTP/1.1 200 OK")
-    assert b"Cache-Control: no-store" in response
-    assert b"Connection: close" in response
+    assert_branded_page(
+        response,
+        "Sign-in complete",
+        "You can close this window and return to your terminal.",
+    )
+    assert parse(response)[0]["Connection"] == "close"
     assert b"authorization-secret" not in response
     assert b"expected-state" not in response
-    headers, body = response.split(b"\r\n\r\n", 1)
-    content_length = next(
-        line for line in headers.split(b"\r\n") if line.startswith(b"Content-Length:")
-    )
-    assert int(content_length.split(b":", 1)[1]) == len(body)
     initial = callback.result.result()
     replay = await get(callback, "/callback?state=expected-state&code=second-secret")
     assert replay.startswith(b"HTTP/1.1 400")
@@ -110,12 +143,27 @@ async def test_callback_decline_is_safe_and_requires_matching_state(callback) ->
         "/callback?state=expected-state&error=access_denied&error_description=secret",
     )
     assert response.startswith(b"HTTP/1.1 200 OK")
-    assert response.endswith(b"Sign-in declined. Return to Vibe.")
-    assert b"Invalid sign-in callback" not in response
+    assert_branded_page(
+        response, "Sign-in was cancelled", "Return to your terminal to try again."
+    )
     with pytest.raises(OidcError, match="authorization was declined") as raised:
         await callback.result
     assert "secret" not in str(raised.value)
     assert b"secret" not in response
+
+
+@pytest.mark.parametrize("error", ["server_error", "invalid_scope"])
+@pytest.mark.asyncio
+async def test_callback_provider_error_other_than_denial_reports_failure(
+    callback, error
+) -> None:
+    response = await get(callback, f"/callback?state=expected-state&error={error}")
+    assert response.startswith(b"HTTP/1.1 200 OK")
+    assert_branded_page(
+        response, "Sign-in failed", "Return to your terminal and try again."
+    )
+    with pytest.raises(OidcError, match="authorization was declined"):
+        await callback.result
 
 
 @pytest.mark.asyncio

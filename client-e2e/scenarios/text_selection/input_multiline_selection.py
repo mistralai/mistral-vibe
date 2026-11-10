@@ -14,7 +14,7 @@ SGR mouse reports (1-based col;row), left button = 0:
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # Force the OSC 52 copy path so the copy notice is deterministic across hosts.
 env = {"SSH_TTY": "/dev/pts/0"}
@@ -36,4 +36,5 @@ timeline: Timeline = [
     "\n",
     "the lazy dog",
     _SELECT,
+    take_snapshot(),
 ]

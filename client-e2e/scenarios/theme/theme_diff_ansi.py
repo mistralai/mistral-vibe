@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "edit the file"
 _OLD = "alpha\nbeta\ngamma\ndelta\n"
@@ -23,7 +23,6 @@ handshake = {
     "config/write": {"runtime": {"config": {"theme": "ansi-dark"}}},
 }
 
-capture_startup = False
 # From textual-dark, fourteen rows up is ansi-dark.
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -32,9 +31,15 @@ timeline: Timeline = [
     edit_file("notes.txt", [(3, _OLD, _NEW)]),
     assistant_msg("Done."),
     turn_completed(),
+    take_snapshot(),
     _EXPAND_EDIT,
+    take_snapshot(),
     "/theme",
+    take_snapshot(),
     "\r",
+    take_snapshot(),
     "\x1b[A" * 14,
+    take_snapshot(),
     "\r",
+    take_snapshot(),
 ]

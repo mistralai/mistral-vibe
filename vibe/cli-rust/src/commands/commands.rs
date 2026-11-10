@@ -98,6 +98,7 @@ const COMMANDS: &[Command] = &[
         .args("[name] | add <url> | status | login <alias> | logout <alias>"),
     cmd(&["/plugins"], "Display the plugins this session is running", false),
     cmd(&["/reload-plugins"], "Re-pin this session's plugins and report what changed", false),
+    cmd(&["/skills"], "Browse and manage skills", false),
     cmd(&["/voice"], "Configure voice settings", true).after_jobs(),
     cmd(&["/leanstall"], "Install the Lean 4 agent (leanstral)", false),
     cmd(&["/unleanstall"], "Uninstall the Lean 4 agent", false),

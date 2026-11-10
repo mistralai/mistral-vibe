@@ -89,6 +89,15 @@ def active_api_key(
     return None
 
 
+def uses_cli_oidc_credential(env_key: str) -> bool:
+    """Whether ``env_key`` resolves from the CLI OIDC session, never an API key.
+
+    Shared by resolution and ``/status``, so the reported source cannot claim
+    an API-key source that resolution never reads.
+    """
+    return env_key == "MISTRAL_API_KEY" and oidc_enabled()
+
+
 def resolve_api_key_with_origin(env_key: str) -> tuple[str, ApiKeyOrigin] | None:
     """The key for ``env_key`` and where it was read from, or ``None``.
 
@@ -100,7 +109,7 @@ def resolve_api_key_with_origin(env_key: str) -> tuple[str, ApiKeyOrigin] | None
     """
     if not env_key:
         return None
-    if env_key == "MISTRAL_API_KEY" and oidc_enabled():
+    if uses_cli_oidc_credential(env_key):
         from vibe.setup.auth._oidc_runtime import stored_oidc_credential
 
         token = stored_oidc_credential()

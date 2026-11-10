@@ -11,7 +11,6 @@ _SOURCES = [
 ]
 
 handshake = mcp_handshake(_SOURCES)
-capture_steps = {1}
 screen_contains = ("Local MCP Servers", "Available Connectors")
 screen_excludes = ("The alpha tool",)
 

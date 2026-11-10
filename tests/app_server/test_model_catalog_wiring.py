@@ -4,20 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 import tomllib
-from typing import Any
+from typing import Any, cast
 from unittest.mock import Mock
 
 import pytest
 import tomli_w
 
+from tests.stubs.process_services import FakeModelCatalogServer
+from vibe.app_server._cached_layers import apply_held_model_catalog
 from vibe.app_server._process_services import ProcessServices
 import vibe.app_server._runtime as runtime_module
 from vibe.app_server.protocol import SessionOptions
 from vibe.core.config.default_orchestrator import build_default_orchestrator
-from vibe.core.config.layers.model_catalog import (
-    apply_cached_model_catalog,
-    apply_model_catalog,
-)
+from vibe.core.config.layers.model_catalog import apply_model_catalog
 from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
 
 
@@ -50,34 +49,53 @@ def _enable_model_catalog(config_dir: Path) -> None:
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
 
 
+async def _hold(
+    process_services: ProcessServices,
+    model_catalog_server: FakeModelCatalogServer,
+    catalog: ModelCatalogResponse,
+) -> None:
+    """Have the process hold *catalog* for the test account, as a session's
+    fetch leaves it.
+    """
+    from vibe.app_server._model_catalog_service import ModelCatalogKey
+    from vibe.core.config import VibeConfigSchema
+
+    model_catalog_server.serve(catalog)
+    key = await ModelCatalogKey.of(
+        VibeConfigSchema.model_validate({"experimental_enable_model_catalog": True}),
+        None,
+    )
+    assert key is not None
+    assert await process_services.model_catalog.ensure(key) == catalog
+
+
 @pytest.mark.asyncio
-async def test_the_cached_catalog_reaches_the_session_config(
-    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+async def test_the_held_catalog_reaches_the_session_config(
+    config_dir: Path,
+    process_services: ProcessServices,
+    model_catalog_server: FakeModelCatalogServer,
 ) -> None:
     _enable_model_catalog(config_dir)
-    monkeypatch.setattr(
-        "vibe.core.model_catalog.load_cached_model_catalog",
-        lambda _config, _credentials=None: _runnable_catalog("cached-model"),
-    )
+    await _hold(process_services, model_catalog_server, _runnable_catalog("held"))
     orchestrator = await build_default_orchestrator()
 
-    await apply_cached_model_catalog(orchestrator)
+    await apply_held_model_catalog(orchestrator, process_services.model_catalog)
 
-    assert "cached-model" in orchestrator.config.models
+    assert "held" in orchestrator.config.models
 
 
 @pytest.mark.asyncio
-async def test_the_cached_catalog_is_ignored_with_the_flag_off(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_the_held_catalog_is_ignored_with_the_flag_off(
+    process_services: ProcessServices, model_catalog_server: FakeModelCatalogServer
 ) -> None:
-    load_cache = Mock(return_value=_runnable_catalog("cached-model"))
-    monkeypatch.setattr("vibe.core.model_catalog.load_cached_model_catalog", load_cache)
+    await _hold(process_services, model_catalog_server, _runnable_catalog("held"))
+    load = Mock(wraps=process_services.model_catalog.load)
     orchestrator = await build_default_orchestrator()
 
-    await apply_cached_model_catalog(orchestrator)
+    await apply_held_model_catalog(orchestrator, cast(Any, Mock(load=load)))
 
-    assert "cached-model" not in orchestrator.config.models
-    load_cache.assert_not_called()
+    assert "held" not in orchestrator.config.models
+    assert load.call_args.args == (None,)
 
 
 @pytest.mark.asyncio
@@ -195,17 +213,16 @@ async def test_a_field_write_to_an_admin_model_keeps_its_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_every_session_config_starts_with_the_cached_catalog(
+async def test_every_session_config_starts_with_the_held_catalog(
     tmp_path: Path,
     config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
     process_services: ProcessServices,
+    model_catalog_server: FakeModelCatalogServer,
 ) -> None:
     # The Unified harness builds every session config here.
     _enable_model_catalog(config_dir)
-    monkeypatch.setattr(
-        "vibe.core.model_catalog.load_cached_model_catalog",
-        lambda _config, _credentials=None: _runnable_catalog("cached-model"),
+    await _hold(
+        process_services, model_catalog_server, _runnable_catalog("cached-model")
     )
 
     session_config = await runtime_module.HarnessProcess(
@@ -219,8 +236,8 @@ async def test_every_session_config_starts_with_the_cached_catalog(
 async def test_a_cached_catalog_applies_a_sparse_override_from_the_first_build(
     tmp_path: Path,
     config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
     process_services: ProcessServices,
+    model_catalog_server: FakeModelCatalogServer,
 ) -> None:
     # The fixture pins a model whose entry this write replaces; unpinned, or
     # the pin's fallback warning would fail the assertion for another reason.
@@ -230,9 +247,8 @@ async def test_a_cached_catalog_applies_a_sparse_override_from_the_first_build(
     config["active_model"] = ""
     config["models"] = {"cached-model": {"temperature": 0.5}}
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
-    monkeypatch.setattr(
-        "vibe.core.model_catalog.load_cached_model_catalog",
-        lambda _config, _credentials=None: _runnable_catalog("cached-model"),
+    await _hold(
+        process_services, model_catalog_server, _runnable_catalog("cached-model")
     )
 
     session_config = await runtime_module.HarnessProcess(
@@ -261,6 +277,7 @@ async def test_a_cached_flag_decides_the_cached_catalog(
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     process_services: ProcessServices,
+    model_catalog_server: FakeModelCatalogServer,
 ) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
@@ -270,9 +287,8 @@ async def test_a_cached_flag_decides_the_cached_catalog(
         "vibe.app_server._cached_layers.load_cached_eval_response",
         lambda _config, _credentials=None: _cached_eval(catalog_on=catalog_on),
     )
-    monkeypatch.setattr(
-        "vibe.core.model_catalog.load_cached_model_catalog",
-        lambda _config, _credentials=None: _runnable_catalog("zai-glm-5-3"),
+    await _hold(
+        process_services, model_catalog_server, _runnable_catalog("zai-glm-5-3")
     )
 
     session_config = await runtime_module.HarnessProcess(

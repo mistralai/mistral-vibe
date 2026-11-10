@@ -28,6 +28,5 @@ handshake = {
     }
 }
 
-capture_startup = False
 screen_contains = ('"v19"', '"v16"')
 timeline: Timeline = ["/config\r", "\r", "\x1b[A" * 3]

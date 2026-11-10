@@ -10,6 +10,7 @@ use super::{hint_line, list_cursor, theme};
 use crate::app::App;
 use crate::config_write::Scope;
 use crate::hints::{self, action, key, Hint};
+use crate::utils::text::capitalize;
 
 /// Draw the whole screen with the picker replacing the input box.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
@@ -90,12 +91,4 @@ fn draw_option(app: &App, f: &mut Frame, bx: u16, y: u16, w: u16, i: usize) {
     let label = app.thinking_picker.levels[i].as_str();
     let display = capitalize(label);
     f.buffer_mut().set_string(bx + 5, y, display, name_style);
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
 }

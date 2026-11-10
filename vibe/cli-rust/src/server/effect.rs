@@ -148,6 +148,12 @@ impl EffectEntry {
         self.kind() != Some("user_question")
     }
 
+    /// The standalone `wait` the model calls for its background work. A program
+    /// `sleep` is not one: its program still runs around it.
+    pub fn is_model_wait(&self) -> bool {
+        self.tool_name() == Some("self.wait")
+    }
+
     /// The state carries a settled verdict.
     pub fn is_terminal(&self) -> bool {
         matches!(

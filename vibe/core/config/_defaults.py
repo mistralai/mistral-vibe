@@ -10,6 +10,7 @@ DEFAULT_MISTRAL_API_ENV_KEY = "MISTRAL_API_KEY"
 DEFAULT_CONSOLE_BASE_URL = "https://console.mistral.ai"
 DEFAULT_VIBE_BASE_URL = "https://chat.mistral.ai"
 DEFAULT_MISTRAL_SERVER_URL = "https://api.mistral.ai"
+DEFAULT_MISTRAL_API_BASE = f"{DEFAULT_MISTRAL_SERVER_URL}/v1"
 PUBLIC_REGIONAL_MISTRAL_API_HOSTS = frozenset({
     "api.eu.mistral.ai",
     "api.us.mistral.ai",

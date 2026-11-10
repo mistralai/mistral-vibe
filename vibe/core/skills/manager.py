@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 import threading
@@ -15,6 +15,7 @@ from vibe.core.config.harness_files import (
 )
 from vibe.core.skills.models import (
     REGISTRY_LATEST_ALIAS,
+    InstalledSkill,
     RegistryRef,
     SkillConfigIssue,
     SkillInfo,
@@ -29,6 +30,7 @@ from vibe.core.skills.parser import (
     parse_skill_markdown,
 )
 from vibe.core.skills.registry import _manifest, _resolved, _store
+from vibe.core.skills.registry.models import pinned_name
 from vibe.core.utils import name_matches
 from vibe.observability.logging import logger
 from vibe.utils.io import read_safe
@@ -113,17 +115,76 @@ def _read_skill_file(skill_path: Path) -> _ParsedSkillFile:
     )
 
 
+def _origin(skill: SkillInfo) -> str:
+    if skill.skill_path is None:
+        return f"the {skill.source.value} skills"
+    return f"{skill.scope.value} {skill.source.value} {skill.skill_path}"
+
+
+@dataclass(frozen=True, slots=True)
+class ShadowedSkill:
+    message: str
+    args: tuple[str, ...]
+
+
+def _shadowed(loser: SkillInfo, winner: SkillInfo) -> ShadowedSkill | None:
+    """None for a file claimed twice under one name, which changes no skill a session
+    loads. Claimed under two names, it loads once, under the winner's.
+    """
+    same_file = loser.skill_path is not None and loser.skill_path == winner.skill_path
+    if same_file and loser.name == winner.name:
+        return None
+    if same_file:
+        return ShadowedSkill(
+            "Skill '%s' from %s is shadowed by '%s', which loads the same file",
+            (loser.name, _origin(loser), winner.name),
+        )
+    return ShadowedSkill(
+        "Skill '%s' from %s is shadowed by the one from %s",
+        (loser.name, _origin(loser), _origin(winner)),
+    )
+
+
+def _named_as_pinned(skill: SkillInfo, name: str) -> SkillInfo:
+    """The stored ``SKILL.md`` keeps the name the version had when it was first written,
+    which an upstream rename or another repository's pin can change.
+    """
+    named = pinned_name(name, skill.name)
+    if named != name:
+        logger.debug(
+            "Registry pin '%s' is not a valid skill name; it loads as '%s'", name, named
+        )
+    if named == skill.name:
+        return skill
+    return skill.model_copy(update={"name": named})
+
+
+def _file_claimant(
+    info: SkillInfo, by_file: Mapping[Path, SkillInfo]
+) -> SkillInfo | None:
+    if info.registry is None or info.skill_path is None:
+        return None
+    return by_file.get(info.skill_path)
+
+
 class SkillManager:
     def __init__(
         self,
         config_getter: Callable[[], VibeConfigSchema],
         *,
         harness_files: HarnessFilesManager | None = None,
+        project_skills: Mapping[str, SkillInfo] | None = None,
     ) -> None:
+        """``project_skills``, read in a sandbox, rank first among the project's, ahead
+        of the files the host reads for it.
+        """
         self._config_getter = config_getter
         self._harness_files = harness_files or get_harness_files_manager()
+        self._project_skills = tuple((project_skills or {}).values())
         self._search_paths = self._compute_search_paths(self._config)
         self._config_issues: list[SkillConfigIssue] = []
+        self._shadowed: list[ShadowedSkill] = []
+        self._claimants = list(self._find_claimants())
         self._discovered = self._discover_skills()
         self.available_skills: Mapping[str, SkillInfo] = MappingProxyType(
             self._apply_filters(self._discovered)
@@ -143,6 +204,11 @@ class SkillManager:
     @property
     def config_issues(self) -> tuple[SkillConfigIssue, ...]:
         return tuple(self._config_issues)
+
+    @property
+    def shadowed(self) -> tuple[ShadowedSkill, ...]:
+        """Only under the scope-first rule; without it each one is a debug line."""
+        return tuple(self._shadowed)
 
     def _apply_filters(self, skills: dict[str, SkillInfo]) -> dict[str, SkillInfo]:
         if self._config.enabled_skills:
@@ -191,31 +257,57 @@ class SkillManager:
         return unique
 
     def _discover_skills(self) -> dict[str, SkillInfo]:
+        """A registry pin whose stored file an earlier claimant already loads is
+        shadowed by it too, as a session's projection loads each file once.
+        """
+        loudly = self._config.experimental_enable_registry_skills
         skills: dict[str, SkillInfo] = {}
-        for base, scope in self._search_paths:
-            if not base.is_dir():
+        by_file: dict[Path, SkillInfo] = {}
+        for info in self._claimants:
+            winner = skills.get(info.name) or _file_claimant(info, by_file)
+            if winner is not None:
+                self._report_shadowed(info, winner, loudly=loudly)
                 continue
-            for name, info in self._discover_skills_in_dir(base, scope).items():
-                if name not in skills:
-                    skills[name] = info
-                else:
-                    logger.debug(
-                        "Skipping duplicate skill '%s' at %s (already loaded from %s)",
-                        name,
-                        info.skill_path,
-                        skills[name].skill_path,
-                    )
-        for name, info in self._discover_registry_skills().items():
-            if name not in skills:
-                skills[name] = info
-            else:
-                logger.debug("Skipping registry skill '%s'; a local skill wins", name)
+            skills[info.name] = info
+            if info.skill_path is not None:
+                by_file.setdefault(info.skill_path, info)
         return skills
 
-    def _discover_skills_in_dir(
-        self, base: Path, scope: SkillScope
-    ) -> dict[str, SkillInfo]:
-        skills: dict[str, SkillInfo] = {}
+    def _report_shadowed(
+        self, loser: SkillInfo, winner: SkillInfo, *, loudly: bool
+    ) -> None:
+        shadow = _shadowed(loser, winner)
+        if shadow is None:
+            return
+        if loudly:
+            self._shadowed.append(shadow)
+            return
+        logger.debug(shadow.message, *shadow.args)
+
+    def _find_claimants(self) -> Iterator[SkillInfo]:
+        """A sandboxed session's own project skills come first among the project's in
+        either order, right after ``skill_paths`` without registry skills.
+        """
+        if not self._config.experimental_enable_registry_skills:
+            configured = {path.resolve() for path in self._config.skill_paths}
+            yield from self._files(lambda base, _scope: base in configured)
+            yield from self._project_skills
+            yield from self._files(lambda base, _scope: base not in configured)
+            return
+        pins = self._registry_pins()
+        yield from self._project_skills
+        yield from self._files(lambda _base, scope: scope is SkillScope.PROJECT)
+        yield from (pin for pin in pins if pin.scope is SkillScope.PROJECT)
+        yield from self._files(lambda _base, scope: scope is SkillScope.GLOBAL)
+        yield from (pin for pin in pins if pin.scope is SkillScope.GLOBAL)
+
+    def _files(self, keep: Callable[[Path, SkillScope], bool]) -> Iterator[SkillInfo]:
+        for base, scope in self._search_paths:
+            if keep(base, scope) and base.is_dir():
+                yield from self._discover_skills_in_dir(base, scope)
+
+    def _discover_skills_in_dir(self, base: Path, scope: SkillScope) -> list[SkillInfo]:
+        skills: list[SkillInfo] = []
         for skill_dir in base.iterdir():
             if not skill_dir.is_dir():
                 continue
@@ -225,17 +317,8 @@ class SkillManager:
             skill_info = self._try_load_skill(
                 skill_file, source=SkillSource.LOCAL, scope=scope
             )
-            if skill_info is None:
-                continue
-            if skill_info.name in skills:
-                logger.debug(
-                    "Skipping duplicate skill '%s' at %s (already loaded from %s)",
-                    skill_info.name,
-                    skill_info.skill_path,
-                    skills[skill_info.name].skill_path,
-                )
-                continue
-            skills[skill_info.name] = skill_info
+            if skill_info is not None:
+                skills.append(skill_info)
         return skills
 
     def _registry_sources(self) -> list[tuple[Path, SkillScope]]:
@@ -250,60 +333,34 @@ class SkillManager:
         )
         return sources
 
-    def _discover_registry_skills(self) -> dict[str, SkillInfo]:
-        """The active set the agent uses: one entry per name, project wins."""
-        if not self._config.experimental_enable_registry_skills:
-            return {}
-        out: dict[str, SkillInfo] = {}
-        for path, scope in self._registry_sources():
-            for entry in _manifest.load_sync(path).skills:
-                info = self._load_registry_entry(entry, scope)
-                if info is not None:
-                    out[entry.name] = info
-        return out
+    def _registry_pins(self) -> list[SkillInfo]:
+        return [
+            info
+            for path, scope in self._registry_sources()
+            for entry in _manifest.load_sync(path).skills
+            if (info := self._load_registry_entry(entry, scope)) is not None
+        ]
 
-    def registry_pins(self) -> list[SkillInfo]:
-        """Every registry pin as its own SkillInfo, one per (name, scope).
+    def installed_skills(self) -> list[InstalledSkill]:
+        """Everything installed, one entry per (name, scope, source), in the order
+        names resolve.
 
-        Unlike ``available_skills`` (de-duped, project-wins) this keeps a global
-        and a project pin of the same skill as separate rows, for the browser.
-        """
-        if not self._config.experimental_enable_registry_skills:
-            return []
-        out: dict[tuple[str, SkillScope], SkillInfo] = {}
-        for path, scope in self._registry_sources():
-            for entry in _manifest.load_sync(path).skills:
-                info = self._load_registry_entry(entry, scope)
-                if info is not None:
-                    out[(entry.name, scope)] = info
-        return list(out.values())
-
-    def installed_skills(self) -> list[SkillInfo]:
-        """Everything installed, one entry per (name, scope, source).
-
-        Not de-duped: a skill pinned both globally and in the project is two
-        pins the user can manage separately, and a registry pin shadowed by a
+        Not de-duped by name: a skill pinned both globally and in the project
+        is two pins the user can manage separately, and a pin shadowed by a
         local file of the same name is still a manifest entry they can remove.
-        Collapsing by name here is what made those unreachable. The browser
-        collapses for display and keeps this set for per-scope actions.
+        Each entry says whether its name resolves to it.
 
         Skills matched by ``disabled_skills`` are kept so one turned off can
         be turned back on.
 
         Reads the discovery done at construction rather than re-walking the
-        search paths, so listing does not hit the disk on the event loop.
+        search paths.
         """
-        out: dict[tuple[str, SkillScope, SkillSource], SkillInfo] = {}
-        for info in self._discovered.values():
-            if info.source is SkillSource.LOCAL:
-                out[(info.name, info.scope, info.source)] = info
-        for base, scope in self._search_paths:
-            if not base.is_dir():
-                continue
-            for name, info in self._discover_skills_in_dir(base, scope).items():
-                out.setdefault((name, scope, SkillSource.LOCAL), info)
-        for info in self.registry_pins():
-            out.setdefault((info.name, info.scope, info.source), info)
+        out: dict[tuple[str, SkillScope, SkillSource], InstalledSkill] = {}
+        for info in self._claimants:
+            key = (info.name, info.scope, info.source)
+            if key not in out:
+                out[key] = InstalledSkill(info, self._discovered.get(info.name) is info)
         return list(out.values())
 
     def _load_registry_entry(
@@ -341,7 +398,7 @@ class SkillManager:
                 version,
             )
             return None
-        return self._try_load_skill(
+        loaded = self._try_load_skill(
             skill_file,
             source=SkillSource.REGISTRY,
             scope=scope,
@@ -350,6 +407,7 @@ class SkillManager:
             ),
             check_dir_name=False,
         )
+        return None if loaded is None else _named_as_pinned(loaded, entry.name)
 
     def _try_load_skill(
         self,

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 import logging
@@ -23,6 +24,12 @@ import time
 
 import httpx2
 
+from mistralai_vibe_local_harness.protocol import RustTokenUsage
+from mistralai_vibe_local_harness.vibe._completion_budget import (
+    CompletionBudgetAccountingDeferred,
+    CompletionPricing,
+    SharedCompletionBudget,
+)
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     ProviderRetry,
     ProviderRetryObserver,
@@ -37,11 +44,29 @@ from mistralai_vibe_local_harness.vibe.completion_profile import should_retry_st
 logger = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class ProviderAttempt:
+    """Budget-relevant facts observed while one provider request runs."""
+
+    accepted: bool = False
+    usage: RustTokenUsage | None = None
+
+    def accept(self) -> None:
+        """Record that the provider accepted the request with a success status."""
+        self.accepted = True
+
+    def report_usage(self, usage: RustTokenUsage) -> None:
+        """Keep the measured usage reported by this provider attempt."""
+        self.usage = usage
+
+
 async def call_with_retries[T](
-    attempt: Callable[[], Awaitable[T]],
+    attempt: Callable[[ProviderAttempt], Awaitable[T]],
     *,
     max_elapsed_time_s: float,
     notices: RetryNotices,
+    completion_budget: SharedCompletionBudget | None = None,
+    pricing: CompletionPricing | None = None,
 ) -> T:
     """Run ``attempt`` until it succeeds, fails for good, or its retries are spent.
 
@@ -57,16 +82,29 @@ async def call_with_retries[T](
     silence was a long generation the provider does not stream, every attempt
     repeats it, and each one is paid for. A response whose tool calls all lack a name is retried at
     most ``_MAX_UNUSABLE_TOOL_CALL_RETRIES`` times for the same reason.
+
+    ``completion_budget`` only counts spend here: the caller admits the call
+    once before it starts, and its retries always run. A failed or cancelled
+    attempt the provider accepted adds the usage it reported; one that reported
+    none adds nothing and is logged.
     """
     started = time.monotonic()
     retry_attempt = 0
     stall_retries = 0
     unusable_tool_call_retries = 0
     while True:
+        provider_attempt = ProviderAttempt()
         try:
-            return await attempt()
+            return await attempt(provider_attempt)
+        except asyncio.CancelledError:
+            await _record_failed_attempt(provider_attempt, completion_budget, pricing)
+            raise
         except Exception as error:
             failure = read_provider_failure(error)
+            if not isinstance(error, CompletionBudgetAccountingDeferred):
+                await _record_failed_attempt(
+                    provider_attempt, completion_budget, pricing
+                )
             stalls_spent = failure.stalled and not should_retry_stall(stall_retries)
             unusable_spent = (
                 failure.unusable_tool_calls
@@ -105,6 +143,24 @@ async def call_with_retries[T](
                 )
             )
             await asyncio.sleep(delay_s)
+
+
+async def _record_failed_attempt(
+    provider_attempt: ProviderAttempt,
+    completion_budget: SharedCompletionBudget | None,
+    pricing: CompletionPricing | None,
+) -> None:
+    if completion_budget is None or not provider_attempt.accepted:
+        return
+    if provider_attempt.usage is None:
+        # The provider may have billed it, but the spend cannot be measured.
+        # Counting nothing keeps one dropped stream from ending the whole run.
+        logger.warning(
+            "A provider-accepted completion attempt ended without reporting usage;"
+            " the completion budget does not count it"
+        )
+        return
+    await completion_budget.record(provider_attempt.usage, pricing)
 
 
 class RetryNotices:
@@ -171,4 +227,4 @@ def _retry_after_s(response: ProviderErrorResponse, now: datetime) -> float | No
     return max((retry_at - now).total_seconds(), 0.0)
 
 
-__all__ = ["RetryNotices", "call_with_retries"]
+__all__ = ["ProviderAttempt", "RetryNotices", "call_with_retries"]

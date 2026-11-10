@@ -247,8 +247,9 @@ pub async fn settle() {
 }
 
 /// A live transcript built from history entries.
+/// The main transcript fed `entries` as live events.
 pub fn live(entries: &[Value]) -> Transcript {
-    let mut transcript = Transcript::default();
+    let mut transcript = Transcript::main();
     for entry in entries {
         transcript.add(&json!({ "entry": entry }));
     }

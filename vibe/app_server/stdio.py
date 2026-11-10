@@ -194,8 +194,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     from vibe.core.config.harness_files import init_harness_files_manager
     from vibe.core.paths import LOG_FILE
     from vibe.observability.logging import init_file_logging
+    from vibe.observability.sentry import claim_cli_crash_report_dsn
 
     _set_process_title()
+    claim_cli_crash_report_dsn()
     from vibe.core.config import load_dotenv_values
     from vibe.core.utils.windows_asyncio import (
         silence_proactor_transport_teardown_warnings,

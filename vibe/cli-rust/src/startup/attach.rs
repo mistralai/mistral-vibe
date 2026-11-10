@@ -59,26 +59,26 @@ pub(super) async fn start_session(
     };
     let params = serde_json::to_value(&start).map_err(|e| StartError::Other(e.into()))?;
     let result = client
-        .request_err(method::SESSION_START, params)
+        .request(method::SESSION_START, params)
         .await
-        .map_err(|err| {
-            if err.is_unauthorized() {
-                StartError::Auth(Box::new(err))
-            } else if err.is_config_error() {
-                StartError::Config(Box::new(err))
-            } else {
-                StartError::Other(anyhow::anyhow!(
-                    "session/start failed: [{}] {}",
-                    err.code(),
-                    err.message
-                ))
-            }
-        })?;
+        .map_err(start_error)?;
     result
         .get("state")
         .cloned()
         .with_context(|| "session/start response missing state")
         .map_err(StartError::Other)
+}
+
+/// Keeps the failure typed, so the startup report tells a server refusal from a dead server.
+fn start_error(error: anyhow::Error) -> StartError {
+    match error.downcast::<RequestFailure>() {
+        Ok(RequestFailure::Rpc(rpc)) if rpc.is_unauthorized() => StartError::Auth(Box::new(rpc)),
+        Ok(RequestFailure::Rpc(rpc)) if rpc.is_config_error() => StartError::Config(Box::new(rpc)),
+        Ok(failure) => {
+            StartError::Other(anyhow::Error::new(failure).context("session/start failed"))
+        }
+        Err(error) => StartError::Other(error),
+    }
 }
 
 /// The `session/start` kind: `ephemeral` for a warm-up a resume replaces at
@@ -199,7 +199,7 @@ pub(super) async fn settle_worktree_session(
         + crate::worktree_gate::SETTLE_WAIT;
     let (settle, waited) = crate::worktree_gate::absorb_until_settled(&mut stream, deadline)
         .await
-        .map_err(anyhow::Error::msg)?;
+        .map_err(|message| anyhow::Error::new(super::failure::ServerFailure(message)))?;
     let settled = settle.cwd;
     let prepared = settle.worktree;
     let absorbed = waited.notifications;

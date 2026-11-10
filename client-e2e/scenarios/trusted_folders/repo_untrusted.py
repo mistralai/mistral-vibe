@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {
     "workspace/trust/status": {
@@ -19,4 +19,4 @@ handshake = {
 
 # An explicitly untrusted repo replaces the repo line with its warning and
 # drops the repo option; "2" declines without touching the selection.
-timeline: Timeline = ["2"]
+timeline: Timeline = ["2", take_snapshot()]

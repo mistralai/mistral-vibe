@@ -165,6 +165,21 @@ def test_compaction_and_output_limits_reject_invalid_values(
         VibeConfigSchema.model_validate(setting)
 
 
+@pytest.mark.parametrize("price", [-1.0, float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["input_price", "output_price", "cached_input_price"])
+def test_model_prices_must_be_finite_and_nonnegative(field: str, price: float) -> None:
+    """*Prepare*: A model price that is negative, NaN or infinite.
+    *Do*: Validate it through the effective Vibe configuration model.
+    *Assert*: Invalid pricing is rejected before a price budget can use it.
+    """
+    # Prepare
+    values = {"name": "m", "provider": "mistral", "alias": "m", field: price}
+
+    # Do / Assert
+    with pytest.raises(ValidationError):
+        ModelConfig.model_validate(values)
+
+
 def test_duplicate_model_alias_last_wins() -> None:
     config = VibeConfigSchema.model_validate({
         "models": [

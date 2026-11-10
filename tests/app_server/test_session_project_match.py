@@ -4,6 +4,7 @@ from pathlib import Path
 
 from vibe.app_server._local_projects import LocalProject
 from vibe.app_server._session_project_match import ProjectFolders
+from vibe.core.paths import WORKTREES_DIR
 
 
 def _project(project_id: str, *roots: Path, created_at: int = 1) -> LocalProject:
@@ -21,14 +22,50 @@ def _matched_id(projects: list[LocalProject], cwd: Path | None) -> str | None:
     return project.id if project is not None else None
 
 
-def test_only_an_exact_folder_matches(tmp_path: Path) -> None:
+def test_the_folder_and_its_subfolders_match(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     projects = [_project("repo", repo)]
 
     assert _matched_id(projects, repo) == "repo"
-    assert _matched_id(projects, repo / "sub") is None
+    assert _matched_id(projects, repo / "sub") == "repo"
+    assert _matched_id(projects, repo / "sub" / "deeper") == "repo"
     assert _matched_id(projects, tmp_path) is None
     assert _matched_id(projects, None) is None
+
+
+def test_a_sibling_sharing_the_prefix_does_not_match(tmp_path: Path) -> None:
+    projects = [_project("foo", tmp_path / "foo")]
+
+    assert _matched_id(projects, tmp_path / "foobar") is None
+    assert _matched_id(projects, tmp_path / "foobar" / "sub") is None
+
+
+def test_the_deepest_project_wins(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    projects = [_project("repo", repo, created_at=0), _project("app", repo / "app")]
+
+    assert _matched_id(projects, repo / "app" / "src") == "app"
+    assert _matched_id(projects, repo / "app") == "app"
+    assert _matched_id(projects, repo / "lib") == "repo"
+
+
+def test_a_worktree_matches_only_its_exact_folder() -> None:
+    worktree = WORKTREES_DIR.path / "bucket" / "name"
+    projects = [_project("home", WORKTREES_DIR.path.parent.parent)]
+
+    assert _matched_id(projects, worktree) is None
+    assert _matched_id([_project("tree", worktree)], worktree) == "tree"
+    assert _matched_id([_project("tree", worktree)], worktree / "sub") is None
+
+
+def test_the_exact_tie_break_holds_for_a_subfolder(tmp_path: Path) -> None:
+    repo, other = tmp_path / "repo", tmp_path / "other"
+    projects = [
+        _project("multi", repo, other, created_at=0),
+        _project("single", repo, created_at=5),
+    ]
+
+    assert _matched_id(projects, repo / "sub") == "single"
 
 
 def test_a_symlinked_folder_matches_its_target(tmp_path: Path) -> None:

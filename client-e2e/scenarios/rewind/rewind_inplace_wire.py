@@ -46,5 +46,4 @@ handshake = {
 }
 request_methods = {"session/rewind"}
 
-capture_steps = {3, 4}
 screen_excludes = ("Forked to a new session",)

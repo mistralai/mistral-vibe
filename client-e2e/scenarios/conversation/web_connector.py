@@ -14,7 +14,7 @@ from e2e.app_server.events import (
     user_msg,
     web_connector_call,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "search peluche chat then open the first result"
 
@@ -78,4 +78,5 @@ timeline: Timeline = [
     _EXPAND_SEARCH,
     _EXPAND_BLOCKED,
     _EXPAND_PAGE,
+    take_snapshot(),
 ]

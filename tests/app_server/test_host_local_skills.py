@@ -45,6 +45,7 @@ def _handler() -> HostRequestHandler:
         org_config=fake_process_services().org_config,
         worktrees=fake_process_services().worktrees,
         experiments=fake_process_services().experiments,
+        model_catalog=fake_process_services().model_catalog,
     )
 
 
@@ -784,6 +785,7 @@ async def test_a_projects_own_config_decides_its_skills(tmp_path: Path) -> None:
         org_config=fake_process_services().org_config,
         worktrees=fake_process_services().worktrees,
         experiments=fake_process_services().experiments,
+        model_catalog=fake_process_services().model_catalog,
     )
 
     listed = await handler.dispatch(
@@ -820,6 +822,7 @@ async def test_the_users_skills_ignore_the_project_the_server_runs_in(
         org_config=fake_process_services().org_config,
         worktrees=fake_process_services().worktrees,
         experiments=fake_process_services().experiments,
+        model_catalog=fake_process_services().model_catalog,
     )
 
     result = await handler.dispatch("skills/local/read", {"name": "code-review"})
@@ -847,6 +850,7 @@ async def test_an_untrusted_projects_config_is_not_read(tmp_path: Path) -> None:
         org_config=fake_process_services().org_config,
         worktrees=fake_process_services().worktrees,
         experiments=fake_process_services().experiments,
+        model_catalog=fake_process_services().model_catalog,
     )
 
     listed = await handler.dispatch("skills/local/list", {"projectRoot": str(project)})

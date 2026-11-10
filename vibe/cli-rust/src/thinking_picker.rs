@@ -3,12 +3,14 @@
 //! saves and `s` keeps the level for the session. A chained `/model` pick is
 //! written with the level in one write.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
 
 use crate::app::{App, Severity, ThinkingPicker};
 use crate::config_write::{self, Scope};
+use crate::model_selection;
 use crate::server::Client;
 
 /// Shown when a running turn parks a saved pick until it ends.
@@ -76,6 +78,7 @@ pub fn open(app: &mut App) {
         show_active_model(app);
     }
     show(app);
+    crate::model_selection::opened(app, crate::model_selection::Picker::ReasoningEffort);
 }
 
 /// Open on a `/model` pick's own levels before anything is written.
@@ -147,6 +150,8 @@ pub fn select(app: &mut App, client: &Arc<Client>, scope: Scope) {
         saved["reasoningEffort"] = json!(level);
     }
     let all_saved = scope == Scope::Saved && pick.as_ref().is_none_or(|p| p.scope == Scope::Saved);
+    let selections =
+        model_selection::picks(app, pick.as_ref().map(|p| p.alias.as_str()), Some(&level));
     let (reason, what) = match &pick {
         Some(pick) => (
             "app-server config update",
@@ -154,13 +159,22 @@ pub fn select(app: &mut App, client: &Arc<Client>, scope: Scope) {
         ),
         None => ("app-server thinking update", format!("thinking {level}")),
     };
-    commit(app, client, ops, all_saved.then_some(saved), reason, what);
+    commit(
+        app,
+        client,
+        ops,
+        all_saved.then_some(saved),
+        reason,
+        what,
+        selections,
+    );
 }
 
 /// Commit a `/model` pick without a thinking level (its model is unresolved).
 pub fn commit_model(app: &mut App, client: &Arc<Client>, pick: &ModelPick) {
     let what = format!("model {}", model_label(pick));
     let saved = (pick.scope == Scope::Saved).then(|| json!({"modelAlias": pick.alias}));
+    let selections = model_selection::picks(app, Some(&pick.alias), None);
     commit(
         app,
         client,
@@ -168,6 +182,7 @@ pub fn commit_model(app: &mut App, client: &Arc<Client>, pick: &ModelPick) {
         saved,
         "app-server config update",
         what,
+        selections,
     );
 }
 
@@ -191,6 +206,7 @@ fn commit(
     saved: Option<Value>,
     reason: &'static str,
     what: String,
+    selections: Vec<BTreeMap<String, Value>>,
 ) {
     if ops.is_empty() {
         return;
@@ -199,8 +215,18 @@ fn commit(
         return;
     };
     let client = client.clone();
+    let telemetry = app.telemetry_tx.clone();
     crate::ui_event::spawn(app, async move {
-        match crate::model_enforcement::write(&client, &session_id, saved, ops, reason).await {
+        let written =
+            crate::model_enforcement::write(&client, &session_id, saved, ops, reason).await;
+        // Recorded once the session takes the write, a parked one included.
+        if written.is_ok() {
+            for properties in selections {
+                let name = crate::telemetry::event::MODEL_SELECTION_SELECTED;
+                crate::telemetry::enqueue(telemetry.as_ref(), name, properties);
+            }
+        }
+        match written {
             Err(error) => Event::Failed(format!("Failed to apply: {what} — {error}")),
             Ok(written) if config_write::is_parked(&written) => Event::Parked,
             Ok(written) => Event::Applied(written, format!("Applied: {what}.")),

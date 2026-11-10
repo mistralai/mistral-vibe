@@ -21,6 +21,14 @@ pub fn thousands(value: u64) -> String {
     grouped
 }
 
+/// The first letter upper-cased, the rest as it is.
+pub fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
 const COUNT_SUFFIXES: [&str; 5] = ["", "k", "M", "B", "T"];
 const SIGNIFICANT_DIGITS: u32 = 3;
 

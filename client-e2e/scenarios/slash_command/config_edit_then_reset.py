@@ -15,7 +15,6 @@ handshake = {
     ]
 }
 
-capture_startup = False
 # Replace 200000 with 64000, save, then reset the saved value.
 timeline: Timeline = ["/config\r", "\r", "\x7f" * 6 + "64000", "\r", "\x12"]
 screen_contains = ("200000",)

@@ -12,7 +12,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "VIBE_INPUT_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_steps = {1, 2, 3, 4, 5, 6}
 
 # An inert Right key requests a settled frame after each focus event.
 timeline: Timeline = [
@@ -31,6 +30,7 @@ timeline: Timeline = [
 
 expected_titles = (
     "Vibe",
+    ">> Vibe",
     ">> Vibe",
     ">> Vibe",
     "Vibe - Action Required",

@@ -50,9 +50,9 @@ def test_projects_store_upserts_and_reads_remote_project(tmp_path: Path) -> None
     repo_root.mkdir()
     store = VibeProjectsStore(path)
 
-    store.upsert_remote_project(_link(repo_root=repo_root))
+    store.upsert_project_link(_link(repo_root=repo_root))
 
-    link = store.get_remote_project(repo_root=repo_root)
+    link = store.get_project_link(repo_root=repo_root)
     assert link == _link(repo_root=repo_root)
     assert _read_toml(path) == {
         "version": 1,
@@ -76,7 +76,7 @@ def test_projects_store_creates_owner_only_registry(tmp_path: Path) -> None:
     repo_root.mkdir()
     store = VibeProjectsStore(path)
 
-    store.upsert_remote_project(_link(repo_root=repo_root))
+    store.upsert_project_link(_link(repo_root=repo_root))
 
     assert stat.S_IMODE(path.stat().st_mode) & 0o077 == 0
 
@@ -90,7 +90,7 @@ def test_projects_store_keeps_existing_file_mode(tmp_path: Path) -> None:
     repo_root.mkdir()
     store = VibeProjectsStore(path)
 
-    store.upsert_remote_project(_link(repo_root=repo_root))
+    store.upsert_project_link(_link(repo_root=repo_root))
 
     assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
@@ -101,13 +101,12 @@ def test_projects_store_upserts_and_reads_local_project(tmp_path: Path) -> None:
     repo_root.mkdir()
     store = VibeProjectsStore(path)
 
-    store.upsert_remote_project(_link(repo_root=repo_root, project_id="remote"))
+    store.upsert_project_link(_link(repo_root=repo_root, project_id="remote"))
     store.upsert_project_link(_local_link(directory_path=repo_root))
 
     assert store.get_project_link(repo_root=repo_root) == _local_link(
         directory_path=repo_root
     )
-    assert store.get_remote_project(repo_root=repo_root) is None
     assert _read_toml(path) == {
         "version": 1,
         "projects": [
@@ -127,18 +126,18 @@ def test_projects_store_replaces_existing_remote_project_key(tmp_path: Path) -> 
     repo_root.mkdir()
     store = VibeProjectsStore(path)
 
-    store.upsert_remote_project(_link(repo_root=repo_root, project_id="old"))
-    store.upsert_remote_project(_link(repo_root=repo_root, project_id="new"))
+    store.upsert_project_link(_link(repo_root=repo_root, project_id="old"))
+    store.upsert_project_link(_link(repo_root=repo_root, project_id="new"))
 
     assert [project["project_id"] for project in _read_toml(path)["projects"]] == [
         "new"
     ]
-    assert store.get_remote_project(repo_root=repo_root) == _link(
+    assert store.get_project_link(repo_root=repo_root) == _link(
         repo_root=repo_root, project_id="new"
     )
 
 
-def test_projects_store_deletes_remote_project_without_touching_other_kinds(
+def test_projects_store_deletes_project_link_without_touching_unknown_entries(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "projects.toml"
@@ -159,9 +158,9 @@ def test_projects_store_deletes_remote_project_without_touching_other_kinds(
             file,
         )
     store = VibeProjectsStore(path)
-    store.upsert_remote_project(_link(repo_root=repo_root))
+    store.upsert_project_link(_link(repo_root=repo_root))
 
-    store.delete_remote_project(repo_root=repo_root)
+    store.delete_project_link(repo_root=repo_root)
 
     assert _read_toml(path) == {
         "version": 1,

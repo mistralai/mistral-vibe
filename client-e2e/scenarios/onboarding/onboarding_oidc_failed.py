@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Action, Timeline
+from e2e.app_server.scenario import Action, Timeline, take_snapshot
 
 client_args = ("--setup",)
 request_methods = {
@@ -26,4 +26,13 @@ handshake = {
 }
 expected_actions = [Action("open_url", _AUTHORIZATION_URL)]
 screen_contains = ("OIDC sign-in was denied.",)
-timeline: Timeline = ["\r", "\r", "\r", "\r"]
+timeline: Timeline = [
+    "\r",
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+]

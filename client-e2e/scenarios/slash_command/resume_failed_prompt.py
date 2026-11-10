@@ -25,7 +25,5 @@ timeline: Timeline = [
     turn_completed(),
 ]
 
-capture_startup = False
-capture_steps = {2, 3, 5}
 screen_contains = ("Reply in the current session.",)
 screen_excludes = ("Saved session restored.", "Failed to resume session")

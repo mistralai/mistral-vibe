@@ -12,7 +12,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "VIBE_INPUT_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
 
 _PROMPT = "clean the build"
 

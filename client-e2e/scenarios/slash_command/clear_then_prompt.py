@@ -13,7 +13,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import AppServerEvent, Timeline
+from e2e.app_server.scenario import AppServerEvent, Timeline, take_snapshot
 
 
 def _rebind(value: Any) -> Any:
@@ -70,6 +70,7 @@ timeline: Timeline = [
     "/clear\r",
     "hello again\r",
     *_cleared_turn(),
+    take_snapshot(),
 ]
 
 handshake = {

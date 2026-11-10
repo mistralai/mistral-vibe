@@ -12,7 +12,6 @@ handshake = {
     },
 }
 
-capture_startup = False
 request_methods = {"config/reload"}
 # Up past mistral-medium-3.5 to Default, pick it and its level, then reopen /model.
 timeline: Timeline = ["/model", "\r", "\x1b[A", "\x1b[A", "\r", "\r", "/model", "\r"]

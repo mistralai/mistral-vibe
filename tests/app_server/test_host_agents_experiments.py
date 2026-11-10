@@ -47,6 +47,7 @@ async def test_agents_list_offers_smart_approve_from_cached_experiment(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
     result = await handler.dispatch(

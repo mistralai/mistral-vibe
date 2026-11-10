@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Action, Timeline
+from e2e.app_server.scenario import Action, Timeline, take_snapshot
 
 client_args = ("--setup",)
 request_methods = {"setup/status"}
@@ -26,4 +26,13 @@ screen_hyperlinks = (
 expected_actions = [
     Action("open_url", "https://chat.mistral.ai/code/extensions?focus=key")
 ]
-timeline: Timeline = ["\r", "\r", "\x1b[B\r", _CLICK_PROVIDER_LINK]
+timeline: Timeline = [
+    "\r",
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+    "\x1b[B\r",
+    take_snapshot(),
+    _CLICK_PROVIDER_LINK,
+    take_snapshot(),
+]

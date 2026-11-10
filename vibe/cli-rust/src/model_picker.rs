@@ -64,6 +64,7 @@ pub fn select(app: &mut App, client: &Arc<Client>, scope: Scope) {
 pub fn open(app: &mut App) {
     app.model_picker.list = crate::option_list::OptionList::new(current_index(app));
     app.model_picker.open = true;
+    crate::model_selection::opened(app, crate::model_selection::Picker::Model);
 }
 
 /// Pre-selected row: pinned model `+1` (offset by Default), else `0` (Default).

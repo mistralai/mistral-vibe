@@ -8,7 +8,6 @@ from scenarios.slash_command._branch_fixtures import REQUEST_METHODS, fork_hands
 handshake = fork_handshake(None)
 request_methods = REQUEST_METHODS
 
-capture_startup = False
 screen_contains = (
     "Session forked",
     "vibe --resume 22222222-0000-4000-8000-000000000002",

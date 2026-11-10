@@ -1,4 +1,4 @@
-//! Headless run lifecycle: stop requests, time limits, budgets, export.
+//! Headless run lifecycle: stop requests, time limits, export.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -30,8 +30,7 @@ impl std::fmt::Display for RunTerminated {
 
 impl std::error::Error for RunTerminated {}
 
-/// Requests to stop a headless run early: SIGTERM, the time limit, and the
-/// token and price budgets.
+/// Requests to stop a headless run early: signals, deadlines, turn limits, and aborts.
 pub struct StopRequests {
     limits: RunLimits,
     deadline: Option<Instant>,
@@ -123,21 +122,6 @@ impl StopRequests {
         }
 
         self.requested_outcome().unwrap_or(RunOutcome::Terminated)
-    }
-
-    /// Observe usage stats and stop the run if a budget is exceeded.
-    pub fn observe_usage(&self, total_tokens: u64, cost: f64) {
-        if let Some(max_tokens) = self.limits.max_tokens {
-            if total_tokens > max_tokens {
-                self.request(RunOutcome::TokenLimit);
-                return;
-            }
-        }
-        if let Some(max_price) = self.limits.max_price {
-            if cost > max_price {
-                self.request(RunOutcome::PriceLimit);
-            }
-        }
     }
 }
 
@@ -295,4 +279,20 @@ pub fn invalid_time_limit(seconds: Option<f64>) -> Option<String> {
     } else {
         Some(format!("--time-limit must be a positive number: {seconds}"))
     }
+}
+
+/// Why a price ceiling is invalid: it must be zero or a positive finite number.
+pub fn price_limit_issue(price: Option<f64>) -> Option<&'static str> {
+    let price = price?;
+    if price.is_finite() && price >= 0.0 {
+        None
+    } else {
+        Some("must be a nonnegative finite number")
+    }
+}
+
+/// The usage error for an invalid `--max-price`.
+pub fn invalid_price_limit(price: Option<f64>) -> Option<String> {
+    let issue = price_limit_issue(price)?;
+    Some(format!("--max-price {issue}: {}", price?))
 }

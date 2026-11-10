@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "start the dev servers"
 
@@ -36,4 +36,5 @@ timeline: Timeline = [
     "\x1b[<0;1;11M\x1b[<0;1;11m",
     "\x1b[<0;5;12M\x1b[<0;5;12m",
     "\x1b[<0;5;15M\x1b[<0;5;15m",
+    take_snapshot(),
 ]

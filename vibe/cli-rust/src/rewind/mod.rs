@@ -256,6 +256,7 @@ fn apply_done(
     app.view.expanded.clear();
     app.view.transcript.load_snapshot(&state);
     crate::worktree::adopt_state(app, &state);
+    crate::background_work::adopt_state(app, &state);
     app.expand_rebuilt_tools();
     if !inplace {
         local::add_rewind_fork(

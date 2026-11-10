@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline, resize
+from e2e.app_server.scenario import Timeline, resize, take_snapshot
 from scenarios.sticky_prompt._turns import tall_reply, turn
 
-timeline: Timeline = [resize(22, 120), *turn("hi", tall_reply("a", 24))]
+timeline: Timeline = [
+    resize(22, 120),
+    *turn("hi", tall_reply("a", 24)),
+    take_snapshot(),
+]
 
-capture_steps = {1}
 screen_excludes = ("> hi",)

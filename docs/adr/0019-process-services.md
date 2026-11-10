@@ -14,8 +14,8 @@ never in a module global and never on `HarnessProcess`.
   A component takes the one service it uses, not the whole container
   (ADR 0018).
 
-A remote value refreshed for everyone (the org config first; the connector
-catalog, experiments and the model catalog next) follows one path:
+A remote value refreshed for everyone (the org config, the connector catalog,
+experiments and the model catalog) follows one path:
 
 1. **Held by a service** in a `RemoteCache` (`vibe/core/utils/remote_cache.py`):
    served at once, refreshed in the background once old, one fetch per key,
@@ -27,8 +27,9 @@ catalog, experiments and the model catalog next) follows one path:
    (`DeferredConfiguration.commit`) that changes nothing the session reads
    until Core runs it. The value is loaded into a copy of the session's config
    as a config input (the org config into the copy's admin layer, with the
-   mode it leaves; a value that is not config, like the connector catalog,
-   feeds the step that resolves it). What that copy derives is pushed to Core,
+   mode it leaves; the model catalog into the copy's catalog layer; a value
+   that is not config, like the connector catalog, feeds the step that
+   resolves it). What that copy derives is pushed to Core,
    and only then is it installed on the shared config, recorded on the
    context, and published to the user.
    - Refused, by the preflight or by Core: nothing was installed, so there is
@@ -49,6 +50,17 @@ attributes and plan telemetry segments it by), but not followed: a session
 loads the eval held for its account and client once, after it opens, and keeps
 it for its life, a worktree move included, so a variant never changes under a
 running conversation. A refresh only reaches sessions opened after it.
+
+The model catalog (`ModelCatalogService`) takes steps 1 to 3, one catalog per
+account and endpoint with its own copy on disk (`model_catalog_cache.json`).
+A session opens on the catalog held, from memory or disk with no request,
+and waits, within its cap, only for an account never fetched on this machine.
+A session whose model is pinned keeps it: a refreshed catalog that retires the
+pinned model is refused for that session, which says so once (one that renames
+it, keeping the old name as an alias, is loaded). A session pins the model it
+runs when a turn starts, so this applies to every session that has run a turn.
+A catalog fetched while a CLI OIDC sign-in changed the account is neither held
+nor written.
 
 MCP tool descriptors take steps 1 and 4 only. `MCPDiscoveryService` holds the
 process's Harness `MCPDiscoveryFlights`, which every session's MCP runtime

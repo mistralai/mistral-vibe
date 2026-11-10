@@ -26,6 +26,5 @@ handshake = {
 }
 request_methods = {"session/rewind/read"}
 
-capture_steps = {1}
 screen_contains = ("Rewindable history entry not found: stale",)
 screen_excludes = ("Rewind to:", "Edit message from here", "✕")

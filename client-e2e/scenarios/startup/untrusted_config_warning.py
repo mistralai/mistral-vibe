@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {
     "workspace/trust/untrustedConfig": {
@@ -11,6 +11,5 @@ handshake = {
     }
 }
 
-# The banner mounts from a startup worker; the capture after typing settles it.
-capture_startup = False
-timeline: Timeline = ["x"]
+# The banner mounts from a startup worker; typing settles it before the snapshot.
+timeline: Timeline = ["x", take_snapshot()]

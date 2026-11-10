@@ -1,8 +1,8 @@
 """Run tools a client of this process serves itself.
 
-Internal: nothing on the app-server wire declares these tools. A host that
-embeds the harness passes :class:`ClientTools` to the process, the way it
-passes a sandbox.
+An embedding host passes :class:`ClientTools` directly. A connected Desktop
+supplies definitions over initialize and implements the same runner using
+JSON-RPC. Plugin packages contain guidance, not client execution declarations.
 
 The tools reach the Core as provided-tool groups, one per namespace, and run
 through a provided-tool executor like Vibe's own. The executor awaits the
@@ -147,8 +147,8 @@ class ClientTools:
     timeout: float = CLIENT_TOOL_TIMEOUT_SECONDS
 
 
-class ClientProvidedTools:
-    """One session's client tools, ready for the Core."""
+class ClientToolExecutor:
+    """The client variant; builds the same ProvidedToolExecutor as MCP tools."""
 
     def __init__(self, tools: ClientTools | None = None) -> None:
         self._tools = tools
@@ -330,13 +330,13 @@ def _failed(
 __all__ = [
     "CLIENT_TOOL_TIMEOUT_SECONDS",
     "DEFAULT_NAMESPACE",
-    "ClientProvidedTools",
     "ClientToolCall",
     "ClientToolCaller",
     "ClientToolCallerResolver",
     "ClientToolDeclarationError",
     "ClientToolDefinition",
     "ClientToolError",
+    "ClientToolExecutor",
     "ClientToolResult",
     "ClientToolRunner",
     "ClientTools",

@@ -1,0 +1,224 @@
+[
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "model",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.opened",
+   "properties": {
+    "has_model_choice": true,
+    "has_reasoning_effort_choice": true,
+    "host_kind": "local",
+    "picker": "model",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "config/model/write",
+  "params": {
+   "modelAlias": "mistral-medium-3.5",
+   "reasoningEffort": "medium",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.selected",
+   "properties": {
+    "default_model": "mistral-medium-3.5",
+    "host_kind": "local",
+    "is_default_model": true,
+    "model": "mistral-medium-3.5",
+    "previous_model": "devstral-small",
+    "selection_type": "model",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "model",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.opened",
+   "properties": {
+    "has_model_choice": true,
+    "has_reasoning_effort_choice": true,
+    "host_kind": "local",
+    "picker": "model",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "config/model/write",
+  "params": {
+   "modelAlias": "mistral-medium-3.5",
+   "reasoningEffort": "high",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.selected",
+   "properties": {
+    "default_model": "mistral-medium-3.5",
+    "host_kind": "local",
+    "is_default_model": true,
+    "model": "mistral-medium-3.5",
+    "previous_model": "devstral-small",
+    "selection_type": "model",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.selected",
+   "properties": {
+    "host_kind": "local",
+    "model": "mistral-medium-3.5",
+    "previous_reasoning_effort": "medium",
+    "reasoning_effort": "high",
+    "selection_type": "reasoning_effort",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "model",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.opened",
+   "properties": {
+    "has_model_choice": true,
+    "has_reasoning_effort_choice": true,
+    "host_kind": "local",
+    "picker": "model",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "config/model/write",
+  "params": {
+   "modelAlias": "",
+   "reasoningEffort": "medium",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.selected",
+   "properties": {
+    "default_model": "mistral-medium-3.5",
+    "host_kind": "local",
+    "is_default_model": true,
+    "model": "default",
+    "previous_model": "devstral-small",
+    "selection_type": "model",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "thinking",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.opened",
+   "properties": {
+    "has_model_choice": true,
+    "has_reasoning_effort_choice": true,
+    "host_kind": "local",
+    "picker": "reasoning_effort",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "config/model/write",
+  "params": {
+   "reasoningEffort": "off",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.selected",
+   "properties": {
+    "host_kind": "local",
+    "model": "devstral-small",
+    "previous_reasoning_effort": "off",
+    "reasoning_effort": "off",
+    "selection_type": "reasoning_effort",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

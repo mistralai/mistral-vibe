@@ -1,5 +1,5 @@
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
-timeline: Timeline = ["hello world", "\x03"]
+timeline: Timeline = ["hello world", "\x03", take_snapshot()]

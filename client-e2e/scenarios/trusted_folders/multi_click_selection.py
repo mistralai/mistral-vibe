@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {
     "workspace/trust/status": {
@@ -24,4 +24,4 @@ def _clicks(column: int, row: int, count: int) -> str:
     return f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m" * count
 
 
-timeline: Timeline = [_clicks(60, 15, 2), _clicks(60, 16, 3)]
+timeline: Timeline = [_clicks(60, 15, 2), _clicks(60, 16, 3), take_snapshot()]

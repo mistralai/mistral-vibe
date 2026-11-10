@@ -39,6 +39,9 @@ class ProviderCredentialSourceKind(StrEnum):
     PROCESS_ENV = "process_env"
     VIBE_HOME_ENV_FILE = "vibe_home_env_file"
     OS_KEYRING = "os_keyring"
+    # The CLI's own OIDC sign-in, which replaces every API-key source for
+    # ``MISTRAL_API_KEY`` while ``VIBE_CLI_OIDC_ENABLED`` is on.
+    CLI_OIDC = "cli_oidc"
 
 
 class ProviderCredentialSourceState(StrEnum):

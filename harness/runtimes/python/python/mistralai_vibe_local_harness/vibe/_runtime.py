@@ -30,6 +30,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustCompactEvent,
     RustCompletionFailedEvent,
     RustCompletionModelInputResyncRequestedEvent,
+    RustCompletionSucceededEvent,
     RustContextCompactedObservation,
     RustContextCompactionFailedObservation,
     RustDeterminismContext,
@@ -87,6 +88,11 @@ from mistralai_vibe_local_harness.session_protocol import (
     PublicBackgroundProcess,
     PublicSessionState,
     TitleSource,
+)
+from mistralai_vibe_local_harness.vibe._completion import request_route
+from mistralai_vibe_local_harness.vibe._completion_budget import (
+    BudgetStopReason,
+    CompletionPricing,
 )
 from mistralai_vibe_local_harness.vibe._errors import (
     HarnessConfigurationRejectedError,
@@ -423,6 +429,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self._work_state_callback: WorkStateCallback | None = None
         self._action_applied_sink: ActionAppliedSink | None = None
         self._subagent_controller: SubagentController | None = None
+        self._model_wait_action_ids: set[str] = set()
         # A restored pending transition may come either from replaying Core inputs or
         # directly from a stored generation. Both paths lost the Runtime's disposable
         # model-input cache and must refresh it before the next provider call.
@@ -1417,6 +1424,21 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
 
     def configure_work_state_callback(self, callback: WorkStateCallback) -> None:
         self._work_state_callback = callback
+
+    @property
+    def model_wait_in_progress(self) -> bool:
+        """Whether the Turn only waits: every Action Core holds is a running
+        standalone ``wait``, which Core requires to be alone in its tool batch.
+
+        A program ``sleep`` never counts: a message cannot end it without
+        stopping the rest of its program.
+        """
+        waits = self._model_wait_action_ids
+        return (
+            bool(waits)
+            and self._live_action_ids <= waits
+            and self.pending_action_ids <= waits
+        )
 
     @property
     def has_active_process_work(self) -> bool:
@@ -2911,6 +2933,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         try:
             while True:
                 recovering_transition = recovering
+                current = await self._apply_completion_budget(current)
                 replayed_ids |= await self._start_transition_actions(
                     current, in_flight, finished, recovering=recovering
                 )
@@ -3007,6 +3030,78 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     # so a failed recovery can still mark what a later settle
                     # abandons.
                     pass
+
+    async def _apply_completion_budget(
+        self, transition: RustSessionTransition
+    ) -> RustSessionTransition:
+        """Admit each new completion once, before its provider call starts.
+
+        A completion with a durable intent is not admitted again: recovery either
+        redelivers its stored result or fails it, and neither starts provider work.
+        """
+        config = self._process_config
+        if config is None or config.completion_budget is None:
+            return transition
+        current = transition
+        while True:
+            candidates = [
+                candidate
+                for candidate in current.actions
+                if isinstance(candidate, RustLLMCallAction)
+            ]
+            if not candidates:
+                return current
+            stored = await asyncio.to_thread(self._store.load)
+            durable_ids = {item.action_id for item in stored.runtime_state.actions}
+            action = next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.action_id not in durable_ids
+                ),
+                None,
+            )
+            if action is None:
+                return current
+            reason = await config.completion_budget.admission_reason(
+                request_route(action, config).pricing
+            )
+            if reason is None:
+                return current
+            async with self._lock:
+                self._guard_open()
+                current = await self._apply_completion_budget_stop_locked(
+                    action, reason
+                )
+
+    async def _apply_completion_budget_stop_locked(
+        self, action: RustLLMCallAction, reason: BudgetStopReason
+    ) -> RustSessionTransition:
+        """End a completion the shared invocation budget no longer admits.
+
+        The caller holds ``self._lock``. A spent limit interrupts the turn; a
+        model without pricing under a price limit fails it.
+        """
+        error = RustProtocolError(
+            code=reason, message=reason.replace("_", " ").capitalize(), retryable=False
+        )
+        turn_id = self.inspection.active_turn_id
+        if turn_id is None:
+            return await self._apply(
+                RustCompletionFailedEvent(action_id=action.action_id, error=error)
+            )
+        # As in ``interrupt``: Core dropped a completion whose model-input update
+        # never reached this Runtime's message cache, so the next one refreshes it.
+        self._model_input_resync_required = True
+        if reason == "pricing_unavailable":
+            return await self._apply(
+                RustFailTurnEvent(
+                    expected_turn_id=turn_id, action_id=action.action_id, error=error
+                )
+            )
+        return await self._apply(
+            RustInterruptEvent(expected_turn_id=turn_id, reason=reason)
+        )
 
     async def _start_transition_actions(
         self,
@@ -3167,6 +3262,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     await self._ensure_action_started(tool_action)
                 elif compaction_action is not None:
                     await self._ensure_action_started(compaction_action)
+                # Redelivery performs no provider work in this invocation, so it must
+                # return before result recording can charge the fresh completion budget.
                 return _EVENT_ADAPTER.validate_python(stored_reply(durable.result))
             if (
                 durable is None
@@ -3258,6 +3355,14 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         if capacity_failure is not None:
             return capacity_failure
         reconcile_started = time.perf_counter() if recovering else None
+        # Priced when the call starts, so a model switch while it runs does not
+        # change what its result is charged at.
+        budget_pricing = (
+            request_route(action, self._process_config).pricing
+            if isinstance(action, RustLLMCallAction)
+            and self._process_config is not None
+            else None
+        )
         try:
             controller = self._subagent_controller
             if (
@@ -3279,12 +3384,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             ):
                 # Read-only. A recovered wait answers at once instead of holding
                 # resume until its deadline (recovery mode "reconcile").
-                event = await execute_model_wait(
-                    action,
-                    self._model_input_signal,
-                    max_wait_ms=self._config.settings.tools.max_wait_ms,
-                    recovering=recovering,
-                )
+                event = await self._execute_model_wait(action, recovering=recovering)
             elif isinstance(
                 action, RustRuntimeBuiltinToolCallAction
             ) and action.call.name.startswith("process."):
@@ -3309,7 +3409,12 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         except asyncio.CancelledError:
             event = _failed_action_event(action, "Action cancelled")
             await self._record_action_result(
-                action, durable, event, reconcile_started=reconcile_started, failed=True
+                action,
+                durable,
+                event,
+                reconcile_started=reconcile_started,
+                failed=True,
+                budget_pricing=None,
             )
             raise
         except Exception as exc:
@@ -3329,6 +3434,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 event,
                 reconcile_started=reconcile_started,
                 failed=failed,
+                budget_pricing=budget_pricing,
             )
         except Exception:
             if action.action_id not in self._process_action_reservations:
@@ -3353,7 +3459,14 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         *,
         reconcile_started: float | None,
         failed: bool,
+        budget_pricing: CompletionPricing | None,
     ) -> None:
+        """Persist ``event`` as ``action``'s result.
+
+        A successful completion this invocation ran is charged to the completion
+        budget at ``budget_pricing``, its route's price when the call started.
+        A path that records only failures passes ``None``.
+        """
         if reconcile_started is not None:
             record_effect_reconciliation(
                 time.perf_counter() - reconcile_started,
@@ -3376,6 +3489,14 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     action.action_id,
                     value,
                     failed=failed,
+                )
+            if (
+                isinstance(event, RustCompletionSucceededEvent)
+                and self._process_config is not None
+                and self._process_config.completion_budget is not None
+            ):
+                await self._process_config.completion_budget.record(
+                    event.result.usage, budget_pricing
                 )
             completed = next(
                 item
@@ -4365,6 +4486,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 pending.event,
                 reconcile_started=None,
                 failed=pending.failed,
+                budget_pricing=None,
             )
             # Close marks release_reservation under this lock as soon as the
             # result write releases it. Sampling the flag and dropping the row
@@ -4605,6 +4727,24 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         return _failed_action_event(
             action, "The interrupted effect cannot be reconnected safely"
         )
+
+    async def _execute_model_wait(
+        self, action: RustRuntimeBuiltinToolCallAction, *, recovering: bool
+    ) -> RustEvent:
+        # The Session steers queued user input into a Turn that only waits, so
+        # it learns when such a wait begins and ends.
+        self._model_wait_action_ids.add(action.action_id)
+        self._notify_work_state_changed()
+        try:
+            return await execute_model_wait(
+                action,
+                self._model_input_signal,
+                max_wait_ms=self._config.settings.tools.max_wait_ms,
+                recovering=recovering,
+            )
+        finally:
+            self._model_wait_action_ids.discard(action.action_id)
+            self._notify_work_state_changed()
 
     async def _pre_agent_hook_signal(self, turn_id: str) -> asyncio.Event | None:
         # Under the lock, Core state matches the journal: `_apply` commits there.

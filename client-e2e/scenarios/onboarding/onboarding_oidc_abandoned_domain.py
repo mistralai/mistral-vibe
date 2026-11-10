@@ -10,8 +10,6 @@ from scenarios.onboarding.onboarding_oidc_complete import (
     request_methods as request_methods,
 )
 
-capture_startup = False
-capture_steps = set()
 exit_after_last_step = True
 expected_actions = [
     Action(

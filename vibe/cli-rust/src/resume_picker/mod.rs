@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
-use crate::app::{App, Severity, Status};
+use crate::app::{App, Severity};
 use crate::option_list::Click;
 use crate::server::request_error::SESSION_BUSY_MESSAGE;
 use crate::server::{Client, PublicSessionState};
@@ -257,7 +257,8 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             crate::startup::banners::dismiss_whats_new(app);
             load_history(app, &state);
             crate::worktree::adopt_state(app, &state);
-            app.set_status(Status::Ready);
+            crate::background_work::adopt_state(app, &state);
+            crate::event_handler::adopt_active_turn(app, &state);
             let resumed = format!("Resumed session `{}`", short_id(&state.session.id));
             notice::result(app, &resumed);
             crate::message_queue::flush_pending(app, client);

@@ -284,6 +284,10 @@ class Terminal:
         self._rows = rows
         self._columns = columns
 
+    @property
+    def title(self) -> str:
+        return self._screen.title
+
     def snapshot(self, label: str, clipboard: str | None = None) -> Snapshot:
         screen = self._screen
         cells = tuple(

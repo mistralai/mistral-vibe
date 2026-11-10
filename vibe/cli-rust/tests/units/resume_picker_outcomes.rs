@@ -102,6 +102,90 @@ async fn a_successful_resume_retires_the_running_turn() {
 }
 
 #[tokio::test]
+async fn resuming_a_session_mid_turn_shows_its_loader() {
+    let mut app = picking();
+    resuming(&mut app);
+    let mut state = session_state(
+        SAVED,
+        vec![json!({
+            "id": "saved-wait",
+            "type": "effect",
+            "turnId": "turn-waiting",
+            "generationStatus": "in_progress",
+            "detail": {
+                "toolName": "self.wait",
+                "kind": "tool",
+                "display": {"statusText": "Waiting for background work"},
+            },
+            "state": {"status": "running"},
+        })],
+    );
+    state.session.status = serde_json::from_value(json!({
+        "type": "running",
+        "activeTurnId": "turn-waiting",
+    }))
+    .ok();
+    resume_picker::apply_event(
+        &mut app,
+        &stub(),
+        Event::Resumed {
+            id: SAVED.into(),
+            state,
+        },
+    );
+    assert!(matches!(app.session.status, Status::Generating { .. }));
+    assert_eq!(app.session.active_turn_id.as_deref(), Some("turn-waiting"));
+    assert_eq!(app.view.loading.label(), "Waiting for background work");
+}
+
+#[tokio::test]
+async fn resuming_a_mid_turn_session_over_a_generating_one_restarts_its_loader() {
+    let mut app = picking_while_generating();
+    app.view
+        .loading
+        .set_label("Running the old session's tests");
+    let old_since = app.session.status;
+    resuming(&mut app);
+    let mut state = session_state(
+        SAVED,
+        vec![
+            json!({
+                "id": "earlier-call",
+                "type": "effect",
+                "turnId": "turn-earlier",
+                "generationStatus": "in_progress",
+                "detail": {"toolName": "file_system.bash", "kind": "tool",
+                           "display": {"statusText": "Running tests"}},
+                "state": {"status": "running"},
+            }),
+            message("saved-user", "user", "Saved question"),
+        ],
+    );
+    state.session.status = serde_json::from_value(json!({
+        "type": "running",
+        "activeTurnId": "turn-streaming",
+    }))
+    .ok();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    resume_picker::apply_event(
+        &mut app,
+        &stub(),
+        Event::Resumed {
+            id: SAVED.into(),
+            state,
+        },
+    );
+    assert!(
+        app.session.status != old_since,
+        "the resumed turn keeps the old timer"
+    );
+    // The resumed turn runs no call: neither the old session's label nor the
+    // call an earlier turn left unsettled names it.
+    assert_ne!(app.view.loading.label(), "Running the old session's tests");
+    assert_ne!(app.view.loading.label(), "Running tests");
+}
+
+#[tokio::test]
 async fn a_resume_names_the_session_the_server_resumed() {
     let mut app = picking();
     resuming(&mut app);

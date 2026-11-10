@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _SAVED = "00000000-0000-4000-8000-000000000003"
 
@@ -14,6 +14,7 @@ timeline: Timeline = [
     user_msg("hi", session_id=_SAVED),
     assistant_msg("Reply in the resumed session.", session_id=_SAVED),
     turn_completed(session_id=_SAVED),
+    take_snapshot(),
 ]
 
 screen_contains = ("Resumed session 00000003", "Reply in the resumed session.")

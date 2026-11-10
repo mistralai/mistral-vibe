@@ -30,6 +30,7 @@ async def _picker_read_error(
         org_config=process_services.org_config,
         worktrees=process_services.worktrees,
         experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
     with pytest.raises(RequestFailure) as raised:
         await handler.dispatch(

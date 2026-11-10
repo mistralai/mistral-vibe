@@ -458,13 +458,15 @@ fn headless_options_with_budgets() -> HeadlessOptions {
 }
 
 #[test]
-fn agent_config_serializes_max_turns_when_set() {
+fn agent_config_serializes_runtime_limits() {
     let config = agent_config(&headless_options_with_budgets(), None, None).unwrap();
     let json = serde_json::to_value(&config).unwrap();
     assert_eq!(json.get("maxTurns").and_then(Value::as_u64), Some(5));
-    // Price and token budgets should be omitted (None + skip_serializing_if).
-    assert!(json.get("maxPrice").is_none());
-    assert!(json.get("maxSessionTokens").is_none());
+    assert_eq!(json.get("maxPrice").and_then(Value::as_f64), Some(1.5));
+    assert_eq!(
+        json.get("maxSessionTokens").and_then(Value::as_u64),
+        Some(10000)
+    );
 }
 
 #[test]
@@ -490,6 +492,10 @@ fn turn_error_outcome_maps_wire_codes() {
     );
     assert_eq!(
         turn_error_outcome(Some("invalid_model")),
+        RunOutcome::ConfigError
+    );
+    assert_eq!(
+        turn_error_outcome(Some("pricing_unavailable")),
         RunOutcome::ConfigError
     );
     assert_eq!(
@@ -539,7 +545,7 @@ fn stopped_report_maps_the_requested_outcome() {
 }
 
 #[test]
-fn final_outcome_lets_an_enforced_limit_win_over_a_finished_turn() {
+fn final_outcome_only_overrides_a_finished_turn_for_the_client_owned_turn_limit() {
     use std::sync::Arc;
 
     use vibe_rs::headless::final_outcome;
@@ -567,9 +573,16 @@ fn final_outcome_lets_an_enforced_limit_win_over_a_finished_turn() {
         RunOutcome::Finished
     );
 
-    // An error still wins, as it says more.
+    // Token and price budgets belong to Runtime. A stale client stop request
+    // cannot override an already completed turn.
     let stop = Arc::new(StopRequests::new(RunLimits::default()));
     stop.request(RunOutcome::PriceLimit);
+    assert_eq!(
+        final_outcome(RunOutcome::Finished, &None, &stop),
+        RunOutcome::Finished
+    );
+
+    // An error still wins, as it says more.
     let error = Some(RunError {
         message: "boom".into(),
         code: None,

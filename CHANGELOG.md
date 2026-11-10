@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.2] - 2026-11-10
+
+### Added
+
+- Installed plugins can be turned off with the `disabled_plugins` setting: a disabled plugin stays installed but contributes nothing to sessions
+- Plugins can be off by default (`defaultEnabled: false` in their `ai.mistral.vibe` extension) and turned on with the `enabled_plugins` setting
+- `/skills` lists your installed skills, one row per name, with search, a Space toggle to turn each one on or off, and the highlighted skill's body under the list or beside it on wide terminals.
+- With registry skills on, `/skills` lists shared skills to add on a Shared tab and lets you pin a version or alias per scope, preview each version, unpin a scope, or remove the skill.
+
+### Changed
+
+- With registry skills on, a project's skills, files or pins, win over global ones of the same name, including skills from `skill_paths`.
+- With registry skills on, cached shared skill versions unused for 30 days are deleted when the registry can still serve them.
+- While the agent only waits for background work, the status line says what it waits for and that a message reaches it at once.
+- A tool group header now counts the calls still running apart from the settled ones ("Calling 1 tool, called 2 tools").
+- Opening a session no longer fetches the model catalog: it is cached on disk and refreshed in the background, and running sessions pick up the refresh when their turn ends
+- Crash reports now cover app-server and session resume errors, and no longer include routine error logs or network outages.
+
+### Fixed
+
+- Headless --max-tokens and --max-price limits now stop the run before another root or subagent completion starts. Models priced at 0 count as free under --max-price.
+- With registry skills on, sessions fetch the pinned skills missing from this machine again when they start, sandboxed sessions included.
+- A message sent while the agent waits for its subagents or background processes now reaches it at once instead of staying queued until the wait ends.
+- The "Interrupted" marker no longer jumps below later messages when the agent starts a background process
+
 ## [3.1.1] - 2026-11-09
 
 ### Added

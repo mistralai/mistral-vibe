@@ -12,6 +12,5 @@ handshake = {
     "runtime/read": {"runtime": {"config": _CONFIG}},
 }
 env = {"VISUAL": "true"}
-capture_startup = False
 mouse_tracking = False
 timeline: Timeline = ["x", _CTRL_G]

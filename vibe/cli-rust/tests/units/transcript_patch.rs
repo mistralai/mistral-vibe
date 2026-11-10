@@ -155,7 +155,7 @@ fn consecutive_effects_share_one_group_keyed_by_the_first_entry() {
     assert_eq!(second.key, "tool-group:e1");
     assert!(first.first && !first.last);
     assert!(!second.first && second.last);
-    assert_eq!(first.kinds, vec![("file_edit", 1), ("file_search", 1)]);
+    assert_eq!(first.running, vec![("file_edit", 1), ("file_search", 1)]);
     assert!(transcript.is_expandable("tool-group:e1"));
 }
 
@@ -312,19 +312,32 @@ fn group_of(kinds: Vec<(&'static str, usize)>, reasoning: bool) -> Group<'static
         last: true,
         finalized: true,
         kinds,
+        running: Vec::new(),
         reasoning,
+        thinking: false,
+    }
+}
+
+fn running_group_of(running: Vec<(&'static str, usize)>, thinking: bool) -> Group<'static> {
+    Group {
+        finalized: false,
+        running,
+        thinking,
+        ..group_of(Vec::new(), thinking)
     }
 }
 
 #[test]
 fn group_labels_count_each_kind_then_add_reasoning_and_capitalize() {
     let group = group_of(vec![("file_edit", 3), ("web_search", 1)], false);
-    assert_eq!(group.label(false), "Edited 3 files, ran 1 web search");
-    assert_eq!(group.label(true), "Editing 3 files, running 1 web search");
+    assert_eq!(group.label(), "Edited 3 files, ran 1 web search");
+    let group = running_group_of(vec![("file_edit", 3), ("web_search", 1)], false);
+    assert_eq!(group.label(), "Editing 3 files, running 1 web search");
 
     let thinking = group_of(vec![("subagent", 2)], true);
-    assert_eq!(thinking.label(false), "Ran 2 subagents, thought");
-    assert_eq!(thinking.label(true), "Running 2 subagents, thinking");
+    assert_eq!(thinking.label(), "Ran 2 subagents, thought");
+    let thinking = running_group_of(vec![("subagent", 2)], true);
+    assert_eq!(thinking.label(), "Running 2 subagents, thinking");
 }
 
 #[test]
@@ -334,7 +347,7 @@ fn group_labels_pluralize_by_count() {
         false,
     );
     assert_eq!(
-        group.label(false),
+        group.label(),
         "Read 10 files, loaded 1 skill, ran 3 commands, updated todos 2 times"
     );
 }
@@ -342,6 +355,7 @@ fn group_labels_pluralize_by_count() {
 #[test]
 fn unknown_kinds_fall_back_to_generic_tool_labels() {
     let group = group_of(vec![("custom_tool", 2)], false);
-    assert_eq!(group.label(false), "Called 2 tools");
-    assert_eq!(group.label(true), "Calling 2 tools");
+    assert_eq!(group.label(), "Called 2 tools");
+    let group = running_group_of(vec![("custom_tool", 2)], false);
+    assert_eq!(group.label(), "Calling 2 tools");
 }

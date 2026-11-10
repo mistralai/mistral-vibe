@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _WHEEL_UP = "\x1b[<64;60;20M"
 
@@ -16,4 +16,15 @@ def _hi_turn() -> Timeline:
     ]
 
 
-timeline: Timeline = [*_hi_turn(), *_hi_turn(), *_hi_turn(), *_hi_turn(), _WHEEL_UP * 6]
+timeline: Timeline = [
+    *_hi_turn(),
+    take_snapshot(),
+    *_hi_turn(),
+    take_snapshot(),
+    *_hi_turn(),
+    take_snapshot(),
+    *_hi_turn(),
+    take_snapshot(),
+    _WHEEL_UP * 6,
+    take_snapshot(),
+]

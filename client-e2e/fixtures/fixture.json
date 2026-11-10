@@ -1106,7 +1106,7 @@
         {
           "name": "experimental_enable_registry_skills",
           "kind": "bool",
-          "description": "Experimental: pull workspace skills from the Mistral AI Registry (api.mistral.ai) and make them available alongside local skills. Requires a Mistral provider and API key. Local skills take precedence on name collision.",
+          "description": "Experimental: pull shared workspace skills from Mistral (api.mistral.ai) and make them available alongside local skills. Requires a Mistral provider and API key. On a name collision the project's skills win over global ones, skill_paths included, and within a scope a local skill wins over a shared one. Builtin skills are named vibe:<name>, so they never collide.",
           "value": false,
           "path": "/experimental_enable_registry_skills",
           "popular": false,

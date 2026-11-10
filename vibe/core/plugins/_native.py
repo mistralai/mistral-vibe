@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import logging
@@ -59,6 +59,7 @@ from vibe.core.plugins._compatibility import (
 )
 from vibe.core.plugins._content import digest_plugin_tree
 from vibe.core.plugins._diagnostics import PluginDiagnosticCode
+from vibe.core.plugins._enablement import is_plugin_enabled
 from vibe.core.plugins._foreign import OpenCodePluginAdapter
 from vibe.core.plugins._kimi import KimiPluginAdapter
 from vibe.core.skills.models import (
@@ -243,6 +244,7 @@ class _VibePluginExtension(BaseModel):
     volumes: list[_PluginVolume] = Field(
         default_factory=list, max_length=_MAX_PLUGIN_VOLUMES
     )
+    default_enabled: bool = Field(default=True, alias="defaultEnabled")
 
     @field_validator("starter_prompt", mode="before")
     @classmethod
@@ -478,6 +480,8 @@ class PluginDescriptor:
     author: str | None = None
     # Presentation only (ai.mistral.vibe extension); `name` stays the identity.
     display_name: str | None = None
+    # Off until listed in ``enabled_plugins`` (ai.mistral.vibe extension).
+    default_enabled: bool = True
 
     @property
     def component_prefix(self) -> str:
@@ -556,6 +560,8 @@ class ResolvedPluginSet:
     connectors: tuple[PluginConnectorDefinition, ...]
     issues: tuple[PluginConfigIssue, ...]
     unsupported_components: tuple[PluginUnsupportedComponent, ...] = ()
+    # Every plugin found, loaded or not, each with only its own components.
+    installed: tuple[InstalledPlugin, ...] = ()
 
     @classmethod
     def empty(cls) -> ResolvedPluginSet:
@@ -581,8 +587,17 @@ class PluginUnsupportedComponent:
     reason: str
 
 
+type InstalledPluginStatus = Literal["loaded", "disabled", "collides"]
+
+
 @dataclass(frozen=True, slots=True)
-class _PluginCandidate:
+class InstalledPlugin:
+    """A plugin as found on disk, with the components it alone declares.
+
+    ``disabled``: the config turns it off. ``collides``: it is on, but shares
+    its namespace with another plugin that is on, so neither loads.
+    """
+
     descriptor: PluginDescriptor
     skills: Mapping[str, SkillInfo]
     mcp_servers: tuple[PluginMCPServerDefinition, ...]
@@ -592,6 +607,7 @@ class _PluginCandidate:
     libraries: tuple[PluginLibraryDefinition, ...]
     connectors: tuple[PluginConnectorDefinition, ...]
     manifest_path: Path
+    status: InstalledPluginStatus = "loaded"
 
 
 class PluginResolver:
@@ -605,7 +621,11 @@ class PluginResolver:
         plugin_scopes: Mapping[Path, SkillScope] | None = None,
         data_root_base: Path | None = None,
         config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
+        apply_switches: bool = True,
     ) -> None:
+        """``apply_switches=False`` keeps every plugin on: a pinned set was already
+        filtered when it was pinned, and the lock is what the session runs.
+        """
         self._project_roots = tuple(project_roots)
         self._user_roots = tuple(user_roots)
         self._builtin_roots = tuple(builtin_roots)
@@ -616,6 +636,7 @@ class PluginResolver:
         self._plugin_scopes = dict(plugin_scopes) if plugin_scopes is not None else {}
         self._data_root_base = data_root_base
         self._config_orchestrator = config_orchestrator
+        self._apply_switches = apply_switches
         self._issues: list[PluginConfigIssue] = []
         self._unsupported_components: list[PluginUnsupportedComponent] = []
 
@@ -674,8 +695,13 @@ class PluginResolver:
         builtin = self._load_scope(
             [*named[SkillScope.BUILTIN], *self._builtin_plugin_dirs], SkillScope.BUILTIN
         )
-        selected = self._select_by_precedence(project, user, builtin)
-        selected = self._remove_namespace_collisions(selected)
+        installed = self._with_status(
+            self._select_by_precedence(project, user, builtin)
+        )
+        resolved = self._merge([p for p in installed if p.status == "loaded"])
+        return replace(resolved, installed=tuple(installed))
+
+    def _merge(self, selected: Sequence[InstalledPlugin]) -> ResolvedPluginSet:
         plugins = tuple(
             sorted(
                 (candidate.descriptor for candidate in selected), key=lambda p: p.name
@@ -789,7 +815,7 @@ class PluginResolver:
 
     def _load_scope(
         self, plugin_dirs: Sequence[Path], scope: SkillScope
-    ) -> list[_PluginCandidate]:
+    ) -> list[InstalledPlugin]:
         candidates = [
             candidate
             for plugin_dir in plugin_dirs
@@ -816,7 +842,7 @@ class PluginResolver:
 
     def _load_plugin(
         self, plugin_dir: Path, scope: SkillScope
-    ) -> _PluginCandidate | None:
+    ) -> InstalledPlugin | None:
         try:
             root = plugin_dir.resolve(strict=True)
         except OSError as error:
@@ -894,7 +920,7 @@ class PluginResolver:
 
     def _load_native_plugin(
         self, root: Path, scope: SkillScope
-    ) -> _PluginCandidate | None:
+    ) -> InstalledPlugin | None:
         manifest_path = root / "plugin.json"
         try:
             resolved_manifest = manifest_path.resolve(strict=True)
@@ -981,13 +1007,16 @@ class PluginResolver:
                 manifest.author.name if manifest.author is not None else None
             ),
             display_name=extension.display_name if extension is not None else None,
+            default_enabled=extension.default_enabled
+            if extension is not None
+            else True,
         )
         skills = self._load_skills(descriptor)
         mcp_servers = self._load_mcp_servers(descriptor)
         runtime_hooks = self._load_runtime_hooks(descriptor, extension)
         knowledge = self._load_knowledge(descriptor, extension)
         agents = self._load_agents(descriptor, extension)
-        return _PluginCandidate(
+        return InstalledPlugin(
             descriptor=descriptor,
             skills=MappingProxyType(skills),
             mcp_servers=mcp_servers,
@@ -1004,7 +1033,7 @@ class PluginResolver:
         root: Path,
         package: AdaptedPluginPackage,
         unsupported: Sequence[AdaptedUnsupportedComponent],
-    ) -> _PluginCandidate | None:
+    ) -> InstalledPlugin | None:
         if package.namespace in _RESERVED_NAMESPACES:
             self._issues.append(
                 PluginConfigIssue(
@@ -1067,7 +1096,7 @@ class PluginResolver:
         )
         skills = self._load_skills_from_roots(descriptor, package.skill_roots)
         skills.update(self._load_adapted_skills(descriptor, package.adapted_skills))
-        return _PluginCandidate(
+        return InstalledPlugin(
             descriptor=descriptor,
             skills=MappingProxyType(skills),
             mcp_servers=self._adapt_mcp_servers(descriptor, package.mcp_servers),
@@ -2018,12 +2047,12 @@ class PluginResolver:
         )
 
     def _remove_same_scope_duplicates(
-        self, candidates: Sequence[_PluginCandidate]
-    ) -> list[_PluginCandidate]:
-        by_name: dict[str, list[_PluginCandidate]] = defaultdict(list)
+        self, candidates: Sequence[InstalledPlugin]
+    ) -> list[InstalledPlugin]:
+        by_name: dict[str, list[InstalledPlugin]] = defaultdict(list)
         for candidate in candidates:
             by_name[candidate.descriptor.name].append(candidate)
-        selected: list[_PluginCandidate] = []
+        selected: list[InstalledPlugin] = []
         for name, matches in by_name.items():
             if len(matches) == 1:
                 selected.append(matches[0])
@@ -2039,10 +2068,10 @@ class PluginResolver:
 
     @staticmethod
     def _select_by_precedence(
-        project: Sequence[_PluginCandidate],
-        user: Sequence[_PluginCandidate],
-        builtin: Sequence[_PluginCandidate] = (),
-    ) -> list[_PluginCandidate]:
+        project: Sequence[InstalledPlugin],
+        user: Sequence[InstalledPlugin],
+        builtin: Sequence[InstalledPlugin] = (),
+    ) -> list[InstalledPlugin]:
         project_by_name = {
             candidate.descriptor.name: candidate for candidate in project
         }
@@ -2061,19 +2090,27 @@ class PluginResolver:
             )
         ]
 
-    def _remove_namespace_collisions(
-        self, candidates: Sequence[_PluginCandidate]
-    ) -> list[_PluginCandidate]:
-        by_namespace: dict[str, list[_PluginCandidate]] = defaultdict(list)
-        for candidate in candidates:
-            by_namespace[candidate.descriptor.namespace].append(candidate)
-        selected: list[_PluginCandidate] = []
+    def _with_status(self, plugins: Sequence[InstalledPlugin]) -> list[InstalledPlugin]:
+        config = (
+            self._config_orchestrator.config
+            if self._config_orchestrator is not None and self._apply_switches
+            else None
+        )
+        on = [
+            plugin
+            for plugin in plugins
+            if config is None or is_plugin_enabled(plugin.descriptor, config)
+        ]
+        by_namespace: dict[str, list[InstalledPlugin]] = defaultdict(list)
+        for plugin in on:
+            by_namespace[plugin.descriptor.namespace].append(plugin)
+        colliding: set[str] = set()
         for namespace, matches in by_namespace.items():
             if len(matches) == 1:
-                selected.append(matches[0])
                 continue
             names = ", ".join(sorted(match.descriptor.name for match in matches))
             for match in matches:
+                colliding.add(match.descriptor.name)
                 self._issues.append(
                     PluginConfigIssue(
                         file=match.manifest_path,
@@ -2082,7 +2119,17 @@ class PluginResolver:
                         ),
                     )
                 )
-        return selected
+        return [
+            replace(
+                plugin,
+                status="disabled"
+                if plugin not in on
+                else "collides"
+                if plugin.descriptor.name in colliding
+                else "loaded",
+            )
+            for plugin in plugins
+        ]
 
 
 NativePluginResolver = PluginResolver

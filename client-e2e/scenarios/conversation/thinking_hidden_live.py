@@ -17,8 +17,6 @@ handshake = {
     "runtime/read": {"runtime": {"config": {"showThinkingNodes": True}}},
 }
 
-capture_steps = {1, 2}
-
 # The update carries the fixture runtime, where `showThinkingNodes` is false.
 timeline: Timeline = [
     "think about it\r",

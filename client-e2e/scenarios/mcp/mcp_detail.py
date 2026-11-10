@@ -7,8 +7,8 @@ from e2e.app_server.mcp import (
     handshake as mcp_handshake,
     sample_sources,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = mcp_handshake(sample_sources(), discovery_errors=SAMPLE_DISCOVERY_ERRORS)
 
-timeline: Timeline = ["/mcp\r", "\r", "\x1b"]
+timeline: Timeline = ["/mcp\r", "\r", "\x1b", take_snapshot()]

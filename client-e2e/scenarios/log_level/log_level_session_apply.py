@@ -6,7 +6,6 @@ from e2e.app_server.scenario import Timeline
 
 _ESCAPE = "\x1b[27u"
 
-capture_startup = False
 request_methods = {"config/write"}
 
 # From WARNING, Down to ERROR, set the session badge, apply, then reopen.

@@ -35,7 +35,6 @@ handshake = {
 }
 
 request_methods = {"telemetry/record"}
-capture_startup = False
 screen_excludes = ("Retry the last failing check.",)
 
 timeline: Timeline = [

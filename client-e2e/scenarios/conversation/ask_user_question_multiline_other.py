@@ -15,8 +15,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18}
 request_methods = {"callback/result"}
 
 _QUESTION = "Which database should we use for this project?"

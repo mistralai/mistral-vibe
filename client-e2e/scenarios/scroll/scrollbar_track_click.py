@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 
 def _tall_reply(tag: str, lines: int) -> str:
@@ -31,10 +31,12 @@ def _release(row: int) -> str:
 timeline: Timeline = [
     *_turn("hi", _tall_reply("a", 24)),
     *_turn("more", _tall_reply("b", 24)),
+    take_snapshot(),
     _press(3) + _release(3),
+    take_snapshot(),
     _press(3),
+    take_snapshot(),
     _release(3),
     _press(30) + _release(30),
+    take_snapshot(),
 ]
-
-capture_steps = {1, 2, 3, 5}

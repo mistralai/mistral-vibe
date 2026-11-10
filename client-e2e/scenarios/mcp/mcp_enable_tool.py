@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.mcp import connector, handshake as mcp_handshake, server, tool
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _TOOLS = [
     tool("create_issue", "Open a GitHub issue", enabled=False),
@@ -22,4 +22,4 @@ _TOGGLED = [
 
 handshake = mcp_handshake(_SOURCES, toggled=_TOGGLED)
 
-timeline: Timeline = ["/mcp github_app\r", "e"]
+timeline: Timeline = ["/mcp github_app\r", "e", take_snapshot()]

@@ -695,10 +695,10 @@ def test_self_wait_label_hides_the_raw_tool_key() -> None:
     assert isinstance(projected, PublicEffectEntry)
     assert isinstance(projected.detail, GenericEffectDetail)
     assert projected.detail.display.verb == "Waiting"
-    assert projected.detail.display.message == "for input"
+    assert projected.detail.display.message == "for background work"
     assert isinstance(projected.state, CompletedEffectState)
     assert projected.state.display.verb == "Waited"
-    assert projected.state.display.message == "for input"
+    assert projected.state.display.message == "for background work"
 
 
 @pytest.mark.parametrize(

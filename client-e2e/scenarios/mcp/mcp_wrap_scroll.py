@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.mcp import connector, handshake as mcp_handshake, server, tool
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _SOURCES = [
     *(
@@ -18,4 +18,4 @@ handshake = mcp_handshake(_SOURCES)
 _UP = "\x1b[A"
 _DOWN = "\x1b[B"
 
-timeline: Timeline = ["/mcp\r", _UP, _DOWN]
+timeline: Timeline = ["/mcp\r", _UP, _DOWN, take_snapshot()]

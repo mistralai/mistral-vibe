@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The harness exports MISTRAL_API_KEY=fake-key; an empty override turns the
 # local probe negative, so the pre-loop round paints the welcome screen and
@@ -33,4 +33,4 @@ handshake = {
     }
 }
 request_methods = {"initialize", "setup/status", "session/start"}
-timeline: Timeline = []
+timeline: Timeline = [take_snapshot()]

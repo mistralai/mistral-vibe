@@ -5,8 +5,6 @@ from __future__ import annotations
 from e2e.app_server.events import turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-capture_startup = False
-
 _PROMPT = "write the migration"
 
 timeline: Timeline = [f"{_PROMPT}\r", turn_started(), user_msg(_PROMPT), "déjà"]

@@ -55,6 +55,9 @@ pub enum MouseTarget {
     BottomApp,
     Mcp,
     Plugins,
+    Skills,
+    /// The body under the `/skills` rows, scrolled on its own.
+    SkillsBody,
     McpOAuth,
     ConnectorAuth,
     DebugConsole,
@@ -260,6 +263,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         MouseTarget::ArtifactsModal => crate::artifacts_modal::navigate(app, !up),
         MouseTarget::ResumePicker => resume_picker::wheel(app, !up),
         MouseTarget::Mcp
+        | MouseTarget::Skills
         | MouseTarget::Config
         | MouseTarget::SubagentList
         | MouseTarget::Question => {
@@ -268,6 +272,9 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
             }
         }
         MouseTarget::Plugins => crate::plugins::wheel(app, !up),
+        MouseTarget::SkillsBody => {
+            crate::skills_browser::wheel_body(app, !up, MOUSE_SCROLL_STEP as usize)
+        }
         MouseTarget::ReleaseNotes => crate::release_notes::wheel(app, !up),
         MouseTarget::ProxySetup => app.proxy_setup.wheel(up, MOUSE_SCROLL_STEP as usize),
         MouseTarget::ConfigEditor => crate::config_edit::wheel(app, if up { -1 } else { 1 }),

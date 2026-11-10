@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from e2e.app_server.context import stats_updated
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"VIBE_THEME": "mistral-dark"}
 handshake = {
@@ -24,7 +24,10 @@ timeline: Timeline = [
     assistant_msg("Hi there."),
     stats_updated(),
     turn_completed(),
+    take_snapshot(),
     _HOVER_GAUGE,
+    take_snapshot(),
     _HOVER_MODEL,
+    take_snapshot(),
 ]
 screen_contains = ("42.3k/200k",)

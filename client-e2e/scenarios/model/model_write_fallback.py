@@ -5,7 +5,6 @@ from __future__ import annotations
 from e2e.app_server.scenario import Timeline
 from scenarios.model._session import session_handshake
 
-capture_startup = False
 request_methods = {"config/reload"}
 handshake = {
     **session_handshake(),

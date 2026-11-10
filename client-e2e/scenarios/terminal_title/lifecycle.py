@@ -16,9 +16,6 @@ handshake = {
     "session/start": {"state": {"session": {"title": "Saved implementation"}}},
 }
 
-# Preview rows have wall-clock ages; capture the committed sessions instead.
-capture_steps = {0, 3}
-
 timeline: Timeline = [
     "hi\r",
     turn_started(),
@@ -31,4 +28,10 @@ timeline: Timeline = [
     "\r",
 ]
 
-expected_titles = ("Saved implementation", "Current task", "Saved implementation")
+expected_titles = (
+    "Saved implementation",
+    "Current task",
+    "Current task",
+    "Current task",
+    "Saved implementation",
+)

@@ -5,6 +5,15 @@ from e2e.app_server.scenario import Timeline
 timeline: Timeline = ["/whoami\r"]
 
 request_methods = {"providerAuth/read"}
+screen_contains = (
+    "Name: Ada Lovelace",
+    "Email: ada@example.com",
+    "Workspace: Analytical Engine",
+    "Organization: Mistral",
+    "Plan: Team",
+    "API key: ****wxyz",
+    "Access scope: shared_only",
+)
 
 handshake = {
     "identity/read": {

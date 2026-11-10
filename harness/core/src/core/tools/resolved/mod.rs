@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 mod assembly;
 mod contracts;
@@ -252,6 +252,15 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
                 ));
             }
             let qualified_name = provided_tool_qualified_name(&group.name, &tool.name);
+            if type_is_not_object(&tool.input_schema) {
+                return Err(CoreError::invalid_configuration(
+                    "tool_groups",
+                    format!(
+                        "tool {qualified_name:?}: input schema type must be \"object\", got {}",
+                        tool.input_schema
+                    ),
+                ));
+            }
             if !qualified_names.insert(qualified_name.clone()) {
                 return Err(CoreError::invalid_configuration(
                     "tool_groups",
@@ -295,6 +304,121 @@ fn validate_tool_groups(config: &HarnessConfig) -> Result<(), CoreError> {
         }
     }
     Ok(())
+}
+
+/// A tool call's arguments are an object, and the MCP specification requires a
+/// tool's `inputSchema` to have `"type": "object"`. So a tool whose input schema
+/// sets top-level types other than `object` is refused: by its `type`, by the
+/// branches of an `anyOf` or `oneOf` (also nested), or by a local `$ref` (`#/…`),
+/// which is read in place of the keywords next to it. `{"type": "string"}`,
+/// `{"type": ["object", "null"]}` and `{"anyOf": [{"type": "string"}, {"type":
+/// "object"}]}` are refused. A schema that sets no type, such as `{}`, passes,
+/// and so does a `$ref` that does not resolve in the schema.
+/// The Runtimes drop a tool that an MCP server or a connector lists with such a
+/// schema by the same rule; `fixtures/tool-input-schema-types.json` holds the
+/// cases they all check.
+fn type_is_not_object(schema: &Value) -> bool {
+    TopLevelTypes::new(schema)
+        .of(schema)
+        .is_some_and(|types| types != ["object"])
+}
+
+/// The types a schema allows at its top level, sorted, or `None` when it sets
+/// none. Each local `$ref` target is read once, so a schema that refers to the
+/// same target many times, as an `anyOf` of two `$ref` per level does, takes
+/// time in its size, not exponential in its depth. A `$ref` to a target that is
+/// being read is a cycle, and sets no type. The branches of an `anyOf` or
+/// `oneOf` are read until the first one that sets no type.
+struct TopLevelTypes<'a> {
+    /// The whole schema, against which a local `$ref` resolves.
+    root: &'a Value,
+    /// The pointers of the `$ref` targets being read, the root first.
+    reading: Vec<&'a str>,
+    /// The types of each `$ref` target already read.
+    read: HashMap<&'a str, Option<Vec<String>>>,
+}
+
+impl<'a> TopLevelTypes<'a> {
+    /// A `$ref` chain longer than this sets no type.
+    const MAX_REF_DEPTH: usize = 32;
+
+    fn new(root: &'a Value) -> Self {
+        Self {
+            root,
+            reading: vec![""],
+            read: HashMap::new(),
+        }
+    }
+
+    fn of(&mut self, schema: &'a Value) -> Option<Vec<String>> {
+        let schema = schema.as_object()?;
+        if let Some(reference) = schema.get("$ref") {
+            return self.of_ref(reference);
+        }
+        let mut types = match schema.get("type") {
+            Some(Value::String(name)) => Some(vec![name.clone()]),
+            Some(Value::Array(names)) if !names.is_empty() => Some(
+                names
+                    .iter()
+                    .map(|name| name.as_str().unwrap_or_default().to_string())
+                    .collect(),
+            ),
+            _ => None,
+        };
+        for keyword in ["anyOf", "oneOf"] {
+            let Some(branches) = schema.get(keyword).and_then(Value::as_array) else {
+                continue;
+            };
+            if branches.is_empty() {
+                continue;
+            }
+            let mut union: Vec<String> = Vec::new();
+            let mut all_typed = true;
+            for branch in branches {
+                let Some(found) = self.of(branch) else {
+                    all_typed = false;
+                    break;
+                };
+                union.extend(found);
+            }
+            if !all_typed {
+                continue;
+            }
+            types = Some(match types {
+                Some(types) => types
+                    .into_iter()
+                    .filter(|name| union.contains(name))
+                    .collect(),
+                None => union,
+            });
+        }
+        types.map(|mut types| {
+            types.sort();
+            types.dedup();
+            types
+        })
+    }
+
+    fn of_ref(&mut self, reference: &'a Value) -> Option<Vec<String>> {
+        let pointer = reference.as_str()?.strip_prefix('#')?;
+        if self.reading.contains(&pointer) || self.reading.len() > Self::MAX_REF_DEPTH {
+            return None;
+        }
+        if let Some(types) = self.read.get(pointer) {
+            return types.clone();
+        }
+        let types = match self.root.pointer(pointer) {
+            Some(target) => {
+                self.reading.push(pointer);
+                let types = self.of(target);
+                self.reading.pop();
+                types
+            }
+            None => None,
+        };
+        self.read.insert(pointer, types.clone());
+        types
+    }
 }
 
 fn build_top_level_tools(config: &HarnessConfig) -> Vec<ToolDefinition> {

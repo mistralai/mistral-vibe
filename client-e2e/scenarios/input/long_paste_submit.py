@@ -61,8 +61,6 @@ handshake = {
     }
 }
 
-capture_startup = False
-capture_steps = {1, 2, 3}
 screen_contains = ("> summarize [Pasted 74 characters]", "Twelve rows.")
 screen_excludes = ("row 5",)
 

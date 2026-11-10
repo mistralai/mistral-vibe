@@ -563,7 +563,9 @@ def session_open_error(outcome: RunOutcome, message: str) -> SessionBackendError
         if outcome is RunOutcome.USAGE_ERROR
         else ProtocolErrorCode.INTERNAL_ERROR
     )
-    return SessionBackendError(code, message, {OUTCOME_ERROR_FIELD: outcome.value})
+    return SessionBackendError(
+        code, message, {OUTCOME_ERROR_FIELD: outcome.value}, expected=True
+    )
 
 
 class AgentSocketMount:

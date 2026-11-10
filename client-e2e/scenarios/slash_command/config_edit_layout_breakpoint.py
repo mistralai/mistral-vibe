@@ -28,7 +28,6 @@ handshake = {
     }
 }
 
-capture_startup = False
 screen_contains = ("Ctrl+S save", "Vision-capable model")
 screen_excludes = ("Enlarge terminal",)
 timeline: Timeline = [resize(24, 73), "/config\r", "\r", resize(24, 74)]

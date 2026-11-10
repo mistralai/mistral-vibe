@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 import json
 import sys
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 
 class InvalidJsonRpcMessage(RuntimeError):
@@ -17,6 +17,13 @@ class JsonRpcTransport(Protocol):
     def messages(self) -> AsyncIterator[dict[str, Any]]: ...
 
     async def close(self) -> None: ...
+
+
+@runtime_checkable
+class ClientLossAwareTransport(Protocol):
+    """A transport that can end while its client is still there."""
+
+    client_lost: bool
 
 
 class BinaryLineReader(Protocol):

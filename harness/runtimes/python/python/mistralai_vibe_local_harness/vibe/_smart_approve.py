@@ -263,6 +263,7 @@ async def classify_tool_call(
                 max_output_tokens=None,
                 reasoning=_classifier_reasoning(config.active_model, classify_model),
                 request_thinking=REASONING_LOWEST,
+                pricing=config.classifier_pricing,
             ),
         )
     )

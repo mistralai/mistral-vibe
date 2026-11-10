@@ -10,7 +10,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 timeline: Timeline = [
     "hello\r",
@@ -23,4 +23,5 @@ timeline: Timeline = [
     turn_started(),
     assistant_msg("Hi there."),
     turn_completed(),
+    take_snapshot(),
 ]

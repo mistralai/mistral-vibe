@@ -24,6 +24,17 @@ impl Client {
     /// frame to the returned receiver, so a test can assert what reached the wire.
     #[doc(hidden)]
     pub fn stub_answering() -> (Self, mpsc::UnboundedReceiver<Value>) {
+        Self::stub_recording(true)
+    }
+
+    /// A `Client` that never answers, handing each written frame to the returned receiver.
+    #[doc(hidden)]
+    pub fn stub_silent() -> (Self, mpsc::UnboundedReceiver<Value>) {
+        Self::stub_recording(false)
+    }
+
+    /// A `Client` handing each written frame to the returned receiver, and answering every request with `null` when `answering`.
+    fn stub_recording(answering: bool) -> (Self, mpsc::UnboundedReceiver<Value>) {
         let (to_writer, mut writer_rx) = mpsc::unbounded_channel::<Option<String>>();
         let (frames_tx, frames_rx) = mpsc::unbounded_channel();
         let pending = Pending::default();
@@ -36,6 +47,7 @@ impl Client {
                 let responder = frame
                     .get("id")
                     .and_then(Value::as_u64)
+                    .filter(|_| answering)
                     .and_then(|id| answers.take(id));
                 let _ = frames_tx.send(frame);
                 if let Some(responder) = responder {

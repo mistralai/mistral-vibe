@@ -234,6 +234,10 @@ pub struct Session {
     pub usage_baseline: Option<crate::server::TokenUsage>,
     /// The latest `runtime` value, for views that read it after the event.
     pub runtime: Value,
+    /// How many of the session's background processes run, from its latest state.
+    pub running_processes: usize,
+    /// What a running `wait` waits for, when the subagents and tasks name it.
+    pub wait_target: Option<String>,
 }
 
 /// Transcript rendering state: content, scroll, per-entry caches, and chrome.
@@ -282,6 +286,8 @@ pub struct View {
     /// Bottom-app box `(y, x0, x1)` cells painted as chrome (question option
     /// prefixes, scrollbars), so a selection never highlights or copies them.
     pub bottom_app_selection_chrome: Vec<RowSpan>,
+    /// A box split in halves: the columns of its left and right half a selection keeps to, by the half its anchor is in.
+    pub bottom_app_selection_halves: Option<(Rect, Rect)>,
     /// Bottom-app box rows that continue a wrapped line, so a copy rejoins them.
     pub bottom_app_selection_folds: crate::selection::Folds,
     /// The bottom app drawn last frame and its box rect, which own the box selection.
@@ -341,7 +347,7 @@ impl Default for View {
         let mut loading = LoadingAnim::default();
         loading.set_label(ui::loading::INITIALIZING_LOADING_STATUS);
         Self {
-            transcript: Transcript::default(),
+            transcript: Transcript::main(),
             scroll: 0,
             scroll_target: 0,
             last_total: 0,
@@ -361,6 +367,7 @@ impl Default for View {
             loading_selection_region: Region::default(),
             bottom_app_selection_region: Region::default(),
             bottom_app_selection_chrome: Vec::new(),
+            bottom_app_selection_halves: None,
             bottom_app_selection_folds: crate::selection::Folds::default(),
             bottom_app: None,
             bottom_bar_links: Vec::new(),
@@ -838,6 +845,7 @@ pub struct App {
     pub question_app: QuestionApp,
     pub mcp: MCPApp,
     pub plugins: crate::plugins::State,
+    pub skills_browser: crate::skills_browser::State,
     /// The `/context` bottom app.
     pub context_app: crate::context_app::State,
     pub mcp_oauth: MCPOAuthApp,
@@ -904,6 +912,9 @@ impl App {
             self.session.artifacts_session = None;
             self.session.artifacts_unseen.clear();
             crate::artifacts_modal::close(self);
+            // The old session's background work is not the new one's.
+            self.session.running_processes = 0;
+            self.session.wait_target = None;
         }
         // The console's poll task reads the current id on every tick.
         if let Some(session_tx) = &self.debug_console.session_tx {

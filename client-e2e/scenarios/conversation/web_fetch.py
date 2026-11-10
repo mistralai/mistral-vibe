@@ -10,7 +10,7 @@ from e2e.app_server.events import (
     web_fetch,
     web_fetch_without_output,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "fetch the articles"
 
@@ -33,4 +33,5 @@ timeline: Timeline = [
     turn_completed(),
     _EXPAND,
     _EXPAND_ENTRY,
+    take_snapshot(),
 ]

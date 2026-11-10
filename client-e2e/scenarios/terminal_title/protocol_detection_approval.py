@@ -13,7 +13,6 @@ from e2e.app_server.scenario import Timeline
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "VIBE_INPUT_GRACE_PERIOD_MS": "0"}
 terminal_responses = {"\x1b]7501;?\x1b\\": "\x1b]7501;?\x1b\\"}
 handshake = {"callback/result": {"accepted": True}}
-capture_steps = {1, 2, 3, 4, 5, 6}
 
 timeline: Timeline = [
     "hi\r",
@@ -29,4 +28,4 @@ timeline: Timeline = [
     "1",
 ]
 
-expected_titles = ("Vibe",) * 7
+expected_titles = ("Vibe", "Vibe", "Vibe", "Vibe", "Vibe", "Vibe", "Vibe", "Vibe")

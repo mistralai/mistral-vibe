@@ -34,6 +34,8 @@ pub(super) fn dispatch(
         MouseTarget::Approval => approval::handle_mouse(app, client, event),
         MouseTarget::Mcp => mcp::mouse(app, event),
         MouseTarget::Plugins => crate::plugins::mouse(app, event),
+        MouseTarget::Skills => crate::skills_browser::mouse(app, client, event),
+        MouseTarget::SkillsBody => bottom_app_event(app, event, |_, _| {}),
         MouseTarget::ReleaseNotes => crate::release_notes::mouse(app, event),
         MouseTarget::McpOAuth => {
             if picked(app, event, |app| &mut app.mcp_oauth.list) {
@@ -150,6 +152,7 @@ pub(crate) fn option_list(app: &mut App, target: MouseTarget) -> Option<&mut dyn
         MouseTarget::ResumePicker => &mut app.resume_picker.list,
         MouseTarget::Mcp => &mut app.mcp.list,
         MouseTarget::Plugins => &mut app.plugins.list,
+        MouseTarget::Skills => crate::skills_browser::visible_list(&mut app.skills_browser),
         MouseTarget::Config => &mut app.config_screen.list,
         MouseTarget::ConfigEditor => &mut app.config_screen.edit.as_mut()?.list,
         MouseTarget::Question => &mut app.question_app.list,

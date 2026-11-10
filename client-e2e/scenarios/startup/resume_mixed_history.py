@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, read_file, user_msg
-from e2e.app_server.scenario import AppServerEvent, Timeline
+from e2e.app_server.scenario import AppServerEvent, Timeline, take_snapshot
 
 _SAVED = "00000000-0000-4000-8000-000000000003"
 _CTRL_O = "\x0f"
@@ -29,7 +29,7 @@ handshake = {"session/resume": {"state": {"history": _HISTORY}}}
 client_args = ("--resume", _SAVED)
 
 # Ctrl+O unfolds the resumed tool call so its output is on screen.
-timeline: Timeline = [_CTRL_O]
+timeline: Timeline = [_CTRL_O, take_snapshot()]
 
 screen_contains = (
     "Hello, how are you?",

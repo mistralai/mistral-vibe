@@ -33,6 +33,7 @@ from typing import (
     Protocol,
     assert_never,
     cast,
+    get_args,
 )
 from uuid import uuid4
 
@@ -111,6 +112,7 @@ from mistralai_vibe_local_harness.vibe import (
     RunningWorktreeHistoryEntry as HarnessRunningWorktreeHistoryEntry,
     SessionConfig,
     SessionWorkspace,
+    SharedCompletionBudget,
     TurnMentionStats as HarnessTurnMentionStats,
     TurnStartRequest as HarnessTurnStartRequest,
     UnifiedHarnessSessionBackend,
@@ -149,7 +151,7 @@ from vibe.app_server._admin_config import (
 from vibe.app_server._approval_permissions import approval_grant_permissions
 from vibe.app_server._auto_approve_option import resolve_start_auto_approve
 from vibe.app_server._cached_layers import oidc_tenant_unresolved
-from vibe.app_server._client_provided_tools import ClientProvidedTools, ClientToolCaller
+from vibe.app_server._client_provided_tools import ClientToolCaller, ClientToolExecutor
 from vibe.app_server._completion_attribution import (
     CompletionAffinityHolder,
     CompletionAttributionHolder,
@@ -241,6 +243,7 @@ from vibe.app_server._loop_prompt import (
 )
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._model import ProtocolModel, validate_backend_wire, validate_wire
+from vibe.app_server._model_catalog_service import ModelCatalogKey, ModelCatalogService
 from vibe.app_server._narration import NarrationContext, NarrationService
 from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigKey, OrgConfigService
@@ -252,6 +255,7 @@ from vibe.app_server._plugins import (
     SessionPlugins,
     UnifiedPluginProvider,
     pinned_plugin_hook,
+    plugin_change_context,
     plugin_hook_signature,
     plugin_reload_notices,
 )
@@ -273,6 +277,7 @@ from vibe.app_server._provided_tools import (
 )
 from vibe.app_server._provider_auth import read_provider_auth
 from vibe.app_server._pull_request_cache import Read, ReadFailure, pull_request_cache
+from vibe.app_server._registry_skill_sync import RegistrySkillSync
 from vibe.app_server._remote_follower import FollowedValue, RemoteFollower
 from vibe.app_server._review import ReviewRequestHandler
 from vibe.app_server._root_session import rebind_history_with_checkpoint
@@ -373,10 +378,18 @@ from vibe.app_server._skill_invocation import (
     with_skill_invocation_display,
     without_skill_invocation_display,
 )
+from vibe.app_server._skill_store_cleanup import SkillStoreCleanup
 from vibe.app_server._skill_watch import (
     SkillWatchRoots,
     skill_watch_roots,
     watch_skill_changes,
+)
+from vibe.app_server._skills import (
+    RegistryVersions,
+    host_skills,
+    installed_session_skills,
+    resolve_session_skills,
+    resolved_registry_versions,
 )
 from vibe.app_server._skills_service import SkillsController
 from vibe.app_server._state import history_page
@@ -472,6 +485,7 @@ from vibe.app_server.models import (
     ApprovalDecisionType,
     ArchivedSessionStatus as VibeArchivedSessionStatus,
     BlockedSessionStatus as VibeBlockedSessionStatus,
+    BudgetStopReason,
     CompletedEffectState,
     ConnectorCounts,
     ContentBlock,
@@ -732,8 +746,8 @@ from vibe.core.config.layer import ConfigStorageError, LayerImplementationError
 from vibe.core.config.layers.admin import admin_layer
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.model_catalog import (
-    apply_cached_model_catalog,
-    apply_model_catalog,
+    ModelCatalogLayer,
+    set_catalog_and_reload,
 )
 from vibe.core.config.layers.overrides import OverridesLayer
 from vibe.core.config.models import ModelConfig
@@ -757,7 +771,6 @@ from vibe.core.loop import LoopError
 from vibe.core.model_catalog import (
     ModelCatalogResponse,
     ModelCatalogWait,
-    fetch_and_cache_model_catalog,
     model_catalog_wait_needed,
 )
 from vibe.core.proxy_setup import (
@@ -778,7 +791,7 @@ from vibe.core.session.saved_sessions import (
     update_saved_session_pin,
 )
 from vibe.core.session.session_loader import METADATA_FILENAME, SessionLoader
-from vibe.core.skills.manager import SkillManager
+from vibe.core.skills.registry import refresh_registry_skills
 from vibe.core.telemetry.send import (
     SubagentOperation,
     SubagentOutcome,
@@ -794,7 +807,9 @@ from vibe.core.types import (
     SessionMetadata,
     SessionProject,
 )
+from vibe.core.utils.concurrency import cancel_pending
 from vibe.observability.logging import logger
+from vibe.observability.sentry import capture_cli_exception
 from vibe.setup.auth.whoami import WhoAmICache, WhoAmIResult, resolve_user_plan
 from vibe.user_content import UserDisplayContent
 from vibe.utils import AgentEntrypoint
@@ -802,10 +817,17 @@ from vibe.utils.io import FileSignature, file_signature, read_safe
 from vibe.utils.mcp import format_tool_display_description
 
 if TYPE_CHECKING:
+    from vibe.app_server._sandbox_skills import SandboxSessionSkills
+
     # The Session API path imports these where it uses them, so a Session on
     # the direct path does not pay for them at startup.
     from vibe.app_server._session_api_commands import SessionApiCommands
     from vibe.app_server._session_api_path import SessionApiPath
+
+
+def _report(exc: BaseException, boundary: str) -> None:
+    """Reports a swallowed failure that leaves session state inconsistent."""
+    capture_cli_exception(exc, tags={"vibe_boundary": f"session.{boundary}"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -836,6 +858,7 @@ class UnifiedRuntimeDerivation:
     core_config: RustHarnessConfig
     adapter_config: LocalRuntimeAdapterConfig
     skill_payloads: Mapping[str, str]
+    registry_versions: RegistryVersions
     # What compiling the active route's completion profile had to guess.
     profile_warnings: tuple[CompletionWarning, ...] = ()
     # The catalogue's answer for the active model, which the session saves.
@@ -1072,6 +1095,21 @@ class OrgConfigKeySlot:
 
 
 @dataclass(slots=True)
+class CompletionBudgetSlot:
+    """The run's cumulative completion budget, read by every derivation.
+
+    A context rebuilt for a live session adopts the slot of the one it replaces,
+    so spend recorded before the rebuild still counts and the root session and
+    its subagents keep one authority.
+    """
+
+    budget: SharedCompletionBudget | None = None
+
+    def adopt(self, other: CompletionBudgetSlot) -> None:
+        self.budget = other.budget
+
+
+@dataclass(slots=True)
 class WorkspaceSlot:
     """Where the session runs now, which ``enter_worktree`` moves mid-session.
 
@@ -1126,6 +1164,9 @@ class UnifiedSessionContext:
     mcp_enable_system_trust_store: bool
     org_config_service: OrgConfigService
     experiments_service: ExperimentsService
+    model_catalog_service: ModelCatalogService
+    skill_store: SkillStoreCleanup | None = None
+    """None in a process without a background worker."""
     mcp_authentication: MCPAuthenticationService = field(
         default_factory=MCPAuthenticationService
     )
@@ -1206,7 +1247,7 @@ class UnifiedSessionContext:
     # todo list the closures read. Frozen field, mutable object.
     vibe_tools: VibeProvidedTools = field(default_factory=VibeProvidedTools)
     # The tools a client of this process runs itself, if it serves any.
-    client_tools: ClientProvidedTools = field(default_factory=ClientProvidedTools)
+    client_tools: ClientToolExecutor = field(default_factory=ClientToolExecutor)
     # Each subagent's agent model calls, counted off the request-sent sink the
     # session shares with its subagents, for ``session/subagents/read``.
     subagent_steps: SubagentSteps = field(default_factory=SubagentSteps)
@@ -1232,6 +1273,13 @@ class UnifiedSessionContext:
     # What the build did with the org config, for the first session that runs
     # under this context to publish. Frozen field, mutable slot.
     org_config_report: OrgConfigReportSlot = field(default_factory=OrgConfigReportSlot)
+    sandbox_skills: SandboxSessionSkills | None = None
+    """So the skills a sandboxed session lists rank its project's own as its derivations
+    do.
+    """
+    completion_budget: CompletionBudgetSlot = field(
+        default_factory=CompletionBudgetSlot
+    )
 
 
 class SessionContextBuilder(Protocol):
@@ -1852,16 +1900,18 @@ class _UnifiedSkillsHost:
         return list(self._runtime().skills)
 
     def installed_skills(self) -> list[SkillSummary]:
-        """Registry pins (one per name+scope), local skills, and plugin skills."""
-        mgr = SkillManager(
-            config_getter=lambda: self._context.config_orchestrator.config,
+        """Every skill file and registry pin, one per name, scope and source, then
+        the plugin skills; each marked active when its name resolves to it, and
+        an active one shown in the version the session runs.
+        """
+        skills = installed_session_skills(
+            lambda: self._context.config_orchestrator.config,
             harness_files=self._context.harness_files,
+            sandbox=self._context.sandbox_skills,
         )
         orchestrator = self._context.config_orchestrator
         installed = project_installed_skill_summaries(
-            mgr.installed_skills(),
-            orchestrator.config,
-            writable_disabled_skills(orchestrator),
+            skills, orchestrator.config, writable_disabled_skills(orchestrator)
         )
         # The runtime snapshot already includes plugin skills (resolved by
         # ``project_core_skills``); merge in any that are not already present
@@ -2408,6 +2458,7 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
         except BaseException:
             await self._worktrees.cleanup(resolution)
             raise
+        await backend.reload_switched_plugins()
         await backend.seat_terminal(
             self._seat_for_session(seat, backend.cwd), record_now=True
         )
@@ -2476,6 +2527,7 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
         except BaseException:
             await self._worktrees.cleanup(resolution)
             raise
+        await backend.reload_switched_plugins()
         await backend.seat_terminal(seat, record_now=True)
         self._start_experiments(backend, after=self._launch_ready(backend))
         return SessionLifecycleResult(
@@ -2874,18 +2926,23 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
     async def _with_folder_projects(
         self, sessions: list[PublicSession], context: UnifiedReadContext
     ) -> list[PublicSession]:
-        """Each session no local project claims in a local project's exact folder, stamped with it."""
+        """Each session no local project claims in or under a local project's folder, stamped with it."""
+        # Only a session moved out explicitly is never matched by folder.
         if not any(
-            session.project is None or session.project.kind == "cloud"
+            session.project is None or session.project.kind != "none"
             for session in sessions
         ):
             return sessions
+        store = LocalProjectStore()
         try:
-            projects = await asyncio.to_thread(LocalProjectStore().list_projects)
+            projects = await asyncio.to_thread(store.list_projects)
+            project_ids = await asyncio.to_thread(store.project_ids)
         except LocalProjectStoreUnreadable:
             logger.warning("Sessions listed unstamped: local projects are unreadable")
             return sessions
-        stamps = await asyncio.to_thread(_folder_stamps, projects, sessions)
+        stamps = await asyncio.to_thread(
+            _folder_stamps, projects, project_ids, sessions
+        )
         if not stamps:
             return sessions
         # Without logging the storage root is a throwaway, not the saved sessions.
@@ -3679,6 +3736,7 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
             context, _ = await self._lifecycle_context(options, require_api_key=True)
             await self._restore_session_pins(session_id, context)
             if backend is not None:
+                context.completion_budget.adopt(backend._context.completion_budget)
                 await _run_carried_variants(backend._context, context)
             settings = (
                 backend._settings if backend is not None else UnifiedSessionSettings()
@@ -3783,7 +3841,7 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
             return
         try:
             context = source._context
-            derivation = await asyncio.to_thread(context.derive, source._settings)
+            derivation = await source.derive_configuration()
             self._host.configure_runtime(
                 derivation.core_config, adapter_config=derivation.adapter_config
             )
@@ -4435,7 +4493,7 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
         source_anchors = _user_entry_ids(
             (await source._read_state_containing(params.entry_id)).history or []
         )
-        derivation = source._context.derive(source._settings)
+        derivation = await source.derive_configuration()
         self._host.configure_runtime(
             derivation.core_config, adapter_config=derivation.adapter_config
         )
@@ -4556,7 +4614,7 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
                     ProtocolErrorCode.INTERNAL_ERROR,
                     f"Failed to clear session active model: {failures[0]}",
                 )
-        derivation = source._context.derive(source._settings)
+        derivation = await source.derive_configuration()
         self._host.configure_runtime(
             derivation.core_config, adapter_config=derivation.adapter_config
         )
@@ -4647,6 +4705,11 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
         source.end_with(SessionEndReason.CLEAR)
         return result
 
+    def mark_client_disconnected(self) -> None:
+        """Report the coming close of every session as a lost client."""
+        for adapter in self._adapters.values():
+            adapter._client_disconnected = True
+
     async def shutdown(self) -> None:
         self._open_sessions.unregister(self)
         # `session/stop` arrives here rather than at the session adapter, so a
@@ -4704,6 +4767,7 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
                 adapter._cancel_experiments_task()
                 adapter._cancel_mcp_discovery_task()
                 adapter._cancel_model_catalog_task()
+                adapter._cancel_registry_sync()
                 adapter._emit_session_closed_telemetry()
                 if adapter._relocation_trust_root is not None:
                     adapter._context.harness_files.trust_store.revoke_session_trust(
@@ -5046,6 +5110,7 @@ class UnifiedHarnessBackendHostAdapter:  # noqa: PLR0904 - implements app-server
                 backend.start_session_hooks(session_start)
             backend.start_scheduled_loops()
             backend.start_skill_watch()
+            backend.start_registry_sync()
             # Phase 2: discover pre-existing PRs/MRs in the background. The
             # open response is already on its way, so the UI renders the
             # conversation first and artifacts arrive later via notifications.
@@ -6826,6 +6891,23 @@ async def _run_carried_variants(
     await incoming.config_orchestrator.reload()
 
 
+def _catalog_layer_of(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+) -> ModelCatalogLayer | None:
+    try:
+        layer = orchestrator.get_layer(ModelCatalogLayer.NAME)
+    except KeyError:
+        return None
+    return layer if isinstance(layer, ModelCatalogLayer) else None
+
+
+def _catalog_of(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+) -> ModelCatalogResponse | None:
+    layer = _catalog_layer_of(orchestrator)
+    return layer.catalog if layer is not None else None
+
+
 def _raise_turn_took_over() -> Never:
     raise SessionBackendError(
         ProtocolErrorCode.CONFLICT,
@@ -7285,7 +7367,11 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         self._worktrees = SessionWorktrees(housekeeping=worktree_housekeeping)
         self._deferred_turns = deferred_turns
         session.configure_turn_settlement(self._settle_configuration)
+        session.configure_waiting_turn_steer(self._user_joined_the_waiting_turn)
         self._closed = False
+        # A plugin switch saved during a turn, run at its boundary.
+        self._plugin_reload_parked = False
+        self._plugin_reloading = asyncio.Lock()
         self._completion_attribution = completion_attribution
         # Anchor for the legacy-semantics init duration ("session start ->
         # ready"), stamped when this adapter is built so every lifecycle path
@@ -7522,6 +7608,8 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         # zero in its own snapshot) is reconciled.
         self._context_tokens_before = 0
         self._telemetry_closed = False
+        # Set when the client's stream ended without a ``session/stop``.
+        self._client_disconnected = False
         self._announce_on_use = False
         # Whether vibe.ready went out for the launch this session stood in for.
         self._ready_reported = False
@@ -7585,6 +7673,27 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         self._experiments_wait: ExperimentsWait | None = None
         self._model_catalog_task: asyncio.Task[None] | None = None
         self._model_catalog_wait: ModelCatalogWait | None = None
+        self._registry_sync = RegistrySkillSync(
+            config=lambda: self._context.config_orchestrator.config,
+            credentials=lambda: self._context.platform_credentials,
+            refresh=refresh_registry_skills,
+            cleanup=None if context.skill_store is None else context.skill_store.run,
+            roots=lambda: self._context.harness_files.project_roots,
+            running=lambda: self._running.registry_versions,
+            resolve=self._resolved_registry_versions,
+            apply=partial(
+                self._rederive_in_background,
+                "Failed to apply the synced registry skills",
+                "apply_registry_skills",
+            ),
+        )
+        self._model_catalog: RemoteFollower[ModelCatalogResponse] | None = None
+        self._model_catalog_key: ModelCatalogKey | None = None
+        # The catalog this session's Core runs. Per session, like the org
+        # config: siblings on the context can run an older one than it holds.
+        self._model_catalog_running = _catalog_of(context.config_orchestrator)
+        # The pin a catalog was refused for: another pick lets it load.
+        self._model_catalog_refused_for: str | None = None
         self._connector_resolve_task: asyncio.Task[None] | None = None
         self._connector_follower: RemoteFollower[ResolvedConnectorCatalog] | None = None
         self._connector_follow: FollowedCatalog | None = None
@@ -7621,7 +7730,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         self._pending_integration_warnings: list[str] | None = []
         self._reported_org_config: set[AdminConfigOutcome] = set()
         self._deferred = DeferredConfiguration(
-            derive=self._derive_configuration,
+            derive=self.derive_configuration,
             push=self._push_configuration,
             adopt=self._adopt_derivation,
             turn_running=lambda: self._session.active_turn_id is not None,
@@ -7695,6 +7804,13 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
     async def _run_host_hook(
         self, hook: HostHook, payload: Mapping[str, Any]
     ) -> HostHookResult:
+        # Before the run: a session_end hook can outlive the close of this
+        # session's telemetry client.
+        if not self._telemetry_closed:
+            self._telemetry.send_hook_triggered(
+                hook_type=str(payload.get("hook_event_name")),
+                from_plugin=hook.plugin_hook is not None,
+            )
         return await run_host_hook(
             hook.command,
             self._adapter_config,
@@ -7832,6 +7948,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         next session's session_start waits for both. Never raises: a close must
         go on whatever its hooks do.
         """
+        self._end_reason = reason
         if not self._session_started:
             return ()
         self._session_started = False
@@ -7905,6 +8022,21 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         notification = turn_notification(turn, self._adapter_config.active_agent)
         if notification is not None:
             self._notify_hooks(notification)
+
+    def _record_turn_failure(self, turn: PublicTurn) -> None:
+        """Emit ``vibe.turn.failed`` once per failed main-agent turn."""
+        if (
+            turn.status is not PublicTurnStatus.FAILED
+            or turn.session_id != self.session_id
+            or not self._session_telemetry.claim(f"turn:{turn.id}")
+        ):
+            return
+        error = turn.error
+        self._telemetry.send_turn_failed(
+            error_code=error.code if error is not None else None,
+            http_status=_turn_error_http_status(error) if error is not None else None,
+            message_id=self._turn_client_message_ids.get(turn.id),
+        )
 
     def _show_completion_warning(self, warning: CompletionWarning) -> None:
         # A notice before the client holds the session would reach no one.
@@ -8015,13 +8147,74 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                 ProtocolErrorCode.NOT_IMPLEMENTED,
                 "This session has no plugin writer, so there is nothing to reload.",
             )
+        if self._session.active_turn_id is not None:
+            # A re-pin cannot swap the tools under a running turn: the turn
+            # boundary runs the reload instead (``_settle_configuration``).
+            self._plugin_reload_parked = True
+            return PluginReloadResponse()
+        async with self._plugin_reloading:
+            self._plugin_reload_parked = False
+            try:
+                await self._reload_plugins_now()
+            except SessionBackendError as exc:
+                # A turn opened while the set was being rebuilt, and the harness
+                # refused the re-pin: its boundary runs the reload instead.
+                if not _is_turn_conflict(exc):
+                    raise
+                self._plugin_reload_parked = True
+        return PluginReloadResponse()
+
+    async def reload_switched_plugins(self) -> None:
+        """Re-pin a restored session onto the plugins switched since it last ran.
+
+        A restore binds the saved lock, and only the sessions open at a switch
+        were reloaded. A set that did not change costs the rescan alone. Best
+        effort: a session that cannot take it opens on its saved set.
+        """
+        if self._rewrite_plugins is None:
+            return
+        async with self._plugin_reloading:
+            try:
+                requested = await self._rescan_plugins()
+                lock = await self._session.read_plugin_lock()
+                if {plugin.name for plugin in requested} == {
+                    entry.name for entry in lock.plugins
+                }:
+                    return
+                if self._session.active_turn_id is not None:
+                    self._plugin_reload_parked = True
+                    return
+                await self._repin_plugins(requested)
+            except Exception as exc:
+                if isinstance(exc, SessionBackendError) and _is_turn_conflict(exc):
+                    self._plugin_reload_parked = True
+                    return
+                logger.warning(
+                    "Failed to apply the plugin switches saved since session_id=%s "
+                    "last ran",
+                    self.session_id,
+                    exc_info=True,
+                )
+
+    async def _reload_plugins_now(self) -> None:
+        if self._rewrite_plugins is None:
+            return
+        await self._repin_plugins(await self._rescan_plugins())
+
+    async def _rescan_plugins(self) -> list[ResolvedPluginDefinition]:
         try:
-            requested = await self._plugin_provider.rescan()
+            return await self._plugin_provider.rescan()
         except PluginReloadUnavailableError as error:
             raise SessionBackendError(
                 ProtocolErrorCode.NOT_IMPLEMENTED, str(error)
             ) from error
-        await _harness_call(self._rewrite_plugins(self.session_id, requested))
+
+    async def _repin_plugins(self, requested: list[ResolvedPluginDefinition]) -> None:
+        rewrite_plugins = self._rewrite_plugins
+        if rewrite_plugins is None:
+            return
+        previous = self._plugin_provider.bound(self.session_id) or self._plugins
+        await _harness_call(rewrite_plugins(self.session_id, requested))
         # Past the write, so this is the new set. Adopting it keeps the
         # adapter's own reads off the resolve the session started with.
         bound = self._plugin_provider.bound(self.session_id)
@@ -8053,7 +8246,40 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                 self.mcp_config_orchestrator
             )
             await self.reconfigure_mcp(configuration, force_remote_discovery=False)
-        return PluginReloadResponse()
+        if bound is not None:
+            await self._tell_plugin_change(plugin_change_context(previous, bound))
+
+    async def _reload_parked_plugins(self) -> None:
+        """Run at the turn boundary, so a failure must never stop the next turn."""
+        if not self._plugin_reload_parked:
+            return
+        async with self._plugin_reloading:
+            if self._closed or self._session.active_turn_id is not None:
+                return
+            self._plugin_reload_parked = False
+            try:
+                await self._reload_plugins_now()
+            except Exception:
+                logger.warning(
+                    "Failed to reload the plugins parked for session_id=%s",
+                    self.session_id,
+                    exc_info=True,
+                )
+
+    async def _tell_plugin_change(self, change: str | None) -> None:
+        # A session nobody has used yet has nothing out of date to correct,
+        # and the note would promote and persist it.
+        if change is None or self._session.ephemeral:
+            return
+        try:
+            await self.inject_context(
+                ContextInjectParams(
+                    session_id=self.session_id, input=[TextContentBlock(text=change)]
+                )
+            )
+        except SessionBackendError as exc:
+            if not _is_turn_conflict(exc):
+                raise
 
     def _artifact_handler(self) -> ArtifactRequestHandler:
         """Answer the ``artifacts/`` namespace over this session's artifacts.
@@ -8522,12 +8748,13 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         """Record a terminal effect without ever masking the failure at hand."""
         try:
             await self._record_shell_effect(entry, limit)
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Failed to record manual shell effect %s in session %s",
                 entry.id,
                 self.session_id,
             )
+            _report(exc, "record_shell_effect")
 
     async def _reject_recorded_shell_operation(self, operation_id: str) -> None:
         """Reject an operation id the session already recorded.
@@ -8943,11 +9170,12 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
     ) -> _SessionMetadataProjection | None:
         try:
             metadata = await self._persist_session_metadata(bumped_at=datetime.now(UTC))
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Failed to persist Unified session bumped_at for session_id=%s",
                 self.session_id,
             )
+            _report(exc, "persist_session_metadata")
             return None
         return self._accepted_user_activity_metadata_projection(metadata)
 
@@ -8975,12 +9203,13 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         def publish_metadata() -> None:
             try:
                 self._publish_session_metadata(metadata)
-            except Exception:
+            except Exception as exc:
                 logger.exception(
                     "Failed to publish Unified session metadata update "
                     "for session_id=%s",
                     metadata.session_id,
                 )
+                _report(exc, "publish_session_metadata")
             finally:
                 if after_response is not None:
                     after_response()
@@ -9514,6 +9743,10 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                     )
                 )
         await apply_derivation()
+        self._telemetry.send_config_updated(
+            fields=sorted({_config_write_field(op.path) for op in params.ops}),
+            target_layers=sorted({op.target_layer or "default" for op in params.ops}),
+        )
         return SessionBackendResult(
             response=ConfigWriteResponse(
                 runtime=self._runtime, status=self._mutation_status()
@@ -9543,7 +9776,9 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         self._deferred.park()
         self._integrations_due = True
         await self._follow_current_org_key()
-        await self._refetch_connector_catalog()
+        await asyncio.gather(
+            self._refetch_connector_catalog(), self._refetch_model_catalog()
+        )
         if (follower := self._org_config) is not None:
             # Fetched for the whole process: every other session loads a
             # changed answer at its own next boundary, this one here.
@@ -9556,6 +9791,8 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                 # The files still land; the caller hears why the policy did not.
                 await self._converge(strict=True)
                 raise
+        else:
+            await self._load_model_catalog(reserved_turn=False, strict=True)
         await self._converge(strict=True)
         return SessionBackendResult(
             response=ConfigMutationResponse(runtime=self._runtime)
@@ -9630,7 +9867,8 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         self, *, reserved_turn: bool = False, strict: bool = False
     ) -> None:
         """Run the session under the remote values held now: the org config
-        through ``_commit_org_config``; a changed connector catalog is left to
+        through ``_commit_org_config``, then the model catalog through
+        ``_commit_model_catalog``; a changed connector catalog is left to
         ``_converge_integrations``, with the selection the org config narrows.
 
         Between turns only, so the turn that ran keeps the config it started
@@ -9639,6 +9877,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         turn that took over.
         """
         await self._load_org_config(reserved_turn=reserved_turn, strict=strict)
+        await self._load_model_catalog(reserved_turn=reserved_turn, strict=strict)
         # Once the first load settled: a login or a late OIDC tenant may have
         # named an account since.
         if self._connector_resolve_task is None or self._connector_resolve_task.done():
@@ -9717,6 +9956,186 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         follower.check()
         if follower.due:
             self._integrations_due = True
+
+    def _follow_model_catalog(self) -> None:
+        """Follow the catalog of the account and endpoint the config names now:
+        a login, an org config or ``/reload`` can move them mid-session.
+        """
+        context = self._context
+        config = context.config_orchestrator.config
+        key = ModelCatalogKey.current(config, context.platform_credentials)
+        if key is None:
+            self._model_catalog = None
+            self._model_catalog_key = None
+            return
+        if self._model_catalog is not None and key == self._model_catalog_key:
+            return
+        self._model_catalog_key = key
+        self._model_catalog = RemoteFollower(
+            context.model_catalog_service.followed(key),
+            loaded=self._model_catalog_running,
+        )
+
+    async def _refetch_model_catalog(self) -> None:
+        self._follow_model_catalog()
+        follower = self._model_catalog
+        key = self._model_catalog_key
+        if follower is None or key is None:
+            return
+        await follower.refresh(
+            partial(self._context.model_catalog_service.refresh, key)
+        )
+
+    def _due_model_catalog(self) -> RemoteFollower[ModelCatalogResponse] | None:
+        if self._closed:
+            return None
+        self._follow_model_catalog()
+        follower = self._model_catalog
+        if follower is None:
+            return None
+        follower.check()
+        refused_for = self._model_catalog_refused_for
+        if (
+            refused_for is not None
+            and refused_for != self._context.config_orchestrator.config.active_model
+        ):
+            self._model_catalog_refused_for = None
+            follower.force()
+        return follower if follower.due else None
+
+    async def _load_model_catalog(self, *, reserved_turn: bool, strict: bool) -> bool:
+        """Load the catalog held, if it changed, between turns only: the
+        turn that ran keeps the config it started with. Answers whether the
+        session runs a new one.
+        """
+        if self._due_model_catalog() is None:
+            return False
+        # Its install rebuilds the config: one switch at a time per session.
+        async with self._agent_switching, self._context.admin_config_lock:
+            # Taken again: another boundary may have run it, or a worktree move
+            # changed what the session follows, while this one waited.
+            follower = self._due_model_catalog()
+            catalog = follower.take() if follower is not None else None
+            if follower is None or catalog is None:
+                return False
+            if catalog == self._model_catalog_running and not follower.forced:
+                follower.mark_loaded(catalog)
+                return False
+            if not reserved_turn and self._session.active_turn_id is not None:
+                if strict:
+                    _raise_turn_took_over()
+                return False
+            return await self._commit_model_catalog(
+                follower, catalog, reserved_turn=reserved_turn, strict=strict
+            )
+
+    async def _commit_model_catalog(
+        self,
+        follower: RemoteFollower[ModelCatalogResponse],
+        catalog: ModelCatalogResponse,
+        *,
+        reserved_turn: bool,
+        strict: bool,
+    ) -> bool:
+        """Run the session under ``catalog``; under the lock.
+
+        Loaded into a copy of the session's config, and what that derives is
+        pushed to Core; only then is the catalog installed on the shared
+        config. A session pinned to a model keeps it: a catalog that would move
+        the pin is refused for this session. Displaced by a turn, nothing was
+        installed, and it stays due.
+        """
+        context = self._context
+        pinned = context.config_orchestrator.config.active_model
+        retired: list[str] = []
+
+        async def build() -> UnifiedRuntimeDerivation:
+            orchestrator = context.config_orchestrator.copy()
+            layer = _catalog_layer_of(orchestrator)
+            if layer is None:
+                raise _CandidateRefusedError("no model catalog layer", shared=False)
+            layer.set_catalog(catalog)
+            try:
+                await orchestrator.reload_layer(layer.name)
+            except Exception as exc:
+                raise _CandidateRefusedError(str(exc), shared=True) from exc
+            # A pin the catalog renamed resolves through its aliases; one it
+            # retired falls back to the default.
+            if pinned and not orchestrator.config.active_model:
+                retired.append(pinned)
+                raise _CandidateRefusedError(
+                    f"it retires the pinned model '{pinned}'", shared=False
+                )
+            agents = context.agents.under(orchestrator)
+            return await self._derive_candidate(
+                UnifiedConfigCandidate(orchestrator, agents)
+            )
+
+        async def install() -> bool:
+            return await self._install_model_catalog(catalog)
+
+        push = (
+            partial(self._push_configuration, allow_reserved_turn=True)
+            if reserved_turn
+            else None
+        )
+        try:
+            running = await self._deferred.commit(
+                build, install=install, push=push, check_turn=not reserved_turn
+            )
+        except (HarnessConfigurationRejectedError, _CandidateRefusedError) as exc:
+            # Not tried again until the catalog changes: the session keeps the
+            # models it runs.
+            follower.mark_loaded(catalog)
+            logger.info(
+                "Model catalog not applied to session_id=%s: %s", self.session_id, exc
+            )
+            if retired and retired[0] == self._model_catalog_refused_for:
+                return False
+            if retired:
+                self._model_catalog_refused_for = retired[0]
+                self._session.publish_notice(
+                    f"Model '{retired[0]}' is no longer in the model list; this"
+                    " session keeps it. Pick another model to use the updated list."
+                )
+            elif strict:
+                self._session.publish_notice(
+                    "The refreshed model list could not be applied."
+                )
+            return False
+        if not running:
+            if strict:
+                _raise_turn_took_over()
+            return False
+        if self._deferred.parked:
+            # Core runs it, but the shared config does not hold it: it stays
+            # due, and the next boundary installs and pushes it again.
+            return False
+        follower.mark_loaded(catalog)
+        self._model_catalog_running = catalog
+        self._model_catalog_refused_for = None
+        if not strict:
+            self._runtime_unannounced = True
+        return True
+
+    async def _install_model_catalog(self, catalog: ModelCatalogResponse) -> bool:
+        """Install on the shared config the catalog Core runs now; a failure
+        leaves the change parked, so the next boundary pushes the shared config.
+        """
+        orchestrator = self._context.config_orchestrator
+        layer = _catalog_layer_of(orchestrator)
+        if layer is None:
+            return False
+        try:
+            await set_catalog_and_reload(orchestrator, layer, catalog)
+        except Exception:
+            logger.warning(
+                "Failed to install the model catalog Core runs for session_id=%s",
+                self.session_id,
+                exc_info=True,
+            )
+            return False
+        return True
 
     async def _commit_org_config(
         self,
@@ -9831,6 +10250,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         self, candidate: UnifiedConfigCandidate
     ) -> UnifiedRuntimeDerivation:
         """What ``candidate`` derives, once this session's context fits it."""
+        await self._copy_skills_into_sandbox(candidate.orchestrator)
         preflight = self._context.preflight
         try:
             derivation = (
@@ -10059,6 +10479,8 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
 
     def _close_org_config(self) -> None:
         self._org_config = None
+        self._model_catalog = None
+        self._model_catalog_key = None
 
     def report_org_config(self, report: OrgConfigReport | None) -> None:
         """Report what the session's build did with the org config, once the
@@ -10104,7 +10526,16 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
 
     async def _config_read_response(self) -> ConfigReadResponse:
         return await _config_read_response(
-            self._context.config_orchestrator, self._context.harness_files
+            self._context.config_orchestrator,
+            self._context.harness_files,
+            sandbox=self._context.sandbox_skills,
+        )
+
+    def _resolved_registry_versions(self) -> RegistryVersions:
+        return resolved_registry_versions(
+            lambda: self._context.config_orchestrator.config,
+            harness_files=self._context.harness_files,
+            sandbox=self._context.sandbox_skills,
         )
 
     async def _config_fields_response(self) -> ConfigFieldsReadResponse:
@@ -10349,6 +10780,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         # names or every routed provided tool would fall back to its route and
         # lose the permission configured against it.
         context.provided_names.adopt(previous.provided_names)
+        context.completion_budget.adopt(previous.completion_budget)
         # Same reason: the live executor closes over the lists the previous holder
         # handed out, so a rewind has to reach those and not the incoming blank ones.
         context.vibe_tools.adopt(previous.vibe_tools)
@@ -10517,8 +10949,29 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
             }
         )
 
-    async def _derive_configuration(self) -> UnifiedRuntimeDerivation:
+    async def derive_configuration(self) -> UnifiedRuntimeDerivation:
+        """A sandboxed session's skills are copied first, so the derivation finds the
+        versions it resolves.
+        """
+        await self._copy_skills_into_sandbox()
         return await asyncio.to_thread(self._context.derive, self._settings)
+
+    async def _copy_skills_into_sandbox(
+        self, orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None
+    ) -> None:
+        """Under ``orchestrator``'s config when given, as an org-config candidate is
+        derived before it is adopted.
+        """
+        sandbox = self._context.sandbox_skills
+        source = orchestrator or self._context.config_orchestrator
+        if sandbox is None or not source.config.experimental_enable_registry_skills:
+            return
+        skills = await asyncio.to_thread(
+            host_skills,
+            lambda: source.config,
+            harness_files=self._context.harness_files,
+        )
+        await sandbox.install(skills.values())
 
     async def _push_configuration(
         self, derivation: UnifiedRuntimeDerivation, *, allow_reserved_turn: bool = False
@@ -10542,6 +10995,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         """Publish the derivation the session is now running."""
         self._running = derivation
         self._org_config_running = self._context.org_config_report.loaded
+        self._model_catalog_running = _catalog_of(self._context.config_orchestrator)
         self._runtime = self._projected_runtime(derivation)
         self._adapter_config = derivation.adapter_config
         self._model = derivation.adapter_config.model
@@ -10556,6 +11010,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         self._bind_completion_sources(derivation)
         self._emit_profile_warnings(derivation)
         self._follow_skill_roots()
+        self._registry_sync.follow()
 
     def _bind_completion_sources(self, derivation: UnifiedRuntimeDerivation) -> None:
         """Point this derivation's request callbacks back at this session.
@@ -10600,7 +11055,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         # derives and pushes for itself, so an apply that derived before the
         # switch could otherwise land after it and restore the old agent.
         async with self._deferred.exclusive():
-            derivation = await asyncio.to_thread(self._context.derive, self._settings)
+            derivation = await self.derive_configuration()
             if self._session.active_turn_id is None:
                 await self._commands.apply_config(derivation.session_config)
                 self._deferred.mark_applied()
@@ -10682,7 +11137,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
             # Derived again, deliberately: the config can move again before the
             # boundary, and the later derivation is the one that takes effect.
             # Only the projection moves here; the turn keeps what it bound.
-            derivation = await asyncio.to_thread(self._context.derive, self._settings)
+            derivation = await self.derive_configuration()
             self._runtime = self._projected_runtime(derivation)
 
     async def initialize_experiments(self, launch_context: LaunchContext) -> None:
@@ -10762,27 +11217,52 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         return None
 
     def _start_model_catalog_fetch(self) -> None:
-        """Refresh the catalog; readiness and the first turn wait for it when
-        the session's model may come from the catalog.
+        """Follow the catalog the process holds for this session's account,
+        fetching it with none held; readiness and the first turn wait for that
+        fetch when the session's model may come from the catalog.
 
         A no-op unless the experimental flag is on.
         """
-        orchestrator = self._context.config_orchestrator
+        context = self._context
+        orchestrator = context.config_orchestrator
         if not orchestrator.config.experimental_enable_model_catalog:
             return
         if (task := self._model_catalog_task) is not None and not task.done():
             return
-        # The cached catalog, if any, is already in the config; the fetch
-        # replaces it.
-        task = asyncio.create_task(self._fetch_model_catalog())
+        service = context.model_catalog_service
+        task = asyncio.create_task(self._open_model_catalog())
         self._model_catalog_task = task
         self._model_catalog_wait = (
-            ModelCatalogWait(task)
+            ModelCatalogWait(task, service.failures)
             if model_catalog_wait_needed(
-                orchestrator, self._context.platform_credentials
+                orchestrator, service.failures, context.platform_credentials
             )
             else None
         )
+
+    async def _open_model_catalog(self) -> None:
+        """Load the catalog held for this session's account, once the process
+        holds one: at once from memory or disk, else after the first fetch.
+        Fail-open: without one, the session runs on local config.
+        """
+        context = self._context
+        key = await ModelCatalogKey.of(
+            context.config_orchestrator.config, context.platform_credentials
+        )
+        if key is None or self._closed:
+            return
+        await context.model_catalog_service.ensure(key)
+        try:
+            changed = await self._load_model_catalog(reserved_turn=False, strict=False)
+        except Exception as exc:
+            logger.exception("Failed to apply the model catalog to config")
+            _report(exc, "apply_model_catalog")
+            return
+        if not changed:
+            return
+        await self.wait_announced()
+        if not self._closed:
+            await self._announce_unannounced_runtime()
 
     async def _wait_for_model_catalog(self) -> None:
         # Waiters arrive once the session is announced, so the fetch's own
@@ -10808,42 +11288,41 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
             # The eval can turn the catalog on and start its fetch.
             await self._wait_for_model_catalog()
 
-    async def _fetch_model_catalog(self) -> None:
-        # fetch_and_cache_model_catalog is fail-open: a skipped or failed
-        # fetch leaves the current catalog untouched.
-        response = await fetch_and_cache_model_catalog(
-            self._context.config_orchestrator.config, self._context.platform_credentials
-        )
-        if response is not None:
-            await self._apply_model_catalog(response)
-
-    async def _apply_model_catalog(self, catalog: ModelCatalogResponse) -> None:
-        """Merge a fetched catalog into config; a running turn keeps its config.
-
-        Fail-open like the fetch: a failure is logged, never surfaced.
+    async def _rederive_in_background(
+        self,
+        failure: str,
+        boundary: str,
+        prepare: Callable[[], Awaitable[bool]] | None = None,
+    ) -> bool:
+        """``prepare`` runs first under the admin lock, and False skips the derivation.
+        Fail-open: a failure is logged as ``failure`` and reported under ``boundary``.
+        A running turn keeps its config, and a derivation it parks still counts as
+        nothing failed.
         """
-        context = self._context
         try:
-            async with context.admin_config_lock:
-                if not await apply_model_catalog(context.config_orchestrator, catalog):
-                    return
+            async with self._context.admin_config_lock:
+                if prepare is not None and not await prepare():
+                    return True
                 changed = await self._apply_derivation_when_idle()
-        except Exception:
-            logger.exception("Failed to apply the model catalog to config")
-            return
+        except Exception as exc:
+            logger.exception(failure)
+            _report(exc, boundary)
+            return False
         if not changed:
-            return
+            return True
         await self.wait_announced()
         if not self._closed:
             await self._announce_runtime()
+        return True
 
     def _cancel_model_catalog_task(self) -> asyncio.Task[None] | None:
-        task = self._model_catalog_task
-        self._model_catalog_task = None
-        if task is not None and not task.done():
-            task.cancel()
-            return task
-        return None
+        task, self._model_catalog_task = self._model_catalog_task, None
+        return cancel_pending(task)
+
+    def _cancel_registry_sync(
+        self,
+    ) -> asyncio.Future[list[BaseException | None]] | None:
+        return self._registry_sync.stop()
 
     # Only what ``adapter_config`` carries takes effect in this session: the
     # model variants apply now, while ``system_prompt_id`` rides ``core_config``,
@@ -10873,15 +11352,10 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         async with context.admin_config_lock:
             layer.set_variants(variants)
             await orchestrator.reload()
-            # The session was built with the catalog off, so without its cache:
-            # a catalog the eval turns on starts from the cache, as at open.
-            if not catalog_was_on:
-                await apply_cached_model_catalog(
-                    orchestrator, context.platform_credentials
-                )
             await self._apply_derivation_when_idle()
-        # The session started the fetch before the eval: a catalog the eval
-        # turns on is fetched now, once.
+        # The session was built with the catalog off: a catalog the eval turns
+        # on is followed from now, from the one the process holds if any, as at
+        # open. It loads at once between turns, else at the next boundary.
         if not catalog_was_on:
             self._start_model_catalog_fetch()
 
@@ -10901,6 +11375,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         await self._pin_for_session_opened_turn()
         await self._converge()
         await self._publish_integrations()
+        await self._reload_parked_plugins()
 
     async def _pin_for_session_opened_turn(self) -> None:
         # Both settles of a turn boundary can get here at once: the one the
@@ -11021,6 +11496,9 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         self._skill_watch_started = True
         self._follow_skill_roots()
 
+    def start_registry_sync(self) -> None:
+        self._registry_sync.start()
+
     def _skill_watch_wanted(self) -> bool:
         return (
             self._adapter_config.sandbox is None
@@ -11130,6 +11608,12 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
             self._turn_counting_starts = turn
             self._turn_started_sessions = 0
         self._turn_started_sessions = max(0, self._turn_started_sessions + delta)
+
+    def _user_joined_the_waiting_turn(self) -> None:
+        """The Session steered the user's queued message into a turn that only
+        waited: the user wrote to it, as on `steer_queued_turn`.
+        """
+        self._message_hops = 0
 
     @property
     def started_by_session_id(self) -> str | None:
@@ -11841,7 +12325,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                 }
             )
             return True
-        self._adopt_derivation(await self._derive_configuration())
+        self._adopt_derivation(await self.derive_configuration())
         return True
 
     async def _persist_session_catalogue(self) -> None:
@@ -12624,7 +13108,11 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         if self._telemetry_closed:
             return
         self._telemetry_closed = True
-        self._telemetry.send_session_closed()
+        self._telemetry.send_session_closed(
+            reason="client_disconnected"
+            if self._client_disconnected
+            else self._end_reason.value
+        )
 
     def _emit_worktree_created_telemetry(
         self, resolution: WorktreeResolution | None
@@ -12805,6 +13293,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
         for pending in (
             self._cancel_experiments_task(),
             self._cancel_model_catalog_task(),
+            self._cancel_registry_sync(),
             self._cancel_connector_resolve_task(),
             self._cancel_mcp_discovery_task(),
             self._cancel_pr_discovery_task(),
@@ -14258,6 +14747,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                     self.refresh_pull_requests(full=True)
                     self._schedule_turn_end_pr_discovery()
                 self._notify_turn_ended(app_event.turn, current)
+                self._record_turn_failure(app_event.turn)
             if isinstance(app_event, TurnCompleted) and updated:
                 translated.append(self._stats_event(current.session.id, stats))
                 updated = False
@@ -14833,6 +15323,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                 nb_context_messages=payload.nb_context_messages,
                 nb_prompt_chars=payload.nb_prompt_chars,
                 call_type=request_call_type(payload.purpose, payload.iteration),
+                reasoning_effort=payload.reasoning_effort,
                 message_id=self._last_client_message_id,
                 attachment_counts=self._turn_attachment_counts,
             )
@@ -15278,6 +15769,7 @@ _HARNESS_ERROR_CODES: Final[dict[str, TurnErrorCode]] = {
     "model_refused": TurnErrorCode.REFUSAL,
     "model_stream_incomplete": TurnErrorCode.INCOMPLETE_STREAM,
     "model_unauthorized": TurnErrorCode.INVALID_API_KEY,
+    "pricing_unavailable": TurnErrorCode.PRICING_UNAVAILABLE,
 }
 
 
@@ -15292,6 +15784,17 @@ def _moved_only_active_model(before: VibeConfigSchema, after: VibeConfigSchema) 
         for name in VibeConfigSchema.model_fields
         if name != "active_model"
     )
+
+
+def _config_write_field(path: str) -> str:
+    """The top-level config field a write's JSON pointer lands in."""
+    return path.lstrip("/").split("/", 1)[0]
+
+
+def _turn_error_http_status(error: PublicError) -> int | None:
+    details = error.details if isinstance(error.details, dict) else {}
+    status = details.get("httpStatus")
+    return status if isinstance(status, int) else None
 
 
 def _harness_turn_error_code(public_error: PublicError) -> TurnErrorCode | None:
@@ -15722,10 +16225,15 @@ def _fork_worktree_notices(resolution: WorktreeResolution) -> tuple[str, ...]:
 async def _config_read_response(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
     harness_files: HarnessFilesManager,
+    *,
+    sandbox: SandboxSessionSkills | None = None,
 ) -> ConfigReadResponse:
+    """A sandboxed session's skill count includes the project skills its ``sandbox``
+    holds.
+    """
     config = orchestrator.config
-    skills = SkillManager(
-        config_getter=lambda: config, harness_files=harness_files
+    skills = resolve_session_skills(
+        lambda: config, harness_files=harness_files, sandbox=sandbox
     ).available_skills
     return ConfigReadResponse(
         config=project_config_view(
@@ -16513,7 +17021,9 @@ def _move_target(target: SessionMoveTarget) -> tuple[SessionProject, Path | None
 
 
 def _folder_stamps(
-    projects: Sequence[LocalProject], sessions: Sequence[PublicSession]
+    projects: Sequence[LocalProject],
+    project_ids: set[str],
+    sessions: Sequence[PublicSession],
 ) -> dict[str, SessionProject]:
     """By session id, the stamp of each session no local project claims whose folder matches."""
     # Sessions share few folders, and each match resolves its folder's path.
@@ -16521,17 +17031,21 @@ def _folder_stamps(
     return {
         session.id: SessionProject(kind="local", id=project.id)
         for session in sessions
-        if _claims_no_project(projects, session.project)
+        if _claims_no_project(projects, project_ids, session.project)
         and (project := match(session.cwd)) is not None
     }
 
 
 def _claims_no_project(
-    projects: Sequence[LocalProject], stamp: PublicSessionProject | None
+    projects: Sequence[LocalProject],
+    project_ids: set[str],
+    stamp: PublicSessionProject | None,
 ) -> bool:
-    # The runner lists a cloud stamp no local project goes by (as the system default project's) under no project.
+    # The runner lists a cloud stamp no local project goes by (as the system default project's), or a removed local project's, under no project.
     if stamp is None:
         return True
+    if stamp.kind == "local":
+        return stamp.id not in project_ids
     return (
         stamp.kind == "cloud"
         and stamp.id is not None
@@ -16677,9 +17191,13 @@ def _project_scheduled_loop(loop: ScheduledPrompt) -> ScheduledLoop:
     )
 
 
+_BUDGET_STOP_REASONS: Final = frozenset(get_args(BudgetStopReason))
+
+
 def _public_turn(turn: object) -> PublicTurn:
     raw = cast(Any, turn)
     error = getattr(raw, "error", None)
+    reason = getattr(raw, "reason", None)
     return PublicTurn(
         id=raw.id,
         session_id=raw.session_id,
@@ -16688,6 +17206,7 @@ def _public_turn(turn: object) -> PublicTurn:
         completed_at=getattr(raw, "completed_at", None),
         error=_public_turn_error(error),
         stop_reason=getattr(raw, "stop_reason", None),
+        budget_stop_reason=reason if reason in _BUDGET_STOP_REASONS else None,
         queue_item_id=getattr(raw, "queue_item_id", None),
         input_entry_id=getattr(raw, "input_entry_id", None),
     )
@@ -17376,6 +17895,9 @@ _DIRECT_SESSION_ERROR_CODES: dict[str, ProtocolErrorCode] = {
     "turn_queue_edit_conflict": ProtocolErrorCode.CONFLICT,
 }
 
+# Internal harness errors the client explains to the user: not Vibe bugs.
+_EXPLAINED_HARNESS_CODES = frozenset({"store_requires_newer_reader"})
+
 
 def _peer_refusal(refusal: PeerRefusal, message: str) -> SessionBackendError:
     return SessionBackendError(
@@ -17450,7 +17972,9 @@ def _raise_session_backend_error(exc: HarnessSessionError) -> Never:
         reason = exc.details.get("reason")
         if isinstance(reason, str):
             data["reason"] = reason
-    raise SessionBackendError(code, str(exc), data) from exc
+    raise SessionBackendError(
+        code, str(exc), data, expected=exc.code in _EXPLAINED_HARNESS_CODES
+    ) from exc
 
 
 def _history_limit(params: SessionReadParams) -> int:

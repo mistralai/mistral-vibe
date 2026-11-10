@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"VIBE_THEME": "auto"}
 handshake = {
@@ -9,4 +9,15 @@ handshake = {
     "config/write": {"runtime": {"config": {"theme": "auto"}}},
 }
 terminal_responses = {"\x1b]11;?\x07": "\x1b]11;rgb:ffff/ffff/ffff\x07"}
-timeline: Timeline = ["/theme", "\r", "\r", "/theme", "\r"]
+timeline: Timeline = [
+    "/theme",
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+    "/theme",
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+]

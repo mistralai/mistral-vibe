@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline, resize
+from e2e.app_server.scenario import Timeline, resize, take_snapshot
 
 screen_contains = (
     "│ Table cells │ Long table cell text wraps",
@@ -29,7 +29,11 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     assistant_msg(_ANSWER),
     turn_completed(),
+    take_snapshot(),
     resize(40, 72),
+    take_snapshot(),
     resize(40, 96),
+    take_snapshot(),
     resize(40, 72),
+    take_snapshot(),
 ]

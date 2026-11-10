@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from e2e.app_server.config import ROWS
 from e2e.app_server.events import artifact
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 
 def _pr(number: int, hour: int, title: str, state: str) -> dict:
@@ -46,4 +46,4 @@ _LABEL = "PRs (2)"
 _CLICK_COL = len("/test/workdir  ") + len(_LABEL) // 2 + 1
 _BAR_CLICK = f"\x1b[<0;{_CLICK_COL};{ROWS}M\x1b[<0;{_CLICK_COL};{ROWS}m"
 
-timeline: Timeline = [_BAR_CLICK]
+timeline: Timeline = [_BAR_CLICK, take_snapshot()]

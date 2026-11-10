@@ -64,6 +64,12 @@ class HarnessFilesManager:
             _session_root=here if here in listed else None,
         )
 
+    def trusting(self, root: Path) -> HarnessFilesManager:
+        """This manager with *root* trusted for this process only, never persisted."""
+        trust_store = self.trust_store.for_session()
+        trust_store.trust_for_session(root)
+        return replace(self, trust_store=trust_store)
+
     @property
     def _effective_cwd(self) -> Path:
         return self.cwd or Path.cwd()

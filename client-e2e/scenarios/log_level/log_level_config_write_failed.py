@@ -8,7 +8,6 @@ _ESCAPE = "\x1b[27u"
 
 handshake = {"config/write": {"rejected": True, "failures": []}}
 
-capture_startup = False
 # Down to ERROR, focus and set the config badge, apply, then reopen the picker.
 timeline: Timeline = [
     "/log-level",

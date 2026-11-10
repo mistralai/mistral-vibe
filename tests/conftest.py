@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator
+import functools
 import os
 from pathlib import Path
 import sys
@@ -9,6 +10,7 @@ import tomllib
 from types import SimpleNamespace
 from typing import Any
 
+import httpcore2
 import keyring
 from keyring.backend import KeyringBackend
 import keyring.errors
@@ -18,7 +20,11 @@ import respx.mocks
 import tomli_w
 
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
-from tests.stubs.process_services import FakeOrgConfigServer, fake_process_services
+from tests.stubs.process_services import (
+    FakeModelCatalogServer,
+    FakeOrgConfigServer,
+    fake_process_services,
+)
 from tests.stubs.respx_httpx2 import HTTPCore2Mocker
 from vibe.app_server._process_services import ProcessServices
 from vibe.core.config import (
@@ -33,7 +39,6 @@ from vibe.core.config.harness_files import (
     reset_harness_files_manager,
 )
 from vibe.core.config.orchestrator import ConfigOrchestrator
-from vibe.core.model_catalog.wait import reset_model_catalog_failed
 from vibe.core.utils.concurrency import run_sync
 from vibe.setup.auth._oidc_credentials import clear_oidc_token_cache
 from vibe.utils import keyring as keyring_utils
@@ -123,13 +128,6 @@ def _reset_windows_shell_cache() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_model_catalog_failed() -> None:
-    # A failed catalog fetch is remembered for the process; one test's failure
-    # must not stop the next from waiting.
-    reset_model_catalog_failed()
-
-
-@pytest.fixture(autouse=True)
 def _no_provider_model_catalogue(monkeypatch: pytest.MonkeyPatch) -> None:
     # Sessions never ask a provider's model catalogue over the network; a test of
     # the catalogue sets its own fetcher factory.
@@ -151,6 +149,32 @@ def _no_billing_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     from vibe.app_server import _billing
 
     monkeypatch.setattr(_billing, "billing_gateway_factory", None)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_registry(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Under respx's own patch, which takes this method's name and arguments for the one
+    it replaces: a registry request respx lets through is refused here, and fails the
+    test.
+    """
+    reached: list[str] = []
+    send = httpcore2.AsyncConnectionPool.handle_async_request
+
+    @functools.wraps(send)
+    async def handle_async_request(
+        self: httpcore2.AsyncConnectionPool, request: httpcore2.Request
+    ) -> httpcore2.Response:
+        url = request.url
+        if url.host == b"api.mistral.ai" and url.target.startswith(b"/v1/skills"):
+            reached.append(url.target.decode())
+            raise httpcore2.ConnectError("Tests never reach the real AI Registry")
+        return await send(self, request)
+
+    monkeypatch.setattr(
+        httpcore2.AsyncConnectionPool, "handle_async_request", handle_async_request
+    )
+    yield
+    assert not reached, f"Mock the AI Registry with respx; this test reached {reached}"
 
 
 @pytest.fixture(autouse=True)
@@ -357,12 +381,22 @@ def org_server() -> FakeOrgConfigServer:
     return FakeOrgConfigServer()
 
 
+@pytest.fixture
+def model_catalog_server() -> FakeModelCatalogServer:
+    """The model-catalog endpoint ``process_services`` fetch from: offline
+    unless the test serves an answer.
+    """
+    return FakeModelCatalogServer()
+
+
 @pytest_asyncio.fixture
 async def process_services(
-    org_server: FakeOrgConfigServer,
+    org_server: FakeOrgConfigServer, model_catalog_server: FakeModelCatalogServer
 ) -> AsyncIterator[ProcessServices]:
     """This test's process services, as an entry point would build them."""
-    services = fake_process_services(org_server)
+    services = fake_process_services(
+        org_server, model_catalog_server=model_catalog_server
+    )
     yield services
     await services.close()
 

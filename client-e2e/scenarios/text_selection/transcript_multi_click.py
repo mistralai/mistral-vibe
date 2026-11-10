@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"SSH_TTY": "/dev/pts/0"}
 
@@ -27,4 +27,5 @@ timeline: Timeline = [
     turn_completed(),
     _clicks(20, 2),
     _clicks(22, 3),
+    take_snapshot(),
 ]

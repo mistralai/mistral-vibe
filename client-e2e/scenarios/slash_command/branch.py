@@ -8,7 +8,6 @@ from scenarios.slash_command._branch_fixtures import REQUEST_METHODS, fork_hands
 handshake = fork_handshake("unified")
 request_methods = REQUEST_METHODS
 
-capture_startup = False
 screen_contains = (
     "Session forked",
     "Copy and paste this command to resume it:",

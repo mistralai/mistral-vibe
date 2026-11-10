@@ -21,8 +21,6 @@ request_methods = {"session/delete"}
 # Enter submits /resume, Up selects the saved session, `d` twice deletes it and the server refuses.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "d", "d"]
 
-capture_startup = False
-capture_steps = {4}
 screen_contains = (
     "Failed to delete session: Session store is unavailable",
     "…",

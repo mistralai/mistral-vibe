@@ -1123,6 +1123,9 @@ class _ArtifactSession:
     def configure_turn_settlement(self, settle: Any) -> None:
         self.settle_configuration = settle
 
+    def configure_waiting_turn_steer(self, steered: Any) -> None:
+        """Unused: no queued input joins a waiting turn here."""
+
     def pin(self, _pin: Any) -> None:
         return None
 
@@ -1204,12 +1207,14 @@ def _artifact_adapter(
         mcp_enable_system_trust_store=False,
         org_config_service=fake_process_services().org_config,
         experiments_service=fake_process_services().experiments,
+        model_catalog_service=fake_process_services().model_catalog,
     )
     derivation = UnifiedRuntimeDerivation(
         runtime=cast(Any, object()),
         core_config=_core_config(SESSION_ID),
         adapter_config=LocalRuntimeAdapterConfig(),
         skill_payloads={},
+        registry_versions={},
     )
     return UnifiedHarnessBackendAdapter(
         cast(Any, _ArtifactSession(SESSION_ID, cwd=cwd, ephemeral=ephemeral)),

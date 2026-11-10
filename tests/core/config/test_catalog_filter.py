@@ -317,7 +317,7 @@ async def test_a_rejected_setting_is_dropped_and_the_others_apply(
     assert "setting 'top_p'" in caplog.text
     assert "setting 'max_context_length'" in caplog.text
     assert (
-        "setting 'input_price' of 'mistral-large-4-0' ignored, negative" in caplog.text
+        "setting 'input_price' of 'mistral-large-4-0' ignored, invalid" in caplog.text
     )
 
 

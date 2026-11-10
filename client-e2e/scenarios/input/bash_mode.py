@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import manual_shell
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {"session/shellCommand": {"accepted": True, "lastEventId": 0}}
 
@@ -23,4 +23,12 @@ on_request = {
 _EXPAND = "\x1b[<0;1;8M\x1b[<0;1;8m"
 _COLLAPSE = "\x1b[<0;2;8M\x1b[<0;2;8m"
 
-timeline: Timeline = ["!", "\x7f", "!   \r", "!printf hello\r", _EXPAND, _COLLAPSE]
+timeline: Timeline = [
+    "!",
+    "\x7f",
+    "!   \r",
+    "!printf hello\r",
+    _EXPAND,
+    _COLLAPSE,
+    take_snapshot(),
+]

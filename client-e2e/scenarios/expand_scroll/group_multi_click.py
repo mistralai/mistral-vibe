@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"SSH_TTY": "/dev/pts/0"}
 
@@ -32,9 +32,13 @@ timeline: Timeline = [
     *(bash(f"ls dir{index}", f"file{index}.txt") for index in range(1, 4)),
     assistant_msg("Listed."),
     turn_completed(),
+    take_snapshot(),
     # A double click unfolds then folds the group, selecting nothing.
     _clicks(2),
+    take_snapshot(),
     # A triple click toggles three times and leaves it open.
     _clicks(3),
+    take_snapshot(),
     f"\x1b[<0;3;{_HEADER}M\x1b[<32;4;{_HEADER}M\x1b[<0;4;{_HEADER}m",
+    take_snapshot(),
 ]

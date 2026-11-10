@@ -2,6 +2,7 @@
 
 mod attach;
 pub mod banners;
+pub mod failure;
 mod launch;
 mod reads;
 mod trust;
@@ -195,10 +196,9 @@ pub async fn handshake(
     trust_rx: mpsc::Receiver<String>,
     params: HandshakeParams,
 ) {
-    if let Err(error) = handshake_inner(client, &event_tx, trust_rx, params).await {
-        // The full error chain, not just the outer context: a bare
-        // "session/start" hides whether the server rejected the request or
-        // the process died, which is the first question at every triage.
+    if let Err(error) = handshake_inner(client.clone(), &event_tx, trust_rx, params).await {
+        failure::log(&error, &client);
+        // The full chain: the outer context alone hides whether the server refused or died.
         let _ = event_tx
             .send(StartupEvent::Failed(format!("{error:#}")))
             .await;

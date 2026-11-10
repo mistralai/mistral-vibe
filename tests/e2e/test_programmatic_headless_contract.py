@@ -226,20 +226,20 @@ def test_turn_limit_exhaustion_is_a_limit_outcome_and_exits_three(
 
 @pytest.mark.parametrize("streaming_mock_server", [_endless_tool_calls], indirect=True)
 @pytest.mark.parametrize(
-    ("budget_flag", "budget", "outcome"),
-    [("--max-tokens", "10", "token_limit"), ("--max-price", "10", "price_limit")],
+    ("budget_flag", "budget", "calls"),
+    [("--max-tokens", 0, 0), ("--max-tokens", 7, 1), ("--max-price", 14, 2)],
 )
-def test_spent_budget_stops_the_turn_and_exits_three(
+def test_cumulative_budget_prevents_the_next_completion(
     streaming_mock_server: StreamingMockServer,
     e2e_workdir: Path,
     tmp_path: Path,
     budget_flag: str,
-    budget: str,
-    outcome: str,
+    budget: int,
+    calls: int,
 ) -> None:
     """*Prepare*: A model that keeps calling a tool, 7 tokens and $7 per request.
-    *Do*: Run `vibe -p` with a token or price budget of 10.
-    *Assert*: Exit 3 and the export reports that budget, spent past its limit.
+    *Do*: Run `vibe -p` with zero or exactly reached budgets.
+    *Assert*: Runtime starts exactly the completions admitted before reaching the limit.
     """
     # Prepare
     write_e2e_config(
@@ -257,7 +257,7 @@ def test_spent_budget_stops_the_turn_and_exits_three(
             "Keep going",
             "--auto-approve",
             budget_flag,
-            budget,
+            str(budget),
             "--output-dir",
             str(output_dir),
         ],
@@ -266,11 +266,110 @@ def test_spent_budget_stops_the_turn_and_exits_three(
     # Assert
     assert result.returncode == 3, result.stderr
     export = read_export(output_dir)
-    assert export.outcome == outcome
+    assert export.outcome == (
+        "token_limit" if budget_flag == "--max-tokens" else "price_limit"
+    )
     assert export.stop_reason == "interrupted"
-    assert export.usage is not None and export.usage.total_tokens > 10
-    assert export.cost_usd is not None and export.cost_usd > 10
-    assert len(streaming_mock_server.requests) >= 2
+    assert export.usage is not None and export.usage.total_tokens == 7 * calls
+    assert export.cost_usd is not None and export.cost_usd == 7 * calls
+    assert len(streaming_mock_server.requests) == calls
+
+
+@pytest.mark.parametrize("streaming_mock_server", [_text_reply], indirect=True)
+@pytest.mark.parametrize(
+    ("budget_flag", "budget"),
+    [("--max-tokens", 7), ("--max-price", 6)],
+    ids=["tokens-equal", "price-overshoot"],
+)
+def test_final_completion_may_finish_at_or_past_the_budget(
+    streaming_mock_server: StreamingMockServer,
+    e2e_workdir: Path,
+    tmp_path: Path,
+    budget_flag: str,
+    budget: int,
+) -> None:
+    """*Prepare*: One admitted final reply costs seven tokens and seven dollars.
+    *Do*: Run with a budget the final reply reaches or overshoots.
+    *Assert*: The completed reply wins because no later completion is requested.
+    """
+    # Prepare
+    write_e2e_config(
+        Path(os.environ["VIBE_HOME"]),
+        streaming_mock_server.api_base,
+        model_settings=["input_price = 1000000.0", "output_price = 1000000.0"],
+    )
+    output_dir = tmp_path / "out"
+
+    # Do
+    result = run_vibe_headless(
+        e2e_workdir,
+        [
+            "-p",
+            "Finish once",
+            budget_flag,
+            str(budget),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    # Assert
+    assert result.returncode == 0, result.stderr
+    export = read_export(output_dir)
+    assert export.outcome == "finished"
+    assert export.usage is not None and export.usage.total_tokens == 7
+    assert export.cost_usd == 7
+    assert len(streaming_mock_server.requests) == 1
+
+
+def test_a_free_model_runs_under_a_price_budget(
+    streaming_mock_server: StreamingMockServer, e2e_workdir: Path, tmp_path: Path
+) -> None:
+    """*Prepare*: A headless price budget on a model with the default zero prices.
+    *Do*: Run against the mock provider.
+    *Assert*: The free model answers; zero prices are not missing pricing.
+    """
+    # Prepare
+    output_dir = tmp_path / "out"
+
+    # Do
+    result = run_vibe_headless(
+        e2e_workdir,
+        ["-p", "Hello", "--max-price", "1", "--output-dir", str(output_dir)],
+    )
+
+    # Assert
+    assert result.returncode == 0, result.stderr
+    export = read_export(output_dir)
+    assert export.outcome == "finished"
+    assert export.cost_usd == 0
+    assert len(streaming_mock_server.requests) == 1
+
+
+def test_invalid_price_limit_is_a_usage_error(
+    e2e_workdir: Path, tmp_path: Path
+) -> None:
+    """*Prepare*: A headless run with an output directory and a negative price limit.
+    *Do*: Run `vibe -p --max-price -1`.
+    *Assert*: Exit 1 and the requested export records the usage error.
+    """
+    # Prepare
+    output_dir = tmp_path / "out"
+
+    # Do
+    result = run_vibe_headless(
+        e2e_workdir,
+        ["-p", "Hello", "--max-price", "-1", "--output-dir", str(output_dir)],
+    )
+
+    # Assert
+    assert result.returncode == 1
+    export = read_export(output_dir)
+    assert export.outcome == "usage_error"
+    assert export.exit_code == 1
+    assert export.error is not None
+    assert "--max-price must be a nonnegative finite number" in export.error.message
+    assert export.session_id is None
 
 
 def test_missing_prompt_file_is_a_usage_error(
@@ -618,6 +717,30 @@ def _truncated_reply(
             usage={"prompt_tokens": 3, "completion_tokens": 4},
         ),
     ]
+
+
+@pytest.mark.parametrize("streaming_mock_server", [_truncated_reply], indirect=True)
+def test_discarded_output_retries_spend_the_cumulative_budget(
+    streaming_mock_server: StreamingMockServer, e2e_workdir: Path, tmp_path: Path
+) -> None:
+    """*Prepare*: Every seven-token reply is discarded because it hits its output cap.
+    *Do*: Run under a 14-token cumulative budget.
+    *Assert*: Two billed replies close admission before another retry starts.
+    """
+    # Prepare
+    output_dir = tmp_path / "out"
+
+    # Do
+    result = run_vibe_headless(
+        e2e_workdir,
+        ["-p", "hello", "--max-tokens", "14", "--output-dir", str(output_dir)],
+    )
+
+    # Assert
+    assert result.returncode == 3, result.stderr
+    export = read_export(output_dir)
+    assert export.outcome == "token_limit"
+    assert len(streaming_mock_server.requests) == 2
 
 
 @pytest.mark.parametrize("streaming_mock_server", [_truncated_reply], indirect=True)

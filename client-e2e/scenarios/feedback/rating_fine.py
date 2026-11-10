@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # Older app servers return only the eligibility flag.
 handshake = {"feedback/record": {}, "feedback/shouldShow": {"show": True}}
@@ -15,4 +15,5 @@ timeline: Timeline = [
     assistant_msg("Hi. What do you need?"),
     turn_completed(),
     "2",
+    take_snapshot(),
 ]

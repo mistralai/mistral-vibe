@@ -534,10 +534,19 @@ class ModelConfig(BaseModel):
     # A session's own ``max_tokens`` limit, ``agent_max_output_tokens`` and
     # ``compaction_max_output_tokens`` take precedence and reach every provider.
     max_output_tokens: int | None = Field(default=None, ge=1)
-    input_price: float = 0.0  # Price per million input tokens
-    output_price: float = 0.0  # Price per million output tokens
-    cached_input_price: float | None = (
-        None  # Price per million cached input tokens; None bills them at input_price
+    input_price: float = Field(
+        default=0.0, ge=0, allow_inf_nan=False
+    )  # Price per million input tokens
+    output_price: float = Field(
+        default=0.0, ge=0, allow_inf_nan=False
+    )  # Price per million output tokens
+    cached_input_price: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Price per million cached input tokens; unset bills them at input_price"
+        ),
     )
     thinking: ThinkingLevel = "off"
     # The levels this model offers, in display order. Defaults to the CLI's

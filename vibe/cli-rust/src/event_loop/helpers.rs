@@ -18,6 +18,7 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
     let id = format!("rs-command-{}", app.view.transcript.revision());
     match command {
         CommandEvent::Plugins(event) => crate::plugins::apply_event(app, *event),
+        CommandEvent::Skills(event) => crate::skills_browser::apply_event(app, client, *event),
         CommandEvent::Context(event) => {
             let (generation, event) = *event;
             crate::context_app::apply_event(app, generation, event)

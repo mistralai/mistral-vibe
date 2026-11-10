@@ -5,6 +5,11 @@ from __future__ import annotations
 from mistralai_vibe_local_harness.vibe._completion import (
     INVALID_API_KEY_MESSAGE,
     invalid_api_key_message,
+    sent_reasoning,
+)
+from mistralai_vibe_local_harness.vibe._completion_budget import (
+    CompletionPricing,
+    SharedCompletionBudget,
 )
 from mistralai_vibe_local_harness.vibe._connector_gateway import ConnectorGatewayClient
 from mistralai_vibe_local_harness.vibe._connector_models import (
@@ -202,6 +207,7 @@ __all__ = [
     "ClassifierFactory",
     "CompiledHooks",
     "CompletedWorktreeHistoryEntry",
+    "CompletionPricing",
     "ConnectorGatewayClient",
     "ConnectorRouteSnapshot",
     "ConnectorSourceState",
@@ -308,6 +314,7 @@ __all__ = [
     "SandboxUnavailableError",
     "SessionConfig",
     "SessionWorkspace",
+    "SharedCompletionBudget",
     "StaticProviderCredentials",
     "ToolApprovalMode",
     "ToolRiskClassifierPort",
@@ -335,6 +342,7 @@ __all__ = [
     "rust_input_modalities",
     "rust_model_facts",
     "sandbox_path",
+    "sent_reasoning",
     "tool_catalog_for_config",
     "with_shell_guidance",
 ]

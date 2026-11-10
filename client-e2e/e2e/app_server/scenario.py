@@ -17,13 +17,21 @@ from e2e.app_server.config import SCENARIO_DIR
 AppServerEvent = dict[str, Any]
 Release = dict[str, int]
 Resize = dict[str, tuple[int, int]]
-Timeline = list[str | AppServerEvent | Release | Resize]
+SnapshotMarker = dict[str, str | None]
+Timeline = list[str | AppServerEvent | Release | Resize | SnapshotMarker]
 _RESIZE_DIMENSIONS = 2
+_REMOVED_ATTRIBUTES = ("capture_startup", "capture_steps")
+ASSERTS_NOTHING = "asserts nothing: add take_snapshot() or an expectation"
 
 
 def resize(rows: int, columns: int) -> Resize:
     """Resize the client's PTY before capturing the next settled frame."""
     return {"resize": (rows, columns)}
+
+
+def take_snapshot(label: str | None = None) -> SnapshotMarker:
+    """Store a golden SVG of the frame settled by the preceding step (or startup)."""
+    return {"take_snapshot": label}
 
 
 # Kitty F23: the client advances its frozen replay clock 100 ms per press.
@@ -78,6 +86,8 @@ class Step:
     # Events gated on settles after this step's input, one event per settle.
     release_after: int = 0
     resize: tuple[int, int] | None = None
+    snapshot: str | None = None
+    """Label of the golden SVG taken once this step settles, if any."""
 
 
 @dataclass
@@ -86,6 +96,8 @@ class Scenario:
 
     name: str
     steps: list[Step]
+    startup_snapshot: str | None = None
+    """Label of the golden SVG taken once startup settles, if any."""
     env: Mapping[str, str] = field(default_factory=dict)
     handshake: Mapping[str, Any] = field(default_factory=dict)
     on_request: Mapping[str, list[AppServerEvent]] = field(default_factory=dict)
@@ -109,8 +121,6 @@ class Scenario:
     mouse_tracking_seen: bool | None = None
     """Whether mouse reports must have been turned on at any point of the run."""
     skip_reason: str | None = None
-    capture_startup: bool = True
-    capture_steps: set[int] | None = None
     exit_after_last_step: bool = False
     settle_per_key: bool = False
     """Settle after every keypress, for scenarios needing each key in its own read."""
@@ -133,12 +143,28 @@ class Scenario:
         """Return non-empty server-event batches in input order."""
         return [step.events for step in self.steps if step.events]
 
-    def clamp_capture_startup(self) -> None:
-        """Drop the startup snapshot for stepped scenarios: only stepless ones
-        (e.g. onboarding welcome) need it to capture anything.
-        """
-        if self.steps:
-            self.capture_startup = False
+    def takes_snapshots(self) -> bool:
+        return self.startup_snapshot is not None or any(
+            step.snapshot is not None for step in self.steps
+        )
+
+    def has_expectations(self) -> bool:
+        """Whether the scenario asserts anything besides its golden requests."""
+        return self.takes_snapshots() or any((
+            self.request_methods,
+            self.expected_actions is not None,
+            self.expected_clipboard is not None,
+            self.expected_titles is not None,
+            self.clipboard_contains,
+            self.clipboard_excludes,
+            self.screen_contains,
+            self.screen_excludes,
+            self.screen_rows,
+            self.screen_cursor is not None,
+            self.screen_hyperlinks is not None,
+            self.mouse_tracking is not None,
+            self.mouse_tracking_seen is not None,
+        ))
 
 
 def available_scenarios() -> list[str]:
@@ -187,9 +213,18 @@ def _module_from_path(path: Path, module_name: str) -> ModuleType:
 def _build_scenario(module: ModuleType, name: str, origin: str) -> Scenario:
     if not isinstance(module, ScenarioModule):
         raise TypeError(f"{origin} must define `timeline`")
+    if removed := [attr for attr in _REMOVED_ATTRIBUTES if hasattr(module, attr)]:
+        raise TypeError(
+            f"{origin}: {removed} is gone; mark frames with take_snapshot()"
+        )
+    startup_snapshot, steps = _split_timeline(module.timeline)
+    exits = getattr(module, "exit_after_last_step", False)
+    if exits and steps and steps[-1].snapshot is not None:
+        raise ValueError(f"{origin}: the exiting last step cannot take a snapshot")
     return Scenario(
         name=name,
-        steps=_split_timeline(module.timeline),
+        steps=steps,
+        startup_snapshot=startup_snapshot,
         env=getattr(module, "env", {}),
         handshake=getattr(module, "handshake", {}),
         on_request=getattr(module, "on_request", {}),
@@ -207,9 +242,7 @@ def _build_scenario(module: ModuleType, name: str, origin: str) -> Scenario:
         mouse_tracking=getattr(module, "mouse_tracking", None),
         mouse_tracking_seen=getattr(module, "mouse_tracking_seen", None),
         skip_reason=getattr(module, "skip", None),
-        capture_startup=getattr(module, "capture_startup", True),
-        capture_steps=getattr(module, "capture_steps", None),
-        exit_after_last_step=getattr(module, "exit_after_last_step", False),
+        exit_after_last_step=exits,
         settle_per_key=getattr(module, "settle_per_key", False),
         terminal_responses=getattr(module, "terminal_responses", {}),
         exit_responses=getattr(module, "exit_responses", {}),
@@ -228,12 +261,28 @@ def _texts(module: ModuleType, name: str) -> tuple[str, ...]:
     return tuple(texts)
 
 
-def _split_timeline(timeline: Timeline) -> list[Step]:
+def _split_timeline(timeline: Timeline) -> tuple[str | None, list[Step]]:
+    """Split a timeline into input steps and the optional startup snapshot label."""
+    startup_snapshot: str | None = None
     steps: list[Step] = []
     for item in timeline:
         if isinstance(item, str):
             steps.append(Step(item))
             continue
+        if "take_snapshot" in item:
+            label = item["take_snapshot"]
+            if not steps:
+                if startup_snapshot is not None:
+                    raise ValueError("startup is already snapshotted")
+                startup_snapshot = label or "startup"
+                continue
+            if steps[-1].snapshot is not None:
+                raise ValueError(f"step {len(steps) - 1} is already snapshotted")
+            steps[-1].snapshot = label or f"step{len(steps) - 1}"
+            continue
+        starts_step = "release" in item or "resize" in item
+        if steps and steps[-1].snapshot is not None and not starts_step:
+            raise ValueError("take_snapshot() must follow every event of its step")
         if "release" in item:
             release = item["release"]
             if not isinstance(release, int) or release < 1:
@@ -263,4 +312,4 @@ def _split_timeline(timeline: Timeline) -> list[Step]:
         # An `id` marks a server-to-client request (e.g. `callback/call`).
         keys = ("id", "method", "params")
         steps[-1].events.append({key: item[key] for key in keys if key in item})
-    return steps
+    return startup_snapshot, steps

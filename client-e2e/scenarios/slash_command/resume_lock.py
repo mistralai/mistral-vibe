@@ -18,7 +18,5 @@ request_methods = {"session/lease/subscribe"}
 # inline notice, without a session/resume request.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "\r"]
 
-capture_startup = False
-capture_steps = {2, 3}
 screen_contains = ("open in another Vibe process",)
 screen_excludes = ("⚠",)

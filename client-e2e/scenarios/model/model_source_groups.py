@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 
 def _model(alias: str, display_name: str, source: str) -> dict[str, Any]:
@@ -45,5 +45,4 @@ handshake = {
 }
 
 # Open /model, close it, then open the /config active_model choices.
-timeline: Timeline = ["/model", "\r", "\x1b", "/config\r", "\r"]
-capture_steps = {1, 4}
+timeline: Timeline = ["/model", "\r", "\x1b", "/config\r", "\r", take_snapshot()]

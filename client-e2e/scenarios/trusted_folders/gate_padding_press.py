@@ -5,7 +5,6 @@ from e2e.app_server.scenario import Timeline
 # Force the OSC 52 copy path so the copy is deterministic across hosts.
 env = {"SSH_TTY": "/dev/pts/0"}
 expected_clipboard = "• AGENTS.md"
-capture_steps = {1}
 
 handshake = {
     "workspace/trust/status": {

@@ -57,7 +57,6 @@ def _click(column: int, row: int) -> str:
     return f"\x1b[<0;{column};{row}M\x1b[<0;{column};{row}m"
 
 
-capture_startup = False
 screen_contains = (
     "┝ attached image: [Image #1]",
     "└ attached image: [Image #2]",

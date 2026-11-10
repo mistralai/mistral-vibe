@@ -30,10 +30,10 @@ from vibe.core.config._defaults import (
     DEFAULT_API_TIMEOUT,
     DEFAULT_COMPACTION_REASONING_LIMIT_TOKENS,
     DEFAULT_CONSOLE_BASE_URL,
+    DEFAULT_MISTRAL_API_BASE,
     DEFAULT_MISTRAL_API_ENV_KEY,
     DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
     DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
-    DEFAULT_MISTRAL_SERVER_URL,
     DEFAULT_OUTPUT_LIMIT_RETRIES,
     DEFAULT_THEME,
     DEFAULT_VIBE_BASE_URL,
@@ -200,7 +200,7 @@ def load_dotenv_values(
 DEFAULT_PROVIDERS = [
     ProviderConfig(
         name="mistral",
-        api_base=f"{DEFAULT_MISTRAL_SERVER_URL}/v1",
+        api_base=DEFAULT_MISTRAL_API_BASE,
         api_key_env_var=DEFAULT_MISTRAL_API_ENV_KEY,
         browser_auth_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_BASE_URL,
         browser_auth_api_base_url=DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL,
@@ -955,13 +955,29 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
             " is set. Supports glob patterns and regex with 're:' prefix."
         ),
     )
+    enabled_plugins: Annotated[list[str], WithConcatMerge()] = Field(
+        default_factory=list,
+        description=(
+            "Names of installed plugins to turn on that are off by default."
+            " 'disabled_plugins' wins when a plugin is in both."
+        ),
+    )
+    disabled_plugins: Annotated[list[str], WithConcatMerge()] = Field(
+        default_factory=list,
+        description=(
+            "Names of installed plugins to disable. A disabled plugin stays"
+            " installed but contributes nothing to sessions."
+        ),
+    )
     experimental_enable_registry_skills: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
         description=(
             "Experimental: pull shared workspace skills from Mistral"
             " (api.mistral.ai) and make them available alongside local skills."
-            " Requires a Mistral provider and API key. Local skills take"
-            " precedence on name collision."
+            " Requires a Mistral provider and API key. On a name collision the"
+            " project's skills win over global ones, skill_paths included, and"
+            " within a scope a local skill wins over a shared one. Builtin skills"
+            " are named vibe:<name>, so they never collide."
         ),
     )
     experimental_enable_model_catalog: Annotated[bool, WithReplaceMerge()] = Field(

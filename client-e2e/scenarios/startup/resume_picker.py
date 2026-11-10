@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 client_args = ("--resume",)
-timeline: Timeline = []
+timeline: Timeline = [take_snapshot()]

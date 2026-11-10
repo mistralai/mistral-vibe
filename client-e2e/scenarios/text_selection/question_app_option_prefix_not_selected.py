@@ -12,8 +12,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "SSH_TTY": "/dev/pts/0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 2, 3}
 # The drag starts on the question title and ends on the first option's label,
 # so the copy crosses the prefix cells without ever including them.
 clipboard_contains = (
