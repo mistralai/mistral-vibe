@@ -7,7 +7,7 @@ mod bash_timeout;
 mod settings;
 
 use schemars::JsonSchema;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::core::tools::command_environment::CommandEnvironment;
 use crate::core::tools::external::RuntimeBuiltinToolName;
@@ -98,8 +98,61 @@ struct ReadFileOutput {
 #[derive(JsonSchema)]
 #[schemars(deny_unknown_fields)]
 struct WriteFileInput {
+    /// Path of the file to create or overwrite. `file_path` is accepted as an alias, as the `edit` tool names it.
     path: String,
     content: String,
+}
+
+/// Lets a `write_file` call name its target `file_path`, the way the skill docs
+/// and the `edit` tool do, while the Runtime keeps reading `path`: the schema
+/// takes either name, and [`write_file_runtime_arguments`] renames the alias.
+fn write_file_input_schema(schema: &mut Value) {
+    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(path) = properties.get("path").cloned() else {
+        return;
+    };
+    let mut file_path = path;
+    if let Value::Object(fields) = &mut file_path {
+        fields.insert(
+            "description".to_string(),
+            Value::from("Alias for `path`, the way the `edit` tool names the file."),
+        );
+    }
+    properties.insert("file_path".to_string(), file_path);
+    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+        required.retain(|field| field.as_str() != Some("path"));
+    }
+    schema["anyOf"] = json!([{ "required": ["path"] }, { "required": ["file_path"] }]);
+}
+
+/// Renames a `write_file` call's `file_path` to the `path` the Runtime reads.
+/// A call that says both keeps its `path` and drops the alias.
+pub(crate) fn write_file_runtime_arguments(mut arguments: Value) -> Value {
+    if let Value::Object(fields) = &mut arguments {
+        if fields.contains_key("path") {
+            fields.remove("file_path");
+        } else if let Some(file_path) = fields.remove("file_path") {
+            fields.insert("path".to_string(), file_path);
+        }
+    }
+    arguments
+}
+
+/// A `write_file` call that names the file twice must mean the same file by both names.
+pub(crate) fn check_write_file_domain(arguments: &Value) -> Result<(), String> {
+    let (Some(path), Some(file_path)) = (arguments.get("path"), arguments.get("file_path")) else {
+        return Ok(());
+    };
+    if path == file_path {
+        Ok(())
+    } else {
+        Err(
+            "write_file got both `path` and `file_path` with different values; send only one"
+                .to_string(),
+        )
+    }
 }
 
 #[derive(JsonSchema)]
@@ -184,10 +237,11 @@ impl ToolName {
     fn schemas(self, timeout: BashTimeout) -> (Value, Value) {
         match self {
             Self::ReadFile => (ReadFileInput::tool_schema(), ReadFileOutput::tool_schema()),
-            Self::WriteFile => (
-                WriteFileInput::tool_schema(),
-                WriteFileOutput::tool_schema(),
-            ),
+            Self::WriteFile => {
+                let mut input_schema = WriteFileInput::tool_schema();
+                write_file_input_schema(&mut input_schema);
+                (input_schema, WriteFileOutput::tool_schema())
+            }
             Self::Edit => (EditInput::tool_schema(), EditOutput::tool_schema()),
             Self::Bash => {
                 let mut input_schema = BashInput::tool_schema();
@@ -329,5 +383,83 @@ mod tests {
             contract.input_schema["required"],
             json!(["file_path", "old_string", "new_string"])
         );
+    }
+
+    /// *Prepare*: The Core-owned write_file tool, as the model and the Runtime see it.
+    /// *Do*: Validate calls that name the file with `path`, with its `file_path` alias, and with neither.
+    /// *Assert*: Both names pass; a call without either, or with a non-string alias, is rejected.
+    #[test]
+    fn write_file_schema_accepts_file_path_as_an_alias_for_path() {
+        // Prepare
+        let write_file = ToolName::WriteFile
+            .spec(CommandEnvironment::Unix, BashTimeout::default(), false)
+            .expect("Unix exposes write_file");
+        let contracts = runtime_contracts(BashTimeout::default());
+        let contract = contracts
+            .iter()
+            .find(|contract| contract.name == RuntimeBuiltinToolName::FileSystemWriteFile)
+            .unwrap();
+
+        // Assert: the Runtime contract is the model's schema, so both accept the alias.
+        assert_eq!(contract.input_schema, write_file.input_schema);
+        for arguments in [
+            json!({"path": "a.txt", "content": "x"}),
+            json!({"file_path": "a.txt", "content": "x"}),
+        ] {
+            assert!(
+                crate::core::tools::arguments::validate_arguments(
+                    Some(RuntimeBuiltinToolName::FileSystemWriteFile),
+                    &contract.input_schema,
+                    &arguments,
+                )
+                .is_ok(),
+                "{arguments} should validate"
+            );
+        }
+        for arguments in [
+            json!({"content": "x"}),
+            json!({"file_path": 7, "content": "x"}),
+        ] {
+            assert!(
+                crate::core::tools::arguments::validate_arguments(
+                    Some(RuntimeBuiltinToolName::FileSystemWriteFile),
+                    &contract.input_schema,
+                    &arguments,
+                )
+                .is_err(),
+                "{arguments} should not validate"
+            );
+        }
+    }
+
+    /// *Prepare*: `write_file` calls naming the file once, and once by both names.
+    /// *Do*: Rename the arguments the Runtime takes.
+    /// *Assert*: `file_path` becomes `path`; a `path` already present wins and the alias is dropped.
+    #[test]
+    fn write_file_runtime_arguments_rename_the_file_path_alias() {
+        assert_eq!(
+            write_file_runtime_arguments(json!({"file_path": "a.txt", "content": "x"})),
+            json!({"path": "a.txt", "content": "x"})
+        );
+        assert_eq!(
+            write_file_runtime_arguments(json!({"path": "a.txt", "content": "x"})),
+            json!({"path": "a.txt", "content": "x"})
+        );
+        assert_eq!(
+            write_file_runtime_arguments(
+                json!({"path": "a.txt", "file_path": "a.txt", "content": "x"})
+            ),
+            json!({"path": "a.txt", "content": "x"})
+        );
+    }
+
+    /// *Prepare*: `write_file` calls naming the file by both names, equal and different.
+    /// *Do*: Check the rule the schema cannot state.
+    /// *Assert*: Equal names pass; different names are refused.
+    #[test]
+    fn write_file_domain_rejects_two_different_file_names() {
+        assert!(check_write_file_domain(&json!({"file_path": "a.txt"})).is_ok());
+        assert!(check_write_file_domain(&json!({"path": "a.txt", "file_path": "a.txt"})).is_ok());
+        assert!(check_write_file_domain(&json!({"path": "a.txt", "file_path": "b.txt"})).is_err());
     }
 }

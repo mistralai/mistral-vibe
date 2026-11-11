@@ -421,6 +421,56 @@ mod tests {
         }
     }
 
+    ///
+    /// *Prepare*: The model calls `write_file` with `file_path`, the name the skill docs use.
+    /// *Do*: Resolve the direct call.
+    /// *Assert*: The call validates and the Runtime receives the target as `path`.
+    ///
+    #[test]
+    fn direct_write_file_call_accepts_the_file_path_alias() {
+        // Prepare
+        let arguments = json!({"file_path": "example.txt", "content": "example"});
+
+        // Do
+        let step = advance_llm(started(), assistant_tool("write_file", arguments));
+
+        // Assert
+        assert!(matches!(
+            step.effect,
+            Some(Action::RuntimeBuiltinTool { call, .. })
+                if call.name.as_str() == "file_system.write_file"
+                    && call.arguments == json!({"path": "example.txt", "content": "example"})
+        ));
+    }
+
+    ///
+    /// *Prepare*: The resolved tools; a `write_file` call naming the file with both `path` and a different `file_path`.
+    /// *Do*: Resolve the direct call.
+    /// *Assert*: The call is rejected with the tool's own wording.
+    ///
+    #[test]
+    fn direct_write_file_call_with_two_different_names_is_rejected() {
+        // Prepare
+        let tools = resolved::ResolvedTools::compile(&config()).unwrap();
+        let call = ToolCall {
+            id: "write-call".to_string(),
+            name: "write_file".to_string(),
+            arguments: json!({"path": "a.txt", "file_path": "b.txt", "content": "x"}),
+            argument_error: None,
+        };
+
+        // Do
+        let error = tools.resolve_direct_call(&call).unwrap_err();
+
+        // Assert
+        assert!(
+            error.to_string().contains(
+                "Invalid arguments for write_file: write_file got both `path` and `file_path` with different values"
+            ),
+            "unexpected error: {error}"
+        );
+    }
+
     #[test]
     fn provided_tool_exposure_controls_top_level_and_programmatic_catalogs() {
         assert!(

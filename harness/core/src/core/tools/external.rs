@@ -139,6 +139,9 @@ impl RuntimeBuiltinToolName {
     pub(crate) fn check_domain(self, arguments: &Value) -> Result<(), String> {
         match self {
             Self::SubagentSpawn => crate::core::features::subagents::check_spawn_domain(arguments),
+            Self::FileSystemWriteFile => {
+                crate::core::features::file_system::check_write_file_domain(arguments)
+            }
             _ => Ok(()),
         }
     }
