@@ -93,6 +93,33 @@ class SessionConfigCache:
         build: Callable[[], Awaitable[BuiltSessionConfig]],
         credentials: PlatformCredentialFactory | None = None,
     ) -> BuiltSessionConfig:
+        entry = await self._current(key, harness_files, org_config, build, credentials)
+        return replace(
+            entry.built, config_orchestrator=entry.built.config_orchestrator.copy()
+        )
+
+    async def config(
+        self,
+        key: SessionConfigKey,
+        harness_files: HarnessFilesManager,
+        org_config: OrgConfigService | None,
+        build: Callable[[], Awaitable[BuiltSessionConfig]],
+        credentials: PlatformCredentialFactory | None = None,
+    ) -> VibeConfigSchema:
+        """The config alone, for a read: no copy of the orchestrator to pay for.
+        The caller must not change it.
+        """
+        entry = await self._current(key, harness_files, org_config, build, credentials)
+        return entry.built.config_orchestrator.config
+
+    async def _current(
+        self,
+        key: SessionConfigKey,
+        harness_files: HarnessFilesManager,
+        org_config: OrgConfigService | None,
+        build: Callable[[], Awaitable[BuiltSessionConfig]],
+        credentials: PlatformCredentialFactory | None,
+    ) -> _Entry:
         # Taken before the build, so a change landing during it rebuilds next
         # time rather than being taken as built.
         inputs = session_config_inputs(harness_files)
@@ -104,9 +131,7 @@ class SessionConfigCache:
             entry = await self._join_or_build(key, inputs, now, build, credentials)
         if key in self._entries:
             self._entries.move_to_end(key)
-        return replace(
-            entry.built, config_orchestrator=entry.built.config_orchestrator.copy()
-        )
+        return entry
 
     async def _join_or_build(
         self,

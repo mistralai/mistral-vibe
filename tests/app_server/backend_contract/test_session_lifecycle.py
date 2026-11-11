@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import AsyncIterator, Callable
+import contextlib
 import json
 from pathlib import Path
 
@@ -273,6 +275,228 @@ async def test_detached_fork_is_readable_and_resumable_from_a_new_host(
     ] == ["First", "First answer"]
 
 
+def _texts(entries: list | None) -> list[str]:
+    return [
+        entry.text for entry in entries or [] if isinstance(entry, PublicMessageEntry)
+    ]
+
+
+async def _act(
+    session: AppServerSession, prompt: str, client_message_id: str | None
+) -> None:
+    _ = [
+        event
+        async for event in session.act(prompt, client_message_id=client_message_id)
+    ]
+
+
+@contextlib.asynccontextmanager
+async def _running_turn(
+    session: AppServerSession,
+    started: asyncio.Event,
+    release: asyncio.Event,
+    client_message_id: str | None = "user-running",
+) -> AsyncIterator[asyncio.Task[None]]:
+    turn = asyncio.create_task(_act(session, "Running", client_message_id))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        yield turn
+    finally:
+        release.set()
+        await asyncio.wait_for(turn, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_fork_during_a_turn_copies_the_session_before_that_turn(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_gated_mistral_response(
+                "Running answer", started=started, release=release
+            ),
+        ]
+    )
+    session = backend_contract_persistent_session
+    await _act(session, "First", "user-1")
+
+    async with _running_turn(session, started, release) as turn:
+        fork = await session.resources.sessions.fork(attach=False)
+        running = not turn.done()
+
+    assert running
+    assert _texts(fork.state.history) == ["First", "First answer"]
+    assert _texts(session.history) == [
+        "First",
+        "First answer",
+        "Running",
+        "Running answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_fork_during_a_steered_turn_copies_the_session_before_that_turn(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    steered, release_steered = asyncio.Event(), asyncio.Event()
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_gated_mistral_response(
+                "Before steer", started=started, release=release
+            ),
+            backend_contract_gated_mistral_response(
+                "After steer", started=steered, release=release_steered
+            ),
+        ]
+    )
+    session = backend_contract_persistent_session
+    await _act(session, "First", "user-1")
+
+    async with _running_turn(session, started, release_steered):
+        await session.inject_user_context(
+            "Steer", as_message=True, client_message_id="user-steer"
+        )
+        release.set()
+        await asyncio.wait_for(steered.wait(), timeout=5)
+        fork = await session.resources.sessions.fork(attach=False)
+
+    assert _texts(fork.state.history) == ["First", "First answer"]
+
+
+@pytest.mark.asyncio
+async def test_fork_during_a_turn_without_a_client_message_id_copies_the_session_before_it(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_gated_mistral_response(
+                "Running answer", started=started, release=release
+            ),
+        ]
+    )
+    session = backend_contract_persistent_session
+    await _act(session, "First", "user-1")
+
+    async with _running_turn(session, started, release, client_message_id=None):
+        fork = await session.resources.sessions.fork(attach=False)
+
+    assert _texts(fork.state.history) == ["First", "First answer"]
+
+
+@pytest.mark.asyncio
+async def test_fork_during_a_steered_injected_turn_copies_the_session_before_it(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    steered, release_steered = asyncio.Event(), asyncio.Event()
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_gated_mistral_response(
+                "Before steer", started=started, release=release
+            ),
+            backend_contract_gated_mistral_response(
+                "After steer", started=steered, release=release_steered
+            ),
+        ]
+    )
+    session = backend_contract_persistent_session
+    await _act(session, "First", "user-1")
+
+    async def retry() -> None:
+        _ = [
+            event
+            async for event in session.act(
+                "Retry", client_message_id="user-retry", injected=True
+            )
+        ]
+
+    turn = asyncio.create_task(retry())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await session.inject_user_context(
+            "Steer", as_message=True, client_message_id="user-steer"
+        )
+        release.set()
+        await asyncio.wait_for(steered.wait(), timeout=5)
+        fork = await session.resources.sessions.fork(attach=False)
+    finally:
+        release_steered.set()
+        await asyncio.wait_for(turn, timeout=5)
+
+    assert _texts(fork.state.history) == ["First", "First answer"]
+
+
+@pytest.mark.asyncio
+async def test_fork_during_the_first_turn_copies_an_empty_session(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_gated_mistral_response(
+            "Running answer", started=started, release=release
+        )
+    )
+    session = backend_contract_persistent_session
+
+    async with _running_turn(session, started, release):
+        fork = await session.resources.sessions.fork(attach=False)
+
+    assert fork.state.session.parent_session_id == session.session_id
+    assert _texts(fork.state.history) == []
+
+
+@pytest.mark.asyncio
+async def test_fork_during_a_turn_after_a_compaction_copies_the_turns_before_it(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    started, release = asyncio.Event(), asyncio.Event()
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_mistral_response("<summary>One turn</summary>"),
+            backend_contract_mistral_response("Second answer"),
+            backend_contract_gated_mistral_response(
+                "Running answer", started=started, release=release
+            ),
+        ]
+    )
+    session = backend_contract_persistent_session
+    await _act(session, "First", "user-1")
+    await session.compact()
+    await _act(session, "Second", "user-2")
+
+    async with _running_turn(session, started, release):
+        fork = await session.resources.sessions.fork(attach=False)
+
+    copied = _texts(fork.state.history)
+    assert copied[-2:] == ["Second", "Second answer"]
+    assert "Running" not in copied
+
+
 @pytest.mark.asyncio
 async def test_in_place_resume_replaces_the_public_snapshot_and_keeps_the_session_usable(
     backend_contract_mistral_api: respx.Route,
@@ -374,6 +598,99 @@ async def test_resume_attaches_the_requested_persisted_session_and_keeps_it_usab
         ] == ["save this", "saved", "resume this", "resumed"]
     finally:
         await resumed.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_starts_the_auto_approve_agent_and_stays_a_bypass_on_resume(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_persistent_config: None,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A session saved on ``ask``.
+    *Do*: Start a new session, then resume the saved one, both with auto-approve.
+    *Assert*: The new one runs the auto-approve agent; the resumed one stays on
+    ``ask`` with every call approved.
+    """
+    # Prepare
+    backend_contract_mistral_api.mock(
+        side_effect=[backend_contract_mistral_response("saved")]
+    )
+    saving = await connect_backend_contract_host(
+        session_options=SessionOptions(agent="ask"),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        saved = await saving.host.open_session()
+        _ = [event async for event in saved.act("save this")]
+        saved_id = saved.session_id
+        await saved.close()
+    finally:
+        await saving.host.close()
+
+    # Do
+    async def open_with_auto_approve(session_id: str | None) -> tuple[str, bool]:
+        connection = await connect_backend_contract_host(
+            session_options=SessionOptions(auto_approve=True),
+            capabilities=ClientCapabilities(),
+            process_services=process_services,
+        )
+        try:
+            session = await (
+                connection.host.open_session()
+                if session_id is None
+                else connection.host.resume_session(session_id)
+            )
+            opened = (
+                session.resources.agents.active.name,
+                session.resources.runtime.bypass_tool_permissions,
+            )
+            await session.close()
+            return opened
+        finally:
+            await connection.host.close()
+
+    started_agent, started_bypass = await open_with_auto_approve(None)
+    resumed_agent, resumed_bypass = await open_with_auto_approve(saved_id)
+
+    # Assert
+    assert (started_agent, started_bypass) == ("auto-approve", True)
+    assert (resumed_agent, resumed_bypass) == ("ask", True)
+
+
+@pytest.mark.asyncio
+async def test_an_auto_approve_start_grants_its_folder_trust_once(
+    tmp_path: Path, process_services: ProcessServices
+) -> None:
+    """*Prepare*: A trusted-for-the-session folder.
+    *Do*: Start a session there with auto-approve, which builds its context twice.
+    *Assert*: The folder holds a single session grant, released with the session.
+    """
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    def grants() -> int:
+        return trusted_folders_manager._session_trusted.count(str(tmp_path.resolve()))
+
+    # Do
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path), trust_workspace=True, auto_approve=True
+        ),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        agent = session.resources.agents.active.name
+        held = grants()
+        await session.close()
+    finally:
+        await connection.host.close()
+
+    # Assert
+    assert agent == "auto-approve"
+    assert held == 1
 
 
 @pytest.mark.asyncio

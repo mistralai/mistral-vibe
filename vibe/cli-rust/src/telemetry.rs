@@ -9,6 +9,8 @@ use tokio::sync::mpsc::error::TrySendError;
 use crate::app::App;
 use crate::server::{method, Client, TelemetryRecordParams};
 
+pub mod install;
+
 /// Queued events awaiting the event loop. Overflow drops the emission attempt:
 /// telemetry must never stall the UI thread or grow without bound.
 pub const TELEMETRY_CHANNEL_CAP: usize = 64;
@@ -149,6 +151,11 @@ pub fn session_branched(app: &App, source_session_id: &str, new_session_id: &str
     );
 }
 
+/// The first Normal-mode entry since `vim_keybindings` turned on.
+pub fn vim_normal_mode_entered(app: &App) {
+    record(app, event::VIM_NORMAL_MODE_ENTERED, BTreeMap::new());
+}
+
 pub fn voice_mode_toggled(app: &App, enabled: bool) {
     record(
         app,
@@ -203,12 +210,16 @@ pub fn bmap(value: Value) -> BTreeMap<String, Value> {
 /// stream per event regardless of which client produced it.
 pub mod event {
     pub const STARTUP: &str = "vibe.startup";
+    pub const VERSION_UPDATED: &str = "vibe.version.updated";
     pub const SLASH_COMMAND_USED: &str = "vibe.slash_command_used";
+    pub const MODEL_SELECTION_OPENED: &str = "vibe.model_selection.opened";
+    pub const MODEL_SELECTION_SELECTED: &str = "vibe.model_selection.selected";
     pub const AT_MENTION_INSERTED: &str = "vibe.at_mention_inserted";
     pub const USER_COPIED_TEXT: &str = "vibe.user_copied_text";
     pub const USER_CANCELLED_ACTION: &str = "vibe.user_cancelled_action";
     pub const SESSION_BRANCHED: &str = "vibe.session_branched";
     pub const VOICE_MODE_TOGGLED: &str = "vibe.voice_mode_toggled";
+    pub const VIM_NORMAL_MODE_ENTERED: &str = "vibe.vim_normal_mode_entered";
     pub const TRANSCRIPTION_START: &str = "vibe.audio.transcription.start";
     pub const TRANSCRIPTION_CANCEL: &str = "vibe.audio.transcription.cancel_recording";
     pub const TRANSCRIPTION_DONE: &str = "vibe.audio.transcription.done";

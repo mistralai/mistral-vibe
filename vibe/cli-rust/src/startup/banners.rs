@@ -31,8 +31,10 @@ const UNTRUSTED_WARNING_KEY: &str = "dirs";
 pub fn mount(app: &mut App, runtime: &Value, client: &Arc<Client>) {
     let promo_eligible = should_show_promo();
     let current = env!("CARGO_PKG_VERSION");
-    // A resumed conversation stays last on screen: what's new waits for a fresh session.
-    let fresh = !app.view.transcript.has_server_entries() && !app.session.resume_picker_shown;
+    // A resumed conversation or a startup submission stays last on screen: what's new waits for a fresh session.
+    let fresh = !app.view.transcript.has_server_entries()
+        && !app.session.resume_picker_shown
+        && !submission_waiting(app);
     let seen = match whats_new_cache::last_seen() {
         LastSeen::Seen(seen) if fresh && seen.as_deref() != Some(current) => Some(seen),
         _ => None,
@@ -46,6 +48,17 @@ pub fn mount(app: &mut App, runtime: &Value, client: &Arc<Client>) {
     }
     app.session.runtime = runtime.clone();
     fetch_untrusted_config(app, client);
+}
+
+/// A prompt or command sent before ready skips `submit`'s dismiss, so what's new would stay pinned below it.
+fn submission_waiting(app: &App) -> bool {
+    app.session
+        .initial_prompt
+        .as_deref()
+        .is_some_and(|prompt| !prompt.is_empty())
+        || !app.queue.is_empty()
+        || !app.pending_commands.is_empty()
+        || app.session.pending_shell.is_some()
 }
 
 /// Mount every release's notes newer than `seen`; with none, the promo shows alone.

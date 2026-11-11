@@ -347,22 +347,109 @@ async def test_a_local_sparse_override_keeps_the_other_catalog_fields(
     assert config.validation_warnings == ()
 
 
+async def _orchestrator_with_model_experiments(
+    *, catalog_flag: bool
+) -> ConfigOrchestrator[VibeConfigSchema]:
+    """GrowthBook adds ``glm-5-3``, routes the default to it, and sets the
+    catalog flag.
+    """
+    orchestrator = await build_default_orchestrator()
+    growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
+    assert isinstance(growthbook, GrowthbookLayer)
+    model = {"name": "glm-5-3", "provider": "mistral", "alias": "glm-5-3"}
+    growthbook.set_variants({
+        ExperimentName.CLI_EXTRA_MODELS.value: json.dumps([model]),
+        ExperimentName.CLI_MODEL_ROUTING.value: json.dumps({
+            "active_model": "glm-5-3",
+            "model_config": model,
+        }),
+        ExperimentName.MODEL_CATALOG.value: catalog_flag,
+    })
+    await orchestrator.reload()
+    return orchestrator
+
+
 @pytest.mark.asyncio
-async def test_growthbook_wins_over_the_catalog() -> None:
+async def test_the_catalog_flag_replaces_the_growthbook_models() -> None:
+    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=True)
+
+    await apply_model_catalog(orchestrator, _catalog(_entry(_GLM, recommended=True)))
+
+    config = orchestrator.config
+    assert "glm-5-3" not in config.models
+    assert _GLM in config.models
+    assert config.resolve_default_model_alias() == _GLM
+
+
+@pytest.mark.asyncio
+async def test_the_catalog_flag_drops_the_growthbook_models_before_the_catalog_loads() -> (
+    None
+):
+    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=True)
+
+    config = orchestrator.config
+    assert "glm-5-3" not in config.models
+    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "catalog",
+    [_catalog(), _catalog(_entry(_GLM, capabilities={"function_calling": False}))],
+    ids=["empty", "no-usable-entry"],
+)
+async def test_a_catalog_with_no_model_leaves_the_built_in_models(
+    catalog: ModelCatalogResponse,
+) -> None:
+    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=True)
+
+    await apply_model_catalog(orchestrator, catalog)
+
+    config = orchestrator.config
+    assert "glm-5-3" not in config.models
+    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+
+
+@pytest.mark.asyncio
+async def test_a_local_catalog_keeps_the_growthbook_models_when_the_flag_is_off(
+    config_dir: Path,
+) -> None:
+    _write_user_config(config_dir, experimental_enable_model_catalog=True)
+    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=False)
+
+    await apply_model_catalog(orchestrator, _catalog(_entry(_GLM)))
+
+    config = orchestrator.config
+    assert "glm-5-3" in config.models
+    assert _GLM in config.models
+
+
+@pytest.mark.asyncio
+async def test_a_local_setting_off_still_drops_the_growthbook_models(
+    config_dir: Path,
+) -> None:
+    _write_user_config(config_dir, experimental_enable_model_catalog=False)
+    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=True)
+
+    config = orchestrator.config
+    assert config.experimental_enable_model_catalog is False
+    assert "glm-5-3" not in config.models
+    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+
+
+@pytest.mark.asyncio
+async def test_the_catalog_flag_keeps_the_other_experiments() -> None:
     orchestrator = await build_default_orchestrator()
     growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
     assert isinstance(growthbook, GrowthbookLayer)
     growthbook.set_variants({
-        ExperimentName.CLI_EXTRA_MODELS.value: json.dumps([
-            {"name": _GLM, "provider": "mistral", "alias": _GLM, "temperature": 0.3}
-        ])
+        ExperimentName.REGISTRY_SKILLS.value: True,
+        ExperimentName.MODEL_CATALOG.value: True,
     })
 
-    await apply_model_catalog(
-        orchestrator, _catalog(_entry(_GLM, parameters={"temperature": 1.0}))
-    )
+    await apply_model_catalog(orchestrator, _catalog(_entry(_GLM)))
 
-    assert orchestrator.config.models[_GLM].temperature == 0.3
+    assert orchestrator.config.experimental_enable_registry_skills is True
 
 
 @pytest.mark.asyncio
@@ -459,19 +546,74 @@ async def test_an_ignored_alias_is_logged_once_across_rebuilds(
 
 
 @pytest.mark.asyncio
-async def test_the_built_in_default_stays_beside_a_catalog_entry_claiming_its_id(
+async def test_catalog_models_replace_the_built_in_default(
     config_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """VIBE-5548: with catalog models available, the built-in default is not
+    available anymore, and a catalog alias takes its name: a pin on the
+    built-in's name runs the catalog model.
+    """
     builtin = DEFAULT_ACTIVE_MODEL_CONFIG.alias
     _write_user_config(config_dir, active_model=builtin)
 
     with caplog.at_level(logging.WARNING):
         config = await _config(_catalog(_entry(_MEDIUM, aliases=[builtin])))
 
-    assert config.models[builtin].name == DEFAULT_ACTIVE_MODEL_CONFIG.name
+    assert builtin not in config.models
     assert _MEDIUM in config.models
-    assert config.get_active_model().alias == builtin
+    assert config.models[_MEDIUM].display_name == _MEDIUM.upper()
+    # The pin on the built-in's name selects the catalog model.
+    assert config.get_active_model().alias == _MEDIUM
+    assert f"Model alias '{builtin}' is ignored" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_settings_entry_under_the_built_in_name_applies_to_the_catalog_model(
+    config_dir: Path,
+) -> None:
+    builtin = DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    config = await _config(
+        _catalog(_entry(_MEDIUM, aliases=[builtin])),
+        config_dir=config_dir,
+        active_model="",
+        models={builtin: {"temperature": 0.7}},
+    )
+
+    assert builtin not in config.models
+    assert config.models[_MEDIUM].temperature == 0.7
+
+
+@pytest.mark.asyncio
+async def test_a_user_defined_model_under_the_built_in_name_is_kept(
+    config_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A whole model the user defines under the built-in's name keeps it: the
+    catalog alias is then ignored and the user's model wins the name.
+    """
+    builtin = DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    with caplog.at_level(logging.WARNING):
+        config = await _config(
+            _catalog(_entry(_MEDIUM, aliases=[builtin])),
+            config_dir=config_dir,
+            active_model="",
+            models=[{"name": "my-medium", "provider": "llamacpp", "alias": builtin}],
+        )
+
+    assert config.models[builtin].name == "my-medium"
+    assert _MEDIUM in config.models
     assert f"Model alias '{builtin}' is ignored" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_empty_catalog_keeps_the_built_in_default() -> None:
+    # Every entry dropped (no function calling): no catalog model is available,
+    # so the built-in default stays.
+    config = await _config(
+        _catalog(_entry(_GLM, capabilities={"function_calling": False}))
+    )
+
+    assert DEFAULT_ACTIVE_MODEL_CONFIG.alias in config.models
+    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
 
 
 @pytest.mark.asyncio
@@ -545,32 +687,77 @@ async def test_a_live_routed_default_wins_over_the_recommendation() -> None:
     growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
     assert isinstance(growthbook, GrowthbookLayer)
     growthbook.set_variants({
-        ExperimentName.CLI_MODEL_ROUTING.value: json.dumps({
-            "active_model": DEFAULT_ACTIVE_MODEL_CONFIG.alias
-        })
+        ExperimentName.CLI_MODEL_ROUTING.value: json.dumps({"active_model": _MEDIUM})
     })
 
-    await apply_model_catalog(orchestrator, _catalog(_entry(_MEDIUM, recommended=True)))
-
-    assert (
-        orchestrator.config.resolve_default_model_alias()
-        == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    await apply_model_catalog(
+        orchestrator, _catalog(_entry(_GLM, recommended=True), _entry(_MEDIUM))
     )
+
+    assert orchestrator.config.resolve_default_model_alias() == _MEDIUM
 
 
 @pytest.mark.asyncio
-async def test_a_recommendation_allowed_models_excludes_leaves_the_local_default(
+async def test_allowed_models_match_the_retired_built_in_names_via_catalog_aliases(
     config_dir: Path,
 ) -> None:
+    """The built-in's names (alias and wire name) are published as aliases of
+    its catalog replacement, so an allowlist written against the built-in
+    keeps matching instead of degrading to allow-all.
+    """
+    builtin = DEFAULT_ACTIVE_MODEL_CONFIG
+    _write_user_config(config_dir, allowed_models=["mistral-vibe-cli-*"])
+
+    config = await _config(
+        _catalog(
+            _entry(_MEDIUM, aliases=[builtin.alias, builtin.name], recommended=True)
+        )
+    )
+
+    assert builtin.alias not in config.models
+    # The glob still restricts: only matching models stay available (the
+    # fixture's user model devstral-latest has the same wire name, plus the
+    # catalog replacement via its alias) — no degrade to allow-all.
+    assert _MEDIUM in config.available_models()
+    assert set(config.available_models()) == {"devstral-latest", _MEDIUM}
+
+
+@pytest.mark.asyncio
+async def test_admin_allowed_models_matching_a_retired_built_in_do_not_fail_closed() -> (
+    None
+):
+    builtin = DEFAULT_ACTIVE_MODEL_CONFIG
+    orchestrator = await build_default_orchestrator()
+    admin = orchestrator.get_layer(AdminConfigLayer.NAME)
+    assert isinstance(admin, AdminConfigLayer)
+    admin.restore({"allowed_models": ["mistral-vibe-cli-*"]})
+
+    await apply_model_catalog(
+        orchestrator, _catalog(_entry(_MEDIUM, aliases=[builtin.alias, builtin.name]))
+    )
+
+    # The config builds (no fail-closed) and the catalog replacement is allowed.
+    assert _MEDIUM in orchestrator.config.available_models()
+
+
+@pytest.mark.asyncio
+async def test_allowed_models_cannot_bring_the_built_in_default_back(
+    config_dir: Path,
+) -> None:
+    """VIBE-5548: a filter that used to fall back to the built-in default now
+    falls back within the catalog, which replaced it.
+    """
     _write_user_config(config_dir, allowed_models=["mistral-vibe-cli-*"])
 
     config = await _config(_catalog(_entry(_MEDIUM, recommended=True)))
 
-    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    assert DEFAULT_ACTIVE_MODEL_CONFIG.alias not in config.models
+    assert DEFAULT_ACTIVE_MODEL_CONFIG.alias not in config.available_models()
+    assert config.resolve_default_model_alias() != DEFAULT_ACTIVE_MODEL_CONFIG.alias
 
 
 @pytest.mark.asyncio
-async def test_a_dropped_recommended_entry_leaves_the_local_default() -> None:
+async def test_a_dropped_recommended_entry_falls_back_to_a_catalog_model() -> None:
     config = await _config(
         _catalog(
             _entry(_GLM),
@@ -579,7 +766,8 @@ async def test_a_dropped_recommended_entry_leaves_the_local_default() -> None:
     )
 
     assert config.catalog_recommended_model == ""
-    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    assert DEFAULT_ACTIVE_MODEL_CONFIG.alias not in config.models
+    assert config.resolve_default_model_alias() == _GLM
 
 
 @pytest.mark.asyncio
@@ -606,6 +794,28 @@ async def test_a_missing_pin_runs_the_default_and_names_no_cause(
     )
     stored = tomllib.loads((config_dir / "config.toml").read_text(encoding="utf-8"))
     assert stored["active_model"] == "glm-5-3"
+
+
+@pytest.mark.asyncio
+async def test_a_pin_on_the_built_in_name_without_a_catalog_alias_falls_back(
+    config_dir: Path,
+) -> None:
+    """VIBE-5548: once the catalog lists models the built-in is gone; a pin on
+    its name that no catalog alias claims gets the missing-model fallback.
+    """
+    builtin = DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    _write_user_config(config_dir, active_model=builtin)
+
+    config = await _config(
+        _catalog(_entry(_MEDIUM, label="Mistral Medium", recommended=True))
+    )
+
+    assert builtin not in config.models
+    assert config.get_active_model().alias == _MEDIUM
+    assert any(
+        f"Model '{builtin}' is not available" in warning
+        for warning in config.validation_warnings
+    )
 
 
 @pytest.mark.asyncio
@@ -720,18 +930,18 @@ async def test_a_pin_and_an_override_of_two_missing_models_warn_for_each(
 
 
 @pytest.mark.asyncio
-async def test_an_override_keyed_on_a_resolved_alias_keeps_its_warning(
-    config_dir: Path,
+async def test_settings_keyed_on_a_catalog_alias_apply_to_its_model(
+    config_dir: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The pin resolves through the alias, so no fallback fires; the override
-    # keyed on the alias string names no model and must not lose its notice.
     _write_user_config(
         config_dir, active_model="glm-old", models={"glm-old": {"temperature": 0.9}}
     )
 
-    config = await _config(_catalog(_entry(_GLM, aliases=["glm-old"])))
+    with caplog.at_level(logging.INFO):
+        config = await _config(_catalog(_entry(_GLM, aliases=["glm-old"])))
 
     assert config.get_active_model().alias == _GLM
-    assert config.validation_warnings == (
-        "Settings for model 'glm-old' are ignored: no such model is available.",
-    )
+    assert config.models[_GLM].temperature == 0.9
+    assert "glm-old" not in config.models
+    assert config.validation_warnings == ()
+    assert "Model settings 'glm-old' apply to model 'zai-glm-5-3'" in caplog.text

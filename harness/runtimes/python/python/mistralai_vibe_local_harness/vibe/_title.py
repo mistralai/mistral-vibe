@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 import dataclasses
 import json
@@ -23,6 +23,7 @@ from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderCredentialResult,
     ProviderCredentialSnapshot,
 )
+from mistralai_vibe_local_harness.vibe._projection import SKIPPED_USER_MESSAGE_OUTCOME
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 from mistralai_vibe_local_harness.vibe._utility_completion import (
     UtilityCompletionError,
@@ -92,14 +93,54 @@ class TitlePolicy:
 DEFAULT_TITLE_POLICY = TitlePolicy()
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ModelUserTexts:
+    """The text the model was given for each user message the Core still holds.
+
+    ``by_id`` is keyed by public entry id. ``by_shown`` is keyed by the text public
+    history shows for the message, for one published under an id the Core does not
+    keep, such as a loop prompt.
+    """
+
+    by_id: Mapping[str, str]
+    by_shown: Mapping[str, str]
+
+    def get(self, entry_id: object, shown: str) -> str | None:
+        if isinstance(entry_id, str) and (text := self.by_id.get(entry_id)) is not None:
+            return text
+        return self.by_shown.get(shown)
+
+
 def build_title_transcript(
-    entries: Sequence[JsonObject], *, policy: TitlePolicy = DEFAULT_TITLE_POLICY
+    entries: Sequence[JsonObject],
+    *,
+    policy: TitlePolicy = DEFAULT_TITLE_POLICY,
+    model_user_texts: ModelUserTexts | None = None,
 ) -> str:
+    """The transcript the title model reads.
+
+    ``model_user_texts`` gives the text the model was given for each user message.
+    A pre_agent hook may have rewritten what the user typed, which public history
+    still shows: the title model reads what the agent's model read. When given, a
+    user entry it does not know is left out rather than read as shown, since the
+    shown text may be what a hook removed; so is a message a hook blocked, as the
+    model never saw it.
+    """
     blocks: list[str] = []
     for entry in entries:
         entry_type = entry.get("type")
         if entry_type == "message":
-            block = _message_block(entry, policy=policy)
+            if (
+                entry.get("role") == "user"
+                and entry.get("outcome") == SKIPPED_USER_MESSAGE_OUTCOME
+            ):
+                continue
+            model_text: str | None = None
+            if model_user_texts is not None and entry.get("role") == "user":
+                model_text = model_user_texts.get(entry.get("id"), _entry_text(entry))
+                if model_text is None:
+                    continue
+            block = _message_block(entry, policy=policy, text=model_text)
         elif entry_type == "effect":
             block = _tool_block(entry, policy=policy)
         else:
@@ -114,11 +155,13 @@ def build_title_transcript(
     return f"{head}{_ELISION}{tail}"
 
 
-def _message_block(entry: JsonObject, *, policy: TitlePolicy) -> str | None:
+def _message_block(
+    entry: JsonObject, *, policy: TitlePolicy, text: str | None = None
+) -> str | None:
     role = entry.get("role")
     if role not in {"user", "assistant"}:
         return None
-    text = _entry_text(entry).strip()
+    text = (_entry_text(entry) if text is None else text).strip()
     if not text:
         return None
     return f"{role}: {text[: policy.max_message_chars]}"
@@ -201,7 +244,7 @@ async def execute_title_completion(
             ]
         ),
     ]
-    report_request_sent(messages, config, route, purpose="title", iteration=0)
+    report_request_sent(messages, title_config, route, purpose="title", iteration=0)
     metadata = (
         config.completion_metadata("title", 0)
         if config.completion_metadata is not None
@@ -232,8 +275,11 @@ async def generate_session_title(
     config: LocalRuntimeAdapterConfig,
     policy: TitlePolicy = DEFAULT_TITLE_POLICY,
     previous_title: str | None = None,
+    model_user_texts: ModelUserTexts | None = None,
 ) -> str | None:
-    transcript = build_title_transcript(entries, policy=policy)
+    transcript = build_title_transcript(
+        entries, policy=policy, model_user_texts=model_user_texts
+    )
     if not transcript:
         return None
     try:
@@ -382,6 +428,7 @@ def _tool_block(entry: JsonObject, *, policy: TitlePolicy) -> str | None:
 
 __all__ = [
     "DEFAULT_TITLE_POLICY",
+    "ModelUserTexts",
     "TitleCadence",
     "TitlePolicy",
     "build_title_transcript",

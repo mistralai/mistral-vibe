@@ -18,7 +18,7 @@ _ANSWER = "\n".join([
         "across several rendered rows for selection coverage | Neighboring content |"
     ),
 ])
-_DRAG = "\x1b[<0;18;14M\x1b[<32;23;14M\x1b[<0;23;14m"
+_DRAG = "\x1b[<0;20;14M\x1b[<32;25;14M\x1b[<0;25;14m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

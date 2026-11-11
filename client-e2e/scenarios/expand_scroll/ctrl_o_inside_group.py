@@ -9,9 +9,9 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
-screen_rows = {0: "⏵ Ran 20 commands"}
+screen_rows = {2: "⏵ Ran 20 commands"}
 
 _WHEEL_UP = "\x1b[<64;60;10M"
 _CTRL_O = "\x0f"
@@ -24,8 +24,12 @@ timeline: Timeline = [
     *(bash(f"check {index:02d}", f"ok {index:02d}") for index in range(1, 21)),
     assistant_msg("\n\n".join(f"Result {index:02d}" for index in range(1, 31))),
     turn_completed(),
+    take_snapshot(),
     _CTRL_O,
+    take_snapshot(),
     # The viewport top lands inside the expanded group.
     _WHEEL_UP * 32,
+    take_snapshot(),
     _CTRL_O,
+    take_snapshot(),
 ]

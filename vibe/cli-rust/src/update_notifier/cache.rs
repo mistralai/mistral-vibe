@@ -48,6 +48,12 @@ pub trait UpdateCacheRepository {
     }
 }
 
+/// The manager (`uv`, `brew` or `pypi`) the last update check asked, while its tag still holds.
+pub fn cached_source() -> Option<String> {
+    let cache = FileSystemUpdateCacheRepository.get()?;
+    super::update::entry_answer_source(&cache).map(str::to_owned)
+}
+
 /// The on-disk repository over `$VIBE_HOME/cache.toml`.
 pub struct FileSystemUpdateCacheRepository;
 

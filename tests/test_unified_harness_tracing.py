@@ -28,6 +28,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustRuntimeBuiltinToolCall,
     RustRuntimeBuiltinToolCallAction,
     RustTextContentBlock,
+    RustTokenUsage,
 )
 from mistralai_vibe_local_harness.vibe import (
     LocalModelRoute,
@@ -121,7 +122,9 @@ def _completion_action(*, purpose: str = "agent") -> RustLLMCallAction:
 
 def _completion_result() -> RustCompletionResult:
     return RustCompletionResult(
-        parts=[RustTextContentBlock(text="hello")], finish_reason="stop"
+        parts=[RustTextContentBlock(text="hello")],
+        finish_reason="stop",
+        usage=RustTokenUsage(input_tokens=1, output_tokens=1, total_tokens=2),
     )
 
 
@@ -130,7 +133,6 @@ def _stub_completion_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         _completion, "_report_malformed_tool_calls", lambda *args, **kwargs: None
     )
-    monkeypatch.setattr(_completion, "_validate_image_support", lambda *args: None)
 
 
 def test_unified_process_configures_tracing_once(
@@ -377,7 +379,8 @@ async def test_mistral_adapter_configures_sdk_telemetry_only_when_enabled(
                 message=SimpleNamespace(content="hello", tool_calls=None),
                 finish_reason="stop",
             )
-        ]
+        ],
+        usage={"prompt_tokens": 1, "completion_tokens": 1},
     )
     client = SimpleNamespace(
         chat=SimpleNamespace(complete_async=AsyncMock(return_value=response))

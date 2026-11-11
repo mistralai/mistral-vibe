@@ -8,12 +8,10 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1}
 
 _INPUT = {
     "filePath": "tool_approval_context.fixture",
@@ -30,4 +28,5 @@ timeline: Timeline = [
     tool_approval_added("edit", "file_edit", _INPUT),
     tool_approval("edit", "file_edit", _INPUT),
     {"release": 5},
+    take_snapshot(),
 ]

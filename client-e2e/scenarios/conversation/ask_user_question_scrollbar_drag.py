@@ -9,12 +9,10 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 4}
 
 _REPLY = "\n\n".join(f"Discussion line {index:02d}." for index in range(1, 31))
 _QUESTION = [
@@ -38,4 +36,5 @@ timeline: Timeline = [
     _PRESS,
     _DRAG,
     _RELEASE,
+    take_snapshot(),
 ]

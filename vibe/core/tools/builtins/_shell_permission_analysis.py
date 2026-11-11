@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import lru_cache
 import re
 
-from tree_sitter import Language, Node, Parser
-import tree_sitter_bash as tsbash
+from tree_sitter import Node
 
 from vibe.core.tools.arity import known_session_pattern_arity
 from vibe.core.tools.builtins._shell_command_policy import has_option_guardrails
+from vibe.core.utils.bash_parser import bash_parser, walk
 
 _SUPPORTED_COMMAND_PARTS = {
     "command_name",
@@ -127,10 +126,10 @@ def redirect_writes(
     root; to any other POSIX shell those are relative paths.
     """
     source = command.encode("utf-8")
-    root = _get_parser().parse(source).root_node
+    root = bash_parser().parse(source).root_node
     faithful = not root.has_error and not _continues_code_line(source, root)
     writes: list[RedirectWrite] = []
-    for node in _walk(root):
+    for node in walk(root):
         if node.type != "file_redirect":
             continue
         target = _redirect_target(node)
@@ -151,16 +150,6 @@ def redirect_writes(
     return tuple(dict.fromkeys(writes))
 
 
-def _walk(root: Node) -> list[Node]:
-    nodes: list[Node] = []
-    pending = [root]
-    while pending:
-        node = pending.pop()
-        nodes.append(node)
-        pending.extend(reversed(node.children))
-    return nodes
-
-
 def _text(node: Node) -> str:
     return node.text.decode("utf-8") if node.text is not None else ""
 
@@ -168,7 +157,7 @@ def _text(node: Node) -> str:
 def _continues_code_line(source: bytes, root: Node) -> bool:
     data = [
         (node.start_byte, node.end_byte)
-        for node in _walk(root)
+        for node in walk(root)
         if node.type in _DATA_NODES
     ]
     return any(
@@ -460,14 +449,9 @@ def _read_command(node: Node) -> _CommandRead:
     )
 
 
-@lru_cache(maxsize=1)
-def _get_parser() -> Parser:
-    return Parser(Language(tsbash.language()))
-
-
 def analyze_shell_command(command: str) -> ShellPermissionAnalysis:
     """Extract commands and fail closed on syntax the policy cannot model."""
-    tree = _get_parser().parse(command.encode("utf-8"))
+    tree = bash_parser().parse(command.encode("utf-8"))
     commands: list[str] = []
     approval_reasons: set[str] = set()
     invalidates_scope = False

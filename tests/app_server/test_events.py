@@ -59,6 +59,7 @@ from vibe.app_server.protocol import (
     MCPAuthRequiredParams,
     Notification,
     SessionTextContentBlock,
+    TurnCompletedParams,
     TurnQueueUpdatedParams,
     TurnUserInputEntry,
 )
@@ -417,6 +418,31 @@ def test_started_turn_prevents_stale_enqueue_reconciliation() -> None:
     projection.track_queued_turn(queued, session_id="session-1")
 
     assert projection.state.turn_queue.items == []
+
+
+def test_late_turn_start_response_does_not_reopen_a_terminated_turn() -> None:
+    projection = _projection()
+    started = PublicTurn(
+        id="turn-1",
+        session_id="session-1",
+        status=PublicTurnStatus.IN_PROGRESS,
+        started_at=2,
+    )
+    interrupted = started.model_copy(
+        update={"status": PublicTurnStatus.INTERRUPTED, "completed_at": 3}
+    )
+    projection.consume(
+        Notification(
+            method="turn/completed",
+            params=TurnCompletedParams(
+                event_id=1, session_id="session-1", turn=interrupted, emitted_at=3
+            ).model_dump(mode="json", by_alias=True),
+        )
+    )
+
+    projection.begin_turn(started)
+
+    assert projection.state.turns == [interrupted]
 
 
 def test_live_snapshot_preserves_loaded_history_and_turn_prefixes() -> None:

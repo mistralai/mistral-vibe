@@ -15,7 +15,6 @@ behaviour, the host owns the session.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -70,7 +69,6 @@ from vibe.core.skills.registry import (
     list_catalog,
     list_skill_versions,
     project_scope_available,
-    publish_local_pins,
     remove_skill,
     set_skill_alias,
     set_skill_latest,
@@ -121,7 +119,9 @@ class SkillsHost(Protocol):
         ...
 
     def installed_skills(self) -> list[SkillSummary]:
-        """Rows for the browser: one per name+scope, not de-duped."""
+        """Rows for the browser: one per name, scope and source, each marked
+        active when its name resolves to it.
+        """
         ...
 
     async def refresh(self) -> RuntimeSnapshot:
@@ -437,8 +437,6 @@ class SkillsController:
         self._host.require_session(session_id)
 
     async def _refreshed(self) -> RuntimeMutationResponse:
-        with contextlib.suppress(RegistrySkillsError, OSError):
-            await publish_local_pins(self._host.skill_roots)
         return RuntimeMutationResponse(runtime=await self._host.refresh())
 
     def _scope(self, scope: str) -> SkillScope:

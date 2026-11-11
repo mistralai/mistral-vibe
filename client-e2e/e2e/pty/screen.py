@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 from functools import cached_property, lru_cache
-from itertools import product
+from itertools import groupby, product
 from typing import Any, NamedTuple, cast
 import unicodedata
 
@@ -94,6 +94,16 @@ class Snapshot:
         """Derive rendered text rows from the authoritative cells."""
         return tuple(
             "".join(cell.character for cell in row).rstrip() for row in self.cells
+        )
+
+    @cached_property
+    def hyperlinks(self) -> tuple[tuple[str, str], ...]:
+        """OSC 8 runs as ``(text, target)``, top to bottom, left to right."""
+        return tuple(
+            ("".join(cell.character for cell in run), target)
+            for row in self.cells
+            for target, run in groupby(row, key=lambda cell: cell.hyperlink)
+            if target is not None
         )
 
 
@@ -273,6 +283,10 @@ class Terminal:
         self._screen.resize(lines=rows, columns=columns)
         self._rows = rows
         self._columns = columns
+
+    @property
+    def title(self) -> str:
+        return self._screen.title
 
     def snapshot(self, label: str, clipboard: str | None = None) -> Snapshot:
         screen = self._screen

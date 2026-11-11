@@ -14,8 +14,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "VIBE_INPUT_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {4, 5, 6}
 request_methods = {"callback/result"}
 
 _QUESTION = "Which features do you want to enable?"

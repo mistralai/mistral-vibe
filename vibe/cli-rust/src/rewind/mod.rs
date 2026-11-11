@@ -214,12 +214,9 @@ pub fn apply_event(app: &mut App, event: Event) {
             *state,
         ),
         Event::Failed(message) => {
-            crate::notices::failed(app, &message);
+            crate::notices::inline(app, Severity::Error, &message);
             if app.rewind.entry_id.is_none() {
                 quit(app);
-            } else {
-                // The panel keeps the conversation scrolled to the selection, off the new row.
-                crate::ui::notice::show_sticky(app, Severity::Error, &message);
             }
         }
     }
@@ -259,6 +256,7 @@ fn apply_done(
     app.view.expanded.clear();
     app.view.transcript.load_snapshot(&state);
     crate::worktree::adopt_state(app, &state);
+    crate::background_work::adopt_state(app, &state);
     app.expand_rebuilt_tools();
     if !inplace {
         local::add_rewind_fork(

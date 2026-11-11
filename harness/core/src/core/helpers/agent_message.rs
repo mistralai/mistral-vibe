@@ -142,7 +142,21 @@ pub(crate) fn render_agent_message(
                 AgentResultTermination::Completed {
                     output,
                     stop_reason: Some(TurnStopReason::IterationLimit),
-                } => render_iteration_limit_result(&sender_agent_path, &output, continue_hint),
+                } => render_stopped_result(
+                    "iteration limit reached before the agent finished",
+                    &sender_agent_path,
+                    &output,
+                    continue_hint,
+                ),
+                AgentResultTermination::Completed {
+                    output,
+                    stop_reason: Some(TurnStopReason::OutputLimit),
+                } => render_stopped_result(
+                    "output limit reached before the agent finished its reply",
+                    &sender_agent_path,
+                    &output,
+                    continue_hint,
+                ),
                 AgentResultTermination::Completed { output, .. } => {
                     format!("Status: completed\nOutput: {output}")
                 }
@@ -210,13 +224,15 @@ pub(crate) fn render_agent_message(
     Ok(content)
 }
 
-/// The output of a Turn stopped by its iteration limit is the agent's last message, if it had text.
-fn render_iteration_limit_result(
+/// A Turn stopped by its iteration or output limit did not finish; its output is the agent's last
+/// message, if it had text.
+fn render_stopped_result(
+    reason: &str,
     sender_agent_path: &str,
     output: &Value,
     continue_hint: bool,
 ) -> String {
-    let mut text = "Status: stopped, iteration limit reached before the agent finished".to_owned();
+    let mut text = format!("Status: stopped, {reason}");
     push_partial_output_and_continue_hint(&mut text, sender_agent_path, output, continue_hint);
     text
 }

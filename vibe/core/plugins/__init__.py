@@ -38,6 +38,12 @@ from vibe.core.plugins._drift import (
     retain_pinned_tools,
     route_key,
 )
+from vibe.core.plugins._enablement import (
+    PluginToggles,
+    is_plugin_enabled,
+    is_required_plugin,
+    set_plugin_enabled,
+)
 from vibe.core.plugins._materialize import (
     MaterializedPluginSet,
     PluginMaterializer,
@@ -54,6 +60,8 @@ from vibe.core.plugins._naming import (
     tool_function_name,
 )
 from vibe.core.plugins._native import (
+    InstalledPlugin,
+    InstalledPluginStatus,
     NativePluginResolver,
     PluginAgentDefinition,
     PluginConfigIssue,
@@ -143,6 +151,8 @@ __all__ = [
     "PLUGIN_PLACEHOLDER",
     "REDACTED",
     "DetectedPluginFormat",
+    "InstalledPlugin",
+    "InstalledPluginStatus",
     "MaterializedPluginSet",
     "NativePluginResolver",
     "NormalizedJson",
@@ -180,6 +190,7 @@ __all__ = [
     "PluginSourceFormatUnsupportedError",
     "PluginSourceKind",
     "PluginSourceRef",
+    "PluginToggles",
     "PluginToolCatalog",
     "PluginToolDefinition",
     "PluginToolExposure",
@@ -202,6 +213,8 @@ __all__ = [
     "digest_plugin_tree",
     "hook_environment_names",
     "identifier_segment",
+    "is_plugin_enabled",
+    "is_required_plugin",
     "mcp_server_secrets",
     "normalize_json",
     "normalize_nfc",
@@ -223,6 +236,7 @@ __all__ = [
     "retain_pinned_tools",
     "route_key",
     "sanitize_message",
+    "set_plugin_enabled",
     "snapshot_bytes",
     "snapshot_digest",
     "sort_diagnostics",

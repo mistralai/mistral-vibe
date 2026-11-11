@@ -118,6 +118,13 @@ pub fn status_ready() -> Color {
 pub fn error() -> Color {
     active().error
 }
+/// A merged PR/MR: GitHub's purple, magenta on ANSI themes.
+pub fn merged() -> Color {
+    if is_ansi() {
+        return Color::Magenta;
+    }
+    fixed::MERGED
+}
 
 // Completed-effect row: dim $primary verb and muted grey message.
 pub fn effect_verb() -> Color {

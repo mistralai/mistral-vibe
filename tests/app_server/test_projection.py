@@ -13,13 +13,17 @@ from vibe.app_server._effect_output_cap import (
     TRUNCATION_MARKER,
 )
 from vibe.app_server._history_projection import project_message_history
-from vibe.app_server._projection import project_config_view, project_skill_summaries
+from vibe.app_server._projection import (
+    project_config_view,
+    project_installed_skill_summaries,
+    project_skill_summaries,
+)
 from vibe.app_server.models import (
     AgentStatsSnapshot,
     CompletedEffectState,
     PublicEffectEntry,
 )
-from vibe.core.skills.models import SkillInfo, SkillScope, SkillSource
+from vibe.core.skills.models import InstalledSkill, SkillInfo, SkillScope, SkillSource
 from vibe.core.types import FunctionCall, LLMMessage, Role, ToolCall
 
 
@@ -68,6 +72,28 @@ def test_config_view_projects_cursor_blink(enabled: bool) -> None:
     legacy_payload = config.model_dump(mode="json", by_alias=True)
     del legacy_payload["cursorBlink"]
     assert type(config).model_validate(legacy_payload).cursor_blink is True
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_vim_keybindings(enabled: bool) -> None:
+    config = project_config_view(build_test_vibe_config(vim_keybindings=enabled))
+
+    assert config.model_dump(mode="json", by_alias=True)["vimKeybindings"] is enabled
+    legacy_payload = config.model_dump(mode="json", by_alias=True)
+    del legacy_payload["vimKeybindings"]
+    assert type(config).model_validate(legacy_payload).vim_keybindings is False
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_enable_sticky_prompt(enabled: bool) -> None:
+    config = project_config_view(build_test_vibe_config(enable_sticky_prompt=enabled))
+
+    assert (
+        config.model_dump(mode="json", by_alias=True)["enableStickyPrompt"] is enabled
+    )
+    legacy_payload = config.model_dump(mode="json", by_alias=True)
+    del legacy_payload["enableStickyPrompt"]
+    assert type(config).model_validate(legacy_payload).enable_sticky_prompt is True
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -122,6 +148,50 @@ def test_skill_summaries_carry_the_origin_the_slash_menu_tags(
     payload = summary.model_dump(mode="json", by_alias=True)
     assert (payload["source"], payload["scope"]) == (source.value, scope.value)
     assert payload["userInvocable"] is True
+
+
+@pytest.mark.parametrize(
+    ("source", "enabled", "disabled", "own", "expected"),
+    [
+        (SkillSource.LOCAL, [], [], None, (True, False)),
+        (SkillSource.PLUGIN, [], ["deploy"], None, (True, True)),
+        (SkillSource.LOCAL, ["other"], [], None, (False, True)),
+        (SkillSource.LOCAL, ["deploy"], [], None, (True, True)),
+        (SkillSource.LOCAL, [], ["dep*"], None, (False, True)),
+        (SkillSource.LOCAL, [], ["deploy"], ["deploy"], (False, False)),
+        (SkillSource.LOCAL, [], ["deploy"], [], (False, True)),
+    ],
+    ids=[
+        "plain",
+        "plugin",
+        "outside-the-allowlist",
+        "inside-the-allowlist",
+        "disabled-by-a-pattern",
+        "disabled-by-name-in-the-writable-layer",
+        "disabled-by-name-in-another-layer",
+    ],
+)
+def test_installed_rows_are_locked_where_the_browser_cannot_switch_them(
+    source: SkillSource,
+    enabled: list[str],
+    disabled: list[str],
+    own: list[str] | None,
+    expected: tuple[bool, bool],
+) -> None:
+    skill = SkillInfo(
+        name="deploy",
+        description="Ship it.",
+        prompt="",
+        source=source,
+        scope=SkillScope.GLOBAL,
+    )
+    config = build_test_vibe_config(enabled_skills=enabled, disabled_skills=disabled)
+
+    [row] = project_installed_skill_summaries(
+        [InstalledSkill(info=skill, active=True)], config, own
+    )
+
+    assert (row.enabled, row.locked) == expected
 
 
 def test_snapshot_session_cost_discounts_cached_tokens() -> None:
@@ -189,7 +259,8 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
     defining layer. A setting without ``name`` and ``provider`` defines
     nothing: a user or admin tweak never moves a catalog or GrowthBook model,
     and the thinking level a pick writes for the session never moves the
-    picked model.
+    picked model. The built-in default model is not listed: the catalog
+    provides models, so it is not available anymore (VIBE-5548).
     """
     from vibe.core.config import build_default_orchestrator
     from vibe.core.config.layers.admin import AdminConfigLayer
@@ -202,7 +273,7 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
         "models": [
             _mistral_model("session-model"),
             # What a /model pick writes for the session.
-            {"alias": "mistral-medium-3.5", "thinking": "off"},
+            {"alias": "mistral-medium-latest", "thinking": "off"},
         ]
     })
     admin = orchestrator.get_layer(AdminConfigLayer.NAME)
@@ -235,8 +306,7 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
     config_file = config_dir / "config.toml"
     user_config = tomllib.loads(config_file.read_text(encoding="utf-8"))
     user_config.update(
-        # Unpinned: the fixture's pin names a model this list replaces.
-        active_model="",
+        active_model="local-model",
         models=[
             _mistral_model("local-model"),
             {"name": "zai-glm-5-3", "temperature": 0.9},
@@ -257,11 +327,12 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
         ("mistral-medium-latest", "catalog"),
         ("session-model", "project"),
         ("local-model", "local"),
-        ("mistral-medium-3.5", "local"),
     ]
+    # The built-in default is not available while the catalog lists models.
+    assert "mistral-medium-3.5" not in config.models
     # Display only: the settings still apply.
     assert config.models["zai-glm-5-3"].temperature == 0.1
-    assert config.models["mistral-medium-3.5"].thinking == "off"
+    assert config.models["mistral-medium-latest"].thinking == "off"
     assert view.active_model.source == "local"
     serialized = view.model_dump(mode="json", by_alias=True)
     assert serialized["models"][0]["source"] == "admin"

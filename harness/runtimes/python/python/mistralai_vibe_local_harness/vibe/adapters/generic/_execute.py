@@ -71,6 +71,7 @@ from mistralai_vibe_local_harness.vibe.adapters._request_log import (
     log_completion_request,
 )
 from mistralai_vibe_local_harness.vibe.adapters._retry import (
+    ProviderAttempt,
     RetryNotices,
     call_with_retries,
 )
@@ -199,6 +200,31 @@ async def execute_generic_completion(
     adapter = _get_adapter(provider.api_style)
     wire = generic_wire(provider.api_style)
     notices = RetryNotices(on_retry)
+    current_attempt: ProviderAttempt | None = None
+
+    async def observe_response(response: httpx2.Response) -> None:
+        if response.is_success and current_attempt is not None:
+            current_attempt.accept()
+        await notices.clear_on_success(response)
+
+    async def complete_attempt(
+        provider_attempt: ProviderAttempt,
+    ) -> RustCompletionResult:
+        nonlocal current_attempt
+        current_attempt = provider_attempt
+        return await _complete_once(
+            client=client,
+            url=url,
+            body=request.body,
+            headers=headers,
+            provider=provider,
+            model=route.model,
+            guard=config.stream_guard(),
+            on_delta=on_delta,
+            malformed=malformed,
+            provider_attempt=provider_attempt,
+        )
+
     request = adapter.prepare_request(
         model_name=route.model,
         messages=[_to_llm_message(message) for message in messages],
@@ -254,22 +280,14 @@ async def execute_generic_completion(
         # Mistral-hosted models reached through the generic (OpenAI-compatible)
         # path still return mistral-correlation-id; capture it like the native
         # adapter. Non-Mistral providers omit the header (sink gets None).
-        event_hooks={"response": [correlation_hook(config), notices.clear_on_success]},
+        event_hooks={"response": [correlation_hook(config), observe_response]},
     ) as client:
         result = await call_with_retries(
-            lambda: _complete_once(
-                client=client,
-                url=url,
-                body=request.body,
-                headers=headers,
-                provider=provider,
-                model=route.model,
-                guard=config.stream_guard(),
-                on_delta=on_delta,
-                malformed=malformed,
-            ),
+            complete_attempt,
             max_elapsed_time_s=config.retry_max_elapsed_time_s,
             notices=notices,
+            completion_budget=config.completion_budget,
+            pricing=route.pricing,
         )
 
     _warn_on_workless_completion(
@@ -322,6 +340,7 @@ async def _complete_once(
     guard: StreamGuard,
     on_delta: ProviderDeltaObserver | None = None,
     malformed: MalformedToolCalls | None = None,
+    provider_attempt: ProviderAttempt,
 ) -> RustCompletionResult:
     # Adapters buffer parse state, so a retried attempt gets a fresh one.
     adapter = _get_adapter(provider.api_style)
@@ -343,6 +362,8 @@ async def _complete_once(
             guard.mark_output()
         if (reported := _reported_usage(parsed.data)) is not None:
             raw_usage = merge_reported_usage(raw_usage, reported)
+            if has_reply_usage(wire, raw_usage):
+                provider_attempt.report_usage(reply_token_usage(wire, raw_usage))
         accumulated = chunk if accumulated is None else accumulated + chunk
         if on_delta is not None:
             text = chunk.message.content or ""
@@ -375,12 +396,14 @@ async def _complete_once(
         raise ProviderRefusal(
             category=accumulated.stop.category, explanation=accumulated.stop.explanation
         )
+    usage = reply_token_usage(wire, raw_usage)
+    provider_attempt.report_usage(usage)
     return _to_completion_result(
         accumulated.model_copy(
             update={"message": adapter.finish_message(accumulated.message)}
         ),
         wire=wire,
-        usage=reply_token_usage(wire, raw_usage),
+        usage=usage,
         source=CompletionSource(provider=provider.name, model=model),
         record=malformed,
     )

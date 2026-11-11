@@ -17,8 +17,6 @@ env = {
     "SSH_TTY": "/dev/pts/0",
 }
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 2}
 clipboard_contains = ("Bright violet machines",)
 
 _SENTENCE = "Bright violet machines hum quietly in the northern hall."

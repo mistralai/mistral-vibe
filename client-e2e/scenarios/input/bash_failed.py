@@ -25,5 +25,4 @@ _EXPAND = "\x1b[<0;1;7M\x1b[<0;1;7m"
 
 timeline: Timeline = [f"!{_COMMAND}\r", _EXPAND]
 
-capture_startup = False
 screen_contains = (_COMMAND, f"Error: {_MESSAGE}")

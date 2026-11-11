@@ -114,7 +114,14 @@ def _dominant_hex_bg(cells: tuple[tuple[Cell, ...], ...]) -> str | None:
     if not counts:
         return None
     top = max(counts, key=lambda k: counts[k])
-    return top if counts[top] > (ROWS * COLUMNS) // 2 else None
+    rows, columns = _size(cells)
+    return top if counts[top] > (rows * columns) // 2 else None
+
+
+def _size(cells: tuple[tuple[Cell, ...], ...]) -> tuple[int, int]:
+    """Rows and columns the SVG spans: the default screen, or a larger one a resize made."""
+    columns = max((len(row) for row in cells), default=0)
+    return max(ROWS, len(cells)), max(COLUMNS, columns)
 
 
 def to_svg(snapshot: Snapshot, title: str) -> str:
@@ -140,9 +147,10 @@ def to_svg(snapshot: Snapshot, title: str) -> str:
             int(dom[0:2], 16), int(dom[2:4], 16), int(dom[4:6], 16)
         )
 
+    rows, columns = _size(cells)
     console = Console(
-        width=COLUMNS,
-        height=ROWS,
+        width=columns,
+        height=rows,
         record=True,
         file=io.StringIO(),
         color_system="truecolor",

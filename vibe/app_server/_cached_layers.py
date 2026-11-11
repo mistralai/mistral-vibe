@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 from vibe.app_server._admin_config import apply_held_admin_config
+from vibe.app_server._model_catalog_service import ModelCatalogKey, ModelCatalogService
 from vibe.app_server._org_config_service import OrgConfigKey, OrgConfigService
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.admin_config import AdminConfigApplyResult, AdminConfigOutcome
 from vibe.core.config.layers.growthbook import GrowthbookLayer
-from vibe.core.config.layers.model_catalog import apply_cached_model_catalog
+from vibe.core.config.layers.model_catalog import apply_model_catalog
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.experiments.cache import load_cached_eval_response
 from vibe.core.experiments.manager import config_variants_from_response
 from vibe.core.platform_auth import PlatformCredentialFactory
 from vibe.core.platform_auth._mistral import mistral_credentials
+from vibe.observability.logging import logger
+from vibe.observability.sentry import capture_cli_exception
 
 OIDC_TENANT_UNRESOLVED = AdminConfigApplyResult(
     AdminConfigOutcome.FETCH_FAILED, error="OIDC tenant not resolved"
@@ -48,13 +51,16 @@ async def apply_cached_layers(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
     org_config: OrgConfigService | None,
     credentials: PlatformCredentialFactory | None = None,
+    *,
+    model_catalog: ModelCatalogService | None,
 ) -> tuple[OrgConfigKey | None, str | None, AdminConfigApplyResult | None]:
-    """Apply the held org config, the cached experiment variants and model
-    catalog.
+    """Apply the held org config, the cached experiment variants and the held
+    model catalog.
 
     Session builds and host reads (``agents/list``, ``config/read``) both go
     through here, so they see the same config. ``org_config=None`` skips the
-    org config, for a build on local config only.
+    org config, and ``model_catalog=None`` the catalog, for a build on local
+    config only.
 
     Returns the org config's key, read before the org config applies since it
     can change the provider the key is made of; the org config it tried, if
@@ -67,8 +73,28 @@ async def apply_cached_layers(
         else (None, None)
     )
     await _apply_cached_experiment_variants(orchestrator, credentials)
-    await apply_cached_model_catalog(orchestrator, credentials)
+    if model_catalog is not None:
+        await apply_held_model_catalog(orchestrator, model_catalog, credentials)
     return org_key, tried, failure
+
+
+async def apply_held_model_catalog(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    model_catalog: ModelCatalogService,
+    credentials: PlatformCredentialFactory | None = None,
+) -> None:
+    """Apply the catalog the process holds for the config's account, without
+    fetching. Fail-open: a catalog the config cannot be built from is ignored.
+    """
+    key = ModelCatalogKey.current(orchestrator.config, credentials)
+    catalog = await model_catalog.load(key)
+    if catalog is None:
+        return
+    try:
+        await apply_model_catalog(orchestrator, catalog)
+    except Exception as exc:
+        logger.exception("Failed to apply the held model catalog to config")
+        capture_cli_exception(exc, tags={"vibe_boundary": "apply_held_model_catalog"})
 
 
 async def _apply_cached_experiment_variants(

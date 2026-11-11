@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import logging
@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 import re
 import tomllib
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, cast
 
 from pydantic import (
     BaseModel,
@@ -59,6 +59,7 @@ from vibe.core.plugins._compatibility import (
 )
 from vibe.core.plugins._content import digest_plugin_tree
 from vibe.core.plugins._diagnostics import PluginDiagnosticCode
+from vibe.core.plugins._enablement import is_plugin_enabled
 from vibe.core.plugins._foreign import OpenCodePluginAdapter
 from vibe.core.plugins._kimi import KimiPluginAdapter
 from vibe.core.skills.models import (
@@ -112,11 +113,15 @@ _MAX_PLUGIN_KNOWLEDGE_FOLDERS = 100
 _MAX_PLUGIN_KNOWLEDGE_ENTRYPOINT_BYTES = 256 * 1024
 _MAX_PLUGIN_AGENTS = 128
 _MAX_PLUGIN_AGENT_BYTES = 64 * 1024
+_MAX_PLUGIN_VOLUMES = 8
+_MAX_PLUGIN_VOLUME_NAME_LENGTH = 63
 _MAX_PLUGIN_COMPONENT_PATH_LENGTH = 1024
 _MAX_NODE_LIBRARY_ALIAS_LENGTH = 214
 _MAX_PYTHON_LIBRARY_ALIAS_LENGTH = 128
 _MAX_CONNECTOR_TOOL_NAME_LENGTH = 256
 _PLUGIN_COMPONENT_NAME_PATTERN = r"^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"
+# What Core accepts before the `:` of a qualified skill name.
+_SKILL_QUALIFIER_PATTERN = re.compile(r"[A-Za-z0-9._$-]+")
 _LOCALE_PATTERN = r"^[a-z]{2,3}(-[A-Za-z0-9]{2,8})*$"
 _NODE_LIBRARY_ALIAS_PATTERN = re.compile(
     r"^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*$"
@@ -133,6 +138,12 @@ class _ManifestAuthor(BaseModel):
 
 
 class _PluginManifest(BaseModel):
+    """The fields Agent Plugins 1.0 defines.
+
+    The loader reports any other top-level field and ignores it, as Agent Plugins
+    requires: see `_validate_defined_fields`.
+    """
+
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
     schema_id: Literal["https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"] = (
@@ -196,7 +207,23 @@ class _StarterPrompt(BaseModel):
         return self
 
 
+class _PluginVolume(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(
+        max_length=_MAX_PLUGIN_VOLUME_NAME_LENGTH,
+        pattern=_PLUGIN_COMPONENT_NAME_PATTERN,
+    )
+    mode: Literal["ro", "rw"] = "ro"
+
+
 class _VibePluginExtension(BaseModel):
+    """The keys the ai.mistral.vibe extension schema defines.
+
+    Like an unknown manifest field, any other key is reported and ignored, and
+    the extension is kept: see `_validate_defined_fields`.
+    """
+
     model_config = ConfigDict(extra="forbid", strict=True, populate_by_name=True)
 
     schema_version: Literal[1] = Field(alias="schemaVersion")
@@ -212,6 +239,12 @@ class _VibePluginExtension(BaseModel):
     tool_overrides: dict[str, _ToolOverride] = Field(
         default_factory=dict, alias="toolOverrides"
     )
+    # Mounted only by hosts that share volumes: accepted here so that the
+    # extension stays valid.
+    volumes: list[_PluginVolume] = Field(
+        default_factory=list, max_length=_MAX_PLUGIN_VOLUMES
+    )
+    default_enabled: bool = Field(default=True, alias="defaultEnabled")
 
     @field_validator("starter_prompt", mode="before")
     @classmethod
@@ -219,6 +252,16 @@ class _VibePluginExtension(BaseModel):
         # `None` above means absent: the schema refuses an explicit null.
         if value is None:
             raise ValueError("starterPrompt cannot be null")
+        return value
+
+    @field_validator("volumes")
+    @classmethod
+    def _volume_names_are_unique(
+        cls, value: list[_PluginVolume]
+    ) -> list[_PluginVolume]:
+        names = [volume.name for volume in value]
+        if len(names) != len(set(names)):
+            raise ValueError("volume names must be unique")
         return value
 
 
@@ -437,6 +480,21 @@ class PluginDescriptor:
     author: str | None = None
     # Presentation only (ai.mistral.vibe extension); `name` stays the identity.
     display_name: str | None = None
+    # Off until listed in ``enabled_plugins`` (ai.mistral.vibe extension).
+    default_enabled: bool = True
+
+    @property
+    def component_prefix(self) -> str:
+        """What qualifies the plugin's skills, knowledge and agents.
+
+        The plugin's name as its manifest writes it, which is how the model sees
+        the plugin named and mounted. Only tools, which code calls by name, use
+        the tool namespace. A name that cannot qualify a skill, such as a Codex
+        name with spaces, falls back to the namespace.
+        """
+        if _SKILL_QUALIFIER_PATTERN.fullmatch(self.name):
+            return self.name
+        return self.namespace
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,6 +560,8 @@ class ResolvedPluginSet:
     connectors: tuple[PluginConnectorDefinition, ...]
     issues: tuple[PluginConfigIssue, ...]
     unsupported_components: tuple[PluginUnsupportedComponent, ...] = ()
+    # Every plugin found, loaded or not, each with only its own components.
+    installed: tuple[InstalledPlugin, ...] = ()
 
     @classmethod
     def empty(cls) -> ResolvedPluginSet:
@@ -527,8 +587,17 @@ class PluginUnsupportedComponent:
     reason: str
 
 
+type InstalledPluginStatus = Literal["loaded", "disabled", "collides"]
+
+
 @dataclass(frozen=True, slots=True)
-class _PluginCandidate:
+class InstalledPlugin:
+    """A plugin as found on disk, with the components it alone declares.
+
+    ``disabled``: the config turns it off. ``collides``: it is on, but shares
+    its namespace with another plugin that is on, so neither loads.
+    """
+
     descriptor: PluginDescriptor
     skills: Mapping[str, SkillInfo]
     mcp_servers: tuple[PluginMCPServerDefinition, ...]
@@ -538,6 +607,7 @@ class _PluginCandidate:
     libraries: tuple[PluginLibraryDefinition, ...]
     connectors: tuple[PluginConnectorDefinition, ...]
     manifest_path: Path
+    status: InstalledPluginStatus = "loaded"
 
 
 class PluginResolver:
@@ -551,7 +621,11 @@ class PluginResolver:
         plugin_scopes: Mapping[Path, SkillScope] | None = None,
         data_root_base: Path | None = None,
         config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
+        apply_switches: bool = True,
     ) -> None:
+        """``apply_switches=False`` keeps every plugin on: a pinned set was already
+        filtered when it was pinned, and the lock is what the session runs.
+        """
         self._project_roots = tuple(project_roots)
         self._user_roots = tuple(user_roots)
         self._builtin_roots = tuple(builtin_roots)
@@ -562,6 +636,7 @@ class PluginResolver:
         self._plugin_scopes = dict(plugin_scopes) if plugin_scopes is not None else {}
         self._data_root_base = data_root_base
         self._config_orchestrator = config_orchestrator
+        self._apply_switches = apply_switches
         self._issues: list[PluginConfigIssue] = []
         self._unsupported_components: list[PluginUnsupportedComponent] = []
 
@@ -620,8 +695,13 @@ class PluginResolver:
         builtin = self._load_scope(
             [*named[SkillScope.BUILTIN], *self._builtin_plugin_dirs], SkillScope.BUILTIN
         )
-        selected = self._select_by_precedence(project, user, builtin)
-        selected = self._remove_namespace_collisions(selected)
+        installed = self._with_status(
+            self._select_by_precedence(project, user, builtin)
+        )
+        resolved = self._merge([p for p in installed if p.status == "loaded"])
+        return replace(resolved, installed=tuple(installed))
+
+    def _merge(self, selected: Sequence[InstalledPlugin]) -> ResolvedPluginSet:
         plugins = tuple(
             sorted(
                 (candidate.descriptor for candidate in selected), key=lambda p: p.name
@@ -735,7 +815,7 @@ class PluginResolver:
 
     def _load_scope(
         self, plugin_dirs: Sequence[Path], scope: SkillScope
-    ) -> list[_PluginCandidate]:
+    ) -> list[InstalledPlugin]:
         candidates = [
             candidate
             for plugin_dir in plugin_dirs
@@ -762,7 +842,7 @@ class PluginResolver:
 
     def _load_plugin(
         self, plugin_dir: Path, scope: SkillScope
-    ) -> _PluginCandidate | None:
+    ) -> InstalledPlugin | None:
         try:
             root = plugin_dir.resolve(strict=True)
         except OSError as error:
@@ -840,7 +920,7 @@ class PluginResolver:
 
     def _load_native_plugin(
         self, root: Path, scope: SkillScope
-    ) -> _PluginCandidate | None:
+    ) -> InstalledPlugin | None:
         manifest_path = root / "plugin.json"
         try:
             resolved_manifest = manifest_path.resolve(strict=True)
@@ -851,7 +931,7 @@ class PluginResolver:
                 raise ValueError(
                     "plugin.json must resolve to a regular file inside the plugin root"
                 )
-            manifest = self._parse_manifest(resolved_manifest)
+            manifest, unknown_fields = self._parse_manifest(resolved_manifest)
         except (OSError, ValueError, ValidationError, json.JSONDecodeError) as error:
             self._issues.append(
                 PluginConfigIssue(
@@ -860,6 +940,15 @@ class PluginResolver:
             )
             return None
 
+        self._issues.extend(
+            _unknown_field_issue(
+                resolved_manifest,
+                PluginDiagnosticCode.MANIFEST_UNKNOWN_FIELD,
+                "plugin.json",
+                field,
+            )
+            for field in unknown_fields
+        )
         extension = self._parse_vibe_extension(manifest, resolved_manifest)
         try:
             manifest_digest = canonical_json_digest(manifest)
@@ -918,13 +1007,16 @@ class PluginResolver:
                 manifest.author.name if manifest.author is not None else None
             ),
             display_name=extension.display_name if extension is not None else None,
+            default_enabled=extension.default_enabled
+            if extension is not None
+            else True,
         )
         skills = self._load_skills(descriptor)
         mcp_servers = self._load_mcp_servers(descriptor)
         runtime_hooks = self._load_runtime_hooks(descriptor, extension)
         knowledge = self._load_knowledge(descriptor, extension)
         agents = self._load_agents(descriptor, extension)
-        return _PluginCandidate(
+        return InstalledPlugin(
             descriptor=descriptor,
             skills=MappingProxyType(skills),
             mcp_servers=mcp_servers,
@@ -941,7 +1033,7 @@ class PluginResolver:
         root: Path,
         package: AdaptedPluginPackage,
         unsupported: Sequence[AdaptedUnsupportedComponent],
-    ) -> _PluginCandidate | None:
+    ) -> InstalledPlugin | None:
         if package.namespace in _RESERVED_NAMESPACES:
             self._issues.append(
                 PluginConfigIssue(
@@ -1004,7 +1096,7 @@ class PluginResolver:
         )
         skills = self._load_skills_from_roots(descriptor, package.skill_roots)
         skills.update(self._load_adapted_skills(descriptor, package.adapted_skills))
-        return _PluginCandidate(
+        return InstalledPlugin(
             descriptor=descriptor,
             skills=MappingProxyType(skills),
             mcp_servers=self._adapt_mcp_servers(descriptor, package.mcp_servers),
@@ -1038,7 +1130,7 @@ class PluginResolver:
     ) -> dict[str, SkillInfo]:
         skills: dict[str, SkillInfo] = {}
         for definition in definitions:
-            alias = f"{plugin.namespace}:{definition.source_name}"
+            alias = f"{plugin.component_prefix}:{definition.source_name}"
             if alias in skills:
                 self._issues.append(
                     PluginConfigIssue(
@@ -1193,9 +1285,9 @@ class PluginResolver:
             )
         return tuple(definitions)
 
-    def _parse_manifest(self, path: Path) -> _PluginManifest:
+    def _parse_manifest(self, path: Path) -> tuple[_PluginManifest, tuple[str, ...]]:
         raw = json.loads(read_safe(path, raise_on_error=True).text)
-        return _PluginManifest.model_validate(raw)
+        return _validate_defined_fields(_PluginManifest, raw)
 
     def _parse_vibe_extension(
         self, manifest: _PluginManifest, manifest_path: Path
@@ -1205,7 +1297,9 @@ class PluginResolver:
         if raw is None:
             return None
         try:
-            return _VibePluginExtension.model_validate(raw)
+            extension, unknown_fields = _validate_defined_fields(
+                _VibePluginExtension, raw
+            )
         except ValidationError as error:
             self._issues.append(
                 PluginConfigIssue(
@@ -1214,6 +1308,16 @@ class PluginResolver:
                 )
             )
             return None
+        self._issues.extend(
+            _unknown_field_issue(
+                manifest_path,
+                PluginDiagnosticCode.EXTENSION_UNKNOWN_FIELD,
+                f"{_VIBE_EXTENSION} extension",
+                field,
+            )
+            for field in unknown_fields
+        )
+        return extension
 
     def _load_runtime_hooks(
         self, plugin: PluginDescriptor, extension: _VibePluginExtension | None
@@ -1377,7 +1481,7 @@ class PluginResolver:
             definitions.append(
                 PluginKnowledgeDefinition(
                     plugin_name=plugin.name,
-                    name=f"{plugin.namespace}:{metadata.name}",
+                    name=f"{plugin.component_prefix}:{metadata.name}",
                     source_name=metadata.name,
                     description=metadata.description,
                     display_name=metadata.display_name,
@@ -1457,7 +1561,7 @@ class PluginResolver:
                     )
                 )
                 continue
-            name = f"{plugin.namespace}:{child.stem}"
+            name = f"{plugin.component_prefix}:{child.stem}"
             overrides: dict[str, object] = {}
             if document.active_model is not None:
                 overrides["active_model"] = document.active_model
@@ -1888,7 +1992,7 @@ class PluginResolver:
                             )
                         )
                     continue
-                alias = f"{plugin.namespace}:{source_name}"
+                alias = f"{plugin.component_prefix}:{source_name}"
                 if alias in skills:
                     self._issues.append(
                         PluginConfigIssue(
@@ -1943,12 +2047,12 @@ class PluginResolver:
         )
 
     def _remove_same_scope_duplicates(
-        self, candidates: Sequence[_PluginCandidate]
-    ) -> list[_PluginCandidate]:
-        by_name: dict[str, list[_PluginCandidate]] = defaultdict(list)
+        self, candidates: Sequence[InstalledPlugin]
+    ) -> list[InstalledPlugin]:
+        by_name: dict[str, list[InstalledPlugin]] = defaultdict(list)
         for candidate in candidates:
             by_name[candidate.descriptor.name].append(candidate)
-        selected: list[_PluginCandidate] = []
+        selected: list[InstalledPlugin] = []
         for name, matches in by_name.items():
             if len(matches) == 1:
                 selected.append(matches[0])
@@ -1964,10 +2068,10 @@ class PluginResolver:
 
     @staticmethod
     def _select_by_precedence(
-        project: Sequence[_PluginCandidate],
-        user: Sequence[_PluginCandidate],
-        builtin: Sequence[_PluginCandidate] = (),
-    ) -> list[_PluginCandidate]:
+        project: Sequence[InstalledPlugin],
+        user: Sequence[InstalledPlugin],
+        builtin: Sequence[InstalledPlugin] = (),
+    ) -> list[InstalledPlugin]:
         project_by_name = {
             candidate.descriptor.name: candidate for candidate in project
         }
@@ -1986,19 +2090,27 @@ class PluginResolver:
             )
         ]
 
-    def _remove_namespace_collisions(
-        self, candidates: Sequence[_PluginCandidate]
-    ) -> list[_PluginCandidate]:
-        by_namespace: dict[str, list[_PluginCandidate]] = defaultdict(list)
-        for candidate in candidates:
-            by_namespace[candidate.descriptor.namespace].append(candidate)
-        selected: list[_PluginCandidate] = []
+    def _with_status(self, plugins: Sequence[InstalledPlugin]) -> list[InstalledPlugin]:
+        config = (
+            self._config_orchestrator.config
+            if self._config_orchestrator is not None and self._apply_switches
+            else None
+        )
+        on = [
+            plugin
+            for plugin in plugins
+            if config is None or is_plugin_enabled(plugin.descriptor, config)
+        ]
+        by_namespace: dict[str, list[InstalledPlugin]] = defaultdict(list)
+        for plugin in on:
+            by_namespace[plugin.descriptor.namespace].append(plugin)
+        colliding: set[str] = set()
         for namespace, matches in by_namespace.items():
             if len(matches) == 1:
-                selected.append(matches[0])
                 continue
             names = ", ".join(sorted(match.descriptor.name for match in matches))
             for match in matches:
+                colliding.add(match.descriptor.name)
                 self._issues.append(
                     PluginConfigIssue(
                         file=match.manifest_path,
@@ -2007,7 +2119,17 @@ class PluginResolver:
                         ),
                     )
                 )
-        return selected
+        return [
+            replace(
+                plugin,
+                status="disabled"
+                if plugin not in on
+                else "collides"
+                if plugin.descriptor.name in colliding
+                else "loaded",
+            )
+            for plugin in plugins
+        ]
 
 
 NativePluginResolver = PluginResolver
@@ -2042,6 +2164,39 @@ def plugin_skill_translation(skill: SkillInfo) -> Literal["synthetic_skill"] | N
 def _plugin_log_label(plugin: PluginDescriptor) -> str:
     version = plugin.version or "unversioned"
     return f"{plugin.name}@{version} ({plugin.source_format}, {plugin.scope})"
+
+
+def _validate_defined_fields[ModelT: BaseModel](
+    model: type[ModelT], raw: object
+) -> tuple[ModelT, tuple[str, ...]]:
+    """Validate the keys of a JSON object that ``model`` defines; name the others.
+
+    Agent Plugins requires a loader to report an unknown top-level manifest field,
+    ignore it and keep loading, and the ai.mistral.vibe extension follows the same
+    rule. Unknown keys are left out before validation, so a field's Python name
+    never stands in for its alias.
+    """
+    if not isinstance(raw, dict):
+        return model.model_validate(raw), ()
+    fields = cast(dict[str, object], raw)
+    known = {field.alias or name for name, field in model.model_fields.items()}
+    unknown = tuple(sorted(key for key in fields if key not in known))
+    defined = {key: value for key, value in fields.items() if key in known}
+    return model.model_validate(defined), unknown
+
+
+def _unknown_field_issue(
+    file: Path, code: PluginDiagnosticCode, owner: str, field: str
+) -> PluginConfigIssue:
+    return PluginConfigIssue(
+        file=file,
+        message=f"Ignored unknown {owner} field {field!r}",
+        severity="warning",
+        code=code,
+        fatal=False,
+        source_format=DetectedPluginFormat.AGENT_PLUGINS_1_0,
+        component="manifest",
+    )
 
 
 def _render_generated_skill(definition: AdaptedSkill) -> str:

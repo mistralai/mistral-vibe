@@ -38,6 +38,7 @@ impl Transcript {
         }
         let mut page = Transcript {
             show_reasoning: self.show_reasoning,
+            hides_live_waits: self.hides_live_waits,
             next_rev: self.next_rev,
             ..Transcript::default()
         };

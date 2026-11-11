@@ -16,9 +16,7 @@ from e2e.app_server.scenario import Timeline
 # they are delivered in.
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
 # Frames that show the caret moves and the two submitted answers.
-capture_steps = {1, 4, 5, 7, 9, 10, 12, 14, 15, 16}
 request_methods = {"callback/result"}
 
 _Q1 = "Which database should we use for this project?"

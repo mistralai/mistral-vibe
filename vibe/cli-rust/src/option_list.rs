@@ -244,13 +244,14 @@ impl OptionList<MultiAction> {
     }
 }
 
-/// Any option list, for the hover, wheel and scrollbar shared by all of them.
+/// Any option list, for the layout, hover, wheel and scrollbar shared by all of them.
 pub trait OptionView {
     fn selected(&self) -> usize;
     fn index_at(&self, at: (u16, u16)) -> Option<usize>;
     fn rows_of(&self, option: usize) -> Vec<Rect>;
     fn wheel(&mut self, down: bool, step: usize);
     fn detach_at(&mut self, scroll: usize);
+    fn layout(&mut self, lines: &[Option<usize>], area: Rect) -> usize;
 }
 
 impl<R: ClickRule> OptionView for OptionList<R> {
@@ -272,5 +273,9 @@ impl<R: ClickRule> OptionView for OptionList<R> {
 
     fn detach_at(&mut self, scroll: usize) {
         OptionList::detach_at(self, scroll);
+    }
+
+    fn layout(&mut self, lines: &[Option<usize>], area: Rect) -> usize {
+        OptionList::layout(self, lines, area)
     }
 }

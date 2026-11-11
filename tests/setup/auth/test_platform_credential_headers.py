@@ -100,3 +100,36 @@ async def test_signed_out_reports_reauthentication_without_a_fallback(
     finally:
         await client_transport.close()
         await server_transport.close()
+
+
+@pytest.mark.asyncio
+async def test_a_401_after_refresh_tells_the_cli_to_update_or_sign_in(
+    monkeypatch, tokens, process_services
+) -> None:
+    """The Rust TUI's audio requests show the mixed message, keyed on
+    ``data.reason``, once the connection's credential is refused after a
+    successful refresh.
+    """
+    from vibe.core.platform_auth import (
+        UNAUTHORIZED_AFTER_REFRESH_MESSAGE,
+        PlatformCredentialRequired,
+    )
+    from vibe.setup.auth._cli_oidc_platform_credentials import (
+        CliOidcPlatformCredentialProvider,
+    )
+
+    async def refused(self, target):
+        del self, target
+        return PlatformCredentialRequired(reason="unauthorized_after_refresh")
+
+    monkeypatch.setattr(CliOidcPlatformCredentialProvider, "resolve", refused)
+    client, client_transport, server_transport = await setup_client(
+        entrypoint="cli", process_services=process_services
+    )
+    try:
+        with pytest.raises(Exception) as error:
+            await client.request(_METHOD, {"url": "https://api.mistral.ai/v1"})
+        assert UNAUTHORIZED_AFTER_REFRESH_MESSAGE in str(error.value)
+    finally:
+        await client_transport.close()
+        await server_transport.close()

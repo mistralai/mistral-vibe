@@ -1,10 +1,11 @@
 """Stateless procedures for the App Server Session Protocol."""
 
 from collections.abc import Sequence
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal, Self, cast
 
-from pydantic import Field, JsonValue, field_validator
+from pydantic import Field, JsonValue, field_validator, model_validator
 
+from ....session_values import REQUEST_CONTEXT
 from ..models.base import SessionModel
 from ..models.callbacks import CallbackResult, TreeCallback
 from ..models.common import (
@@ -12,6 +13,7 @@ from ..models.common import (
     AbsolutePath,
     EventId,
     HistoryEntryId,
+    OutputType,
     ProtocolError,
     SessionId,
     TurnId,
@@ -108,9 +110,6 @@ type Procedure = Literal[
     "app_server/vibeCodeWeb/projects/unlink",
     "app_server/vibeCodeWeb/projects/cancel",
     "app_server/vibeCodeWeb/projects/recover",
-    "app_server/vibeCodeWeb/teleport/start",
-    "app_server/vibeCodeWeb/teleport/cancel",
-    "app_server/vibeCodeWeb/teleport/push/respond",
     "app_server/account/read",
     "app_server/account/identity/read",
     "app_server/telemetry/record",
@@ -219,9 +218,6 @@ APP_SERVER_CAPABILITY_PROCEDURES: dict[str, tuple[Procedure, ...]] = {
         "app_server/vibeCodeWeb/projects/unlink",
         "app_server/vibeCodeWeb/projects/cancel",
         "app_server/vibeCodeWeb/projects/recover",
-        "app_server/vibeCodeWeb/teleport/start",
-        "app_server/vibeCodeWeb/teleport/cancel",
-        "app_server/vibeCodeWeb/teleport/push/respond",
     ),
     "app_server/account": (
         "app_server/account/read",
@@ -269,6 +265,7 @@ def validate_request[ModelT: SessionModel](model: type[ModelT], value: object) -
         by_alias=True,
         by_name=False,
         extra="forbid",
+        context=REQUEST_CONTEXT,
     )
 
 
@@ -307,9 +304,11 @@ class InfoResponse(SessionModel):
 
 
 class ContextMessage(SessionModel):
-    """Model-only context sent with a user message.
+    """Context for the model sent with a user message.
 
-    Public history, snapshots, and events never show it.
+    The model gets it in a `<Context>` block at the start of the user message. Public
+    history records it after the user message, as a `context` message of kind `input`,
+    when the Session accepts the message.
     """
 
     content: Annotated[list[ContentBlock], Field(min_length=1)]
@@ -511,8 +510,47 @@ class SessionTurnsListResponse(SessionModel):
     page: Page[TurnState]
 
 
-class MessageSendParams(UserMessageInput):
+class MessageSendInput(SessionModel):
+    """What `message/send` sends: a user message, model-only context, or both.
+
+    Context sent without a message starts no Turn and extends none: the running
+    Turn's model reads it at its next call, or the next Turn's first call reads
+    it when no Turn runs.
+    """
+
+    message: Annotated[list[ContentBlock], Field(min_length=1)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    context_messages: list[ContextMessage] = Field(default_factory=list)
+    # Names the message, so only a send with one sets it.
+    message_entry_id: HistoryEntryId | None = None
+
+    @field_validator("message")
+    @classmethod
+    def _refuse_blank_text(cls, message: list[ContentBlock] | None) -> list[ContentBlock] | None:
+        return None if message is None else _require_non_blank_text(message, "A user message")
+
+    @field_validator("message")
+    @classmethod
+    def _refuse_unsupported_blocks(
+        cls, message: list[ContentBlock] | None
+    ) -> list[ContentBlock] | None:
+        return None if message is None else refuse_unsupported_blocks(message)
+
+    @model_validator(mode="after")
+    def _require_input(self) -> Self:
+        if self.message is None and not self.context_messages:
+            raise ValueError("A message/send needs a message or a context message")
+        if self.message is None and self.message_entry_id is not None:
+            raise ValueError("A message/send without a message has no message entry ID")
+        return self
+
+
+class MessageSendParams(MessageSendInput):
     """Send one user message; the Session starts a Turn or steers the active one.
+
+    It needs a `message`, `context_messages`, or both. Context messages alone
+    start no Turn, and take no `message_entry_id`.
 
     Reusing `idempotency_key` with the same message, entry ID, and context
     messages returns the original receipt; reusing it with any of them changed
@@ -521,18 +559,29 @@ class MessageSendParams(UserMessageInput):
 
     idempotency_key: str | None = None
     session_id: SessionId
-    message_entry_id: HistoryEntryId | None = None
+    # The schema the answer of the Turn this message starts must match. A message that steers
+    # the active Turn carries none or that Turn's own.
+    output_type: OutputType | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def _require_message_for_output_type(self) -> Self:
+        if self.message is None and self.output_type is not None:
+            raise ValueError("A message/send without a message has no output type")
+        return self
 
 
 class MessageSendResponse(SessionModel):
-    """Receipt for an accepted message and the Turn it joined.
+    """Receipt for an accepted send and the Turn its message joined.
 
     `steered` is true when the message joined the running Turn and false when it
-    started that Turn. A host that does not report it leaves it out.
+    started that Turn. A host that does not report it leaves it out. A send of
+    context only names no entry and no Turn, so it leaves all three out.
     """
 
-    message_entry_id: HistoryEntryId
-    turn_id: TurnId
+    message_entry_id: HistoryEntryId | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    turn_id: TurnId | None = Field(default=None, exclude_if=lambda value: value is None)
     steered: bool | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
@@ -540,6 +589,8 @@ class TurnStartParams(UserMessageInput):
     idempotency_key: str | None = None
     session_id: SessionId
     message_entry_id: HistoryEntryId | None = None
+    # Every agent model call of this Turn must answer with JSON that follows this schema.
+    output_type: OutputType | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class TurnStartResponse(SessionModel):

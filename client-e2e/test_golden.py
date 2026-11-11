@@ -17,33 +17,47 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import tempfile
+from types import ModuleType
 from xml.etree import ElementTree
 
 from e2e.app_server import golden
 from e2e.app_server.capture import Capture, capture_scenario
-from e2e.app_server.config import CLIENT_BIN, GOLDEN_DIR, REPLAY_BIN, VIBE_DIR
+from e2e.app_server.config import (
+    CLIENT_BIN,
+    GOLDEN_DIR,
+    GOLDEN_LOCK,
+    REPLAY_BIN,
+    VIBE_DIR,
+)
 from e2e.app_server.golden import (
     golden_exists,
     golden_path,
     load_golden_requests,
     load_golden_svgs,
     normalize_snapshot,
+    render_golden_lock,
     store_golden,
 )
 from e2e.app_server.normalize import normalize_requests
 from e2e.app_server.scenario import (
+    ASSERTS_NOTHING,
     Action,
     Request,
     Scenario,
+    Timeline,
+    _build_scenario,
     available_scenarios,
     load_scenario,
+    take_snapshot,
 )
 from e2e.app_server.svg import to_svg
 from e2e.pty.screen import Snapshot, Terminal
 import pytest
 
 _LIVE_DIR = golden_path("_live")
+_BLANK = Snapshot("final", ())
 
 
 def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None:
@@ -52,10 +66,10 @@ def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None
             want.matches(got)
             for want, got in zip(expected, captured.actions, strict=True)
         ), f"actions {captured.actions!r} do not match {expected!r}"
-    if not captured.snapshots:
-        return
+    if (titles := scenario.expected_titles) is not None:
+        assert captured.titles == titles, f"titles {captured.titles!r} != {titles!r}"
 
-    snapshot = captured.snapshots[-1]
+    snapshot = captured.final
     screen = "\n".join(snapshot.rows)
     for text in scenario.screen_contains:
         assert text in screen, f"screen is missing {text!r}"
@@ -65,6 +79,10 @@ def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None
         assert snapshot.rows[row] == text, f"screen row {row} differs"
     if (cursor := scenario.screen_cursor) is not None:
         assert snapshot.cursor == cursor, f"cursor {snapshot.cursor} != {cursor}"
+    if (links := scenario.screen_hyperlinks) is not None:
+        assert snapshot.hyperlinks == links, (
+            f"hyperlinks {snapshot.hyperlinks!r} != {links!r}"
+        )
     if (mouse := scenario.mouse_tracking) is not None:
         assert snapshot.mouse_tracking == mouse, f"mouse tracking is not {mouse}"
     if (seen := scenario.mouse_tracking_seen) is not None:
@@ -107,7 +125,7 @@ def test_scenario_expectations_reject_wrong_actions(
     scenario = Scenario(name="test", steps=[], expected_actions=expected)
 
     with pytest.raises(AssertionError):
-        _assert_scenario_expectations(Capture([], actual, []), scenario)
+        _assert_scenario_expectations(Capture([], actual, [], _BLANK), scenario)
 
 
 def test_scenario_expectations_accept_a_pattern_action() -> None:
@@ -115,13 +133,13 @@ def test_scenario_expectations_accept_a_pattern_action() -> None:
     scenario = Scenario(name="test", steps=[], expected_actions=expected)
 
     _assert_scenario_expectations(
-        Capture([], [Action("open_url", "file:///tmp/a-x1.png")], []), scenario
+        Capture([], [Action("open_url", "file:///tmp/a-x1.png")], [], _BLANK), scenario
     )
 
 
 def test_scenario_expectations_reject_wrong_clipboard() -> None:
     scenario = Scenario(name="test", steps=[], expected_clipboard="expected")
-    captured = Capture([Snapshot("final", (), "actual")], [], [])
+    captured = Capture([], [], [], Snapshot("final", (), "actual"))
 
     with pytest.raises(AssertionError):
         _assert_scenario_expectations(captured, scenario)
@@ -129,7 +147,7 @@ def test_scenario_expectations_reject_wrong_clipboard() -> None:
 
 def test_scenario_expectations_reject_wrong_cursor() -> None:
     scenario = Scenario(name="test", steps=[], screen_cursor=(0, 0))
-    captured = Capture([Snapshot("final", (), cursor=(0, 1))], [], [])
+    captured = Capture([], [], [], Snapshot("final", (), cursor=(0, 1)))
 
     with pytest.raises(AssertionError):
         _assert_scenario_expectations(captured, scenario)
@@ -138,7 +156,7 @@ def test_scenario_expectations_reject_wrong_cursor() -> None:
 @pytest.mark.parametrize("tracking", [False, True])
 def test_scenario_expectations_reject_wrong_mouse_tracking(tracking: bool) -> None:
     scenario = Scenario(name="test", steps=[], mouse_tracking=not tracking)
-    captured = Capture([Snapshot("final", (), mouse_tracking=tracking)], [], [])
+    captured = Capture([], [], [], Snapshot("final", (), mouse_tracking=tracking))
 
     with pytest.raises(AssertionError):
         _assert_scenario_expectations(captured, scenario)
@@ -147,10 +165,85 @@ def test_scenario_expectations_reject_wrong_mouse_tracking(tracking: bool) -> No
 @pytest.mark.parametrize("seen", [False, True])
 def test_scenario_expectations_reject_wrong_mouse_tracking_seen(seen: bool) -> None:
     scenario = Scenario(name="test", steps=[], mouse_tracking_seen=not seen)
-    captured = Capture([Snapshot("final", (), mouse_tracking_seen=seen)], [], [])
+    captured = Capture([], [], [], Snapshot("final", (), mouse_tracking_seen=seen))
 
     with pytest.raises(AssertionError):
         _assert_scenario_expectations(captured, scenario)
+
+
+def test_screen_expectations_check_the_final_frame_without_snapshots() -> None:
+    terminal = Terminal(2, 20)
+    terminal.feed(b"hello")
+    scenario = Scenario(name="test", steps=[], screen_contains=("bye",))
+
+    with pytest.raises(AssertionError, match="bye"):
+        _assert_scenario_expectations(
+            Capture([], [], [], terminal.snapshot("final")), scenario
+        )
+
+
+def test_scenario_expectations_reject_wrong_titles() -> None:
+    scenario = Scenario(name="test", steps=[], expected_titles=("Vibe", "Done"))
+
+    with pytest.raises(AssertionError):
+        _assert_scenario_expectations(
+            Capture([], [], [], _BLANK, ("Vibe", "Other")), scenario
+        )
+
+
+def _scenario(timeline: Timeline, **attributes: object) -> Scenario:
+    module = ModuleType("scenario_test")
+    module.timeline = timeline  # type: ignore[attr-defined]
+    for key, value in attributes.items():
+        setattr(module, key, value)
+    return _build_scenario(module, "test", "test.py")
+
+
+def test_take_snapshot_labels_startup_and_the_preceding_step() -> None:
+    scenario = _scenario([
+        take_snapshot(),
+        "a",
+        {"method": "turn/started"},
+        take_snapshot(),
+        "b",
+        {"release": 1},
+        take_snapshot("done"),
+    ])
+
+    assert scenario.startup_snapshot == "startup"
+    assert [step.snapshot for step in scenario.steps] == ["step0", None, "done"]
+
+
+@pytest.mark.parametrize(
+    "timeline",
+    [
+        pytest.param(["a", take_snapshot(), {"method": "x"}], id="before_events"),
+        pytest.param(["a", take_snapshot(), {"release_after": 1}], id="before_release"),
+        pytest.param(["a", take_snapshot(), take_snapshot()], id="twice"),
+        pytest.param([take_snapshot(), take_snapshot()], id="startup_twice"),
+    ],
+)
+def test_take_snapshot_rejects_misplaced_markers(timeline: Timeline) -> None:
+    with pytest.raises(ValueError):
+        _scenario(timeline)
+
+
+def test_take_snapshot_rejects_the_exiting_step() -> None:
+    with pytest.raises(ValueError, match="exiting"):
+        _scenario(["a", take_snapshot()], exit_after_last_step=True)
+
+
+@pytest.mark.parametrize("attribute", ["capture_steps", "capture_startup"])
+def test_removed_capture_attributes_fail_loudly(attribute: str) -> None:
+    with pytest.raises(TypeError, match="take_snapshot"):
+        _scenario(["a"], **{attribute: set()})
+
+
+def test_a_scenario_must_snapshot_or_expect_something() -> None:
+    assert not _scenario(["a"]).has_expectations()
+    assert _scenario(["a", take_snapshot()]).has_expectations()
+    assert _scenario(["a"], screen_contains=("a",)).has_expectations()
+    assert _scenario(["a"], request_methods={"turn/start"}).has_expectations()
 
 
 def test_svg_groups_text_without_merging_styles() -> None:
@@ -366,6 +459,95 @@ def test_goldens_are_environment_independent() -> None:
     )
 
 
+def test_golden_lock_is_current() -> None:
+    assert GOLDEN_LOCK.is_file() and GOLDEN_LOCK.read_text() == render_golden_lock(), (
+        "goldens.lock is stale; from vibe/, run `uv run --no-project "
+        '--with "pyte==0.8.2" --with "rich==15.0.0" python '
+        "client-e2e/store_golden.py --lock`"
+    )
+
+
+def test_golden_lock_ignores_untracked_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "requests.json").write_text("[]")
+    (tmp_path / "a" / "snapshot_00_x.svg").write_text("<svg/>")
+    monkeypatch.setattr(golden, "GOLDEN_DIR", tmp_path)
+    before = render_golden_lock()
+
+    (tmp_path / "a" / ".DS_Store").write_bytes(b"\0")
+    (tmp_path / "a" / "snapshot_00_x.svg.orig").write_text("<svg/>")
+
+    assert render_golden_lock() == before
+
+
+_BASE_GOLDENS = dict.fromkeys("acegi", "1")
+
+
+@pytest.mark.parametrize(
+    ("ours", "theirs", "conflicts"),
+    [
+        pytest.param(
+            dict.fromkeys("acegi", "2"),
+            {**_BASE_GOLDENS, "d": "1"},
+            True,
+            id="change_everything_vs_new_golden",
+        ),
+        pytest.param(
+            {**_BASE_GOLDENS, "c": "2"},
+            {**_BASE_GOLDENS, "c": "3"},
+            True,
+            id="same_golden_changed_differently",
+        ),
+        pytest.param(
+            {**_BASE_GOLDENS, "c": "2"},
+            {**_BASE_GOLDENS, "c": "2"},
+            False,
+            id="same_golden_changed_identically",
+        ),
+        pytest.param(
+            {**_BASE_GOLDENS, "c": "2"},
+            {**_BASE_GOLDENS, "e": "2"},
+            False,
+            id="neighbor_goldens",
+        ),
+        pytest.param(
+            {**_BASE_GOLDENS, "i": "2"},
+            {**_BASE_GOLDENS, "b": "1"},
+            False,
+            id="new_golden_far_from_change",
+        ),
+    ],
+)
+def test_golden_lock_conflicts_only_on_overlapping_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ours: dict[str, str],
+    theirs: dict[str, str],
+    conflicts: bool,
+) -> None:
+    def lock(name: str, goldens: dict[str, str]) -> str:
+        root = tmp_path / name
+        for scenario, content in goldens.items():
+            (root / scenario).mkdir(parents=True)
+            (root / scenario / "requests.json").write_text(content)
+        monkeypatch.setattr(golden, "GOLDEN_DIR", root)
+        path = tmp_path / f"{name}.lock"
+        path.write_text(render_golden_lock())
+        return str(path)
+
+    base = lock("base", _BASE_GOLDENS)
+    merge = subprocess.run(
+        ["git", "merge-file", "-p", lock("ours", ours), base, lock("theirs", theirs)],
+        capture_output=True,
+        check=False,
+    )
+
+    assert not merge.stderr, merge.stderr
+    assert (merge.returncode > 0) == conflicts
+
+
 @pytest.mark.parametrize("name", available_scenarios())
 def test_matches_golden(name: str) -> None:
     """The capture must match the committed golden for SVGs and requests."""
@@ -379,22 +561,15 @@ def test_matches_golden(name: str) -> None:
             f"client-e2e/store_golden.py {name}` and review it before committing",
             pytrace=False,
         )
-    expected_titles = scenario.expected_titles
-    if expected_titles is not None and scenario.capture_startup:
-        expected_titles = expected_titles[1:]
-    scenario.clamp_capture_startup()
+    golden_svgs = load_golden_svgs(name)
+    golden_requests = load_golden_requests(name)
+    if not scenario.has_expectations() and not golden_requests:
+        pytest.fail(f"{name}: {ASSERTS_NOTHING}", pytrace=False)
     if not CLIENT_BIN.exists() or not REPLAY_BIN.exists():
         pytest.skip("Client binary missing (run `make build_test`)")
 
     captured = capture_scenario(scenario)
-    if expected_titles is not None:
-        assert (
-            tuple(snapshot.title for snapshot in captured.snapshots) == expected_titles
-        )
     _assert_scenario_expectations(captured, scenario)
-
-    golden_svgs = load_golden_svgs(name)
-    golden_requests = load_golden_requests(name)
 
     if normalize_requests(captured.requests) != golden_requests:
         _save_live_svgs(name, captured.snapshots)

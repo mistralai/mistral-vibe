@@ -2,10 +2,10 @@
 
 use std::cmp::Ordering;
 
-use ratatui::style::{Color, Modifier};
+use ratatui::style::Color;
 use ratatui::text::{Line, Span};
 
-use super::super::super::markdown::{self, LinkKind, LinkedLines, Sc};
+use super::super::super::markdown::{self, LinkedLines};
 use super::super::super::{pulse, theme};
 use crate::selection::{fold, Fold};
 use crate::server::CheckpointEntry;
@@ -110,41 +110,6 @@ fn push_settled(lines: &mut LinkedLines, message: &str) {
         ]));
     }
 }
-
-/// Teleport status: pulse, then ✓ with the link to `text` or ✕ once cancelled.
-pub(super) fn push_teleport_status(
-    lines: &mut LinkedLines,
-    text: &str,
-    complete: bool,
-    in_progress: bool,
-    pulse_frame: usize,
-) {
-    let (glyph, color) = if in_progress {
-        (pulse::glyph(pulse_frame).to_string(), theme::foreground())
-    } else if complete {
-        ("✓".to_string(), theme::status_ready())
-    } else {
-        ("✕".to_string(), theme::error())
-    };
-    let body = theme::text(theme::foreground());
-    let mut spans = vec![Span::styled(format!("{glyph} "), theme::text(color))];
-    lines.push_gap();
-    if !complete {
-        spans.push(Span::styled(text.to_string(), body));
-        lines.push(Line::from(spans));
-        return;
-    }
-    spans.push(Span::styled("Teleported to ", body));
-    let link = Some(lines.link(text.to_owned(), LinkKind::External));
-    let style = theme::text(theme::md_link()).add_modifier(Modifier::UNDERLINED);
-    let label: Vec<Sc> = TELEPORT_LINK_LABEL
-        .chars()
-        .map(|c| (c, style, link))
-        .collect();
-    lines.push_row(spans, &label);
-}
-
-const TELEPORT_LINK_LABEL: &str = "Vibe Code Web";
 
 #[cfg(test)]
 mod tests;

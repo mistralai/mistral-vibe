@@ -185,7 +185,7 @@ type ApprovalNoteRecorder = Callable[[str, str], None]
 
 @dataclass(frozen=True, slots=True)
 class HookAgentIdentity:
-    """The agent a post_agent_turn action reviews, captured once per action."""
+    """The agent a turn hook action runs for, captured once per action."""
 
     # The agent configuration name (``LocalRuntimeAdapterConfig.active_agent``);
     # ``None`` when the embedder does not set it.
@@ -209,9 +209,11 @@ class HookContext:
     request_approval: HookApprovalCallback | None = None
     emit_hook_notice: HookNoticeEmitter | None = None
     record_approval_note: ApprovalNoteRecorder | None = None
-    # Set for post_agent_turn hooks only: the identity their handlers were selected
-    # for, so the payload names the same agent the selection saw.
+    # Set for turn hooks (pre_agent_turn, post_agent_turn): the identity their
+    # handlers were selected for, so the payload names the same agent the selection
+    # saw, and the turn the action belongs to.
     agent: HookAgentIdentity | None = None
+    turn_id: str | None = None
 
 
 # On a ``pre_tool_call`` ``continue``, ``effective_arguments`` is the full replacement the
@@ -268,6 +270,21 @@ class AcceptOrRetryPostAgentHandler:
             "an accept-or-retry post_agent handler may only accept the candidate "
             "unchanged or ask for a retry"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentScopedHook[I, R]:
+    """A turn hook that runs only for the agents its ``selects`` accepts.
+
+    The Core binds turn hooks with an ``always`` selector, so the executor applies
+    ``selects`` before the run starts, as for ``AcceptOrRetryPostAgentHandler``.
+    """
+
+    run: Callable[[I, HookContext], Awaitable[R]]
+    selects: Callable[[HookAgentIdentity], bool] = _select_every_agent
+
+    async def __call__(self, hook_input: I, context: HookContext) -> R:
+        return await self.run(hook_input, context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -562,6 +579,17 @@ class _LocalActionState:
         self._project_roots_for: tuple[Path, ...] | None = None
         self._project_roots: list[str] = []
         self._refresh_project_roots()
+        self._before_model_step: Callable[[], Awaitable[None]] | None = None
+
+    def bind_before_model_step(self, hook: Callable[[], Awaitable[None]]) -> None:
+        """Run ``hook`` before each agent completion, once the previous step ended.
+
+        Core asks for the next completion only after every result of the step
+        before it is applied, so nothing of that step runs while the hook does.
+        Compaction completions are skipped: they are not a step of the agent's,
+        and a compaction already holds the Session's lifecycle lock.
+        """
+        self._before_model_step = hook
 
     def configure_background_processes(self, runs: Callable[[], bool]) -> None:
         """Say how to tell whether background processes run in this Session.
@@ -741,6 +769,8 @@ class _LocalActionState:
 
     async def _execute(self, action: RustAction) -> RustEvent:  # noqa: PLR0911 - one return per action kind
         if isinstance(action, RustLLMCallAction):
+            if self._before_model_step is not None and action.purpose == "agent":
+                await self._before_model_step()
             self._apply_model_input(action)
             return await execute_completion(
                 action,
@@ -919,11 +949,27 @@ class _LocalActionState:
     async def _execute_pre_agent_turn_hook(
         self, action: RustPreAgentTurnHookAction
     ) -> RustEvent:
+        # Handlers chain: each sees the content the previous one returned, and the
+        # first skip wins.
         try:
-            context = self._hook_context()
-            handlers = _resolve_hooks(
-                action.hook_binding_ids, self._hook_handlers.pre_agent_turn
+            agent = HookAgentIdentity(
+                name=self._config.active_agent, main=self._main_session
             )
+            handlers = _select_for_agent(
+                _resolve_hooks(
+                    action.hook_binding_ids, self._hook_handlers.pre_agent_turn
+                ),
+                agent,
+            )
+        except Exception as error:
+            return _hook_pipeline_failed(action, error)
+        emit_run = self._emits_run_notices([bid for bid, _ in handlers])
+        if emit_run:
+            await self._emit_notice(
+                HookNoticeData(kind="hook_run_started", scope="pre_agent")
+            )
+        try:
+            context = self._hook_context(agent=agent, turn_id=action.turn_id)
             user_content = action.input.user_content
             for _, handler in handlers:
                 result = await handler(
@@ -938,6 +984,11 @@ class _LocalActionState:
                 user_content = output.user_content
         except Exception as error:
             return _hook_pipeline_failed(action, error)
+        finally:
+            if emit_run:
+                await self._emit_notice(
+                    HookNoticeData(kind="hook_run_completed", scope="pre_agent")
+                )
         return RustHookCompletedEvent(
             action_id=action.action_id,
             result=RustPreAgentTurnHookResult(
@@ -1026,7 +1077,7 @@ class _LocalActionState:
                 HookNoticeData(kind="hook_run_started", scope="post_agent")
             )
         try:
-            context = self._hook_context(agent=agent)
+            context = self._hook_context(agent=agent, turn_id=action.turn_id)
             candidate = action.input.candidate
             replacement: list[RustContentBlock] | None = None
             # Each hook reviews the model's original completion, not a prior hook's
@@ -1097,7 +1148,9 @@ class _LocalActionState:
         self._post_agent_retries[turn_id] = count + 1
         return retry
 
-    def _hook_context(self, *, agent: HookAgentIdentity | None = None) -> HookContext:
+    def _hook_context(
+        self, *, agent: HookAgentIdentity | None = None, turn_id: str | None = None
+    ) -> HookContext:
         # Turn-boundary and post hooks gate a whole turn or a completed call, not a single
         # pending tool call, so they are not offered a per-call approval transport.
         return HookContext(
@@ -1108,6 +1161,7 @@ class _LocalActionState:
             parent_session_id=self._parent_session_id,
             emit_hook_notice=self._emit_notice,
             agent=agent,
+            turn_id=turn_id,
         )
 
     def _pre_tool_call_context(self, turn_id: str) -> HookContext:
@@ -1682,7 +1736,7 @@ def _select_for_agent[H](
     return [
         (binding_id, handler)
         for binding_id, handler in resolved
-        if not isinstance(handler, AcceptOrRetryPostAgentHandler)
+        if not isinstance(handler, AcceptOrRetryPostAgentHandler | AgentScopedHook)
         or handler.selects(agent)
     ]
 
@@ -1761,6 +1815,7 @@ def _failed_tool_action(
 __all__ = [
     "CLASSIFICATION_EVENT_TYPE",
     "AcceptOrRetryPostAgentHandler",
+    "AgentScopedHook",
     "ApprovalGrant",
     "ApprovalRequester",
     "ClassificationSink",

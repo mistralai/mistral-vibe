@@ -26,11 +26,10 @@ pub const MAX_PENDING_QUESTIONS: usize = 64;
 const DEFAULT_TYPING_DEBOUNCE_MS: u64 = 1000;
 const TYPING_DEBOUNCE_ENV_VAR: &str = "VIBE_TYPING_GRACE_PERIOD_MS";
 
-/// Who answers the open question: a server callback or a local question.
+/// Who answers the open question: a server callback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum QuestionSource {
     Callback(CallbackAddress),
-    TeleportPush,
 }
 
 /// Whether a `user_input` callback question is open or waiting to open.

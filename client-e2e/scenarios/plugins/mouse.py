@@ -10,6 +10,7 @@ _BROKEN = dropped(
 )
 handshake = {"plugin_catalog/read": catalog(sample_plugins(), [_BROKEN])}
 request_methods = METHODS
+screen_contains = ("Location: /opt/vibe/plugins/docs", "r reload  Esc back")
 
 # Press and release on the docs row, in 1-based terminal coordinates.
 _CLICK_DOCS = "\x1b[<0;10;32M\x1b[<0;10;32m"

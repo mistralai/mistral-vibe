@@ -16,7 +16,6 @@ env = {
     "EDITOR": "false",
 }
 
-capture_startup = False
 screen_contains = ("HELLO WORLD", "second line")
 screen_excludes = ("hello world",)
 

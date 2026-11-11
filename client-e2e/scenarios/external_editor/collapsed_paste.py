@@ -16,7 +16,6 @@ env = {
     )
 }
 
-capture_startup = False
 screen_contains = ("summarize [Pasted 73 characters]",)
 screen_excludes = ("row 5",)
 

@@ -22,11 +22,9 @@ pub struct PublicSessionArtifact {
     pub details: Option<ArtifactDetails>,
 }
 
-/// The PR/MR number fields of the provider-discriminated details union; the
-/// bar only renders the number, so the rest of the union stays unread.
-/// Phase 4 adds the synced enrichment surface the CLI renders: the lifecycle
-/// state, the aggregated actionability status (`prStatus`), and the CI
-/// checks summary. All optional — pre-Phase-4 payloads parse unchanged.
+/// The PR/MR number fields of the provider-discriminated details union, plus
+/// the synced state, status and CI checks the CLI renders. All optional, so
+/// older payloads parse unchanged.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArtifactDetails {
@@ -35,11 +33,62 @@ pub struct ArtifactDetails {
     #[serde(default)]
     pub merge_request_iid: Option<u64>,
     #[serde(default)]
-    pub state: Option<String>,
+    pub state: Option<PrState>,
     #[serde(default)]
-    pub pr_status: Option<String>,
+    pub pr_status: Option<PrStatus>,
+    /// Why `pr_status` is `action_needed` or `waiting`, decided by the server.
+    #[serde(default)]
+    pub pr_status_reason: Option<PrStatusReason>,
     #[serde(default)]
     pub checks: Option<ChecksSummary>,
+}
+
+/// A PR/MR's lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    Closed,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The server's actionability status of an open PR/MR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrStatus {
+    ActionNeeded,
+    Waiting,
+    Mergeable,
+    #[serde(other)]
+    Unknown,
+}
+
+/// The cause of a `PrStatus`, in the server's precedence order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrStatusReason {
+    ChangesRequested,
+    ChecksFailing,
+    Conflicts,
+    ChecksPending,
+    ReviewRequired,
+    MergeBlocked,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One CI check's outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckOutcome {
+    Pass,
+    Fail,
+    Pending,
+    #[serde(other)]
+    Unknown,
 }
 
 /// The CI checks summary (`checks` on the details): an overall state plus the
@@ -62,7 +111,7 @@ pub struct CheckStatus {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<CheckOutcome>,
     #[serde(default)]
     pub url: Option<String>,
 }

@@ -9,23 +9,21 @@ use crate::server::{method, Client};
 pub const ENFORCED_MESSAGE: &str =
     "'active_model' is enforced by your administrator. Contact your admin to change it.";
 
-/// Write a pick, refusing a model change the administrator pins; `Ok(true)` means parked.
+/// Write a pick, refusing a model change the administrator pins; answers the write's response.
 pub async fn write(
     client: &Client,
     session_id: &str,
     saved: Option<Value>,
     ops: Vec<Value>,
     reason: &str,
-) -> Result<bool, String> {
+) -> Result<Value, String> {
     let picks_model = ops.iter().any(|op| op["path"] == "/active_model");
     if picks_model && is_active_model_enforced(client, session_id).await {
         return Err(ENFORCED_MESSAGE.to_owned());
     }
     match saved {
         Some(pick) => config_write::write_model(client, session_id, pick, ops, reason).await,
-        None => config_write::write(client, session_id, ops, reason)
-            .await
-            .map(|_| false),
+        None => config_write::write(client, session_id, ops, reason).await,
     }
 }
 

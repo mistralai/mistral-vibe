@@ -140,6 +140,13 @@ pub fn accept(app: &mut App) -> bool {
     true
 }
 
+/// Enter's accept: a typed built-in runs as typed, even one completion hides (`/pr` with its feature off).
+pub fn accept_on_enter(app: &mut App) -> bool {
+    let typed = matches!(active(app), Some(ActiveCompletion::Slash))
+        && commands::parse(&format!("/{}", app.chat_input.input)).is_some();
+    !typed && accept(app)
+}
+
 /// Tab accepts like `accept`, then leaves a space after a slash command so its arguments (and hint) follow.
 pub fn tab(app: &mut App) {
     let slash = matches!(active(app), Some(ActiveCompletion::Slash));
@@ -229,7 +236,8 @@ fn slash_entries(app: &App) -> Vec<CompletionEntry> {
     let input = &app.chat_input.input;
     let end = crate::chat_input::clamp_offset(input, app.chat_input.cursor);
     let query = input[..end].to_lowercase();
-    let mut scored: Vec<(i64, CompletionEntry)> = commands::entries(&app.completion.skills)
+    let entries = commands::entries(&app.completion.skills, |feature| feature.is_on(app));
+    let mut scored: Vec<(i64, CompletionEntry)> = entries
         .into_iter()
         .filter_map(|entry| {
             let score =

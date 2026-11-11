@@ -417,6 +417,10 @@ class ClientProjection:
                 f"Turn belongs to session {turn.session_id!r}, "
                 f"expected {self.state.session.id!r}"
             )
+        # The turn/start response can land after notifications already moved
+        # this turn on (e.g. to interrupted); never roll it back to its start.
+        if any(existing.id == turn.id for existing in self.state.turns or []):
+            return
         self._replace_turn(turn)
 
     def consume(self, notification: Notification) -> AppServerEvent | None:

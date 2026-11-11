@@ -580,11 +580,12 @@ def _project_write(
     def project_result(state: CompletedEffectState) -> CompletedEffectState:
         envelope = _ToolResultEnvelope.model_validate(state.output)
         result = _WriteResult.model_validate(envelope.structured_content)
+        previous_content = _replaced_content(envelope)
         output = FileWriteEffectOutput(
             file_path=result.path,
-            content=arguments.content,
+            content=_written_content(arguments.content, previous_content),
             file_existed=result.file_existed,
-            previous_content=_replaced_content(envelope),
+            previous_content=previous_content,
         )
         display = EffectResultDisplay(
             success=True,
@@ -594,6 +595,28 @@ def _project_write(
         return _completed_state(state, output, display)
 
     return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _written_content(content: str, previous_content: str | None) -> str:
+    """The text a write put on disk, so a diff against the replaced text is exact.
+
+    A write reads ``\\n``, ``\\r\\n`` and ``\\r`` as line breaks and keeps the
+    dominant line ending of the file it replaces. A new file's line ending
+    depends on where the Runtime runs, so its content stands as given.
+    """
+    if not previous_content:
+        return content
+    crlf = previous_content.count("\r\n")
+    counts = {
+        "\r\n": crlf,
+        "\n": previous_content.count("\n") - crlf,
+        "\r": previous_content.count("\r") - crlf,
+    }
+    newline = max(counts, key=counts.__getitem__)
+    if counts[newline] == 0:
+        return content
+    lf_content = content.replace("\r\n", "\n").replace("\r", "\n")
+    return lf_content if newline == "\n" else lf_content.replace("\n", newline)
 
 
 def _project_edit(
@@ -1515,7 +1538,8 @@ def _cron_schedule(interval_seconds: int | None, cron: str | None) -> str:
 
 
 def _cron_prompt_summary(prompt: str) -> str:
-    return " ".join(prompt.split())[:100]
+    # The prompt's first line is the loop's title.
+    return " ".join(prompt.strip().split("\n", 1)[0].split())[:100]
 
 
 def _cron_result_text(result: _CronResult, *, action: str) -> str:
@@ -1805,7 +1829,9 @@ _TOOL_LABELS: dict[str, _ToolLabel] = {
     # ── Built-in harness tools ──────────────────────────────────────────
     "ui.ask_user_question": _ToolLabel("Asking", "a question", "Asked"),
     "self.sleep": _ToolLabel("Sleeping", "", "Slept"),
-    "self.wait": _ToolLabel("Waiting", "for input", "Waited"),
+    # The model waits for its subagents or background processes, not for the
+    # user: a message the user sends joins the waiting turn.
+    "self.wait": _ToolLabel("Waiting", "for background work", "Waited"),
     "agents.list_configs": _ToolLabel("Listing", "subagent configs", "Listed"),
     "agents.list": _ToolLabel("Listing", "subagents", "Listed"),
     "agents.send_message": _ToolLabel("Sending", "a message to a subagent", "Sent"),

@@ -234,6 +234,34 @@ def test_windows_uses_subprocess_and_forwards_returncode(
     assert recorded == [[str(bundled), "--version"]]
 
 
+@pytest.mark.parametrize("returncode", [0xC0000135, -0x3FFFFECB])
+def test_windows_explains_a_missing_dll(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    returncode: int,
+) -> None:
+    bundled = tmp_path / "_bin" / "vibe-rs.exe"
+    bundled.parent.mkdir(parents=True)
+    bundled.touch()
+
+    monkeypatch.setattr(launcher, "_BUNDLED_BIN", bundled)
+    monkeypatch.setattr("sys.argv", [str(tmp_path / "vibe.exe")])
+    monkeypatch.setattr("sys.platform", "win32")
+    _forbid_execvpe(monkeypatch)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda argv, env: subprocess.CompletedProcess(argv, returncode=returncode),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        launcher.exec_rust_cli([])
+
+    assert excinfo.value.code == returncode
+    assert f"{bundled} could not start" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "args", [[], ["update"], ["--check-upgrade"], ["--", "update"], ["mcp", "list"]]
 )

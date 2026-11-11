@@ -33,6 +33,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustSystemMessage,
     RustTextContentBlock,
     RustTextResourceContents,
+    RustTokenUsage,
     RustToolDefinition,
     RustToolMessage,
     RustUserMessage,
@@ -65,6 +66,7 @@ from mistralai_vibe_local_harness.vibe.adapters._request_log import (
     log_completion_request,
 )
 from mistralai_vibe_local_harness.vibe.adapters._retry import (
+    ProviderAttempt,
     RetryNotices,
     call_with_retries,
 )
@@ -173,7 +175,9 @@ async def execute_mistral_completion(
         source = CompletionSource(provider=config.provider, model=route.model)
         if stream:
 
-            async def stream_once() -> RustCompletionResult:
+            async def stream_once(
+                provider_attempt: ProviderAttempt,
+            ) -> RustCompletionResult:
                 opened = False
 
                 # The guard watches the request from the start, so silence before
@@ -184,6 +188,7 @@ async def execute_mistral_completion(
                     nonlocal opened
                     async with await client.chat.stream_async(**kwargs) as events:
                         opened = True
+                        provider_attempt.accept()
                         async for event in events:
                             yield event
 
@@ -200,32 +205,46 @@ async def execute_mistral_completion(
                         emits_finish_reason=config.emits_finish_reason,
                         source=source,
                         record=malformed,
+                        provider_attempt=provider_attempt,
                     )
 
             return await call_with_retries(
                 stream_once,
                 max_elapsed_time_s=config.retry_max_elapsed_time_s,
                 notices=notices,
+                completion_budget=config.completion_budget,
+                pricing=route.pricing,
             )
 
         # Reading the response is part of the attempt, so a response with only
         # unusable tool calls is retried like a failed request.
-        async def complete_once() -> RustCompletionResult:
+        async def complete_once(
+            provider_attempt: ProviderAttempt,
+        ) -> RustCompletionResult:
+            response = await client.chat.complete_async(**kwargs)
+            provider_attempt.accept()
             return _read_completion(
-                await client.chat.complete_async(**kwargs),
+                response,
                 source=source,
                 record=malformed,
+                provider_attempt=provider_attempt,
             )
 
         return await call_with_retries(
             complete_once,
             max_elapsed_time_s=config.retry_max_elapsed_time_s,
             notices=notices,
+            completion_budget=config.completion_budget,
+            pricing=route.pricing,
         )
 
 
 def _read_completion(
-    response: Any, *, source: CompletionSource, record: MalformedToolCalls | None = None
+    response: Any,
+    *,
+    source: CompletionSource,
+    record: MalformedToolCalls | None = None,
+    provider_attempt: ProviderAttempt | None = None,
 ) -> RustCompletionResult:
     choice = _first_choice(response)
     if choice is None:
@@ -248,6 +267,7 @@ def _read_completion(
     tool_calls = _read_field(message, "tool_calls")
     tool_call_parts = _message_tool_call_parts(tool_calls)
     parts.extend(tool_call_parts)
+    usage = _report_provider_usage(_read_field(response, "usage"), provider_attempt)
     reason = _read_field(choice, "finish_reason")
     finish_reason = align_finish_reason(
         map_finish_reason(WireFormat.MISTRAL, reason)
@@ -261,11 +281,7 @@ def _read_completion(
     )
     if not parts:
         raise ValueError("Completion response has no content")
-    return RustCompletionResult(
-        parts=parts,
-        finish_reason=finish_reason,
-        usage=reply_token_usage(WireFormat.MISTRAL, _read_field(response, "usage")),
-    )
+    return RustCompletionResult(parts=parts, finish_reason=finish_reason, usage=usage)
 
 
 def _carries_model_output(event: Any) -> bool:
@@ -292,6 +308,7 @@ async def _read_stream(
     emits_finish_reason: bool,
     source: CompletionSource,
     record: MalformedToolCalls | None = None,
+    provider_attempt: ProviderAttempt | None = None,
 ) -> RustCompletionResult:
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
@@ -311,6 +328,10 @@ async def _read_stream(
         chunk = _event_data(event)
         if (reported := _read_field(chunk, "usage")) is not None:
             raw_usage = reported
+            if provider_attempt is not None and has_reply_usage(
+                WireFormat.MISTRAL, raw_usage
+            ):
+                _report_provider_usage(raw_usage, provider_attempt)
         choice = _first_choice(chunk)
         if choice is None:
             continue
@@ -360,8 +381,17 @@ async def _read_stream(
             source=source,
             record=record,
         ),
-        usage=reply_token_usage(WireFormat.MISTRAL, raw_usage),
+        usage=_report_provider_usage(raw_usage, provider_attempt),
     )
+
+
+def _report_provider_usage(
+    raw_usage: object, provider_attempt: ProviderAttempt | None
+) -> RustTokenUsage:
+    usage = reply_token_usage(WireFormat.MISTRAL, raw_usage)
+    if provider_attempt is not None:
+        provider_attempt.report_usage(usage)
+    return usage
 
 
 def _streamed_parts(

@@ -12,7 +12,7 @@ from vibe.core.types import FileImageSource, InlineImageSource, LLMMessage, Role
 from vibe.utils.api_keys import resolve_api_key
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from mistralai_vibe_local_harness.protocol import RustContentBlock, RustMessage
     from mistralai_vibe_local_harness.vibe import (
@@ -67,13 +67,15 @@ async def complete_once(
     temperature: float | None = None,
     request_thinking: RequestReasoning | None = None,
     credentials: ProviderCredentialProvider | None = None,
+    on_request: Callable[[str], None] | None = None,
 ) -> UtilityReply:
     """One completion outside a turn, on the Harness provider adapters.
 
     ``credentials`` is the session's credential for ``provider`` (the
     connection's sign-in for a Mistral provider); without it, the provider's
     API key. Raises ``UtilityCompletionError`` when the provider call fails,
-    or when ``credentials`` has no credential to send.
+    or when ``credentials`` has no credential to send. ``on_request`` gets the
+    reasoning setting the request sends just before the provider call.
     """
     # Imported here: the Harness pulls the provider SDKs, which stay off the
     # CLI startup path.
@@ -84,6 +86,7 @@ async def complete_once(
         ProviderCredentialSnapshot,
         UtilityCompletionError,
         execute_utility_completion,
+        sent_reasoning,
     )
 
     if credentials is None:
@@ -128,6 +131,8 @@ async def complete_once(
         request_thinking=request_thinking,
         max_output_tokens=model.max_output_tokens,
     )
+    if on_request is not None:
+        on_request(sent_reasoning(config, route))
     try:
         return await execute_utility_completion(
             _harness_messages(messages),

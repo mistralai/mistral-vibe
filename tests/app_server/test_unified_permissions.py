@@ -2038,3 +2038,40 @@ async def test_outside_workdir_deny_lets_the_null_device_and_streams_through(
     outcome = await resolver.resolve("file_system.bash", {"command": command})
 
     assert outcome.decision != "deny"
+
+
+def test_a_session_that_moved_into_untrusted_worktrees_reads_no_config_from_them(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session whose tools moved into one worktree after another,
+        neither trusted, each with project hooks and skills.
+    *Do*: Read the tools' project roots and write boundary.
+    *Assert*: Both worktrees are writable, but neither is a root project
+    config is read from.
+    """
+    # Prepare
+    checkout, first, second = (tmp_path / name for name in ("c", "w1", "w2"))
+    for directory in (checkout, first, second):
+        (directory / ".vibe").mkdir(parents=True)
+        (directory / ".vibe" / "hooks.toml").write_text("", encoding="utf-8")
+    orchestrator = FakeConfigOrchestrator(build_test_vibe_config())
+    store = PermissionStore()
+    manager = ToolManager(
+        lambda: orchestrator.config,
+        defer_mcp=True,
+        cwd=checkout,
+        harness_files=HarnessFilesManager(sources=("user", "project")).for_session(
+            checkout
+        ),
+        permission_getter=store.get_tool_permission,
+    )
+
+    # Do
+    manager.move_to(second, [first, second])
+    tool = manager.get("write_file")
+
+    # Assert
+    assert first.resolve() not in tool.harness_files.project_roots
+    assert second.resolve() not in tool.harness_files.project_roots
+    assert tool.workspace.allows((first / "a.md").resolve())
+    assert tool.workspace.allows((second / "a.md").resolve())

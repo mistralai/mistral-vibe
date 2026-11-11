@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"SSH_TTY": "/dev/pts/0", "VIBE_THEME": "ansi-light"}
 handshake = {
@@ -26,5 +26,7 @@ timeline: Timeline = [
     user_msg("tell me a story"),
     assistant_msg(_wide_reply(30)),
     turn_completed(),
+    take_snapshot(),
     _SELECT,
+    take_snapshot(),
 ]

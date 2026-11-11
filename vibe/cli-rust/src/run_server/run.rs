@@ -10,7 +10,7 @@ use tokio::time::Instant;
 use super::protocol::{invalid_params, Failure, RunEnded, RunStartParams};
 use crate::cli::{HeadlessOptions, HeadlessSession, OutputFormat};
 use crate::headless::drive;
-use crate::headless_run::{iso_now, HeadlessRun, StopRequests};
+use crate::headless_run::{iso_now, price_limit_issue, HeadlessRun, StopRequests};
 use crate::run_export::{RunError, RunLimits, RunOutcome, RunReport, RunResult};
 use crate::server::{ChannelCloser, Connect, Connected};
 
@@ -43,13 +43,14 @@ impl RunSpec {
         let positive = |value: Option<f64>| value.is_none_or(|v| v.is_finite() && v > 0.0);
         for (field, ok) in [
             ("maxTurns", params.max_turns != Some(0)),
-            ("maxTokens", params.max_tokens != Some(0)),
-            ("maxPrice", positive(params.max_price)),
             ("timeLimit", positive(params.time_limit)),
         ] {
             if !ok {
                 issues.push((field.to_owned(), "must be greater than 0".to_owned()));
             }
+        }
+        if let Some(issue) = price_limit_issue(params.max_price) {
+            issues.push(("maxPrice".to_owned(), issue.to_owned()));
         }
         if !issues.is_empty() {
             return Err(invalid_params(issues));

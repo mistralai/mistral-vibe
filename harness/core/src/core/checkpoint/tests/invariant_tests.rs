@@ -105,10 +105,13 @@ fn compaction_projection(state: &crate::core::HarnessState) -> CompactionProject
         state.context.messages(),
         state.generated_system_message(),
         "",
-        state.resolved_tools.top_level_tools(),
-        CompactionBudgets::from_settings(&state.config.settings.context, state.estimate_correction)
-            .request,
-        &state.config.settings.prompts.compaction,
+        state.resolved_tools().top_level_tools(),
+        CompactionBudgets::from_settings(
+            &state.config().settings.context,
+            state.estimate_correction,
+        )
+        .request,
+        &state.config().settings.prompts.compaction,
     )
     .expect("test compaction projection can be estimated");
     let CompactionProjectionFit::Fitted(projection) = projection else {

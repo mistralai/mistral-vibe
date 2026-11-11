@@ -124,6 +124,7 @@ class FakeAgentServer:
         self._crashes = crashes
         self._aborts_on = aborts_on
         self.requests: list[Request] = []
+        self._requested = threading.Condition()
         self.peak_active_requests = 0
         self._active_requests = 0
         self._reply = reply
@@ -149,6 +150,11 @@ class FakeAgentServer:
     def methods(self) -> list[JsonValue]:
         return [request["method"] for request in self.requests]
 
+    def wait_for_requests(self, method: str, count: int = 1) -> None:
+        """Block until ``count`` ``method`` requests arrived; the test's timeout bounds it."""
+        with self._requested:
+            self._requested.wait_for(lambda: self.methods.count(method) >= count)
+
     async def _handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
@@ -163,7 +169,9 @@ class FakeAgentServer:
             if not line:
                 return
             request = json.loads(line)
-            self.requests.append(request)
+            with self._requested:
+                self.requests.append(request)
+                self._requested.notify_all()
             reply = await (self._reply or self._answer)(request)
             if reply is not None:
                 writer.write(reply)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -8,14 +10,19 @@ import httpx
 import pytest
 import respx
 
+from tests.conftest import build_test_vibe_config
 from tests.skills.registry.conftest import make_item
 from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
-from vibe.core.skills.registry import _ledger, _manifest, _resolved, _service, _store
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
-from vibe.core.skills.registry._service import (
-    RegistrySyncStatus,
+from vibe.core.skills.registry import (
+    _manifest,
+    _resolved,
+    _service,
+    _store,
     refresh_registry_skills,
 )
+from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._service import RegistrySyncStatus
+from vibe.core.utils import file_lock
 
 _URL = "https://api.mistral.ai/v1/skills"
 
@@ -90,12 +97,33 @@ async def test_refresh_skipped_without_endpoint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_refresh_skipped_when_no_pins(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
+async def test_refresh_with_no_pins_has_nothing_to_fetch(
+    respx_mock: respx.MockRouter,
+) -> None:
+    registry = respx_mock.route(url__startswith=_URL)
+
     result = await refresh_registry_skills(
-        _config(experimental_enable_registry_skills=True)
+        build_test_vibe_config(experimental_enable_registry_skills=True)
     )
-    assert result.status is RegistrySyncStatus.SKIPPED
+
+    assert (result.status, result.written) == (RegistrySyncStatus.OK, 0)
+    assert not registry.called
+
+
+@pytest.mark.asyncio
+async def test_refresh_with_every_frozen_pin_on_disk_never_reaches_the_registry(
+    respx_mock: respx.MockRouter,
+) -> None:
+    registry = respx_mock.route(url__startswith=_URL)
+    await _store.materialize(make_item(skill_id="sk", version=2), "frozen")
+    await _pin(ManifestEntry(name="frozen", skill_id="sk", version=2))
+
+    result = await refresh_registry_skills(
+        build_test_vibe_config(experimental_enable_registry_skills=True)
+    )
+
+    assert (result.status, result.written) == (RegistrySyncStatus.OK, 0)
+    assert not registry.called
 
 
 @pytest.mark.asyncio
@@ -204,6 +232,7 @@ async def test_refresh_skips_latest_when_skill_deleted(
 async def test_refresh_alias_failure_keeps_cached_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An alias whose fetch fails keeps the version it last resolved to, still on disk."""
     monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
     # Alias 'stable' last resolved to v1; a newer v2 also sits on disk.
     await _store.materialize(make_item(skill_id="cid", version=1), "st")
@@ -219,9 +248,8 @@ async def test_refresh_alias_failure_keeps_cached_version(
 
     await refresh_registry_skills(_config(experimental_enable_registry_skills=True))
 
-    # The alias's cached target (v1) stays; the unrelated newer v2 is pruned.
+    assert _resolved.get("cid", "stable") == 1
     assert await _store.is_materialized("cid", 1)
-    assert not await _store.is_materialized("cid", 2)
 
 
 @pytest.mark.asyncio
@@ -342,68 +370,43 @@ def test_local_skill_dir_refuses_symlinked_vibe_dir(
 
 
 @pytest.mark.asyncio
-async def test_convert_refuses_unsafe_name(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A pin with a path-traversal name must not let the export escape the root.
-    await _store.materialize(make_item(skill_id="cid", version=1), "evil")
-    await _manifest.save(
-        _manifest.global_manifest_path(),
-        SkillManifest(
-            skills=[ManifestEntry(name="../evil", skill_id="cid", version=1)]
-        ),
-    )
-    assert _service.convert_skill_to_local("../evil") is None
-
-
-@pytest.mark.asyncio
-async def test_convert_keeps_pin_when_export_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A failed export must not remove the registry pin, so the skill stays
-    # usable and a retry is possible.
-    await _store.materialize(make_item(skill_id="cid", version=1), "sk")
-    await _pin(ManifestEntry(name="sk", skill_id="cid", version=1))
-
-    def _boom(*_args: Any, **_kwargs: Any) -> None:
-        raise OSError("disk full")
-
-    monkeypatch.setattr(_store, "export_local_sync", _boom)
-    with pytest.raises(OSError):
-        _service.convert_skill_to_local("sk")
-
-    assert _service._find_entry("sk", _service.SkillScope.GLOBAL) is not None
-
-
-@pytest.mark.asyncio
 async def test_refresh_skips_unsafe_skill_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A committed manifest with a path-traversal id is skipped, not a crash."""
     monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    # A committed manifest with a path-traversal id must be skipped, not crash.
     await _pin(ManifestEntry(name="bad", skill_id="../evil", version=1))
 
     result = await refresh_registry_skills(
         _config(experimental_enable_registry_skills=True)
     )
 
-    assert result.status is RegistrySyncStatus.SKIPPED
+    assert result.status is RegistrySyncStatus.OK
 
 
 @pytest.mark.asyncio
-async def test_refresh_fast_path_prunes_unpinned(
+@respx.mock
+@pytest.mark.parametrize(
+    ("pin", "answer", "status"),
+    [
+        (3, 503, RegistrySyncStatus.FAILED),
+        ("stable", 503, RegistrySyncStatus.FAILED),
+        (3, 404, RegistrySyncStatus.OK),
+        ("stable", 404, RegistrySyncStatus.OK),
+    ],
+)
+async def test_a_sync_that_could_not_fetch_a_pin_is_not_done(
     monkeypatch: pytest.MonkeyPatch,
+    pin: int | str,
+    answer: int,
+    status: RegistrySyncStatus,
 ) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    # Frozen pin v1 already materialized (so no network sync is needed), plus a
-    # stale unpinned v2 that should still be pruned.
-    await _store.materialize(make_item(skill_id="abc", version=1), "my-skill")
-    await _store.materialize(make_item(skill_id="abc", version=2), "my-skill")
-    await _pin(ManifestEntry(name="my-skill", skill_id="abc", version=1))
+    await _pin(ManifestEntry(name="sk", skill_id="cid", version=pin))
+    respx.get(f"{_URL}/cid").mock(return_value=httpx.Response(answer))
 
     result = await refresh_registry_skills(
-        _config(experimental_enable_registry_skills=True)
+        build_test_vibe_config(experimental_enable_registry_skills=True)
     )
 
-    assert result.status is RegistrySyncStatus.SKIPPED
-    assert await _store.is_materialized("abc", 1)
-    assert not await _store.is_materialized("abc", 2)
+    assert (result.status, result.written) == (status, 0)
 
 
 @pytest.mark.asyncio
@@ -430,26 +433,83 @@ async def test_refresh_failed_download_keeps_prior_body(
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_refresh_prunes_unpinned_versions(
+async def test_a_refresh_keeps_the_version_it_moved_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    # A stale version sits in the store but is not pinned.
-    await _store.materialize(make_item(skill_id="abc", version=2), "my-skill")
-    assert await _store.is_materialized("abc", 2)
-
-    await _pin(ManifestEntry(name="my-skill", skill_id="abc", version=1))
+    await _store.materialize(make_item(skill_id="abc", version=1), "my-skill")
+    await _pin(ManifestEntry(name="my-skill", skill_id="abc", version="latest"))
     respx.get(_URL).mock(
-        return_value=httpx.Response(200, json=_catalog_page("abc", "my-skill"))
+        return_value=httpx.Response(
+            200, json=_catalog_page("abc", "my-skill", version=2, latest=2)
+        )
     )
     respx.get(f"{_URL}/abc").mock(
-        return_value=httpx.Response(200, json=_skill_payload("abc", "my-skill"))
+        return_value=httpx.Response(
+            200, json=_skill_payload("abc", "my-skill", version=2)
+        )
     )
 
-    await refresh_registry_skills(_config(experimental_enable_registry_skills=True))
+    result = await refresh_registry_skills(
+        build_test_vibe_config(experimental_enable_registry_skills=True)
+    )
 
+    assert (result.status, result.written) == (RegistrySyncStatus.OK, 1)
+    assert await _store.is_materialized("abc", 2)
     assert await _store.is_materialized("abc", 1)
-    assert not await _store.is_materialized("abc", 2)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_two_repositories_syncing_one_global_pin_at_once_both_succeed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    await _pin(ManifestEntry(name="my-skill", skill_id="abc", version="latest"))
+    respx.get(_URL).mock(
+        return_value=httpx.Response(
+            200, json=_catalog_page("abc", "my-skill", version=2, latest=2)
+        )
+    )
+    respx.get(f"{_URL}/abc").mock(
+        return_value=httpx.Response(
+            200, json=_skill_payload("abc", "my-skill", version=2)
+        )
+    )
+    acquire = file_lock.acquire_file_lock
+    second_waits = threading.Event()
+    attempts: list[object] = []
+
+    def acquire_counting(file: Any, *, blocking: bool = False) -> None:
+        attempts.append(file)
+        if len(attempts) == 2:
+            second_waits.set()
+        acquire(file, blocking=blocking)
+
+    write_assets = _store._write_assets
+    writes: list[Path] = []
+
+    def write_while_the_second_waits(dest: Path, item: Any) -> None:
+        write_assets(dest, item)
+        writes.append(dest)
+        assert second_waits.wait(timeout=10)
+
+    monkeypatch.setattr(file_lock, "acquire_file_lock", acquire_counting)
+    monkeypatch.setattr(_store, "_write_assets", write_while_the_second_waits)
+    config = build_test_vibe_config(experimental_enable_registry_skills=True)
+
+    results = await asyncio.gather(
+        refresh_registry_skills(config, [tmp_path / "repo-a"]),
+        refresh_registry_skills(config, [tmp_path / "repo-b"]),
+    )
+
+    assert [result.status for result in results] == [RegistrySyncStatus.OK] * 2
+    assert len(writes) == 1
+    version_dir = _store.skill_dir("abc", 2)
+    assert sorted(entry.name for entry in version_dir.parent.iterdir()) == [
+        ".2.lock",
+        ".2.used",
+        "2",
+    ]
+    assert await _store.is_materialized("abc", 2)
 
 
 def _catalog_multi(*entries: tuple[str, str, int]) -> dict[str, Any]:
@@ -470,119 +530,6 @@ def _catalog_multi(*entries: tuple[str, str, int]) -> dict[str, Any]:
         ],
         "nextPageToken": "",
     }
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_import_skill_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    respx.get(f"{_URL}/cid").mock(
-        return_value=httpx.Response(200, json=_skill_payload("cid", "sk", version=3))
-    )
-
-    entry = await _service.import_skill(_config(), "cid", version=3)
-
-    assert entry.version == 3
-    manifest = _manifest.load_sync(_manifest.global_manifest_path())
-    assert any(e.name == "sk" and e.version == 3 for e in manifest.skills)
-    assert await _store.is_materialized("cid", 3)
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_import_skill_latest(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    respx.get(f"{_URL}/cid").mock(
-        return_value=httpx.Response(200, json=_skill_payload("cid", "sk", version=4))
-    )
-
-    entry = await _service.import_skill(_config(), "cid")
-
-    assert entry.version == "latest"
-    manifest = _manifest.load_sync(_manifest.global_manifest_path())
-    assert any(e.name == "sk" and e.version == "latest" for e in manifest.skills)
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_import_skill_custom_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    respx.get(f"{_URL}/cid").mock(
-        return_value=httpx.Response(200, json=_skill_payload("cid", "sk", version=5))
-    )
-
-    entry = await _service.import_skill(_config(), "cid", alias="stable")
-
-    assert entry.version == "stable"
-    # A custom alias records where it resolved so discovery can find it offline.
-    assert _resolved.get("cid", "stable") == 5
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_set_skill_version_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    await _pin(ManifestEntry(name="sk", skill_id="cid", version="latest"))
-    respx.get(f"{_URL}/cid").mock(
-        return_value=httpx.Response(200, json=_skill_payload("cid", "sk", version=1))
-    )
-
-    entry = await _service.set_skill_version(_config(), "sk", 1)
-
-    assert entry is not None and entry.version == 1
-    manifest = _manifest.load_sync(_manifest.global_manifest_path())
-    assert any(e.name == "sk" and e.version == 1 for e in manifest.skills)
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_set_skill_latest_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    await _pin(ManifestEntry(name="sk", skill_id="cid", version=1))
-    respx.get(f"{_URL}/cid").mock(
-        return_value=httpx.Response(200, json=_skill_payload("cid", "sk", version=2))
-    )
-
-    entry = await _service.set_skill_latest(_config(), "sk")
-
-    assert entry is not None and entry.version == "latest"
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_set_skill_alias_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    await _pin(ManifestEntry(name="sk", skill_id="cid", version=1))
-    respx.get(f"{_URL}/cid").mock(
-        return_value=httpx.Response(200, json=_skill_payload("cid", "sk", version=7))
-    )
-
-    entry = await _service.set_skill_alias(_config(), "sk", "beta")
-
-    assert entry is not None and entry.version == "beta"
-    assert _resolved.get("cid", "beta") == 7
-
-
-@pytest.mark.asyncio
-async def test_set_skill_version_unknown_returns_none(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    assert await _service.set_skill_version(_config(), "missing", 1) is None
-
-
-@pytest.mark.asyncio
-async def test_remove_skill_one_scope_only() -> None:
-    await _pin(ManifestEntry(name="sk", skill_id="cid", version=1))
-
-    # Removing the project scope (no project pin) leaves the global pin intact.
-    assert _service.remove_skill("sk", _service.SkillScope.PROJECT) is False
-    global_path = _manifest.global_manifest_path()
-    assert any(e.name == "sk" for e in _manifest.load_sync(global_path).skills)
-
-    # Removing the global scope drops it.
-    assert _service.remove_skill("sk", _service.SkillScope.GLOBAL) is True
-    assert not any(e.name == "sk" for e in _manifest.load_sync(global_path).skills)
 
 
 @pytest.mark.asyncio
@@ -654,88 +601,6 @@ async def test_check_new_versions_marks_seen(monkeypatch: pytest.MonkeyPatch) ->
     assert second == []
 
 
-@pytest.mark.asyncio
-@respx.mock
-async def test_import_project_scope_uses_given_roots(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    # Project-scoped import must target the caller's (session) roots, not the
-    # global harness singleton.
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    root = tmp_path / "proj"
-    root.mkdir()
-    respx.get(f"{_URL}/cid").mock(
-        return_value=httpx.Response(200, json=_skill_payload("cid", "sk", version=1))
-    )
-
-    entry = await _service.import_skill(
-        _config(), "cid", scope=_service.SkillScope.PROJECT, roots=[root]
-    )
-
-    assert entry.name == "sk"
-    manifest_path = root / ".vibe" / "skills.toml"
-    assert manifest_path.is_file()
-    manifest = _manifest.load_sync(manifest_path)
-    assert any(e.name == "sk" for e in manifest.skills)
-    # The global manifest is untouched.
-    global_manifest = _manifest.load_sync(_manifest.global_manifest_path())
-    assert not any(e.name == "sk" for e in global_manifest.skills)
-
-
-def test_ledger_union_across_repos() -> None:
-    _ledger.record("repo-a", {("cid", 1)})
-    _ledger.record("repo-b", {("cid", 2), ("other", 5)})
-    assert _ledger.union() == {("cid", 1), ("cid", 2), ("other", 5)}
-    # Re-recording a repo replaces only its own entry.
-    _ledger.record("repo-a", {("cid", 3)})
-    assert _ledger.union() == {("cid", 3), ("cid", 2), ("other", 5)}
-
-
-def test_ledger_keeps_each_repo_in_its_own_file() -> None:
-    _ledger.record("repo-a", {("cid", 1)})
-    _ledger.record("repo-b", {("cid", 2)})
-
-    files = sorted(p.name for p in _ledger.ledger_root().glob("*.txt"))
-    assert files == ["repo-a.txt", "repo-b.txt"]
-
-
-def test_ledger_concurrent_writers_keep_both_entries() -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
-    payloads = {f"repo-{n}": {(f"cid{n}", n)} for n in range(12)}
-    with ThreadPoolExecutor(max_workers=12) as pool:
-        list(pool.map(lambda kv: _ledger.record(*kv), payloads.items()))
-
-    assert _ledger.union() == {entry for pins in payloads.values() for entry in pins}
-
-
-@pytest.mark.asyncio
-@respx.mock
-async def test_refresh_keeps_sibling_repo_version(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # A sibling repo (different project roots) pins cid@2 in the shared store;
-    # this repo pins cid@1. Syncing this repo must not evict the sibling's cid@2.
-    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
-    await _store.materialize(make_item(skill_id="cid", version=1), "sk")
-    await _store.materialize(make_item(skill_id="cid", version=2), "sk")
-    _ledger.record("sibling-repo", {("cid", 2)})
-    await _pin(ManifestEntry(name="sk", skill_id="cid", version=1))
-    respx.get(_URL).mock(
-        return_value=httpx.Response(
-            200, json=_catalog_page("cid", "sk", version=1, latest=1)
-        )
-    )
-    respx.get(f"{_URL}/cid").mock(
-        return_value=httpx.Response(200, json=_skill_payload("cid", "sk", version=1))
-    )
-
-    await refresh_registry_skills(_config(experimental_enable_registry_skills=True))
-
-    assert await _store.is_materialized("cid", 1)  # this repo's pin
-    assert await _store.is_materialized("cid", 2)  # sibling repo's pin preserved
-
-
 def test_local_skill_dir_refuses_symlinked_skills_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -756,49 +621,6 @@ def test_local_skill_dir_refuses_symlinked_skills_dir(
         )
         is None
     )
-
-
-def test_ledger_drops_an_entry_when_a_repo_stops_pinning() -> None:
-    _ledger.record("repo-a", {("cid", 1)})
-    _ledger.record("repo-b", {("other", 2)})
-    assert _ledger.union() == {("cid", 1), ("other", 2)}
-
-    _ledger.record("repo-a", set())
-
-    assert _ledger.union() == {("other", 2)}
-    assert not (_ledger.ledger_root() / "repo-a.txt").exists()
-
-
-def test_ledger_keeps_a_project_claim_on_a_globally_pinned_version() -> None:
-    _ledger.record(_ledger.GLOBAL_KEY, {("cid", 1)})
-    _ledger.record("repo-a", {("cid", 1)})
-    assert _ledger.union() == {("cid", 1)}
-
-    _ledger.record(_ledger.GLOBAL_KEY, set())
-
-    assert _ledger.union() == {("cid", 1)}
-
-
-@pytest.mark.asyncio
-async def test_prune_keeps_a_version_claimed_during_the_sweep() -> None:
-    await _store.materialize(make_item(skill_id="cid", version=1), "body")
-    await _store.materialize(make_item(skill_id="cid", version=2), "body")
-
-    await _store.prune({("cid", 2)}, recheck=lambda: {("cid", 1)})
-
-    assert await _store.is_materialized("cid", 1)
-    assert await _store.is_materialized("cid", 2)
-
-
-@pytest.mark.asyncio
-async def test_prune_still_drops_an_unclaimed_version() -> None:
-    await _store.materialize(make_item(skill_id="cid", version=1), "body")
-    await _store.materialize(make_item(skill_id="cid", version=2), "body")
-
-    await _store.prune({("cid", 2)}, recheck=set)
-
-    assert not await _store.is_materialized("cid", 1)
-    assert await _store.is_materialized("cid", 2)
 
 
 def test_manifest_path_for_scope_refuses_symlinked_vibe_dir(
@@ -862,29 +684,3 @@ def test_remove_skill_skips_a_symlinked_project_manifest(
 
     assert _service.remove_skill("sk", _service.SkillScope.PROJECT) is False
     assert not escaped.exists()
-
-
-@pytest.mark.asyncio
-async def test_publish_local_pins_records_this_repo_for_siblings(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    project = tmp_path / "proj"
-    (project / ".vibe").mkdir(parents=True)
-    monkeypatch.setattr(
-        _service,
-        "get_harness_files_manager",
-        lambda: SimpleNamespace(project_roots=[project]),
-    )
-    recorded: list[tuple[str, set[tuple[str, int]]]] = []
-    monkeypatch.setattr(
-        _service._ledger, "record", lambda key, pins: recorded.append((key, set(pins)))
-    )
-
-    await _service.publish_local_pins()
-
-    assert recorded, "a mid-session pin change must republish this repo's claims"
-    keys = {key for key, _ in recorded}
-    assert keys - {_service._ledger.GLOBAL_KEY}, (
-        "the repo's own claim must be recorded under its own key: keying the "
-        "write as global drops the project pins a sibling prunes against"
-    )

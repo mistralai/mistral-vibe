@@ -19,8 +19,10 @@ mod approval_keys;
 mod argument_hint;
 #[path = "units/artifacts.rs"]
 mod artifacts;
-#[path = "units/artifacts_checks.rs"]
-mod artifacts_checks;
+#[path = "units/artifacts_actions.rs"]
+mod artifacts_actions;
+#[path = "units/artifacts_guards.rs"]
+mod artifacts_guards;
 #[path = "units/artifacts_modal.rs"]
 mod artifacts_modal;
 #[path = "units/banner.rs"]
@@ -33,6 +35,8 @@ mod bottom_bar_layout;
 mod bottom_bar_overflow;
 #[path = "units/bottom_bar_selection.rs"]
 mod bottom_bar_selection;
+#[path = "units/bounded_message.rs"]
+mod bounded_message;
 #[path = "units/builtin_skill_commands.rs"]
 mod builtin_skill_commands;
 #[path = "units/callback_kinds.rs"]
@@ -77,6 +81,8 @@ mod composer_mentions;
 mod composer_model_click;
 #[path = "units/composer_pastes.rs"]
 mod composer_pastes;
+#[path = "units/composer_yank.rs"]
+mod composer_yank;
 #[path = "units/config_filter.rs"]
 mod config_filter;
 #[path = "units/config_selection.rs"]
@@ -115,6 +121,8 @@ mod feedback_support;
 mod fence_copy;
 #[path = "units/file_autocomplete_gate.rs"]
 mod file_autocomplete_gate;
+#[path = "units/file_index_events.rs"]
+mod file_index_events;
 #[path = "units/file_index_metrics.rs"]
 mod file_index_metrics;
 #[path = "units/file_index_rescan_ignore.rs"]
@@ -195,6 +203,8 @@ mod markdown_cache;
 mod markdown_links;
 #[path = "units/markdown_parse.rs"]
 mod markdown_parse;
+#[path = "units/markdown_table_layout.rs"]
+mod markdown_table_layout;
 #[path = "units/mcp_add_args.rs"]
 mod mcp_add_args;
 #[path = "units/mcp_add_help.rs"]
@@ -223,6 +233,8 @@ mod mode_indicator;
 mod model_enforcement;
 #[path = "units/model_picker.rs"]
 mod model_picker;
+#[path = "units/model_selection.rs"]
+mod model_selection;
 #[path = "units/mouse_pixels.rs"]
 mod mouse_pixels;
 #[path = "units/mouse_routing.rs"]
@@ -237,12 +249,16 @@ mod narrator_status;
 mod notice_state;
 #[path = "units/notices.rs"]
 mod notices;
+#[path = "units/notices_inline.rs"]
+mod notices_inline;
 #[path = "units/observability_memory.rs"]
 mod observability_memory;
 #[path = "units/observability_rotating.rs"]
 mod observability_rotating;
 #[path = "units/observability_scrub.rs"]
 mod observability_scrub;
+#[path = "units/observability_sentry_filter.rs"]
+mod observability_sentry_filter;
 #[path = "units/older_history.rs"]
 mod older_history;
 #[path = "units/onboarding_boot_pending.rs"]
@@ -389,6 +405,8 @@ mod selection_lost_release;
 mod selection_prompt_marker;
 #[path = "units/selection_spans.rs"]
 mod selection_spans;
+#[path = "units/server_deadline.rs"]
+mod server_deadline;
 #[path = "units/settle.rs"]
 mod settle;
 #[path = "units/setup_entrypoint.rs"]
@@ -405,14 +423,56 @@ mod shell_submission;
 mod skill;
 #[path = "units/skill_mention_completion.rs"]
 mod skill_mention_completion;
+#[path = "units/skills_browser.rs"]
+mod skills_browser;
+#[path = "units/skills_browser_body.rs"]
+mod skills_browser_body;
+#[path = "units/skills_browser_clicks.rs"]
+mod skills_browser_clicks;
+#[path = "units/skills_browser_columns.rs"]
+mod skills_browser_columns;
+#[path = "units/skills_browser_deadline.rs"]
+mod skills_browser_deadline;
+#[path = "units/skills_browser_follow.rs"]
+mod skills_browser_follow;
+#[path = "units/skills_browser_page.rs"]
+mod skills_browser_page;
+#[path = "units/skills_browser_page_keys.rs"]
+mod skills_browser_page_keys;
+#[path = "units/skills_browser_pickers.rs"]
+mod skills_browser_pickers;
+#[path = "units/skills_browser_preview.rs"]
+mod skills_browser_preview;
+#[path = "units/skills_browser_remove.rs"]
+mod skills_browser_remove;
+#[path = "units/skills_browser_rows.rs"]
+mod skills_browser_rows;
+#[path = "units/skills_browser_same_name.rs"]
+mod skills_browser_same_name;
+#[path = "units/skills_browser_selection.rs"]
+mod skills_browser_selection;
+#[path = "units/skills_browser_support.rs"]
+mod skills_browser_support;
+#[path = "units/skills_browser_tabs.rs"]
+mod skills_browser_tabs;
+#[path = "units/skills_wire.rs"]
+mod skills_wire;
 #[path = "units/slash_completion.rs"]
 mod slash_completion;
+#[path = "units/startup_failure.rs"]
+mod startup_failure;
 #[path = "units/startup_resume_intent.rs"]
 mod startup_resume_intent;
+#[path = "units/sticky_prompt.rs"]
+mod sticky_prompt;
+#[path = "units/sticky_prompt_hover.rs"]
+mod sticky_prompt_hover;
 #[path = "units/stress_command.rs"]
 mod stress_command;
 #[path = "units/system_proxy.rs"]
 mod system_proxy;
+#[path = "units/tab_bar.rs"]
+mod tab_bar;
 
 #[path = "units/subagent_click.rs"]
 mod subagent_click;
@@ -428,14 +488,6 @@ mod subagent_view_keys;
 mod support;
 #[path = "units/telemetry_events.rs"]
 mod telemetry_events;
-#[path = "units/teleport_input.rs"]
-mod teleport_input;
-#[path = "units/teleport_lifecycle.rs"]
-mod teleport_lifecycle;
-#[path = "units/teleport_picker.rs"]
-mod teleport_picker;
-#[path = "units/teleport_support.rs"]
-mod teleport_support;
 #[path = "units/terminal_detect.rs"]
 mod terminal_detect;
 #[path = "units/terminal_input_filter.rs"]
@@ -485,6 +537,8 @@ mod program_status_regressions;
 mod terminal_late_completion;
 #[path = "units/terminal_lifecycle.rs"]
 mod terminal_lifecycle;
+#[path = "units/text_case.rs"]
+mod text_case;
 #[path = "units/update_uv_oracle.rs"]
 mod update_uv_oracle;
 #[path = "units/update_version.rs"]
@@ -493,6 +547,12 @@ mod update_version;
 mod usage_gauge_reads;
 #[path = "units/version_flag.rs"]
 mod version_flag;
+#[path = "units/vim.rs"]
+mod vim;
+#[path = "units/vim_edit.rs"]
+mod vim_edit;
+#[path = "units/vim_render.rs"]
+mod vim_render;
 #[path = "units/voice_errors.rs"]
 mod voice_errors;
 #[path = "units/voice_settings.rs"]
@@ -501,6 +561,8 @@ mod voice_settings;
 mod voice_text;
 #[path = "units/voice_tracking.rs"]
 mod voice_tracking;
+#[path = "units/waiting_line.rs"]
+mod waiting_line;
 #[path = "units/whats_new.rs"]
 mod whats_new;
 #[path = "units/whoami.rs"]

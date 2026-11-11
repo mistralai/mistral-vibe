@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
 from e2e.app_server.mcp import connector, handshake as mcp_handshake, server, tool
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _TOOLS = [
     tool(f"tool_{index:02d}", "A tool exposed by the connector") for index in range(30)
@@ -15,8 +15,6 @@ _SOURCES = [
 ]
 
 handshake = mcp_handshake(_SOURCES)
-capture_startup = False
-capture_steps = {1, 4}
 
 _PRESS = "\x1b[<0;117;20M"
 _DRAG = "\x1b[<32;117;30M"
@@ -33,4 +31,5 @@ timeline: Timeline = [
     _PRESS,
     _DRAG,
     _RELEASE,
+    take_snapshot(),
 ]

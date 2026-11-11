@@ -313,12 +313,23 @@ def _is_model_switch(
     binds to the same Session sources (``_bind_completion_sources``). So are the
     tool groups: a resident Core takes them from the Session's own MCP and
     connector snapshots, and ``apply_config`` never pushes them to it, on
-    either path. Only a resident Session gets here (``ephemeral`` is checked
-    first).
+    either path. The classifier model and pricing stay fixed: they configure a
+    utility completion, not the active model being switched. Only a resident
+    Session gets here (``ephemeral`` is checked first).
+
+    ``config/write`` carries no price, so the Runtime keeps the previous
+    model's. A switch that changes the price under a price budget therefore
+    goes to the Runtime directly, with the route that carries the new price.
     """
     if core is None or local is None:
         return False
     if config.local.active_model == local.active_model:
+        return False
+    if (
+        local.completion_budget is not None
+        and local.completion_budget.max_price is not None
+        and config.local.active_model.pricing != local.active_model.pricing
+    ):
         return False
     follows = local.compaction_model == local.active_model
     moved = replace(

@@ -36,7 +36,7 @@ screen_contains = ("PRs (2)",)
 screen_excludes = ("Pull Requests",)
 
 # The count link follows the replay-pinned cwd.
-_LEFT = "/test/workdir ⧉  "
+_LEFT = "/test/workdir  "
 _RIGHT = "ctx        0/600k"
 _LABEL = "PRs (2)"
 _LABEL_X = len(_LEFT)

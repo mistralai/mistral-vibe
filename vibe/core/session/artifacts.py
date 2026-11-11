@@ -22,8 +22,10 @@ __all__ = [
     "GitLabMergeRequestArtifact",
     "GitLabMergeRequestDetails",
     "PrStatus",
+    "PrStatusReason",
     "PullRequestLifecycleState",
     "SessionArtifact",
+    "WorktreeArtifact",
 ]
 
 ArtifactKind = Literal["pull_request"]
@@ -36,6 +38,15 @@ PullRequestLifecycleState = Literal["draft", "open", "merged", "closed"]
 # (Phase 4) and rendered as-is by every surface. None covers draft,
 # merged, closed PRs and artifacts not synced yet.
 PrStatus = Literal["action_needed", "waiting", "mergeable"]
+# Why the PR is action_needed or waiting; None for mergeable and unlabeled PRs.
+PrStatusReason = Literal[
+    "changes_requested",
+    "checks_failing",
+    "conflicts",
+    "checks_pending",
+    "review_required",
+    "merge_blocked",
+]
 
 
 class CheckStatus(BaseModel):
@@ -82,6 +93,7 @@ class _PullRequestSharedEnrichment(BaseModel):
     provider_merged_at: str | None
     merge_commit_sha: str | None
     pr_status: PrStatus | None = None
+    pr_status_reason: PrStatusReason | None = None
     checks: ChecksSummary | None = None
     # Raw provider-neutral statuses (the wire's derived-status source):
     # checks_status none/pending/passing/failing (the checks that gate the
@@ -128,7 +140,7 @@ class GitLabMergeRequestDetails(_PullRequestSharedEnrichment):
 class _SessionArtifactBase(BaseModel):
     """Common fields shared by all artifact variants. Mirrors sessionArtifactCommonFields."""
 
-    id: str  # UUID v7 (time-ordered), generated via uuid-utils
+    id: str  # UUID v5 of session id + external key (older sessions keep UUID v7)
     session_id: str
     # Stable dedupe key: "github.com/org/repo/pull/123" or "gitlab.com/42/merge_requests/7"
     external_key: str
@@ -162,6 +174,23 @@ SessionArtifact = Annotated[
 ]
 
 
+class WorktreeArtifact(BaseModel):
+    """A git worktree the session created, kept apart from the PR/MR artifacts.
+
+    Stored in ``meta.json`` under ``worktrees`` rather than ``artifacts``: an
+    older build validates ``artifacts`` against the PR/MR union and would drop
+    these. The worktree's own claim record stays the source of truth for
+    holding and reaping it.
+    """
+
+    id: str
+    session_id: str
+    path: str
+    branch: str
+    repo_root: str
+    discovered_at: str
+
+
 def sanitize_artifacts_in_raw_metadata(
     raw: dict[str, object], *, session_dir: object = None
 ) -> dict[str, object]:
@@ -174,22 +203,23 @@ def sanitize_artifacts_in_raw_metadata(
     """
     from vibe.observability.logging import logger
 
-    artifacts = raw.get("artifacts")
-    if not isinstance(artifacts, list):
-        return raw
-    kept: list[object] = []
-    for entry in artifacts:
-        try:
-            TypeAdapter(SessionArtifact).validate_python(entry)
-        except ValidationError as exc:
-            logger.warning(
-                "Dropping invalid persisted session artifact",
-                extra={
-                    "session_dir": str(session_dir) if session_dir else None,
-                    "error": str(exc)[:500],
-                },
-            )
+    for key, model in (("artifacts", SessionArtifact), ("worktrees", WorktreeArtifact)):
+        entries = raw.get(key)
+        if not isinstance(entries, list):
             continue
-        kept.append(entry)
-    raw["artifacts"] = kept
+        kept: list[object] = []
+        for entry in entries:
+            try:
+                TypeAdapter(model).validate_python(entry)
+            except ValidationError as exc:
+                logger.warning(
+                    "Dropping invalid persisted session artifact",
+                    extra={
+                        "session_dir": str(session_dir) if session_dir else None,
+                        "error": str(exc)[:500],
+                    },
+                )
+                continue
+            kept.append(entry)
+        raw[key] = kept
     return raw

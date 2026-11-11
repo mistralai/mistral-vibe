@@ -31,6 +31,8 @@ _MANIFEST = _PKG_ROOT / "cli-rust" / "Cargo.toml"
 _RELEASE_BIN = _PKG_ROOT / "cli-rust" / "target" / "release" / _BIN_NAME
 # The Python project root, where `uv run vibe-app-server` resolves.
 _PROJECT_ROOT = _PKG_ROOT.parent
+# NTSTATUS for a process Windows could not load because a DLL it imports is missing.
+_STATUS_DLL_NOT_FOUND = 0xC0000135
 _APP_SERVER_ENV_KEYS = (
     "VIBE_APP_SERVER_CMD",
     "VIBE_APP_SERVER_BIN",
@@ -61,7 +63,14 @@ def exec_rust_cli(
         # execvpe does not overlay the process on Windows; run and forward the code.
         import subprocess
 
-        sys.exit(subprocess.run(argv, env=env).returncode)
+        returncode = subprocess.run(argv, env=env).returncode
+        # Windows reports the NTSTATUS unsigned here and signed in shells.
+        if returncode & 0xFFFFFFFF == _STATUS_DLL_NOT_FOUND:
+            print(
+                f"{binary} could not start: Windows could not find a DLL it needs.",
+                file=sys.stderr,
+            )
+        sys.exit(returncode)
     os.execvpe(str(binary), argv, env)
 
 

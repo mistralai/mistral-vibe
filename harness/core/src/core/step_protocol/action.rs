@@ -10,6 +10,7 @@ use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, ProvidedToolCall, RuntimeBuiltinToolCall,
 };
 use crate::core::wire::message::Message;
+use crate::core::wire::user_message::OutputType;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -114,6 +115,10 @@ pub(crate) enum Action {
         iteration: u32,
         max_iterations: Option<u32>,
         model_input: ModelInputUpdate,
+        /// The Turn's output type, on its agent completions only. Omitted when
+        /// the Turn has none, so actions recorded before the field match.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_type: Option<OutputType>,
     },
     #[serde(rename = "runtime_builtin_tool_call")]
     RuntimeBuiltinTool {

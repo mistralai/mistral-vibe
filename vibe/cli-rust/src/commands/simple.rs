@@ -17,7 +17,7 @@ use crate::utils::text::format_count_markdown;
 
 pub(super) const DATA_RETENTION_MESSAGE: &str = "## Your Data Helps Improve Mistral AI\n\nAt Mistral AI, we're committed to delivering the best possible experience. When you use Mistral models on our API, your interactions may be collected to improve our models, ensuring they stay cutting-edge, accurate, and helpful.\n\nManage your data settings [here](https://chat.mistral.ai/work?profile_dialog=privacy)";
 
-pub fn help_text() -> String {
+pub fn help_text(app: &App) -> String {
     let mut lines = vec![
         "## Help".to_owned(),
         String::new(),
@@ -42,7 +42,7 @@ pub fn help_text() -> String {
         "### Commands".to_owned(),
         String::new(),
     ];
-    let mut commands = super::builtin();
+    let mut commands = super::builtin(|feature| feature.is_on(app));
     commands.sort_by(|a, b| a.0.cmp(&b.0));
     for (aliases, description) in commands {
         lines.push(format!("- {aliases}: {description}"));

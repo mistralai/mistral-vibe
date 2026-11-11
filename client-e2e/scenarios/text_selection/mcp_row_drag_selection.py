@@ -12,7 +12,6 @@ _SOURCES = [
 
 handshake = mcp_handshake(_SOURCES)
 env = {"SSH_TTY": "/dev/pts/0"}
-capture_steps = {1}
 expected_clipboard = "filesystem"
 screen_contains = ("Local MCP Servers", "Available Connectors")
 screen_excludes = ("The alpha tool",)

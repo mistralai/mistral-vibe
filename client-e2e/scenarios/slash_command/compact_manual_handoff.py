@@ -12,7 +12,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import AppServerEvent, Timeline
+from e2e.app_server.scenario import AppServerEvent, Timeline, take_snapshot
 
 # The live session is `session/start`'s (…0001); `replace_idle` hands the
 # manual compaction off to a fresh session (…0002) when the id would change.
@@ -145,4 +145,5 @@ timeline: Timeline = [
     _entry_added(_message("again-user", _HANDOFF, "user", "again")),
     _entry_added(_message("again-assistant", _HANDOFF, "assistant", "Round two.")),
     _turn2(completed=True),
+    take_snapshot(),
 ]

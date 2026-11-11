@@ -239,7 +239,7 @@ def test_reports_no_repo_url_without_a_remote(tmp_path: Path) -> None:
 
 
 # Where the repository is hosted is not this probe's business: it reports what
-# the checkout points at, and only teleport needs that to be GitHub.
+# the checkout points at, and only Vibe Code needs that to be GitHub.
 def test_reports_a_remote_that_is_not_github(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     repo.create_remote("origin", "git@gitlab.com:owner/repo.git")

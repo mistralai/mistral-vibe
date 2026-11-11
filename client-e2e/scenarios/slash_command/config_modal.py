@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _WHEEL_DOWN = "\x1b[<65;60;20M"
 
-timeline: Timeline = ["/config\r", _WHEEL_DOWN * 3]
+timeline: Timeline = ["/config\r", _WHEEL_DOWN * 3, take_snapshot()]

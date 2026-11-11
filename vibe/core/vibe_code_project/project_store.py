@@ -82,7 +82,15 @@ class VibeProjectsStore:
         self._write_entries(data, next_entries)
 
     def delete_project_link(self, *, repo_root: Path) -> None:
-        self._delete_project_link(repo_root=repo_root, remote_only=False)
+        data = self._read_raw_document()
+        entries = _raw_project_entries(data)
+        normalized_root = _normalize_path(repo_root)
+        next_entries = [
+            entry
+            for entry in entries
+            if not _entry_matches_key(entry, repo_root=normalized_root)
+        ]
+        self._write_entries(data, next_entries)
 
     def list_project_links(self) -> list[ProjectLink]:
         links: list[ProjectLink] = []
@@ -109,29 +117,6 @@ class VibeProjectsStore:
             if isinstance(entry, dict) and (link := _parse_project_link(dict(entry)))
         ]
         return links, len(links) == len(entries)
-
-    def get_remote_project(self, *, repo_root: Path) -> RemoteProjectLink | None:
-        link = self.get_project_link(repo_root=repo_root)
-        return link if isinstance(link, RemoteProjectLink) else None
-
-    def upsert_remote_project(self, link: RemoteProjectLink) -> None:
-        self.upsert_project_link(link)
-
-    def delete_remote_project(self, *, repo_root: Path) -> None:
-        self._delete_project_link(repo_root=repo_root, remote_only=True)
-
-    def _delete_project_link(self, *, repo_root: Path, remote_only: bool) -> None:
-        data = self._read_raw_document()
-        entries = _raw_project_entries(data)
-        normalized_root = _normalize_path(repo_root)
-        next_entries = [
-            entry
-            for entry in entries
-            if not _entry_matches_key(
-                entry, repo_root=normalized_root, remote_only=remote_only
-            )
-        ]
-        self._write_entries(data, next_entries)
 
     def list_remote_projects(self) -> list[RemoteProjectLink]:
         return [
@@ -200,11 +185,9 @@ def _parse_project_link(entry: dict[str, object]) -> ProjectLink | None:
         return None
 
 
-def _entry_matches_key(
-    entry: dict[str, object], *, repo_root: str, remote_only: bool = False
-) -> bool:
+def _entry_matches_key(entry: dict[str, object], *, repo_root: str) -> bool:
     link = _parse_project_link(entry)
-    if link is None or (remote_only and not isinstance(link, RemoteProjectLink)):
+    if link is None:
         return False
     return _normalize_path(project_link_path(link)) == repo_root
 

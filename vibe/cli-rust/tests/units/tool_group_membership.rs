@@ -52,7 +52,7 @@ fn a_second_call_groups_the_first() {
     transcript.add(&json!({"entry": effect("e2", "running")}));
     let group = transcript.entry(0).unwrap().group.expect("groups");
     assert!(group.first);
-    assert_eq!(group.kinds, vec![("shell", 2)]);
+    assert_eq!(group.running, vec![("shell", 2)]);
 }
 
 /// Only painted rows count: a hidden thinking node leaves its call alone.
@@ -101,7 +101,7 @@ fn unknown_and_missing_kinds_count_as_one_tool_label() {
     ]);
     let group = transcript.group_of("e1").expect("groups");
     assert_eq!(group.kinds, vec![("tool", 3)]);
-    assert_eq!(group.label(false), "Called 3 tools");
+    assert_eq!(group.label(), "Called 3 tools");
 }
 
 #[test]
@@ -115,28 +115,116 @@ fn interleaved_unknown_kinds_share_the_first_tool_label() {
     ]);
     let group = transcript.group_of("e1").expect("groups");
     assert_eq!(
-        group.label(false),
+        group.label(),
         "Called 2 tools, read 1 file, ran 1 command, updated todos 1 time"
     );
 }
 
 #[test]
 fn kinds_sharing_a_verb_merge_into_one_segment() {
-    let transcript = live(&[
-        effect_of_kind("e1", "completed", Some("shell")),
-        effect_of_kind("e2", "completed", Some("file_read")),
-        effect_of_kind("e3", "completed", Some("file_search")),
-        effect_of_kind("e4", "completed", Some("shell")),
-        effect_of_kind("e5", "completed", Some("web_search")),
-    ]);
-    let group = transcript.group_of("e1").expect("groups");
+    let calls = |state: &str| {
+        live(&[
+            effect_of_kind("e1", state, Some("shell")),
+            effect_of_kind("e2", state, Some("file_read")),
+            effect_of_kind("e3", state, Some("file_search")),
+            effect_of_kind("e4", state, Some("shell")),
+            effect_of_kind("e5", state, Some("web_search")),
+        ])
+    };
+    let settled = calls("completed");
     assert_eq!(
-        group.label(false),
+        settled.group_of("e1").expect("groups").label(),
         "Ran 2 commands, 1 search and 1 web search, read 1 file"
     );
+    let running = calls("running");
     assert_eq!(
-        group.label(true),
+        running.group_of("e1").expect("groups").label(),
         "Running 2 commands, 1 search and 1 web search, reading 1 file"
+    );
+}
+
+/// A live group counts its running calls apart from the ones already settled.
+#[test]
+fn a_live_group_counts_running_and_settled_calls_apart() {
+    let mut transcript = live(&[effect_of_kind("e1", "running", Some("tool"))]);
+    transcript.add(&json!({"entry": effect_of_kind("e2", "running", Some("tool"))}));
+    let label = |transcript: &Transcript| transcript.group_of("e1").expect("groups").label();
+    assert_eq!(label(&transcript), "Calling 2 tools");
+
+    transcript.add(&json!({"entry": effect_of_kind("e1", "completed", Some("tool"))}));
+    assert_eq!(label(&transcript), "Calling 1 tool, called 1 tool");
+
+    transcript.add(&json!({"entry": effect_of_kind("e2", "completed", Some("tool"))}));
+    assert_eq!(label(&transcript), "Called 2 tools");
+}
+
+/// A finalized group reads as settled even when a call never reported its verdict.
+#[test]
+fn a_finalized_group_reads_as_settled() {
+    let mut transcript = live(&[
+        effect_of_kind("e1", "running", Some("tool")),
+        effect_of_kind("e2", "completed", Some("tool")),
+    ]);
+    transcript.finalize_tool_group();
+    assert_eq!(
+        transcript.group_of("e1").expect("groups").label(),
+        "Called 2 tools"
+    );
+}
+
+fn tool_call(id: &str, state: &str, tool_name: &str) -> Value {
+    json!({"id": id, "type": "effect",
+           "detail": {"kind": "tool", "toolName": tool_name},
+           "state": {"status": state}})
+}
+
+/// A running wait is hidden: the waiting status line says it. A sleep runs
+/// inside its program, so it stays a visible call.
+#[test]
+fn a_running_wait_is_hidden_until_it_settles_and_a_sleep_stays_visible() {
+    let mut transcript = live(&[
+        effect_of_kind("e1", "completed", Some("subagent")),
+        effect_of_kind("e2", "completed", Some("subagent")),
+        tool_call("e3", "running", "self.wait"),
+    ]);
+    let ids = |transcript: &Transcript| -> Vec<String> {
+        transcript.lines().map(|line| line.id.to_owned()).collect()
+    };
+    assert_eq!(ids(&transcript), ["e1", "e2"]);
+    assert_eq!(
+        transcript.group_of("e1").expect("groups").label(),
+        "Ran 2 subagents"
+    );
+
+    transcript.add(&json!({"entry": tool_call("e3", "completed", "self.wait")}));
+    assert_eq!(ids(&transcript), ["e1", "e2", "e3"]);
+    assert_eq!(
+        transcript.group_of("e1").expect("groups").label(),
+        "Ran 2 subagents, waited for background work"
+    );
+
+    let transcript = live(&[
+        effect_of_kind("e1", "running", Some("tool")),
+        tool_call("e2", "running", "self.sleep"),
+    ]);
+    assert_eq!(ids(&transcript), ["e1", "e2"]);
+    assert_eq!(
+        transcript.group_of("e1").expect("groups").label(),
+        "Calling 2 tools"
+    );
+}
+
+/// A settled wait reads as what the agent did; a sleep counts as an ordinary call.
+#[test]
+fn a_settled_wait_reads_as_waiting_and_a_sleep_as_a_call() {
+    let transcript = live(&[
+        tool_call("e1", "completed", "self.wait"),
+        tool_call("e2", "completed", "self.sleep"),
+        effect_of_kind("e3", "completed", Some("tool")),
+    ]);
+    assert_eq!(
+        transcript.group_of("e1").expect("groups").label(),
+        "Waited for background work, called 2 tools"
     );
 }
 
@@ -171,8 +259,8 @@ fn file_kinds_count_distinct_paths() {
         ]
     );
     assert_eq!(
-        group.label(true),
-        "Editing 1 file, reading 2 files, writing 1 file, running 2 commands"
+        group.label(),
+        "Edited 1 file, read 2 files, wrote 1 file, ran 2 commands"
     );
 }
 
@@ -185,7 +273,7 @@ fn file_calls_without_a_path_count_each_call() {
         file_call("e4", "file_read", Some("a.py")),
     ]);
     let group = transcript.group_of("e1").expect("groups");
-    assert_eq!(group.label(false), "Read 3 files");
+    assert_eq!(group.label(), "Read 3 files");
 }
 
 #[test]

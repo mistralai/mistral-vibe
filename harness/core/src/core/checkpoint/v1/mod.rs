@@ -81,8 +81,8 @@ impl CheckpointV1 {
         let mut state =
             crate::core::initial_state(config).map_err(|error| error.detail().to_string())?;
         state.context = self.context.restore(
-            &state.config,
-            state.resolved_tools.tool_group_inventory_prompt_section(),
+            state.config(),
+            state.resolved_tools().tool_group_inventory_prompt_section(),
         )?;
         state.compaction_count = self.compaction_count;
         state.last_reported_context_tokens = self.last_reported_context_tokens;
@@ -97,13 +97,13 @@ impl CheckpointV1 {
             &state.context,
             CompactionRestore {
                 generated_system,
-                tools: state.resolved_tools.top_level_tools(),
+                tools: state.resolved_tools().top_level_tools(),
                 budget: CompactionBudgets::from_settings(
-                    &state.config.settings.context,
+                    &state.config().settings.context,
                     state.estimate_correction,
                 )
                 .request,
-                prompts: &state.config.settings.prompts.compaction,
+                prompts: &state.config().settings.prompts.compaction,
             },
         )?;
         state.last_finished_turn_id = self.last_finished_turn_id;
@@ -114,7 +114,7 @@ impl CheckpointV1 {
         )?;
         state
             .notifications
-            .retain_recent(state.config.settings.context.notifications.recent_ids);
+            .retain_recent(state.config().settings.context.notifications.recent_ids);
         validate_restored_state(&state)?;
         Ok(state)
     }

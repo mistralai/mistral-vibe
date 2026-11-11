@@ -5,11 +5,11 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use vibe_rs::app::App;
+use vibe_rs::app::{App, Severity};
 use vibe_rs::resume_picker::{self, Event, Session};
 use vibe_rs::server::{request_error, Client, Incoming, RequestFailure};
 
-use crate::feedback_support::errors;
+use crate::feedback_support::{errors, notice};
 use crate::support::{message, messages, settle};
 
 const CURRENT: &str = "11111111-current";
@@ -88,9 +88,13 @@ async fn a_failed_delete_keeps_the_row_and_reports_the_error() {
     assert!(picker.app.resume_picker.open);
     assert!(picker.app.resume_picker.deleting.is_none());
     assert_eq!(
-        errors(&picker.app),
-        ["Failed to delete session: Session store unavailable"]
+        notice(&picker.app),
+        Some((
+            Severity::Error,
+            "Failed to delete session: Session store unavailable"
+        ))
     );
+    assert!(errors(&picker.app).is_empty());
     let ids: Vec<&str> = picker
         .app
         .resume_picker
@@ -140,7 +144,7 @@ async fn deleting_the_last_listed_session_reports_it_and_closes_the_picker() {
     assert_eq!(
         tail,
         [
-            row("command_status", "Deleted session `22222222`."),
+            row("command_status", "Deleted session `22-saved`."),
             row(
                 "command_status",
                 "No saved sessions left for this directory."

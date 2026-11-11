@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::Value;
 
-use crate::app::{App, Status};
+use crate::app::{App, Severity};
 use crate::option_list::Click;
 use crate::server::request_error::SESSION_BUSY_MESSAGE;
 use crate::server::{Client, PublicSessionState};
@@ -52,7 +52,8 @@ pub enum Event {
         id: String,
         error: Option<String>,
     },
-    Error(String),
+    /// A failed resume or list; a session open elsewhere is a warning.
+    Error(Severity, String),
 }
 
 pub fn open(app: &mut App, client: &Arc<Client>) {
@@ -219,15 +220,14 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
         {
             notice::preview_failed(app);
         }
-        Event::Resumed { id, state } => {
+        Event::Resumed { state, .. } => {
             if !notice::finish_resume(app) {
                 return;
             }
             app.resume_picker.open = false;
             app.resume_picker.transcript = None;
-            // The attempt notices belong to the session the picker was opened
-            // on; the resumed session's transcript must not inherit them.
-            notice::clear_attempts(app);
+            // The startup warnings belong to the session the picker was opened on.
+            crate::notices::close_startup(app);
             app.set_session_id(state.session.id.clone());
             app.terminal_notifier
                 .set_default_title(state.session.title.as_deref().unwrap_or(""));
@@ -257,15 +257,18 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             crate::startup::banners::dismiss_whats_new(app);
             load_history(app, &state);
             crate::worktree::adopt_state(app, &state);
-            app.set_status(Status::Ready);
-            notice::result(app, &format!("Resumed session `{}`", short_id(&id)));
+            crate::background_work::adopt_state(app, &state);
+            crate::event_handler::adopt_active_turn(app, &state);
+            let resumed = format!("Resumed session `{}`", short_id(&state.session.id));
+            notice::result(app, &resumed);
             crate::message_queue::flush_pending(app, client);
             crate::event_handler::process_initial_prompt(app, client);
         }
         Event::Deleted { id, error } => {
             app.resume_picker.deleting = None;
             if let Some(error) = error {
-                crate::notices::failed(app, &format!("Failed to delete session: {error}"));
+                let message = format!("Failed to delete session: {error}");
+                crate::notices::inline(app, Severity::Error, &message);
                 return;
             }
             app.resume_picker
@@ -292,14 +295,14 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
         Event::Leases(snapshot) => apply_lease_snapshot(app, snapshot),
         // A late answer to a cancelled resume: the picker is already closed and
         // nobody is waiting on it.
-        Event::Error(_) if !app.resume_picker.open => {
+        Event::Error(..) if !app.resume_picker.open => {
             notice::finish_resume(app);
         }
         // Restore the transcript the preview replaced; leaving `open` false on
         // its own would strand the preview on screen.
-        Event::Error(message) => {
+        Event::Error(severity, message) => {
             notice::close(app);
-            notice::error(app, notice::ATTEMPT_ERROR_ID, &message);
+            crate::notices::inline(app, severity, &message);
             drop_initial_prompt(app);
         }
         Event::Preview { .. } | Event::PreviewFailed { .. } => {}
@@ -310,7 +313,6 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
 /// leaves the picker without resuming.
 fn drop_initial_prompt(app: &mut App) {
     app.session.initial_prompt = None;
-    app.session.teleport_on_start = false;
 }
 
 fn navigate(app: &mut App, client: &Arc<Client>, down: bool) {
@@ -365,7 +367,7 @@ fn resume(app: &mut App, client: &Arc<Client>) {
     // The lease already names another process; resume would only bounce the
     // conflict back. Say the same refusal the delete path does, locally.
     if app.resume_picker.locked.contains(&session.id) {
-        crate::notices::refused(app, SESSION_BUSY_MESSAGE);
+        crate::notices::inline(app, Severity::Warning, SESSION_BUSY_MESSAGE);
         return;
     }
     let id = session.id.clone();
@@ -392,7 +394,7 @@ fn delete(app: &mut App, client: &Arc<Client>) {
     // The lease already names another process, so the delete would only
     // bounce the conflict back; say the same refusal locally.
     if app.resume_picker.locked.contains(&session.id) {
-        crate::notices::refused(app, SESSION_BUSY_MESSAGE);
+        crate::notices::inline(app, Severity::Warning, SESSION_BUSY_MESSAGE);
         return;
     }
     let id = session.id.clone();
@@ -405,7 +407,7 @@ fn delete(app: &mut App, client: &Arc<Client>) {
     request::delete(app, client, id);
 }
 
-/// The first 8 characters of a session id.
+/// The last 8 characters of a session id: random in a UUIDv7, unlike its time-ordered start.
 pub(crate) fn short_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
+    id.get(id.len().saturating_sub(8)..).unwrap_or(id)
 }

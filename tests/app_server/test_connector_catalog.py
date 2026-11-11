@@ -318,6 +318,7 @@ def test_resolve_provider_gates_mistral_mcp_connector(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("connectors_enabled")
 async def test_growthbook_variant_adds_mistral_mcp_to_resolved_builtins(
     monkeypatch,
 ) -> None:
@@ -1057,6 +1058,17 @@ async def test_connector_cache_round_trip_preserves_diagnostics_and_revision(
     )
 
 
+def test_non_utf8_connector_cache_is_ignored_and_overwritten(tmp_path: Path) -> None:
+    cache_path = tmp_path / "connectors.json"
+    cache_path.write_bytes(b'{"k": "\xff"}')
+    cache = ConnectorCatalogCache(cache_path)
+
+    assert cache.read("first", now=1_000) is None
+
+    cache.write(_cache_catalog("first", "first"), stored_at=1_000)
+    assert cache.read("first", now=1_000) is not None
+
+
 def test_concurrent_connector_cache_writers_preserve_account_entries(
     tmp_path: Path,
 ) -> None:
@@ -1221,6 +1233,96 @@ async def test_successful_bootstrap_writes_redacted_bounded_v2(
         "status",
         "tools",
     }
+
+
+def _bulky_bootstrap(
+    count: int, schema_bytes: int, *, tools: int = 1
+) -> dict[str, object]:
+    connectors = []
+    for index in range(count):
+        connector = _connector(connector_id=f"c-{index:03d}", name=f"conn{index:03d}")
+        connector["tools"] = [
+            {
+                "name": f"tool_{tool}",
+                "description": "Search",
+                "inputSchema": {"type": "object", "pad": "x" * schema_bytes},
+            }
+            for tool in range(tools)
+        ]
+        connectors.append(connector)
+    return {"connectors": connectors}
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_over_two_mib_loads_and_is_cached(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    cache_path = tmp_path / "connectors.json"
+    payload = _bulky_bootstrap(60, 50 * 1024)
+
+    async def fetch(
+        _base_url: str, _credentials: object, _builtins: tuple[str, ...] = ()
+    ) -> object:
+        return payload
+
+    service = _service(
+        cache_path=cache_path, fetch_bootstrap=fetch, clock=lambda: 1_000
+    )
+
+    catalog = await service.resolve_catalog(_orchestrator())
+
+    async def offline(
+        _base_url: str, _credentials: object, _builtins: tuple[str, ...] = ()
+    ) -> object:
+        raise TimeoutError("offline")
+
+    restarted = _service(
+        cache_path=cache_path, fetch_bootstrap=offline, clock=lambda: 1_000
+    )
+    cached = await restarted.resolve_catalog(_orchestrator())
+
+    assert catalog is not None
+    assert len(catalog.connectors) == 60
+    assert cached is not None
+    assert len(cached.connectors) == 60
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_over_the_cache_cap_loads_and_drops_the_older_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    cache_path = tmp_path / "connectors.json"
+    # 260 schemas just under the 64 KiB tool cap add up to more than 16 MiB.
+    payloads = [
+        {"connectors": [_connector()]},
+        _bulky_bootstrap(130, 64 * 1024 - 100, tools=2),
+    ]
+
+    async def fetch(
+        _base_url: str, _credentials: object, _builtins: tuple[str, ...] = ()
+    ) -> object:
+        return payloads.pop(0)
+
+    service = _service(
+        cache_path=cache_path, fetch_bootstrap=fetch, clock=lambda: 1_000
+    )
+    await service.resolve_catalog(_orchestrator())
+
+    with caplog.at_level(logging.WARNING, logger="vibe"):
+        catalog = await service.resolve_catalog(_orchestrator(), force_refresh=True)
+
+    assert catalog is not None
+    assert len(catalog.connectors) == 130
+    assert json.loads(cache_path.read_text(encoding="utf-8")) == {}
+    rejected = [
+        record
+        for record in caplog.records
+        if getattr(record, "connector_operation", None) == "cache_write"
+        and getattr(record, "connector_outcome", None) == "rejected"
+    ]
+    assert len(rejected) == 1
 
 
 @pytest.mark.asyncio
@@ -2634,12 +2736,12 @@ async def test_a_sessionless_refresh_without_an_api_key_still_fetches_followed_a
     assert keys == ["session-key"]
 
 
-@pytest.mark.parametrize("writable", [True, False])
+@pytest.mark.parametrize("outcome", ["success", "failure", "rejected"])
 @pytest.mark.asyncio
 async def test_a_fetch_records_how_its_cache_write_went(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, writable: bool
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, outcome: str
 ) -> None:
-    """*Prepare*: A cache file that can or cannot be written.
+    """*Prepare*: A cache file that can be written, cannot be, or refuses the entry.
     *Do*: Fetch the catalog.
     *Assert*: The cache write is recorded with its outcome, as before the
       process service.
@@ -2655,12 +2757,16 @@ async def test_a_fetch_records_how_its_cache_write_went(
             outcome,
         )),
     )
-    if not writable:
+    if outcome == "failure":
 
-        def fail(*_: object, **__: object) -> None:
+        def fail(*_: object, **__: object) -> bool:
             raise OSError("read-only")
 
         monkeypatch.setattr(connector_catalog.ConnectorCatalogCache, "write", fail)
+    if outcome == "rejected":
+        monkeypatch.setattr(
+            connector_catalog.ConnectorCatalogCache, "write", lambda *_, **__: False
+        )
 
     async def fetch(
         _base_url: str, _credentials: object, _builtins: tuple[str, ...] = ()
@@ -2673,4 +2779,4 @@ async def test_a_fetch_records_how_its_cache_write_went(
     await service.resolve_catalog(_orchestrator(), force_refresh=True)
 
     # Assert
-    assert ("cache_write", "success" if writable else "failure") in recorded
+    assert ("cache_write", outcome) in recorded

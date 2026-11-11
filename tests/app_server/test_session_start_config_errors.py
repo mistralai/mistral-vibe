@@ -44,12 +44,14 @@ thinking = "off"
 @pytest.fixture
 def write_config(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> Callable[[str], None]:
+) -> Callable[..., None]:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     monkeypatch.setenv("TEST_FAKE_API_KEY", "test")
 
-    def write(settings: str) -> None:
-        (config_dir / "config.toml").write_text(_CONFIG + settings, encoding="utf-8")
+    # Top-level keys go first: after the tables they would land in the last one.
+    def write(settings: str, *, top_level: str = "") -> None:
+        config = top_level + _CONFIG + settings
+        (config_dir / "config.toml").write_text(config, encoding="utf-8")
 
     return write
 
@@ -184,4 +186,109 @@ async def test_starting_an_agent_with_one_bash_timeout_is_a_configuration_error(
         "Cannot load the Vibe config."
         f" Agent 'slow' in {agents / 'slow.toml'}: tools: tools.bash: default_timeout"
         " is set without max_timeout_seconds. Set both, or neither."
+    )
+
+
+@pytest.mark.parametrize(
+    ("agent", "message"),
+    [
+        pytest.param("typo", "Agent 'typo' not found.", id="unknown"),
+        pytest.param(
+            "plan",
+            "Agent 'plan' was removed in Vibe 3.0. Use 'ask' or a custom agent.",
+            id="removed builtin",
+        ),
+        pytest.param(
+            "explore",
+            "Agent 'explore' is a subagent and cannot be used as the primary agent."
+            " Only agents of type 'agent' can be selected with --agent.",
+            id="subagent",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_starting_an_agent_that_cannot_start_is_an_invalid_request(
+    write_config: Callable[[str], None],
+    client: AppServerClient,
+    agent: str,
+    message: str,
+) -> None:
+    # Prepare
+    write_config("")
+
+    # Do
+    with pytest.raises(AppServerResponseError) as exc_info:
+        await client.request(
+            "session/start", SessionStartParams(agent_config=AgentConfig(agent=agent))
+        )
+
+    # Assert
+    error = exc_info.value.error
+    assert error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert error.data is None
+    assert error.message == message
+
+
+@pytest.mark.asyncio
+async def test_starting_an_unavailable_agent_is_an_invalid_request(
+    write_config: Callable[..., None], client: AppServerClient
+) -> None:
+    # Prepare
+    write_config("", top_level="enable_auto_approve = false\n")
+
+    # Do
+    with pytest.raises(AppServerResponseError) as exc_info:
+        await client.request(
+            "session/start",
+            SessionStartParams(agent_config=AgentConfig(agent="auto-approve")),
+        )
+
+    # Assert
+    error = exc_info.value.error
+    assert error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert error.message == (
+        "Agent 'auto-approve' is unavailable: the auto-approve mode is disabled"
+        " ('enable_auto_approve' is false)."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_default_agent_that_cannot_start_is_a_configuration_error(
+    write_config: Callable[..., None], client: AppServerClient
+) -> None:
+    # Prepare
+    write_config("", top_level='default_agent = "typo"\n')
+
+    # Do
+    with pytest.raises(AppServerResponseError) as exc_info:
+        await client.request("session/start", SessionStartParams())
+
+    # Assert
+    error = exc_info.value.error
+    assert error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert error.data == {"kind": "configuration"}
+    assert error.message == (
+        "Cannot load the Vibe config. default_agent: Agent 'typo' not found."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_disabled_default_agent_is_named_once(
+    write_config: Callable[..., None], client: AppServerClient
+) -> None:
+    # Prepare
+    write_config(
+        "",
+        top_level='default_agent = "accept-edits"\ndisabled_agents = ["accept-edits"]\n',
+    )
+
+    # Do
+    with pytest.raises(AppServerResponseError) as exc_info:
+        await client.request("session/start", SessionStartParams())
+
+    # Assert
+    assert exc_info.value.error.message == (
+        "Cannot load the Vibe config. default_agent 'accept-edits' is in"
+        " 'disabled_agents' ['accept-edits']. Remove 'accept-edits' from"
+        " 'disabled_agents', or set 'default_agent' to an enabled agent."
     )

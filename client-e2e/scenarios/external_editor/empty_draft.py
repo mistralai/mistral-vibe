@@ -8,7 +8,6 @@ _CTRL_G = "\x07"
 
 env = {"VISUAL": 'sh -c \'printf "written by the editor" > "$1"\' editor'}
 
-capture_startup = False
 screen_contains = ("written by the editor",)
 
 timeline: Timeline = [_CTRL_G]

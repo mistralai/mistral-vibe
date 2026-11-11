@@ -26,7 +26,6 @@ _SKILLS = [
 ]
 
 handshake = {"runtime/read": {"runtime": {"skills": _SKILLS}}}
-capture_steps = {3, 5, 7}
 screen_contains = (
     _SKILL_PROMPT,
     _FOLLOW_UP,

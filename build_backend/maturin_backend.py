@@ -28,6 +28,7 @@ import platform
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
@@ -82,6 +83,12 @@ _ZIG_ARCHITECTURES = {
     "aarch64": "aarch64",
     "arm64": "aarch64",
 }
+# Windows does not ship the VC++ runtime, and pip and uv do not put it next to
+# vibe-rs.exe, so a vibe-rs.exe that imports it fails to start (0xC0000135).
+_MSVC_TARGETS = ("x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc")
+_STATIC_CRT_FLAG = "-C target-feature=+crt-static"
+_PE32_PLUS_MAGIC = 0x20B
+_VC_REDIST_DLL = re.compile(r"(?:vcruntime|msvcp)\d+(?:_\w+)?\.dll", re.IGNORECASE)
 # Maturin's platform tag option and its alias.
 _COMPATIBILITY_FLAGS = frozenset({"--compatibility", "--manylinux"})
 # Maturin's legacy manylinux tags and the glibc each allows (PEP 600).
@@ -545,6 +552,7 @@ def _stage_rust_cli() -> None:
 
     environment = os.environ.copy()
     environment["CARGO_TARGET_DIR"] = str(_TUI_TARGET)
+    _link_msvc_crt_statically(environment)
     build_flags = _rust_cli_build_flags()
     _link_rust_cli_with_zig(environment, build_flags)
     command = [
@@ -577,6 +585,14 @@ def _stage_rust_cli() -> None:
                 f"{built} needs glibc {floor[0]}.{floor[1]}, newer than the "
                 f"wheel's manylinux_{promised[0]}_{promised[1]} tag allows"
             )
+    redist = [
+        dll for dll in _pe_imports(built.read_bytes()) if _VC_REDIST_DLL.fullmatch(dll)
+    ]
+    if redist:
+        raise NativeBuildError(
+            f"{built} imports {', '.join(redist)}, which Windows does not ship; "
+            f"link it with `{_STATIC_CRT_FLAG}` (a RUSTFLAGS variable overrides it)"
+        )
     staged = _TUI_TARGET.parent / f"staged-{_TUI_NAME}"
     staged.unlink(missing_ok=True)
     _BUNDLED_TUI.parent.mkdir(parents=True, exist_ok=True)
@@ -585,6 +601,16 @@ def _stage_rust_cli() -> None:
         staged.replace(_BUNDLED_TUI)
     finally:
         staged.unlink(missing_ok=True)
+
+
+def _link_msvc_crt_statically(environment: dict[str, str]) -> None:
+    # Target rustflags, unlike a .cargo/config.toml, apply whatever cwd cargo runs in.
+    for triple in _MSVC_TARGETS:
+        name = f"CARGO_TARGET_{triple.upper().replace('-', '_')}_RUSTFLAGS"
+        existing = environment.get(name)
+        environment[name] = (
+            f"{existing} {_STATIC_CRT_FLAG}" if existing else _STATIC_CRT_FLAG
+        )
 
 
 def _link_rust_cli_with_zig(
@@ -685,6 +711,41 @@ def _glibc_floor(binary: bytes) -> tuple[int, int] | None:
         for major, minor in re.findall(rb"GLIBC_(\d+)\.(\d+)", binary)
     }
     return max(versions, default=None)
+
+
+def _pe_imports(binary: bytes) -> list[str]:
+    if binary[:2] != b"MZ":
+        return []
+    (header,) = struct.unpack_from("<I", binary, 0x3C)
+    if binary[header : header + 4] != b"PE\0\0":
+        return []
+    (section_count,) = struct.unpack_from("<H", binary, header + 6)
+    (optional_size,) = struct.unpack_from("<H", binary, header + 20)
+    optional = header + 24
+    (magic,) = struct.unpack_from("<H", binary, optional)
+    directories = optional + (112 if magic == _PE32_PLUS_MAGIC else 96)
+    (import_rva,) = struct.unpack_from("<I", binary, directories + 8)
+    if not import_rva:
+        return []
+    sections = [
+        struct.unpack_from("<4I", binary, optional + optional_size + index * 40 + 8)
+        for index in range(section_count)
+    ]
+
+    def file_offset(rva: int) -> int:
+        for virtual_size, address, raw_size, raw_offset in sections:
+            if address <= rva < address + max(virtual_size, raw_size):
+                return raw_offset + rva - address
+        raise NativeBuildError(f"PE address {rva:#x} is outside every section")
+
+    imports = []
+    descriptor = file_offset(import_rva)
+    while binary[descriptor : descriptor + 20].strip(b"\0"):
+        (name_rva,) = struct.unpack_from("<I", binary, descriptor + 12)
+        name = file_offset(name_rva)
+        imports.append(binary[name : binary.index(b"\0", name)].decode("ascii"))
+        descriptor += 20
+    return imports
 
 
 def _rust_cli_build_flags() -> list[str]:

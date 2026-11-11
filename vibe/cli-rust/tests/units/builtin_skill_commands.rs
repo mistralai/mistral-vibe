@@ -72,7 +72,7 @@ fn every_documented_command_is_registered() {
 #[test]
 fn every_registered_command_is_documented() {
     let documented = documented();
-    let missing: Vec<String> = entries(&[])
+    let missing: Vec<String> = entries(&[], |_| true)
         .into_iter()
         .map(|entry| entry.label)
         .filter(|label| {

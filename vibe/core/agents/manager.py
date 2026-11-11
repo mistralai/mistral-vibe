@@ -16,6 +16,7 @@ from vibe.core.agents.registry import (
     AgentLoadFailure,
     AgentRegistry,
     apply_profile_overrides,
+    apply_profile_overrides_async,
     refuse_profile_shell_timeouts_over_the_users,
 )
 from vibe.core.config.builder import InvalidConfigError
@@ -34,6 +35,10 @@ if TYPE_CHECKING:
 
 # The modes a session falls back to, in order, after the default.
 FALLBACK_AGENTS: Final = (BuiltinAgentName.ACCEPT_EDITS, BuiltinAgentName.ASK)
+
+
+class AgentSelectionError(ValueError):
+    """An agent name that names no agent the session can start in."""
 
 
 class AgentManager:
@@ -102,6 +107,12 @@ class AgentManager:
             }
             excluded_mode = self._is_primary(starting) and self.org_excludes(starting)
             if not (server_default or excluded_mode):
+                if requested is None and isinstance(exc, AgentSelectionError):
+                    # Nobody asked for it: the config's default_agent is to fix.
+                    message = str(exc)
+                    if not message.startswith("default_agent"):
+                        message = f"default_agent: {message}"
+                    raise InvalidConfigError(message) from exc
                 raise
             error = exc
         for candidate in (default, *FALLBACK_AGENTS):
@@ -146,10 +157,15 @@ class AgentManager:
                 self._forced_agents.add(initial_agent)
         if profile is None:
             if initial_agent in self._discovered:
-                raise ValueError(self._unavailable_message(initial_agent))
-            raise ValueError(f"Agent '{initial_agent}' not found.")
+                raise AgentSelectionError(self._unavailable_message(initial_agent))
+            if (replacement := REMOVED_BUILTIN_AGENTS.get(initial_agent)) is not None:
+                raise AgentSelectionError(
+                    f"Agent '{initial_agent}' was removed in Vibe 3.0."
+                    f" Use '{replacement}' or a custom agent."
+                )
+            raise AgentSelectionError(f"Agent '{initial_agent}' not found.")
         if not allow_subagent and profile.agent_type != AgentType.AGENT:
-            raise ValueError(
+            raise AgentSelectionError(
                 f"Agent '{initial_agent}' is a {profile.agent_type} and cannot be used"
                 f" as the primary agent. Only agents of type 'agent' can be selected"
                 f" with --agent."
@@ -247,21 +263,36 @@ class AgentManager:
         return view
 
     def switch_profile(self, name: str) -> None:
+        """Off the event loop only; code on it uses ``aswitch_profile``."""
         profile = self.get_agent(name)
         # A refused profile leaves the session on the one it was running.
         self._install_profile(profile)
         self.active_profile = profile
 
+    async def aswitch_profile(self, name: str) -> None:
+        """``switch_profile``, rebuilding the config on the event loop: a
+        synchronous rebuild there deadlocks against a reload in flight.
+        """
+        profile = self.get_agent(name)
+        self._check_installable(profile)
+        await apply_profile_overrides_async(
+            self._orchestrator, profile.overrides, profile_name=profile.name
+        )
+        self.active_profile = profile
+
     def _install_profile(self, profile: AgentProfile) -> None:
+        self._check_installable(profile)
+        apply_profile_overrides(
+            self._orchestrator, profile.overrides, profile_name=profile.name
+        )
+
+    def _check_installable(self, profile: AgentProfile) -> None:
         if profile.config_error is not None:
             raise InvalidConfigError(
                 f"Agent '{profile.name}' in {profile.source_path}:"
                 f" {profile.config_error}"
             )
         refuse_profile_shell_timeouts_over_the_users(self._orchestrator, profile)
-        apply_profile_overrides(
-            self._orchestrator, profile.overrides, profile_name=profile.name
-        )
 
     def is_known_agent(self, name: str) -> bool:
         return name in self._discovered

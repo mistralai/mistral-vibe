@@ -22,7 +22,6 @@ handshake = {
     "session/resume": {"state": {"history": _HISTORY}},
 }
 request_methods = {"session/read", "session/history/list"}
-capture_startup = False
 screen_contains = ("Preview message 79", "Resumed session")
 screen_excludes = ("Preview message 00", "Load more", "load more messages")
 

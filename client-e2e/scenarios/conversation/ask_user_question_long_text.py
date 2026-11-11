@@ -12,8 +12,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 2, 3}
 screen_excludes = ("› 1. Wrap the content",)
 
 _WHEEL_DOWN = "\x1b[<65;10;13M"

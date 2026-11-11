@@ -9,7 +9,7 @@ import shutil
 import tempfile
 
 from e2e.app_server.config import MINIMAL_HOME_CONFIG, WHATS_NEW_FIXTURE
-from e2e.app_server.scenario import Action, Timeline
+from e2e.app_server.scenario import Action, Timeline, take_snapshot
 
 # The harness's isolated home is fresh, so the what's-new gate never trips;
 # pin a VIBE_HOME seeded with a stale seen-version instead. The rust client
@@ -41,6 +41,5 @@ expected_actions = [Action("open_url", _URI)]
 # The fixture's `VS Code extension` link spans one-based columns 13-29 on row 12.
 _CLICK = "\x1b[<0;16;12M\x1b[<0;16;12m"
 
-# The banner mounts after startup; the capture after typing settles it.
-capture_startup = False
-timeline: Timeline = ["x", _CLICK]
+# The banner mounts after startup; typing settles it before the snapshot.
+timeline: Timeline = ["x", take_snapshot(), _CLICK, take_snapshot()]

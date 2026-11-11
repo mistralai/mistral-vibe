@@ -13,8 +13,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "SSH_TTY": "/dev/pts/0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {5, 6}
 clipboard_contains = (
     "Which database should we use for this project?",
     "line two",

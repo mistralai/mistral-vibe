@@ -35,7 +35,6 @@ on_request = {
 }
 
 # Step 1 matches queue/steer_queued_prompt; only the order after the steer is new.
-capture_steps = {2}
 screen_excludes = ("Queued",)
 screen_rows = {
     12: "  Subagent finished.",

@@ -7,13 +7,13 @@ pub mod text;
 
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use ratatui::layout::Rect;
 
 use crate::app::App;
 use crate::commands::submission::new_message_id;
 use crate::option_list::{OptionList, SingleAction};
-use crate::search_field::Search;
+use crate::search_field::{self, Press, Search};
 use crate::selection::RegionId;
 use crate::server::{Client, PluginCatalogState};
 use crate::transcript::local;
@@ -225,16 +225,12 @@ pub fn wheel(app: &mut App, down: bool) {
 /// A press on the search field focuses it; a click on a plugin opens it, like Enter.
 pub fn mouse(app: &mut App, event: MouseEvent) {
     let at = (event.column, event.row);
-    let pressed = event.kind == MouseEventKind::Down(MouseButton::Left);
-    let on_search = app.plugins.viewing.is_none() && app.plugins.filter.area.contains(at.into());
     let click =
         crate::mouse::option_gesture(app, event, RegionId::BottomApp, |app| &mut app.plugins.list);
-    if on_search && pressed {
-        app.plugins.filter.focused = true;
+    let shown = app.plugins.viewing.is_none();
+    let on_option = app.plugins.list.index_at(at).is_some();
+    if search_field::press(&mut app.plugins.filter, &event, shown, on_option) == Press::Field {
         return;
-    }
-    if pressed && app.plugins.list.index_at(at).is_some() {
-        app.plugins.filter.focused = false;
     }
     if click.is_some() {
         select(app);

@@ -28,6 +28,8 @@ PluginComponent = Literal[
 
 class PluginDiagnosticCode(StrEnum):
     MANIFEST_INVALID = "plugin.manifest.invalid"
+    MANIFEST_UNKNOWN_FIELD = "plugin.manifest.unknown_field"
+    EXTENSION_UNKNOWN_FIELD = "plugin.extension.unknown_field"
     SCHEMA_VERSION_UNSUPPORTED = "plugin.schema.version_unsupported"
     FORMAT_AMBIGUOUS = "plugin.compatibility.format_ambiguous"
     FORMAT_UNRECOGNIZED = "plugin.compatibility.format_unrecognized"

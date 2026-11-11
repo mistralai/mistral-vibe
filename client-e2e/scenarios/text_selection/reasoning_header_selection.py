@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"SSH_TTY": "/dev/pts/0"}
 
@@ -28,4 +28,5 @@ timeline: Timeline = [
     assistant_msg("Done."),
     turn_completed(),
     _HEADER_DRAG,
+    take_snapshot(),
 ]

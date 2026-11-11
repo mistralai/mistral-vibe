@@ -3,7 +3,7 @@
 use ratatui::layout::{Alignment, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
@@ -25,8 +25,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) -> Option<Position> {
         .mouse_position
         .is_some_and(|at| composer_title::model_at(app, at))
     {
-        f.buffer_mut()
-            .set_style(app.view.model_area, theme::link_hover_style());
+        super::list_hover::paint_button(f.buffer_mut(), app.view.model_area);
     }
     caret
 }
@@ -40,19 +39,24 @@ fn draw_box(app: &App, f: &mut Frame, area: Rect, title: Line<'static>) -> Optio
     // but leaves the draft it holds styled like ordinary input.
     let selecting = app.queue.selected.is_some() && !app.queue.editing;
     let border = theme::border_style();
-    // Reserve one column on the right for the chat input content: a 1-cell
-    // scrollbar gutter (bar hidden), so text wraps and ends one column before
-    // the edge. The top/bottom borders still
-    // span the full width; only the inner content is inset.
+    // Like vim, only Insert mode is labelled, mirroring the agent title's corner.
+    let inserting = crate::vim::inserting(app);
+    let vim_mode = match inserting {
+        true => Line::from(vec![
+            Span::styled("─", border),
+            Span::styled(" INSERT ", theme::text(theme::foreground())),
+        ]),
+        false => Line::default(),
+    };
     let block = Block::default()
         .borders(Borders::TOP | Borders::BOTTOM)
         .border_style(border)
-        .padding(Padding::right(1))
         .title(title)
+        .title_bottom(vim_mode.left_aligned())
         .title_alignment(Alignment::Right);
 
     // A slow agent switch, then recording, replace the prompt marker with their own glyph.
-    let cursor = crate::chat_input::clamp_offset(&app.chat_input.input, app.chat_input.cursor);
+    let cursor = crate::vim::caret(app);
     let marker = match agents::spinner_glyph(app).or_else(|| super::recording_indicator::glyph(app))
     {
         Some(glyph) => format!("{glyph} "),
@@ -69,7 +73,10 @@ fn draw_box(app: &App, f: &mut Frame, area: Rect, title: Line<'static>) -> Optio
     // While searching, the bottom bar owns the caret and the composer previews the match.
     let owns_keys =
         editable && !selecting && !app.subagents.list.focused && app.reverse_search.is_none();
-    let caret = (owns_keys && app.main_input_cursor_on()).then_some(body_off);
+    let caret_on = owns_keys && app.main_input_cursor_on();
+    // Vim Insert mode shows the terminal's bar cursor instead of a painted block.
+    let bar = inserting && crate::input::composer_owns_key(app);
+    let caret = caret_on.then_some(body_off).filter(|_| !bar);
     let sel =
         crate::chat_input::selection_range(&app.chat_input.input, cursor, app.chat_input.anchor);
     let hint = crate::commands::argument_hint(app.chat_input.mode.prefix(), body);
@@ -136,6 +143,9 @@ fn draw_box(app: &App, f: &mut Frame, area: Rect, title: Line<'static>) -> Optio
     let caret_cell = caret_y.and_then(|y| caret_position(&layout, cursor_row, &marker, area.x, y));
     let para = Paragraph::new(lines).scroll((scroll, 0)).block(block);
     f.render_widget(para, area);
+    if let Some(cell) = caret_cell.filter(|_| bar && caret_on) {
+        f.set_cursor_position(cell);
+    }
     if scroll > 0 && area.height > 2 {
         f.buffer_mut()
             .set_string(area.x, area.y + 1, marker, prompt_style);
@@ -158,7 +168,7 @@ fn caret_position(
 }
 
 fn composer_layout(app: &App, width: u16) -> ComposerLayout<'_> {
-    let cursor = crate::chat_input::clamp_offset(&app.chat_input.input, app.chat_input.cursor);
+    let cursor = crate::vim::caret(app);
     ComposerLayout::new(
         &app.chat_input.input,
         app.chat_input.mode.marker(),

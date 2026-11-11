@@ -1,4 +1,4 @@
-"""A fired loop's prompt keeps its user row, with a primary marker and a fired-at line."""
+"""A fired loop's one-line prompt folds its fired-at line, which Ctrl+O reveals."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from e2e.app_server.scenario import Timeline
 
 env = {"TZ": "UTC"}
 
-screen_contains = ["> Run the linter", "└ loop 1a2b3c4d - 2026-08-24 17:41:00 UTC"]
+screen_contains = ["⏷ Run the linter", "└ loop 1a2b3c4d - 2026-08-24 17:41:00 UTC"]
 screen_excludes = ["Loop `1a2b3c4d` fired"]
 
 timeline: Timeline = [
@@ -23,4 +23,5 @@ timeline: Timeline = [
     scheduled_loop_fired("Loop `1a2b3c4d` fired", "1a2b3c4d"),
     assistant_msg("Hello."),
     turn_completed(),
+    "\x0f",
 ]

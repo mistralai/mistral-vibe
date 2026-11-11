@@ -28,6 +28,7 @@ from .common import (
     ToolKind,
     TurnId,
     UnixMs,
+    UnknownValue,
     Uri,
 )
 from .content import ContentBlock, TextContentBlock, refuse_unsupported_blocks
@@ -41,7 +42,10 @@ type CheckpointKind = Literal["compaction", "rollback", "resume", "custom"]
 class HistoryImportMessage(SessionModel):
     type: Literal["message"] = "message"
     role: MessageRole
+    """``"system"``, ``"user"`` or ``"assistant"``."""
     content: list[ContentBlock] = Field(default_factory=list)
+    """The message's content blocks. A system message takes text blocks only, and an assistant
+    message takes no embedded resource."""
 
     @field_validator("content")
     @classmethod
@@ -53,23 +57,34 @@ class HistoryImportMessage(SessionModel):
 class HistoryImportReasoning(SessionModel):
     type: Literal["reasoning"] = "reasoning"
     text: str
+    """The model's reasoning."""
 
 
 class HistoryImportToolCall(SessionModel):
     type: Literal["tool_call"] = "tool_call"
     tool_call_id: ToolCallId
+    """The ID of the call: its result carries the same ID."""
     tool_kind: ToolKind = "local"
+    """Where the tool comes from, such as ``"local"`` or ``"mcp"``."""
     name: str
+    """The name of the tool the model called."""
     arguments: JsonValue = None
+    """The arguments the model passed."""
 
 
 class HistoryImportToolResult(SessionModel):
     type: Literal["tool_result"] = "tool_result"
     tool_call_id: ToolCallId
+    """The ID of the call this is the result of."""
     name: str | None = None
+    """The name of the tool, or ``None``."""
     result: JsonValue = None
+    """The tool's result, for a call that succeeded."""
     error: ProtocolError | None = None
+    """For a failed call, its error, such as ``{"message": "..."}``, in place of ``result``: an
+    entry with both is refused."""
     annotations: dict[str, JsonValue] = Field(default_factory=dict)
+    """Metadata kept with the result."""
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
@@ -81,8 +96,11 @@ class HistoryImportToolResult(SessionModel):
 class HistoryImportSnapshot(SessionModel):
     type: Literal["snapshot"] = "snapshot"
     task_name: str
+    """The task the snapshot is of. The checkpoint's message is ``task_name:snapshot_type``."""
     snapshot_type: str
+    """The kind of snapshot."""
     value: JsonValue = None
+    """The snapshot's data, kept as the checkpoint's details. The model does not read it."""
 
 
 type HistoryImportEntry = Annotated[
@@ -93,6 +111,8 @@ type HistoryImportEntry = Annotated[
     | HistoryImportSnapshot,
     Field(discriminator="type"),
 ]
+"""An entry of a history that seeds a new Session: a message, reasoning, a tool call, a tool result
+or a snapshot."""
 
 
 class HistoryEntryBase(SessionModel):
@@ -101,7 +121,7 @@ class HistoryEntryBase(SessionModel):
     id: HistoryEntryId
     index: Annotated[int, Field(ge=0)]
     turn_id: TurnId | None = None
-    generation_status: GenerationStatus
+    generation_status: GenerationStatus | UnknownValue
     created_at: UnixMs
     updated_at: UnixMs
     annotations: dict[str, JsonValue] = Field(default_factory=dict)
@@ -129,12 +149,39 @@ class AgentResultContextMessageHistoryEntry(HistoryEntryBase, AgentResultInput):
     role: Literal["context"] = "context"
 
 
-class UnknownMessageHistoryEntry(HistoryEntryBase):
-    """A message entry whose role, or context kind, this reader does not know.
+class CapabilityContextMessageHistoryEntry(HistoryEntryBase):
+    """What the model was told about a tool source: that it failed, or that it is back.
 
-    A newer Runtime can add message roles and context kinds. A reader keeps the
-    entry's position and role so that one new variant does not fail the whole
-    history or event. It also keeps the rest of the entry's fields as they came, so
+    The model gets it just before the input of a Turn start or a steer; history records it
+    after that input. A failure also reaches the user as a notice, whose `details` name the
+    source; a recovery is told only here.
+    """
+
+    type: Literal["message"] = "message"
+    role: Literal["context"] = "context"
+    kind: Literal["capability_source"] = "capability_source"
+    source_id: Annotated[str, Field(min_length=1)]
+    content: Annotated[list[ContentBlock], Field(min_length=1)]
+
+
+class InputContextMessageHistoryEntry(HistoryEntryBase):
+    """A context message sent with a user message: what the model was told with it.
+
+    The model gets it just before the user message of a Turn start or a steer; history
+    records it after that message. The user does not see it as their own message.
+    """
+
+    type: Literal["message"] = "message"
+    role: Literal["context"] = "context"
+    kind: Literal["input"] = "input"
+    content: Annotated[list[ContentBlock], Field(min_length=1)]
+
+
+class UnknownMessageHistoryEntry(HistoryEntryBase):
+    """A message entry whose role, or context kind, was added after your SDK version.
+
+    A reader keeps the entry's position and role so that one new variant does not fail the
+    whole history or event. It also keeps the rest of the entry's fields as they came, so
     later patches to the entry still apply. Known roles and kinds still validate strictly.
     """
 
@@ -150,6 +197,8 @@ _CONTEXT_KINDS: dict[str, str] = {
     "task": "context",
     "message": "context",
     "result": "context_result",
+    "capability_source": "capability_context",
+    "input": "input_context",
 }
 
 
@@ -172,6 +221,8 @@ type MessageHistoryEntryVariant = Annotated[
     Annotated[MessageHistoryEntry, Tag("role")]
     | Annotated[AgentContextMessageHistoryEntry, Tag("context")]
     | Annotated[AgentResultContextMessageHistoryEntry, Tag("context_result")]
+    | Annotated[CapabilityContextMessageHistoryEntry, Tag("capability_context")]
+    | Annotated[InputContextMessageHistoryEntry, Tag("input_context")]
     | Annotated[UnknownMessageHistoryEntry, Tag("unknown")],
     Discriminator(_message_variant),
 ]
@@ -186,7 +237,7 @@ class ReasoningHistoryEntry(HistoryEntryBase):
 class PlanItem(SessionModel):
     id: str
     text: str
-    status: Literal["pending", "generating", "complete"]
+    status: Literal["pending", "generating", "complete"] | UnknownValue
 
 
 class PlanHistoryEntry(HistoryEntryBase):
@@ -198,7 +249,7 @@ class PlanHistoryEntry(HistoryEntryBase):
 class ToolCallHistoryEntry(HistoryEntryBase):
     type: Literal["tool_call"] = "tool_call"
     tool_call_id: ToolCallId
-    tool_kind: ToolKind
+    tool_kind: ToolKind | UnknownValue
     name: str
     arguments: JsonValue = None
     input_schema: JsonSchema | None = None
@@ -229,7 +280,7 @@ class ToolResultHistoryEntry(HistoryEntryBase):
 
 class FileChange(SessionModel):
     path: AbsolutePath
-    kind: Literal["create", "modify", "delete", "rename"]
+    kind: Literal["create", "modify", "delete", "rename"] | UnknownValue
     old_path: AbsolutePath | None = None
     diff: str | None = None
 
@@ -237,7 +288,7 @@ class FileChange(SessionModel):
 class FileChangeHistoryEntry(HistoryEntryBase):
     type: Literal["file_change"] = "file_change"
     changes: list[FileChange] = Field(default_factory=list)
-    status: FileChangeStatus
+    status: FileChangeStatus | UnknownValue
 
 
 class ResourceHistoryEntry(HistoryEntryBase):
@@ -249,7 +300,7 @@ class ResourceHistoryEntry(HistoryEntryBase):
 
 class CheckpointHistoryEntry(HistoryEntryBase):
     type: Literal["checkpoint"] = "checkpoint"
-    checkpoint_kind: CheckpointKind
+    checkpoint_kind: CheckpointKind | UnknownValue
     message: str | None = None
     details: JsonValue = None
 
@@ -261,22 +312,22 @@ class ErrorHistoryEntry(HistoryEntryBase):
 
 class NoticeHistoryEntry(HistoryEntryBase):
     type: Literal["notice"] = "notice"
-    level: NoticeLevel
-    notice_kind: NoticeKind | None = None
+    level: NoticeLevel | UnknownValue
+    notice_kind: NoticeKind | UnknownValue | None = None
     message: str
     details: JsonValue = None
 
 
 class UnknownHistoryEntry(HistoryEntryBase):
-    """A history entry of a type this reader does not know.
+    """A history entry of a type added after your SDK version.
 
-    A newer Runtime can add entry types. Such an entry is kept, so that it does not fail
-    a whole history page or drop the event that carries it. Its type is saved in
-    ``original_type`` and its other fields are kept as they came, so later patches to it
-    still apply. Its own ``type`` is ``unknown``, so a ``match`` on ``type`` still works
-    for the known entries. Serialized, it has its own ``type`` and no ``original_type``; its
-    own fields are as they came, the fields every entry shares as this reader models them.
-    Entries of a known type are validated as before.
+    Such an entry is kept, so that it does not fail a whole history page or drop the event
+    that carries it. Its type is saved in ``original_type`` and its other fields are kept as
+    they came, so later patches to it still apply. Its own ``type`` is ``unknown``, so a
+    ``match`` on ``type`` still works for the known entries. Serialized, it has its own
+    ``type`` and no ``original_type``; its own fields are as they came, the fields every
+    entry shares as this reader models them. Entries of a known type are validated as
+    before.
     """
 
     model_config = ConfigDict(extra="allow")

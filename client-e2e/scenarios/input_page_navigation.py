@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PAGE_UP = "\x1b[5~"
 _PAGE_DOWN = "\x1b[6~"
@@ -11,4 +11,5 @@ timeline: Timeline = [
     "X",
     _PAGE_DOWN,
     "Y",
+    take_snapshot(),
 ]

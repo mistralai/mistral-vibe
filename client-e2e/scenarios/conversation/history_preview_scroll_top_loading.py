@@ -28,7 +28,6 @@ handshake = {
     "session/history/list": {"items": _page(0, 20), "nextCursor": None},
 }
 request_methods = {"session/read", "session/history/list"}
-capture_startup = False
 # Each key settles, so a page landing mid-burst cannot race the remaining keys.
 settle_per_key = True
 screen_contains = ("Preview message 00",)

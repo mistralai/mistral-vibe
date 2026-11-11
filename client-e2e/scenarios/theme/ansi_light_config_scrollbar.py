@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 models = [
     {
@@ -29,4 +29,4 @@ handshake = {
     "config/read": {"config": {"models": models, "theme": "ansi-light"}},
     "runtime/read": {"runtime": {"config": {"models": models, "theme": "ansi-light"}}},
 }
-timeline: Timeline = ["/config\r", "\r"]
+timeline: Timeline = ["/config\r", take_snapshot(), "\r", take_snapshot()]

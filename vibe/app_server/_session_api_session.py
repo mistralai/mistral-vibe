@@ -79,6 +79,7 @@ from vibe.app_server._session_api_projection import (
     ApiHistoryProjection,
     EntryChange,
 )
+from vibe.app_server._unified_history_projection import approval_call_display
 from vibe.app_server.models import ApprovalDecisionType, PublicHistoryEntry
 
 _STATE_ITEMS = frozenset({
@@ -282,7 +283,13 @@ class ApiSessionState:
                     "status": "completed",
                     "completedAt": completed_at,
                     "stopReason": details.get("stopReason")
-                    or ("limit" if stop_reason == "iteration_limit" else None),
+                    or (
+                        "limit"
+                        if stop_reason == "iteration_limit"
+                        else "length"
+                        if stop_reason == "output_limit"
+                        else None
+                    ),
                 }
                 if stop_reason == "skipped":
                     completed["skipReason"] = output if isinstance(output, str) else ""
@@ -362,14 +369,9 @@ class ApiSessionState:
                             "kind": "tool",
                             "toolName": name,
                             "input": callback.input,
-                            "display": {
-                                "summary": name,
-                                "verb": "Run",
-                                "message": name,
-                                "settledVerb": "Ran",
-                                "settledMessage": name,
-                                "statusText": f"Waiting for approval to run {name}",
-                            },
+                            "display": approval_call_display(name).model_dump(
+                                mode="json"
+                            ),
                         },
                         "requiredPermissions": details.get("requiredPermissions") or [],
                         "choices": [

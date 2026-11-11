@@ -39,7 +39,7 @@ Committed goldens (terminal SVGs + app-server request JSON) under
 
 - Generate all: `make store_golden` from `vibe/`. One scenario: `uv run --no-project --with "pyte==0.8.2" --with "rich==15.0.0" python client-e2e/store_golden.py <scenario>`. `test_golden.py` fails for a scenario without a committed golden; generate it with the command above and review it before committing.
 - Test all: `make test_golden` from `vibe/`. One scenario: `uv run --no-project --with "pyte==0.8.2" --with "rich==15.0.0" --with pytest --with pytest-timeout python -m pytest client-e2e/test_golden.py -k <scenario>`. The pins matter: unpinned `pyte` and `rich` can render different SVGs.
-- Each scenario stores SVG snapshots and normalized client-to-server RPCs. `test_golden.py` also checks declared action, screen, and clipboard expectations.
+- Each scenario stores normalized client-to-server RPCs, plus one SVG per opt-in `take_snapshot()`. `test_golden.py` also checks declared action, screen, and clipboard expectations. Prefer expectations to snapshots; see `client-e2e/AGENTS.md`.
 - Regenerate when the TUI intentionally changes rendering; review the SVG and request diffs.
 
 ## Running tests

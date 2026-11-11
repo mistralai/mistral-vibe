@@ -14,7 +14,6 @@ handshake = {
     "config/write": {"runtime": {"config": {"enableMouseCapture": True}}},
 }
 
-capture_startup = False
 mouse_tracking = True
 # Open enable_mouse_capture, move from False to True, save.
 timeline: Timeline = ["/config\r", "\r", "\x1b[A", "\r"]

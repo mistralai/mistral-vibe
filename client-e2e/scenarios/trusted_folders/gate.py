@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {
     "workspace/trust/status": {
@@ -18,4 +18,4 @@ handshake = {
 }
 
 # Startup shows the gate; Enter takes "Trust folder" and opens the session.
-timeline: Timeline = ["\r"]
+timeline: Timeline = ["\r", take_snapshot()]

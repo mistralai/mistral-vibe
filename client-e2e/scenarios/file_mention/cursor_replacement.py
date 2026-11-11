@@ -8,8 +8,6 @@ from e2e.app_server.scenario import Timeline
 _SUFFIX = "TAIL @later unchanged"
 _LEFT = "\x1b[D"
 
-capture_startup = False
-capture_steps = {1, 3}
 expected_clipboard = "pré @data/fixture.json !TAIL @later unchanged"
 
 timeline: Timeline = [

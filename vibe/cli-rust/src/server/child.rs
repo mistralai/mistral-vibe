@@ -12,6 +12,10 @@ use super::Launch;
 /// Grace period for the app-server to exit after `session/stop` before killing it.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
+/// How long the TUI waits for the `session/stop` response. Covers the 5 s the
+/// app-server gives the user's notification hooks still running.
+pub const SESSION_STOP_GRACE: Duration = Duration::from_secs(7);
+
 /// Owns the app-server child process; `main.rs` waits on it after `session/stop`.
 pub struct ChildHandle {
     pub(super) child: Child,
@@ -96,7 +100,8 @@ impl ChildHandle {
     /// Wait for the child to exit, or kill its tree after `SHUTDOWN_GRACE`.
     /// Returns `Some` on self-exit, `None` on timeout or a failed wait.
     pub async fn wait_with_grace(mut self) -> Option<std::process::ExitStatus> {
-        match tokio::time::timeout(SHUTDOWN_GRACE, self.child.wait()).await {
+        let grace = crate::utils::timeout_or_env("VIBE_TEST_SHUTDOWN_GRACE_MS", SHUTDOWN_GRACE);
+        match tokio::time::timeout(grace, self.child.wait()).await {
             Ok(status) => status.ok(),
             Err(_) => {
                 self.kill_tree();

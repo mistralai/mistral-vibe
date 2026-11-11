@@ -2,6 +2,7 @@
 
 mod attach;
 pub mod banners;
+pub mod failure;
 mod launch;
 mod reads;
 mod trust;
@@ -57,14 +58,15 @@ fn entrypoint() -> &'static str {
 }
 
 pub use crate::utils::startup_cache::read_skills;
-pub use attach::{continue_params, nothing_to_continue, resume_params};
+pub use attach::{continue_params, nothing_to_continue, resume_params, start_kind};
 pub use launch::{
     agent_ready_duration_ms, first_frame_duration_ms, launch_from_env, mark_first_draw,
     resolve_launch, resolve_launch_cwd, StartupRecorder,
 };
 pub use reads::{
-    read_ask_confirmation_on_exit, read_show_subagent_status_list, read_show_thinking_nodes,
-    read_tokens, ConfigRead,
+    read_ask_confirmation_on_exit, read_enable_sticky_prompt, read_pr_monitoring,
+    read_show_subagent_status_list, read_show_thinking_nodes, read_tokens, read_vim_keybindings,
+    ConfigRead,
 };
 
 pub enum StartupEvent {
@@ -194,10 +196,9 @@ pub async fn handshake(
     trust_rx: mpsc::Receiver<String>,
     params: HandshakeParams,
 ) {
-    if let Err(error) = handshake_inner(client, &event_tx, trust_rx, params).await {
-        // The full error chain, not just the outer context: a bare
-        // "session/start" hides whether the server rejected the request or
-        // the process died, which is the first question at every triage.
+    if let Err(error) = handshake_inner(client.clone(), &event_tx, trust_rx, params).await {
+        failure::log(&error, &client);
+        // The full chain: the outer context alone hides whether the server refused or died.
         let _ = event_tx
             .send(StartupEvent::Failed(format!("{error:#}")))
             .await;
@@ -267,7 +268,7 @@ async fn handshake_inner(
     let (mut state, mut attach) = if worktree {
         // A worktree run starts bare: the session is rebound onto its
         // worktree after the settle below.
-        let started = match attach::start_session(&client, agent_config.clone()).await {
+        let started = match attach::start_session(&client, agent_config.clone(), &resume).await {
             Ok(started) => started,
             Err(error) => return handle_start_error(error, event_tx).await,
         };

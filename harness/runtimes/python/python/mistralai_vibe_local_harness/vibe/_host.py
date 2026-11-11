@@ -75,6 +75,7 @@ from mistralai_vibe_local_harness.vibe._connector_models import (
     ConnectorAuthorizationRequiredSignal,
     ConnectorGateway,
     ConnectorRouteSnapshot,
+    ConnectorRuntimeEventSink,
     ResolvedConnectorCatalog,
     ResolvedConnectorSelection,
 )
@@ -103,6 +104,7 @@ from mistralai_vibe_local_harness.vibe._fork import (
     history_for_fork,
     history_user_anchor,
     imported_entry_id,
+    skipped_user_anchor,
 )
 from mistralai_vibe_local_harness.vibe._local_actions import (
     HookHandlers,
@@ -115,13 +117,14 @@ from mistralai_vibe_local_harness.vibe._local_actions import (
     merge_hook_handlers,
     streams_provisional_content,
 )
-from mistralai_vibe_local_harness.vibe._mcp_actions import build_mcp_action_executor
+from mistralai_vibe_local_harness.vibe._mcp_actions import McpToolExecutor
 from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPAuthorizationProvider,
     MCPAuthorizationRequiredSignal,
     MCPDescriptorCachePolicy,
     MCPHTTPTransportPolicy,
     MCPRouteSnapshot,
+    MCPRuntimeEventSink,
     MCPSamplingCompletion,
     MCPTransportFactory,
     ResolvedMCPCatalog,
@@ -142,9 +145,15 @@ from mistralai_vibe_local_harness.vibe._processes._manager import (
     ProcessTerminalSnapshot,
     SessionProcessManager,
 )
-from mistralai_vibe_local_harness.vibe._processes._output import ProcessOutputStore
+from mistralai_vibe_local_harness.vibe._processes._output import (
+    ProcessOutputStore,
+    written_output_bytes,
+)
 from mistralai_vibe_local_harness.vibe._projection import (
+    HOOK_CONTEXT_META_KEY,
+    HOOK_ORIGINAL_TEXT_META_KEY,
     SessionProjector,
+    displayed_user_content,
     renamed_session_state,
     settle_stalled_projection,
     with_session_preview,
@@ -204,6 +213,7 @@ from mistralai_vibe_local_harness.vibe._subagents._configuration import (
 )
 from mistralai_vibe_local_harness.vibe._subagents._controller import (
     ChildInterruptResult,
+    ChildMessageResult,
     SubagentController,
 )
 from mistralai_vibe_local_harness.vibe._subagents._host import (
@@ -225,6 +235,10 @@ from mistralai_vibe_local_harness.vibe._subagents._models import (
     SpawnTarget,
     SubagentFailure,
     SubagentSessionIdentity,
+)
+from mistralai_vibe_local_harness.vibe._tool_schemas import (
+    TOOL_SCHEMA_NOT_OBJECT,
+    ToolsLeftOutSignal,
 )
 from mistralai_vibe_local_harness.vibe.plugins import (
     PluginPackageStore,
@@ -285,6 +299,7 @@ _INTEROP_HISTORY_ADAPTER = TypeAdapter(list[InteropHistoryMessageV1])
 
 logger = logging.getLogger(__name__)
 _SHORT_SESSION_ID_LENGTH = 8
+_UNSETTLED_REASONS_BUDGET = 120
 _READ_STORE_CACHE_SIZE = 8
 _READ_STORE_CACHE_BYTES = 32 * 1024 * 1024
 _PROCESS_OUTPUT_TARGET_BYTES = 500 * 1024 * 1024
@@ -292,6 +307,10 @@ _PROCESS_OUTPUT_TARGET_BYTES = 500 * 1024 * 1024
 _PROCESS_OUTPUT_PRUNE_FRACTION = 0.8
 _LEASE_RETRY_DELAY_SECONDS = 0.01
 _PROCESS_OUTPUT_CLEANUP_DEBOUNCE_SECONDS = 5.0
+# Output written by other processes sharing the storage root is invisible to
+# this process's byte counter, so a measurement under the target is trusted for
+# at most this long.
+_PROCESS_OUTPUT_REMEASURE_SECONDS = 300.0
 _USER_DISPLAY_CONTENT_META_KEY = "vibe.userDisplayContent"
 _REASONING_PAYLOADS_META_KEY = "vibe_reasoning_payloads"
 
@@ -345,6 +364,20 @@ class HarnessSessionDeleteResult:
 class _TreeDeletionLeases:
     root: SessionLease
     children: dict[str, SessionLease]
+
+
+@dataclass(frozen=True, slots=True)
+class _ProcessOutputMeasurement:
+    storage_root: Path
+    stored_bytes: int
+    written_bytes_before: int
+    measured_at: float
+
+    def may_exceed_target(self, written_bytes: int, now: float) -> bool:
+        if now - self.measured_at >= _PROCESS_OUTPUT_REMEASURE_SECONDS:
+            return True
+        written_since = written_bytes - self.written_bytes_before
+        return self.stored_bytes + written_since > _PROCESS_OUTPUT_TARGET_BYTES
 
 
 @dataclass(slots=True)
@@ -537,6 +570,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         self._cleanup_task: asyncio.Task[None] | None = None
         self._cleanup_requested = False
         self._cleanup_finished_at: float | None = None
+        self._process_output_measurement: _ProcessOutputMeasurement | None = None
         self._orphan_diagnostic_tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
 
@@ -1214,7 +1248,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                     raise HarnessChildSessionRequiresParentError(
                         source_session_id, "forked"
                     )
-                importable_history = self._importable_history(source)
+                importable_history = self._importable_history(source, "fork")
                 source_snapshot = SessionForkSnapshot(
                     source=UnifiedInteropSourceV1(
                         session_id=source_session_id,
@@ -1223,7 +1257,10 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                     ),
                     history=tuple(
                         history_for_fork(
-                            importable_history, entry_id, include_entry=include_entry
+                            importable_history,
+                            entry_id,
+                            include_entry=include_entry,
+                            public_entries=source.projection_state.snapshot.history.entries,
                         )
                     ),
                     session_metadata=source.runtime_state.session_metadata.model_copy(
@@ -1330,15 +1367,20 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             raise HarnessSessionNotFoundError(session_id)
         await session._wait_for_pending_turns()
         runtime = session._runtime_for_host()
-        stored = await asyncio.to_thread(
-            UnifiedSessionStore(self._storage_root, session_id).load
-        )
-        if isinstance(stored.runtime_state.identity, SubagentSessionIdentity):
+        if isinstance(runtime.identity, SubagentSessionIdentity):
             raise HarnessChildSessionRequiresParentError(session_id, "rewound")
-        history = self._importable_history(stored)
-        anchor = history_user_anchor(history, entry_id)
-        rewound_history = history[:anchor]
+        stored = await runtime.fold_idle_journal()
+        history = self._importable_history(stored, "rewind")
         public = runtime.projection.model_copy(deep=True)
+        try:
+            anchor = history_user_anchor(history, entry_id)
+        except ValueError:
+            # A message a pre_agent hook blocked is only in the public history.
+            skipped = skipped_user_anchor(history, entry_id, public.history.entries)
+            if skipped is None:
+                raise
+            anchor = skipped
+        rewound_history = history[:anchor]
         public_anchor = next(
             (
                 index
@@ -1381,6 +1423,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             attachments_root=self._attachments_root(session_id),
             keep_interop_metadata=True,
         )
+        await session.drop_workspace_move()
         await runtime.replace_quiescent_context(
             checkpoint=checkpoint, projection=projection
         )
@@ -1880,6 +1923,32 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             return ()
         return await controller.interrupt_running_children(reason)
 
+    async def message_idle_child(
+        self,
+        root_session_id: str,
+        child_session_id: str,
+        message: str,
+        *,
+        content_meta: JsonObject | None = None,
+    ) -> ChildMessageResult:
+        """Start a new Turn of an idle child of a live root with ``message``,
+        the way the root's own ``send_message`` call would, without steering.
+
+        A child running a Turn, or waiting on the root's concurrent Turn
+        limit, is reported ``busy`` and left as it is. The child's result
+        reaches the root as a notification, like any other child result.
+        ``content_meta`` is set on the message's content block, so the child's
+        public history carries it as it does for a host's own Turn.
+        """
+        controller = self._subagent_controller(root_session_id)
+        if controller is None:
+            return ChildMessageResult(
+                outcome="unavailable", error="Session has no live subagents"
+            )
+        return await controller.message_idle_child(
+            child_session_id, message, content_meta=content_meta
+        )
+
     def _subagent_controller(self, root_session_id: str) -> SubagentController | None:
         root = self._live_session(root_session_id)
         runtime = root._runtime if root is not None else None
@@ -2157,6 +2226,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         message: str,
         known_generation: ChildGenerationRef,
         operation_key: str,
+        content_meta: JsonObject | None = None,
     ) -> ChildCommandAdmission:
         session = self._require_live_child(child)
         identity = session._runtime_for_host().identity
@@ -2167,6 +2237,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             message=message,
             known_generation=known_generation,
             operation_key=operation_key,
+            content_meta=content_meta,
         )
         return ChildCommandAdmission(target=target, turn_id=target.command.turn_id)
 
@@ -2307,6 +2378,28 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         finally:
             await asyncio.to_thread(lease.release)
         return True
+
+    async def child_turn_in_flight(self, child_session_id: str) -> bool:
+        """Whether a child's own store holds a Turn that has not settled.
+
+        Background processes do not count: a child that left a process
+        running is idle and can take a message.
+        """
+        session = self._live_session(child_session_id)
+        if session is not None:
+            runtime = session._runtime_for_host()
+            return runtime.inspection.status in {"running", "compacting"} or any(
+                receipt.state == "reserved"
+                for receipt in runtime.runtime_state.command_receipts
+            )
+        store = UnifiedSessionStore(self._storage_root, child_session_id)
+        if not store.exists:
+            return False
+        # Only the Turn counts here: reservations of an unloaded child settle
+        # when it loads, and one that resumes a Turn then is met by the send.
+        stored = await asyncio.to_thread(store.load)
+        turn = stored.projection_state.snapshot.latest_turn
+        return turn is not None and turn.status == "in_progress"
 
     async def reconfigure_subagents(
         self, session_id: str, adapter_config: LocalRuntimeAdapterConfig
@@ -2748,7 +2841,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 raise RuntimeError("Ephemeral session is not bound")
             session._publish_event(event)
 
-        def publish_mcp_event(signal: MCPAuthorizationRequiredSignal) -> None:
+        def publish_mcp_event(
+            signal: MCPAuthorizationRequiredSignal | ToolsLeftOutSignal,
+        ) -> None:
+            if isinstance(signal, ToolsLeftOutSignal):
+                publish_event(_tools_left_out_notice(signal))
+                return
             publish_event({
                 "type": "mcp_authorization_required",
                 "serverName": signal.server_name,
@@ -2758,8 +2856,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             })
 
         def publish_connector_event(
-            signal: ConnectorAuthorizationRequiredSignal,
+            signal: ConnectorAuthorizationRequiredSignal | ToolsLeftOutSignal,
         ) -> None:
+            if isinstance(signal, ToolsLeftOutSignal):
+                publish_event(_tools_left_out_notice(signal))
+                return
             publish_event({
                 "type": "connector_authorization_required",
                 "rawConnectorId": signal.raw_connector_id,
@@ -2773,9 +2874,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         connector_runtime = self._new_connector_runtime(
             event_sink=publish_connector_event
         )
-        mcp_executor = (
-            build_mcp_action_executor(mcp_runtime) if mcp_runtime is not None else None
-        )
+        mcp_executor = McpToolExecutor(mcp_runtime) if mcp_runtime is not None else None
         connector_executor = (
             build_connector_action_executor(connector_runtime)
             if connector_runtime is not None
@@ -2783,7 +2882,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         )
 
         registered_groups = _registered_group_names(
-            self._provided_tool_groups, runtime_config_template.capabilities
+            self._provided_tool_groups, runtime_config_template.capabilities, plugins
         )
         registered_executors = _session_provided_tool_executors(
             self._provided_tool_groups, registered_groups, session_id
@@ -2799,7 +2898,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 if session is None:
                     raise RuntimeError("Session is not ready for user input")
                 return await session._request_user_input(action)
-            registered = registered_executors.get(action.call.group_name)
+            registered = _executor_for_group(
+                self._provided_tool_groups,
+                registered_executors,
+                action.call.group_name,
+                session_id,
+            )
             if registered is not None:
                 return await registered(action)
             if connector_executor is not None and action.call.group_name.startswith(
@@ -2824,8 +2928,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             )
             else None
         )
+        # Every Host-registered group's mode, not just the ones advertised at
+        # start: a plugin enabled mid-session is gated at its own pinned bar on
+        # its first call, and Core only calls groups it advertises anyway.
         provided_tool_modes = _session_provided_tool_modes(
-            self._provided_tool_groups, registered_groups
+            self._provided_tool_groups, frozenset(self._provided_tool_groups)
         )
         # Built before the session so the session can own the handle. An ephemeral
         # session can be re-configured before it is ever promoted, so the adapter has to
@@ -3230,7 +3337,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         )
         action_config = adapter_config or LocalRuntimeAdapterConfig(workspace=workspace)
 
-        def publish_mcp_event(signal: MCPAuthorizationRequiredSignal) -> None:
+        def publish_mcp_event(
+            signal: MCPAuthorizationRequiredSignal | ToolsLeftOutSignal,
+        ) -> None:
+            if isinstance(signal, ToolsLeftOutSignal):
+                publish_event(_tools_left_out_notice(signal))
+                return
             publish_event({
                 "type": "mcp_authorization_required",
                 "serverName": signal.server_name,
@@ -3240,8 +3352,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             })
 
         def publish_connector_event(
-            signal: ConnectorAuthorizationRequiredSignal,
+            signal: ConnectorAuthorizationRequiredSignal | ToolsLeftOutSignal,
         ) -> None:
+            if isinstance(signal, ToolsLeftOutSignal):
+                publish_event(_tools_left_out_notice(signal))
+                return
             publish_event({
                 "type": "connector_authorization_required",
                 "rawConnectorId": signal.raw_connector_id,
@@ -3261,9 +3376,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             if integrations_enabled
             else None
         )
-        mcp_executor = (
-            build_mcp_action_executor(mcp_runtime) if mcp_runtime is not None else None
-        )
+        mcp_executor = McpToolExecutor(mcp_runtime) if mcp_runtime is not None else None
         connector_executor = (
             build_connector_action_executor(connector_runtime)
             if connector_runtime is not None
@@ -3276,7 +3389,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             plugins=plugins,
         )
         registered_groups = _registered_group_names(
-            self._provided_tool_groups, runtime_config.capabilities
+            self._provided_tool_groups, runtime_config.capabilities, plugins
         )
         registered_executors = _session_provided_tool_executors(
             self._provided_tool_groups, registered_groups, stored.manifest.session_id
@@ -3292,7 +3405,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 if session is None:
                     raise RuntimeError("Session is not ready for user input")
                 return await session._request_user_input(action)
-            registered = registered_executors.get(action.call.group_name)
+            registered = _executor_for_group(
+                self._provided_tool_groups,
+                registered_executors,
+                action.call.group_name,
+                stored.manifest.session_id,
+            )
             if registered is not None:
                 return await registered(action)
             if connector_executor is not None and action.call.group_name.startswith(
@@ -3317,8 +3435,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             )
             else None
         )
+        # Every Host-registered group's mode, not just the ones advertised at
+        # resume: a plugin enabled mid-session is gated at its own pinned bar on
+        # its first call, and Core only calls groups it advertises anyway.
         provided_tool_modes = _session_provided_tool_modes(
-            self._provided_tool_groups, registered_groups
+            self._provided_tool_groups, frozenset(self._provided_tool_groups)
         )
         store = UnifiedSessionStore(
             self._storage_root, stored.manifest.session_id, lease=lease
@@ -3599,9 +3720,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         await controller.reconcile_actions(runtime.pending_action_ids)
 
     def _new_mcp_runtime(
-        self,
-        *,
-        event_sink: Callable[[MCPAuthorizationRequiredSignal], None] | None = None,
+        self, *, event_sink: MCPRuntimeEventSink | None = None
     ) -> MCPRuntime | None:
         provider = self._mcp_authorization_provider
         if provider is None:
@@ -3668,10 +3787,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             self._mcp_stdio_pool = None
 
     def _new_connector_runtime(
-        self,
-        *,
-        event_sink: Callable[[ConnectorAuthorizationRequiredSignal], None]
-        | None = None,
+        self, *, event_sink: ConnectorRuntimeEventSink | None = None
     ) -> ConnectorRuntime | None:
         gateway_factory = self._connector_gateway_factory
         if gateway_factory is None:
@@ -4154,11 +4270,16 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             return requested
         if not unified_root.exists() or len(requested) > _SHORT_SESSION_ID_LENGTH:
             return None
+        # Clients print the last characters, random in a UUIDv7; older ones printed the first.
         matches = sorted(
             path.name
             for path in unified_root.iterdir()
             if path.is_dir()
-            and path.name[:_SHORT_SESSION_ID_LENGTH] == requested
+            and requested
+            in {
+                path.name[:_SHORT_SESSION_ID_LENGTH],
+                path.name[-_SHORT_SESSION_ID_LENGTH:],
+            }
             and (path / "CURRENT").is_file()
         )
         if len(matches) > 1:
@@ -4205,14 +4326,15 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         return entry
 
     @staticmethod
-    def _importable_history(stored: StoredSession) -> list[InteropHistoryMessageV1]:
+    def _importable_history(
+        stored: StoredSession, operation: Literal["rewind", "fork"]
+    ) -> list[InteropHistoryMessageV1]:
+        unsettled = stored.runtime_state.unsettled_work()
+        if not unsettled and not _journal_preserves_interop_history(stored.journal):
+            unsettled = ("recent changes to the session are still being saved",)
         export = stored.interop_export
-        if (
-            not stored.runtime_state.quiescent
-            or export is None
-            or not _journal_preserves_interop_history(stored.journal)
-        ):
-            raise ValueError("source session is not at an exported quiescent boundary")
+        if unsettled or export is None:
+            raise ValueError(_unsettled_session_message(operation, unsettled))
         return list(export.history)
 
     async def _register(
@@ -4260,6 +4382,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             lambda event: parent.publish_child_event(identity.session_id, event),
         )
         parent.publish_child_registration(identity.session_id, snapshot)
+        child._publish_held_notices()
 
     async def _attach_live_session(
         self, session_id: str
@@ -4502,11 +4625,31 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 self._cleanup_finished_at = time.monotonic()
 
     async def _cleanup_process_output_once(self) -> None:  # noqa: PLR0912, PLR0914, PLR0915 - one cohesive sweep
-        # Other clients show every Session the sweep leases as open elsewhere.
-        if await _maintenance_io(
-            _process_output_within_target, self._storage_root / "unified"
+        # Both read before measuring, so output written during the walk is counted
+        # again and the remeasure window starts no later than the walk does.
+        written_bytes = written_output_bytes()
+        now = time.monotonic()
+        storage_root = self._storage_root
+        measurement = self._process_output_measurement
+        if (
+            measurement is not None
+            and measurement.storage_root == storage_root
+            and not measurement.may_exceed_target(written_bytes, now)
         ):
             return
+        stored_bytes = await _maintenance_io(
+            _process_output_bytes_within_target, storage_root / "unified"
+        )
+        if stored_bytes is not None:
+            self._process_output_measurement = _ProcessOutputMeasurement(
+                storage_root=storage_root,
+                stored_bytes=stored_bytes,
+                written_bytes_before=written_bytes,
+                measured_at=now,
+            )
+            return
+        self._process_output_measurement = None
+        # Other clients show every Session the sweep leases as open elsewhere.
         cleanup_lease = SessionLease(self._storage_root, "process-output-cleanup")
         owned: list[tuple[str, asyncio.Event, SessionLease]] = []
         pinned: list[tuple[str, _LoadedSessionEntry]] = []
@@ -4888,9 +5031,10 @@ def _public_state(
                 if isinstance(part, InteropAssistantContentPartV1)
             ]
         else:
+            # What the user typed, before a pre_agent hook rewrote or extended it.
             content = [
                 cast(JsonValue, _without_interop_metadata(_public_history_block(part)))
-                for part in message.content
+                for part in displayed_user_content(message.content)
             ]
             # The display annotation is presentation, not Runtime identity, so
             # it outlives the metadata stripped above.
@@ -4902,7 +5046,9 @@ def _public_state(
                 ),
                 None,
             )
-        if not content:
+        # A user message stays even when a pre_agent hook's text is all it holds,
+        # as the live projection keeps it: the Core still holds that turn.
+        if not content and message.role != "user":
             continue
         entries.append({
             "type": "message",
@@ -4961,8 +5107,9 @@ def _create_checkpoint(
     History arriving from elsewhere is handed over without its Runtime
     metadata: the client message ids in it name entries of the session it was
     written in, and a session importing it publishes the turns under ids of its
-    own. Only the user display annotation is kept, since it describes how a
-    message is shown rather than which session recorded it. A rewind is the
+    own. Only the user display annotation and a pre_agent hook's marks are kept,
+    since they describe how a message is shown rather than which session
+    recorded it. A rewind is the
     exception -- the transcript is the session's own, cut short, and the
     entries it keeps are still published under the ids recorded in it -- so it
     asks to keep the metadata rather than lose the ids the conversation it goes
@@ -5078,11 +5225,20 @@ def _core_content_block(
     if keep_interop_metadata:
         return cast(dict[str, JsonValue], value)
     projected = cast(dict[str, JsonValue], _without_interop_metadata(value))
-    # The display annotation is presentation, not Runtime identity: keeping it
-    # lets the copy publish it again when it is itself forked.
-    display = _user_display_content(getattr(block, "meta", None))
+    # The display annotation and a pre_agent hook's marks are presentation, not
+    # Runtime identity: keeping them lets the copy show the message as the user
+    # sent it, and publish it so again when it is itself forked.
+    meta = getattr(block, "meta", None)
+    kept: dict[str, JsonValue] = {}
+    display = _user_display_content(meta)
     if display is not None:
-        projected["_meta"] = {_USER_DISPLAY_CONTENT_META_KEY: display}
+        kept[_USER_DISPLAY_CONTENT_META_KEY] = display
+    if isinstance(meta, dict):
+        for key in (HOOK_ORIGINAL_TEXT_META_KEY, HOOK_CONTEXT_META_KEY):
+            if key in meta:
+                kept[key] = cast(JsonValue, meta[key])
+    if kept:
+        projected["_meta"] = kept
     return projected
 
 
@@ -5129,6 +5285,27 @@ def _journal_preserves_interop_history(journal: Sequence[JournalRecordV1]) -> bo
         )
         for record in journal
     )
+
+
+def _unsettled_session_message(
+    operation: Literal["rewind", "fork"], unsettled: Sequence[str]
+) -> str:
+    """Tell the user why a rewind or fork has to wait, short enough for a notice.
+
+    Reasons are listed while they fit the budget; the rest are counted, once
+    per distinct reason.
+    """
+    advice = "Try again when it finishes."
+    if not unsettled:
+        return f"Cannot {operation} yet: the session is still working. {advice}"
+    shown = [unsettled[0]]
+    for reason in unsettled[1:]:
+        if len("; ".join([*shown, reason])) > _UNSETTLED_REASONS_BUDGET:
+            break
+        shown.append(reason)
+    if hidden := len(unsettled) - len(shown):
+        shown.append(f"{hidden} more")
+    return f"Cannot {operation} yet: {'; '.join(shown)}. {advice}"
 
 
 def _without_interop_metadata(value: JsonValue) -> JsonValue:
@@ -5270,11 +5447,32 @@ class _ProvidedToolGroup:
     mode: ProvidedToolApproval | None
 
 
+def _tools_left_out_notice(signal: ToolsLeftOutSignal) -> JsonObject:
+    """The notice ``UnifiedHarnessSessionBackend.publish_notice`` publishes for ``signal``."""
+    return {
+        "type": "notice",
+        "level": "warning",
+        "message": signal.message,
+        "code": TOOL_SCHEMA_NOT_OBJECT,
+    }
+
+
 def _registered_group_names(
-    groups: Mapping[str, _ProvidedToolGroup], capabilities: RustHarnessCapabilitySet
+    groups: Mapping[str, _ProvidedToolGroup],
+    capabilities: RustHarnessCapabilitySet,
+    plugins: SessionPluginBinding | None,
 ) -> frozenset[str]:
     return frozenset(
-        group.name for group in capabilities.tool_groups if group.name in groups
+        group.name
+        for group in (
+            *capabilities.tool_groups,
+            *(
+                group
+                for plugin in (plugins.definitions if plugins is not None else ())
+                for group in plugin.capabilities.tool_groups
+            ),
+        )
+        if group.name in groups
     )
 
 
@@ -5299,6 +5497,37 @@ def _session_provided_tool_executors(
             built[id(factory)] = executor
         executors[name] = executor
     return executors
+
+
+def _executor_for_group(
+    groups: Mapping[str, _ProvidedToolGroup],
+    executors: dict[str, ProvidedToolExecutor],
+    group_name: str,
+    session_id: str,
+) -> ProvidedToolExecutor | None:
+    """The session's executor for ``group_name``, built on the first call that names it.
+
+    The executor map is captured when the session starts or resumes, but a plugin
+    enabled mid-session only advertises its group in Core afterwards. The group is
+    still Host-registered, so the executor is created on demand and cached in the
+    captured map: the factory still runs once per session, and a group sharing a
+    factory with an already-built one shares its executor.
+    """
+    executor = executors.get(group_name)
+    if executor is None and group_name in groups:
+        factory = groups[group_name].factory
+        executor = next(
+            (
+                existing
+                for name, existing in executors.items()
+                if groups[name].factory is factory
+            ),
+            None,
+        )
+        if executor is None:
+            executor = factory(session_id)
+        executors[group_name] = executor
+    return executor
 
 
 def _core_config(session_id: str) -> RustHarnessConfig:
@@ -5351,21 +5580,21 @@ def _stored_sessions_with_process_output(
     )
 
 
-def _process_output_within_target(unified_root: Path) -> bool:
+def _process_output_bytes_within_target(unified_root: Path) -> int | None:
     # Must never undercount what the sweep measures, since it takes no lease.
     session_ids = _stored_session_ids(unified_root)
     total = 0
     for session_id in _stored_sessions_with_process_output(unified_root, session_ids):
         processes_root = unified_root / session_id / "processes"
         if processes_root.is_symlink() or not processes_root.is_dir():
-            return False
+            return None
         for directory, _subdirectories, files in os.walk(processes_root):
             for name in files:
                 with suppress(OSError):
                     total += os.lstat(os.path.join(directory, name)).st_size
             if total > _PROCESS_OUTPUT_TARGET_BYTES:
-                return False
-    return True
+                return None
+    return total
 
 
 def _stored_session_ids(unified_root: Path) -> tuple[str, ...]:

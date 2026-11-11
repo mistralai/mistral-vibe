@@ -98,6 +98,9 @@ class _ChannelTransport:
         )
         self._closed = False
         self._finished = False
+        # Only the shared stream's end loses the client: a close frame or a full
+        # inbox ends the channel while the client is still there.
+        self.client_lost = False
 
     async def send(self, message: dict[str, Any]) -> None:
         if self._closed:
@@ -123,6 +126,12 @@ class _ChannelTransport:
 
     async def close(self) -> None:
         self._closed = True
+        self.receive(None)
+
+    def end_of_stream(self) -> None:
+        # A channel already ending, on a close frame or a full inbox, keeps its client.
+        if not self._finished:
+            self.client_lost = True
         self.receive(None)
 
 
@@ -191,6 +200,6 @@ async def serve_multiplexed(
                 channel.receive(frame.message)
             # EOF closes all channels; each server owns and flushes its runtime.
             for channel in tuple(channels.values()):
-                channel.receive(None)
+                channel.end_of_stream()
     finally:
         await transport.close()

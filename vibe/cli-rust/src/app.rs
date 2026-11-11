@@ -148,6 +148,8 @@ pub struct ChatInput {
     pub collapsed_pastes: crate::collapsed_pastes::CollapsedPastes,
     /// The paste just collapsed, which pasting it again shows in full until the next edit.
     pub expandable_paste: Option<std::sync::Arc<str>>,
+    /// Text removed by the last kill (Ctrl+K, Ctrl+U, Ctrl+W...), which Ctrl+Y yanks back.
+    pub kill_buffer: String,
     /// The composer as history recall found it, mentions and mode included,
     /// given back whole when Down leaves the recalled entries.
     pub recall_draft: Option<crate::edit_history::Snapshot>,
@@ -194,11 +196,12 @@ pub struct Session {
     pub prepared_worktree: Option<crate::worktree::WorktreeInfo>,
     /// Context budget `(current_tokens, max_tokens)`; `(_, 0)` renders as empty.
     pub tokens: (u64, u64),
-    /// The session's PR/MR artifacts, latest first; the footer shows the
-    /// latest as a link, or a modal listing them all when there are several.
+    /// The session's PR/MR artifacts, latest first; the footer link opens a modal listing them.
     pub artifacts: Vec<crate::server::PublicSessionArtifact>,
     /// The session `artifacts` was read for; a switch away re-reads the list.
     pub artifacts_session: Option<String>,
+    /// Artifacts whose status changed since the modal was last open; the bar marks them.
+    pub artifacts_unseen: std::collections::HashSet<String>,
     pub stats: crate::server::SessionStats,
     pub startup_config: StartupConfig,
     pub startup_error: Option<String>,
@@ -208,8 +211,6 @@ pub struct Session {
     pub agent_config: crate::server::AgentConfig,
     /// The positional `vibe <prompt>` argument, sent once startup has converged.
     pub initial_prompt: Option<String>,
-    /// `--teleport`: teleport the initial prompt instead of sending it.
-    pub teleport_on_start: bool,
     /// A `session/resume` has landed, so the handshake's own session is stale.
     pub resumed: bool,
     /// The workspace-trust gate opened during this startup.
@@ -233,6 +234,10 @@ pub struct Session {
     pub usage_baseline: Option<crate::server::TokenUsage>,
     /// The latest `runtime` value, for views that read it after the event.
     pub runtime: Value,
+    /// How many of the session's background processes run, from its latest state.
+    pub running_processes: usize,
+    /// What a running `wait` waits for, when the subagents and tasks name it.
+    pub wait_target: Option<String>,
 }
 
 /// Transcript rendering state: content, scroll, per-entry caches, and chrome.
@@ -281,6 +286,8 @@ pub struct View {
     /// Bottom-app box `(y, x0, x1)` cells painted as chrome (question option
     /// prefixes, scrollbars), so a selection never highlights or copies them.
     pub bottom_app_selection_chrome: Vec<RowSpan>,
+    /// A box split in halves: the columns of its left and right half a selection keeps to, by the half its anchor is in.
+    pub bottom_app_selection_halves: Option<(Rect, Rect)>,
     /// Bottom-app box rows that continue a wrapped line, so a copy rejoins them.
     pub bottom_app_selection_folds: crate::selection::Folds,
     /// The bottom app drawn last frame and its box rect, which own the box selection.
@@ -321,6 +328,10 @@ pub struct View {
     /// Entry index the next frame must bring to the top of the viewport,
     /// consumed by the render.
     pub scroll_to_entry: Option<usize>,
+    /// Entry index and painted rows of the prompt pinned over the transcript top last frame.
+    pub sticky_prompt: Option<(usize, u16)>,
+    /// The `enable_sticky_prompt` config value.
+    pub sticky_prompt_enabled: bool,
     /// Entry an expand/collapse toggle holds steady, consumed by the next render.
     pub scroll_anchor: Option<crate::utils::scroll::ScrollAnchor>,
     /// Per-frame `(index, viewport-relative top, height)` of each painted entry, bounded by the viewport.
@@ -336,7 +347,7 @@ impl Default for View {
         let mut loading = LoadingAnim::default();
         loading.set_label(ui::loading::INITIALIZING_LOADING_STATUS);
         Self {
-            transcript: Transcript::default(),
+            transcript: Transcript::main(),
             scroll: 0,
             scroll_target: 0,
             last_total: 0,
@@ -356,6 +367,7 @@ impl Default for View {
             loading_selection_region: Region::default(),
             bottom_app_selection_region: Region::default(),
             bottom_app_selection_chrome: Vec::new(),
+            bottom_app_selection_halves: None,
             bottom_app_selection_folds: crate::selection::Folds::default(),
             bottom_app: None,
             bottom_bar_links: Vec::new(),
@@ -374,6 +386,8 @@ impl Default for View {
             cursor_position: None,
             app_focus: true,
             scroll_to_entry: None,
+            sticky_prompt: None,
+            sticky_prompt_enabled: true,
             scroll_anchor: None,
             entry_rows: Vec::new(),
             at_top: false,
@@ -528,10 +542,12 @@ pub struct ModelPicker {
 /// The artifacts modal state (a bottom-app): the session's PR/MR links.
 #[derive(Default)]
 pub struct ArtifactsModal {
+    /// The config turns PR monitoring on, so `/pr` is offered.
+    pub enabled: bool,
     /// While set the modal replaces the input box: title, link rows, hint.
     pub open: bool,
-    /// Highlighted artifact (latest first) and the viewport.
-    pub list: crate::option_list::OptionList<crate::option_list::SingleAction>,
+    /// Highlighted artifact (latest first) and the viewport; a row has several actions (Enter, `c`, `f`).
+    pub list: crate::option_list::OptionList<crate::option_list::MultiAction>,
     /// Option rows from the last render; PageUp/PageDown move by its height.
     pub list_area: ratatui::layout::Rect,
 }
@@ -799,6 +815,7 @@ pub struct App {
     pub credential_client: Option<Arc<crate::server::Client>>,
     pub terminal_notifier: crate::terminal_notifier::TerminalNotifier,
     pub chat_input: ChatInput,
+    pub vim: crate::vim::Vim,
     pub session: Session,
     pub agents: Agents,
     pub view: View,
@@ -810,6 +827,7 @@ pub struct App {
     pub paste_image: crate::paste_image::State,
     pub voice: Voice,
     pub voice_app: crate::voice_app::VoiceApp,
+    pub branch_app: crate::branch_app::BranchApp,
     pub proxy_setup: crate::proxy_setup::ProxySetupApp,
     pub config_screen: ConfigScreen,
     pub release_notes: crate::release_notes::State,
@@ -819,9 +837,6 @@ pub struct App {
     pub thinking_picker: ThinkingPicker,
     pub artifacts_modal: ArtifactsModal,
     pub resume_picker: ResumePicker,
-    pub vibe_code_project: crate::vibe_code_project::State,
-    /// The running `/teleport` operation, if any.
-    pub teleport: Option<crate::teleport::Operation>,
     /// The latest written todo list, never seeded from history.
     pub todo_tracker: crate::todo_tracker::TodoTracker,
     pub todo_sidebar: crate::todo_tracker::TodoSidebar,
@@ -830,6 +845,7 @@ pub struct App {
     pub question_app: QuestionApp,
     pub mcp: MCPApp,
     pub plugins: crate::plugins::State,
+    pub skills_browser: crate::skills_browser::State,
     /// The `/context` bottom app.
     pub context_app: crate::context_app::State,
     pub mcp_oauth: MCPOAuthApp,
@@ -883,10 +899,9 @@ impl App {
     pub fn set_session_id(&mut self, session_id: String) {
         if self.session.session_id.as_deref() != Some(session_id.as_str()) {
             self.session.deferred_completion = None;
+            self.branch_app = Default::default();
             crate::program_status::reset_shell(self);
             self.terminal_notifier.clear_outcome();
-            self.vibe_code_project = Default::default();
-            crate::teleport::reset(self);
             // The retry offer names the previous session's turn and rows.
             crate::commands::retry::cancel(self);
             // A session switch starts a new log: drop the old session's lines
@@ -895,7 +910,11 @@ impl App {
             // The old session's PRs/MRs go with it; `artifacts::follow_session` reads the new ones.
             self.session.artifacts.clear();
             self.session.artifacts_session = None;
+            self.session.artifacts_unseen.clear();
             crate::artifacts_modal::close(self);
+            // The old session's background work is not the new one's.
+            self.session.running_processes = 0;
+            self.session.wait_target = None;
         }
         // The console's poll task reads the current id on every tick.
         if let Some(session_tx) = &self.debug_console.session_tx {
@@ -987,6 +1006,11 @@ impl App {
         self.view.mouse_regions.clear();
         crate::mouse::register_region(self, f.area(), crate::mouse::MouseTarget::Blocked);
         ui::draw(self, f);
+        crate::terminal_hyperlinks::mark(
+            self,
+            f.buffer_mut(),
+            crate::mouse::MouseTarget::Transcript,
+        );
     }
 }
 
@@ -1043,13 +1067,14 @@ impl App {
         self.view.scroll_anchor = crate::utils::scroll::bulk_toggle_anchor(
             self.view.scroll_target,
             &self.view.entry_rows,
+            self.view.sticky_prompt.map_or(0, |(_, rows)| rows),
         );
     }
 
     /// History (re)builds consult the bulk fold state: while expanded,
-    /// every rebuilt group and reasoning row mounts unfolded. Rebuilt tool
-    /// results keep their constructor's collapsed default, so only group keys
-    /// and reasoning ids join `expanded`. True rebuilds (resume, rewind) remount
+    /// every rebuilt group, reasoning row and loop prompt mounts unfolded. Rebuilt
+    /// tool results keep their collapsed default, so only group keys, reasoning
+    /// and loop prompt ids join `expanded`. True rebuilds (resume, rewind) remount
     /// every widget fresh, so their callers clear `expanded` first; the
     /// mid-turn snapshot path keeps live widget state and stays insert-only.
     pub fn expand_rebuilt_tools(&mut self) {
@@ -1061,7 +1086,7 @@ impl App {
             if let Some(group) = value.group.as_ref().filter(|group| group.first) {
                 expanded.insert(group.key.clone());
             }
-            if self.view.transcript.is_reasoning(value.id) {
+            if value.fired_loop.is_some() || self.view.transcript.is_reasoning(value.id) {
                 expanded.insert(value.id.to_owned());
             }
         }
@@ -1156,7 +1181,8 @@ impl App {
                 );
                 self.voice.recording = None;
                 self.voice.transcribe_state = TranscribeState::Idle;
-                crate::notices::failed(self, &format!("Voice transcription failed: {msg}"));
+                let message = format!("Voice transcription failed: {msg}");
+                crate::notices::inline(self, Severity::Error, &message);
             }
             VoiceEvent::Finished => {
                 crate::telemetry::record(

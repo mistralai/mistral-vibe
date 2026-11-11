@@ -148,6 +148,7 @@ pub fn paste(app: &mut App, text: String) {
         return;
     };
     if choices(&edit.field).is_empty() {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         crate::utils::input_edit::insert(&mut edit.draft, &mut edit.cursor, &text);
         edit.error = None;
     }

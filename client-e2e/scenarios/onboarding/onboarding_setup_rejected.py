@@ -5,8 +5,6 @@ from __future__ import annotations
 from e2e.app_server.scenario import Timeline
 
 client_args = ("--setup",)
-capture_startup = False
-capture_steps = set()
 exit_after_last_step = True
 request_methods = {"setup/status", "setup/store-credential", "setup/submit-choices"}
 

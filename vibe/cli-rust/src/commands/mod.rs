@@ -17,6 +17,6 @@ pub mod stress;
 pub mod submission;
 
 pub use commands::{
-    argument_hint, builtin, entries, has_command, is_side_channel, parse, waits_for_jobs,
+    argument_hint, builtin, entries, has_command, is_side_channel, parse, waits_for_jobs, Feature,
 };
-pub use event::CommandEvent;
+pub use event::{spawn_session, CommandEvent};

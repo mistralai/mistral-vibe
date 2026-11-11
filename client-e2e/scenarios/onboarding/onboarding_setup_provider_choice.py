@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 client_args = ("--setup",)
 exit_after_last_step = True
@@ -36,11 +36,17 @@ handshake = {
 request_methods = {"setup/status", "setup/store-credential", "setup/submit-choices"}
 
 timeline: Timeline = [
-    "\r",  # welcome -> theme
-    "\r",  # theme -> provider choice
-    "\r",  # Mistral AI -> the browser / API key choice
-    "\x1b",  # back to the provider choice
-    "\x1b[B\r",  # Set up litellm-anthropic -> its API key screen
-    "test-key-123",  # the masked card fills and validates
+    "\r",
+    take_snapshot(),  # welcome -> theme
+    "\r",
+    take_snapshot(),  # theme -> provider choice
+    "\r",
+    take_snapshot(),  # Mistral AI -> the browser / API key choice
+    "\x1b",
+    take_snapshot(),  # back to the provider choice
+    "\x1b[B\r",
+    take_snapshot(),  # Set up litellm-anthropic -> its API key screen
+    "test-key-123",
+    take_snapshot(),  # the masked card fills and validates
     "\r",  # submit: the litellm-anthropic key lands, then exit
 ]

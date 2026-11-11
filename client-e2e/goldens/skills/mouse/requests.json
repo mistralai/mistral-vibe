@@ -1,0 +1,51 @@
+[
+ {
+  "method": "skills/updates",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/installed",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/catalog",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/versions",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "skillId": "skill-deploy"
+  }
+ },
+ {
+  "method": "skills/detail",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "skillId": "skill-deploy",
+   "version": 2
+  }
+ },
+ {
+  "method": "skills/import",
+  "params": {
+   "alias": null,
+   "scope": "project",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "skillId": "skill-deploy",
+   "version": 1
+  }
+ },
+ {
+  "method": "skills/installed",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

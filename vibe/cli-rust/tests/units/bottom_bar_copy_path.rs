@@ -1,4 +1,4 @@
-//! The copy icon after the footer's cwd copies the whole path, even when the cwd is shortened.
+//! The copy icon after a shortened footer cwd copies the whole path; a cwd shown in full has none.
 
 use crossterm::event::{MouseButton, MouseEventKind};
 use tokio::sync::mpsc;
@@ -123,6 +123,36 @@ fn the_icon_is_inert_under_an_overlay_drawn_over_the_footer() {
     app.config_screen.open = true;
 
     assert!(bottom_bar::link_at(&app, (icon, 0)).is_none());
+}
+
+#[test]
+fn a_cwd_shown_in_full_has_no_icon() {
+    let mut app = App::default();
+    app.session.cwd = Some(CWD.into());
+    app.session.tokens = (0, 600_000);
+
+    let row = bottom_bar_row(&mut app, 120);
+
+    assert!(row.starts_with(&format!("{CWD} ")), "{row:?}");
+    assert!(!row.contains('⧉'));
+    assert!(app.view.bottom_bar_links.is_empty());
+}
+
+#[test]
+fn at_every_width_the_icon_shows_exactly_when_the_cwd_is_shortened_and_stays_in_the_row() {
+    let mut app = App::default();
+    app.session.cwd = Some(CWD.into());
+    app.session.tokens = (0, 600_000);
+
+    for width in 1..=60 {
+        let row = bottom_bar_row(&mut app, width);
+        let links = &app.view.bottom_bar_links;
+        assert!(
+            links.iter().all(|link| link.area.right() <= width),
+            "{width}: {row:?}"
+        );
+        assert_eq!(row.contains('⧉'), row.starts_with('…'), "{width}: {row:?}");
+    }
 }
 
 #[test]

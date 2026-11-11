@@ -9,6 +9,11 @@ const CLICK_CHAIN_TIME_THRESHOLD: Duration = Duration::from_millis(500);
 const DOUBLE_CLICK: u8 = 2;
 const TRIPLE_CLICK: u8 = 3;
 
+/// Whether a press at `now` still belongs to a click chain whose last press came `at`.
+pub fn chained(at: UiInstant, now: UiInstant) -> bool {
+    now.duration_since(at) <= CLICK_CHAIN_TIME_THRESHOLD
+}
+
 /// How much text one press selects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Granularity {
@@ -31,10 +36,8 @@ pub struct ClickChain {
 impl ClickChain {
     /// Advance the chain for a press on `target` and return its granularity.
     pub fn press(&mut self, target: (u16, u16), now: UiInstant) -> Granularity {
-        let within = self.last_target == Some(target)
-            && self
-                .last_at
-                .is_some_and(|at| now.duration_since(at) <= CLICK_CHAIN_TIME_THRESHOLD);
+        let within =
+            self.last_target == Some(target) && self.last_at.is_some_and(|at| chained(at, now));
         self.count = if within && !self.consumed {
             self.count.saturating_add(1)
         } else {

@@ -187,24 +187,6 @@ async fn flush_pending_rejects_non_side_channel_while_generating() {
     assert!(app.view.transcript.revision() > before);
 }
 
-/// A deferred teleport rejected at flush time goes back into the input.
-#[tokio::test]
-async fn flush_pending_restores_a_rejected_teleport() {
-    let mut app = App::default();
-    app.session.status = Status::Generating {
-        since: vibe_rs::clock::now(),
-    };
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-
-    app.pending_commands.push("&ship it".to_owned());
-    let exit = submission::flush_pending(&mut app, &stub(), &config_tx);
-
-    assert!(!exit);
-    assert_eq!(app.chat_input.full_text(), "&ship it");
-    assert_eq!(app.chat_input.cursor, 0);
-    assert!(app.teleport.is_none());
-}
-
 /// `flush_pending` with nothing deferred keeps a dismissed completion popup
 /// closed: a Ready event alone must not reset the user's completion state
 /// (Bugbot: ready resets open completions).

@@ -14,9 +14,9 @@ dispatches is the Core's own decision (``tools/external.rs``).
 The glob dialect is :mod:`fnmatch`, case-insensitive and anchored, so ``*``, ``?`` and
 ``[...]`` behave as they do in legacy. ``re:<regex>`` selects the regex dialect instead.
 
-A ``post_agent`` hook's ``match`` uses the same dialect against the agent that finished
-its turn: its agent configuration name and, for a main session (a root session or a
-fork), the ``main`` alias. See :func:`agent_candidate_names`.
+A ``pre_agent`` or ``post_agent`` hook's ``match`` uses the same dialect against the
+agent whose turn it is: its agent configuration name and, for a main session (a root
+session or a fork), the ``main`` alias. See :func:`agent_candidate_names`.
 """
 
 from __future__ import annotations
@@ -35,10 +35,9 @@ from mistralai_vibe_local_harness.protocol import (
 )
 
 # The Core rejects a ``tool_keys`` selector at these points, so they cannot be scoped
-# by tool. ``post_agent_turn`` is the only lifecycle point that takes a ``match``: it
-# selects the agent that finished its turn, applied by the Runtime at call time.
+# by tool. ``pre_agent_turn`` and ``post_agent_turn`` take a ``match`` that selects the
+# agent whose turn it is, applied by the Runtime at call time.
 _UNMATCHABLE_LIFECYCLE_POINTS: frozenset[RustHookPoint] = frozenset({
-    "pre_agent_turn",
     "pre_llm_call",
     "post_llm_call",
 })

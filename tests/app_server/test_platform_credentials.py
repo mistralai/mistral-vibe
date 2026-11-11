@@ -39,7 +39,11 @@ from vibe.core.platform_auth import (
     PlatformCredentialSnapshot,
     PlatformCredentialTarget,
 )
-from vibe.setup.auth._oidc_tenant import OidcTenant, OidcTenantResolver
+from vibe.setup.auth._oidc_tenant import (
+    OidcTenant,
+    OidcTenantResolver,
+    OidcUnauthorized,
+)
 
 
 class _ResolvingIdentityGateway:
@@ -727,3 +731,114 @@ async def test_a_desktop_connection_starts_a_session_without_an_api_key(
             broker_task.cancel()
             with suppress(asyncio.CancelledError):
                 await broker_task
+
+
+def _refreshing_desktop(
+    *, refreshed_token_accepted: bool
+) -> tuple[
+    ConnectionPlatformCredentialProvider,
+    list[PlatformCredentialsResolveParams],
+    AsyncMock,
+]:
+    """Desktop refreshes a refused ID token, as ``resolveOidcIdToken`` does,
+    and answers ``unauthorized_after_refresh`` when the refreshed one is
+    refused too. Workspace discovery refuses the first token, and the
+    refreshed one unless ``refreshed_token_accepted``.
+    """
+    old, fresh = _id_token(), _id_token() + "-refreshed"
+    requests: list[PlatformCredentialsResolveParams] = []
+
+    async def resolve(
+        params: PlatformCredentialsResolveParams,
+    ) -> PlatformCredentialsSnapshot | PlatformCredentialsUnavailable:
+        requests.append(params)
+        if params.rejected_revision == "fresh":
+            return PlatformCredentialsUnavailable(
+                status="unavailable", reason="unauthorized_after_refresh"
+            )
+        refreshed = params.rejected_revision == "old"
+        return PlatformCredentialsSnapshot(
+            status="ready",
+            kind="oidc_id_token",
+            token=fresh if refreshed else old,
+            audience=params.audience,
+            expires_at=2_000_000_000_000,
+            revision="fresh" if refreshed else "old",
+        )
+
+    async def discover(audience: str, token: str, workspace: str) -> OidcTenant:
+        del audience, workspace
+        if token == fresh and refreshed_token_accepted:
+            return OidcTenant("org-1", "ws-1")
+        raise OidcUnauthorized("refused")
+
+    discovery = AsyncMock(side_effect=discover)
+    provider = ConnectionPlatformCredentialProvider(
+        resolve, kind="oidc_id_token", tenants=OidcTenantResolver(discovery)
+    )
+    return provider, requests, discovery
+
+
+@pytest.mark.asyncio
+async def test_desktop_discovery_401_after_a_refresh_asks_to_update_or_sign_in() -> (
+    None
+):
+    """401 -> Desktop refreshes -> 401 again: Desktop's own answer, the mixed
+    reason, is reported; no third token is sent.
+    """
+    provider, requests, discovery = _refreshing_desktop(refreshed_token_accepted=False)
+
+    result = await provider.resolve(
+        PlatformCredentialTarget("https://api.mistral.ai/v1")
+    )
+
+    assert result == PlatformCredentialRequired(reason="unauthorized_after_refresh")
+    assert [request.rejected_revision for request in requests] == [None, "old", "fresh"]
+    assert discovery.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_desktop_discovery_401_recovers_when_the_refreshed_token_works() -> None:
+    """401 -> Desktop refreshes -> 200: the refreshed token is sent."""
+    provider, requests, _ = _refreshing_desktop(refreshed_token_accepted=True)
+
+    result = await provider.resolve(
+        PlatformCredentialTarget("https://api.mistral.ai/v1")
+    )
+
+    assert isinstance(result, PlatformCredentialSnapshot)
+    assert result.revision == "fresh"
+    assert [request.rejected_revision for request in requests] == [None, "old"]
+
+
+@pytest.mark.asyncio
+async def test_desktop_reports_its_unauthorized_after_refresh_reason() -> None:
+    """A model call's 401 reaches Desktop through ``reject``: Desktop's
+    answer for a refreshed token is passed through unchanged.
+    """
+
+    async def resolve(
+        params: PlatformCredentialsResolveParams,
+    ) -> PlatformCredentialsUnavailable:
+        del params
+        return PlatformCredentialsUnavailable(
+            status="unavailable", reason="unauthorized_after_refresh"
+        )
+
+    provider = ConnectionPlatformCredentialProvider(
+        resolve, kind="oidc_id_token", tenants=OidcTenantResolver()
+    )
+    target = PlatformCredentialTarget("https://api.mistral.ai/v1")
+    observed = PlatformCredentialSnapshot(
+        kind="oidc_id_token",
+        headers={"Authorization": "Bearer t"},
+        cache_namespace="oidc_id_token:desktop_connection",
+        revision="fresh",
+        source="test",
+    ).identity
+
+    result = await provider.reject(
+        target, observed=observed, reason="http_unauthorized"
+    )
+
+    assert result == PlatformCredentialRequired(reason="unauthorized_after_refresh")

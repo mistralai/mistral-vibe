@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The live session is `session/start`'s (…0001); the canned `session/read`
 # state (…0003, "Saved implementation") is a different, unrelated session.
@@ -106,4 +106,5 @@ timeline: Timeline = [
     assistant_msg("Hi there."),
     turn_completed(),
     "/compact\r",
+    take_snapshot(),
 ]

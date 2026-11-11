@@ -22,7 +22,7 @@ class ImportProject:
     name: str
     cwd: Path
     source_cwd: Path | None = None
-    # The cloud project the provisioner linked the folder to.
+    # The folder's saved link or local project, if any.
     project_id: str | None = None
 
 

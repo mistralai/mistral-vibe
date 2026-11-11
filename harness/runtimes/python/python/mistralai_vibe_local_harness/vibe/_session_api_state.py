@@ -707,6 +707,8 @@ def _turn_record(turn: PublicTurn) -> TurnRecord:
                 stop_reason=(
                     "iteration_limit"
                     if turn.stop_reason == "limit"
+                    else "output_limit"
+                    if turn.stop_reason == "length"
                     else "skipped"
                     if turn.skip_reason is not None
                     else "rejected"

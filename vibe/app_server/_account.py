@@ -21,6 +21,7 @@ from vibe.app_server.models import (
     AccountView,
 )
 from vibe.core.config import DEFAULT_VIBE_BASE_URL, VibeConfigSchema
+from vibe.core.config._vibe_base_url import resolve_vibe_base_url
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.platform_auth import (
     PlatformCredentialFactory,
@@ -270,8 +271,7 @@ class AccountController:
 
     async def _read(self) -> tuple[_TenantDomainUpdate | None, AccountView]:
         runtime_config = self._agent_loop.config
-        vibe_base_url = runtime_config.vibe_base_url
-        upgrade = _account_action(AccountActionKind.UPGRADE_TO_PRO, vibe_base_url)
+        vibe_base_url = resolve_vibe_base_url(runtime_config)
         # Resolve a Mistral credential (prefers the active provider, else the
         # first configured Mistral provider). Runs in a thread because key
         # resolution can touch the keyring / filesystem.
@@ -284,9 +284,7 @@ class AccountController:
                 # stamp NO_PLAN_DATA (distinct from the null "tried but failed"
                 # case) and show no account UI.
                 self._agent_loop.set_user_plan(NO_PLAN_DATA)
-                return None, AccountView(
-                    status=AccountStatus.UNAVAILABLE, teleport_action=upgrade
-                )
+                return None, AccountView(status=AccountStatus.UNAVAILABLE)
             # A Mistral provider is configured but its key is missing. Do NOT
             # clobber a user_plan the experiments path may have set; null
             # already signals the failure. Surface MISSING_KEY only when the
@@ -296,8 +294,7 @@ class AccountController:
                     AccountStatus.MISSING_KEY
                     if self._agent_loop.config.is_active_model_mistral()
                     else AccountStatus.UNAVAILABLE
-                ),
-                teleport_action=upgrade,
+                )
             )
 
         # Do NOT reset user_plan to None before the fetch. The experiments
@@ -317,7 +314,9 @@ class AccountController:
             )
         )
         try:
-            return await self._read_plan(mistral, principal, api_key, billing, upgrade)
+            return await self._read_plan(
+                mistral, principal, api_key, billing, vibe_base_url
+            )
         finally:
             billing.cancel()
             await asyncio.gather(billing, return_exceptions=True)
@@ -328,9 +327,9 @@ class AccountController:
         principal: str | None,
         api_key: str | None,
         billing: asyncio.Task[BillingRead],
-        upgrade: AccountAction,
+        vibe_base_url: str,
     ) -> tuple[_TenantDomainUpdate | None, AccountView]:
-        vibe_base_url = self._agent_loop.config.vibe_base_url
+        upgrade = _account_action(AccountActionKind.UPGRADE_TO_PRO, vibe_base_url)
         console_base_url = self._agent_loop.config.console_base_url
         try:
             result = await self._gateway.read(
@@ -343,22 +342,19 @@ class AccountController:
             # Suppress the account UI entirely for a non-Mistral active model;
             # otherwise surface the usual upgrade prompts.
             return None, (
-                AccountView(status=AccountStatus.UNAVAILABLE, teleport_action=upgrade)
+                AccountView(status=AccountStatus.UNAVAILABLE)
                 if not self._agent_loop.config.is_active_model_mistral()
                 else AccountView(
                     status=AccountStatus.UNAUTHORIZED,
                     plan_offer=_upgrade_offer(vibe_base_url),
                     rate_limit_action=upgrade,
-                    teleport_action=upgrade,
                 )
             )
         except AccountGatewayUnavailable as exc:
             logger.warning(
                 "Failed to fetch account status (%s)", type(exc).__name__, exc_info=exc
             )
-            return None, AccountView(
-                status=AccountStatus.UNAVAILABLE, teleport_action=upgrade
-            )
+            return None, AccountView(status=AccountStatus.UNAVAILABLE)
 
         # Warm the cross-session cache, and reconcile telemetry's plan fields
         # with this live result so user_plan and experiment_attributes never
@@ -405,10 +401,7 @@ class AccountController:
 
         if not self._agent_loop.config.is_active_model_mistral():
             return tenant_update, AccountView(
-                status=AccountStatus.UNAVAILABLE,
-                plan=plan_view,
-                teleport_action=upgrade,
-                api_key=api_key_view,
+                status=AccountStatus.UNAVAILABLE, plan=plan_view, api_key=api_key_view
             )
 
         switch_key = _account_action(AccountActionKind.SWITCH_API_KEY, vibe_base_url)
@@ -418,14 +411,11 @@ class AccountController:
         elif plan.offers_upgrade:
             plan_offer = _upgrade_offer(vibe_base_url)
 
-        teleport_eligible = plan.kind is not AccountPlanKind.MISTRAL_CODE
         return tenant_update, AccountView(
             status=AccountStatus.READY,
             plan=plan_view,
             plan_offer=plan_offer,
             rate_limit_action=(upgrade if plan.rate_limit_upgrade_available else None),
-            teleport_eligible=teleport_eligible,
-            teleport_action=None if teleport_eligible else switch_key,
             api_key=api_key_view,
             budget=_budget_view(reads),
         )

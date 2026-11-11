@@ -36,8 +36,6 @@ pub(super) fn run_command(
         "/theme" => theme_picker::open(app),
         "/model" => model_picker::open(app),
         "/thinking" => crate::thinking_picker::open(app),
-        "/remote-project" => crate::vibe_code_project::open(app, client),
-        "/teleport" => crate::teleport::command(app, client),
         "/log-level" => log_level_picker::open(app),
         "/debug" => crate::debug_console::toggle(app, client),
         "/resume" | "/continue" => resume_picker::open(app, client),
@@ -47,9 +45,10 @@ pub(super) fn run_command(
         "/plugins" => crate::plugins::show(app, client),
         "/context" => crate::context_app::open(app, client),
         "/reload-plugins" => crate::plugins::reload(app, client),
+        "/skills" => crate::skills_browser::show(app, client),
         "/leanstall" => super::leanstall::install_lean(app, client),
         "/unleanstall" => super::leanstall::uninstall_lean(app, client),
-        "/help" => add_text(app, &help_text()),
+        "/help" => add_text(app, &help_text(app)),
         "/clear" | "/new" | "/clean" => clear_history(app, client, value),
         "/compact" => super::compact::start_compact(app, client, value),
         "/copy" => copy_last_agent_message(app),
@@ -57,6 +56,12 @@ pub(super) fn run_command(
         "/status" => super::provider_auth::status(app, client),
         "/log" => read_log(app, client),
         "/rename" => rename_session(app, client, value),
+        "/pr" if app.artifacts_modal.enabled => crate::artifacts_modal::show(app, client),
+        "/pr" => ui::notice::show_sticky(
+            app,
+            Severity::Warning,
+            "Turn on enable_pr_monitoring to use /pr",
+        ),
         "/reload" => reload_config(app, client),
         "/retry" => {
             let args = command_args(value);

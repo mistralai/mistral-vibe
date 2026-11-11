@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 from scenarios.reverse_search._history import VOICE_OFF, sent
 
 handshake = VOICE_OFF
@@ -17,5 +17,5 @@ timeline: Timeline = [
     _UP,
     _DOWN,
     "\r",
+    take_snapshot(),
 ]
-capture_steps = {3, 4, 5, 6, 7, 8}

@@ -134,13 +134,6 @@ def hanging_agent_server() -> Iterator[FakeAgentServer]:
         yield _agent_server(stack, on_tool_call=_hang)
 
 
-def _wait_for_tool_call(server: FakeAgentServer) -> None:
-    deadline = time.monotonic() + 30
-    while "tools/call" not in server.methods:
-        assert time.monotonic() < deadline, "the run never called its tool"
-        time.sleep(0.05)
-
-
 @pytest.mark.parametrize("streaming_mock_server", [_look_up_then_finish], indirect=True)
 def test_concurrent_runs_end_on_their_own_and_one_abort_spares_the_others(
     streaming_mock_server: StreamingMockServer, tmp_path: Path
@@ -202,7 +195,7 @@ def test_the_server_ends_its_live_runs_before_it_exits(
         started = client.start_run(
             "hangs", hanging_agent_server.socket_path, outputDir=str(tmp_path / "out")
         )
-        _wait_for_tool_call(hanging_agent_server)
+        hanging_agent_server.wait_for_requests("tools/call")
 
         # Do
         if ending == "sigterm":
@@ -285,13 +278,10 @@ def test_runs_past_k_start_another_app_server_and_an_idle_one_exits(
 
         # Do
         client.start_run("first", hanging_agent_server.socket_path)
-        _wait_for_tool_call(hanging_agent_server)
+        hanging_agent_server.wait_for_requests("tools/call")
         alone = client.app_servers()
         client.start_run("second", hanging_agent_server.socket_path)
-        deadline = time.monotonic() + 30
-        while hanging_agent_server.methods.count("tools/call") < 2:
-            assert time.monotonic() < deadline, "the second run never called"
-            time.sleep(0.05)
+        hanging_agent_server.wait_for_requests("tools/call", count=2)
         together = client.app_servers()
         client.request("run/stop", {"runId": "first"})
         client.ended("first")
@@ -322,7 +312,7 @@ def test_a_killed_server_leaves_no_app_server(
     with run_server(tmp_path) as client:
         client.initialize()
         client.start_run("hangs", hanging_agent_server.socket_path)
-        _wait_for_tool_call(hanging_agent_server)
+        hanging_agent_server.wait_for_requests("tools/call")
         app_servers = client.app_server_pids()
 
         # Do

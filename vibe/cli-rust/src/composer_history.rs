@@ -11,6 +11,7 @@ pub fn before_key(app: &mut App, key: &KeyEvent) -> Option<(Snapshot, bool)> {
     let action = keymap::action_for(key);
     let edit = action.as_ref().is_some_and(Action::is_edit);
     let isolated = key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x')
+        || crate::composer_yank::is_yank_key(key)
         || key.code == KeyCode::Tab
         || key.code == KeyCode::Enter && completion_manager::is_open(app);
     if edit || isolated {

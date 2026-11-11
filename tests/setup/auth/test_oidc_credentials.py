@@ -605,3 +605,57 @@ async def test_failed_write_never_falls_back_to_env_file(tokens, monkeypatch, tm
 
     assert env_file.read_text(encoding="utf-8") == original
     assert sorted(path.name for path in tmp_path.iterdir()) == [".env"]
+
+
+@pytest.mark.asyncio
+async def test_take_returns_the_keyring_session_and_deletes_it(tokens, fake_keyring):
+    store = OidcCredentialStore()
+    await store.save(tokens)
+    rotated = tokens.model_copy(update={"refresh_token": SecretStr("rotated-refresh")})
+    # Another process rotated the slot behind this process's cached copy.
+    fake_keyring.values[_SERVICE, _ENTRY] = rotated.model_dump_json()
+    assert await store.take() == rotated
+    assert (_SERVICE, _ENTRY) not in fake_keyring.values
+    assert await store.take() is None
+
+
+@pytest.mark.asyncio
+async def test_take_cannot_interleave_with_a_conditional_write(
+    tokens, fake_keyring, monkeypatch
+):
+    """The session ``take`` returns is the one it deleted: a refresh that
+    rotates the slot runs entirely before or after it.
+    """
+    store = OidcCredentialStore()
+    other = OidcCredentialStore()
+    await store.save(tokens)
+    rotated = tokens.model_copy(update={"refresh_token": SecretStr("rotated-refresh")})
+    reading = asyncio.Event()
+    release = Event()
+    loop = asyncio.get_running_loop()
+    original_get = fake_keyring.get_password
+
+    def blocked_read(service, username):
+        value = original_get(service, username)
+        loop.call_soon_threadsafe(reading.set)
+        release.wait()
+        return value
+
+    monkeypatch.setattr(keyring, "get_password", blocked_read)
+    take = asyncio.create_task(other.take())
+    refresh = None
+    try:
+        await asyncio.wait_for(reading.wait(), 2)
+        monkeypatch.setattr(keyring, "get_password", original_get)
+        refresh = asyncio.create_task(store.save_if_current(rotated, expected=tokens))
+        await asyncio.sleep(0.05)
+        assert not refresh.done()
+        release.set()
+        assert await asyncio.wait_for(take, 2) == tokens
+        assert not await asyncio.wait_for(refresh, 2)
+        assert (_SERVICE, _ENTRY) not in fake_keyring.values
+    finally:
+        release.set()
+        await asyncio.gather(
+            take, *([refresh] if refresh else []), return_exceptions=True
+        )

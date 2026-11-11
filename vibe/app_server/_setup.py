@@ -43,7 +43,7 @@ from vibe.setup.auth.api_key_persistence import (
     persist_provider_credentials,
     resolve_api_key_provider,
 )
-from vibe.utils.api_keys import resolve_api_key
+from vibe.utils.api_keys import resolve_api_key, uses_cli_oidc_credential
 
 if TYPE_CHECKING:
     from vibe.app_server._connection_protocol import ClientInfo
@@ -116,7 +116,7 @@ class SetupRequestHandler:
     ) -> SetupStoreCredentialResponse:
         orchestrator = await self._orchestrator()
         provider = _named_provider(orchestrator.config, params.provider)
-        if oidc_enabled() and provider.api_key_env_var == "MISTRAL_API_KEY":
+        if uses_cli_oidc_credential(provider.api_key_env_var):
             raise RequestFailure(
                 ProtocolErrorCode.INVALID_PARAMS,
                 "OIDC mode requires browser sign-in; disable VIBE_CLI_OIDC_ENABLED to use an API key",

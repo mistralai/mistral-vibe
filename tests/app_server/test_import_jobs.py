@@ -5,7 +5,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import threading
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 import pytest
@@ -119,26 +119,30 @@ class RecordingProjectProvisioner:
 class RecordingProjectLinks:
     def __init__(
         self,
+        saved_links: dict[str, str] | None = None,
         failing_roots: set[str] | None = None,
         canonical_roots: dict[str, str] | None = None,
     ) -> None:
-        self.calls: list[tuple[str, str]] = []
+        self.calls: list[str] = []
+        self.saved_links = saved_links or {}
         self.failing_roots = failing_roots or set()
         self.canonical_roots = canonical_roots or {}
 
-    async def ensure_import_project(
-        self, root_path: str, name: str
-    ) -> dict[str, object]:
-        self.calls.append((root_path, name))
+    async def inspect_root(self, root_path: str) -> dict[str, Any]:
+        self.calls.append(root_path)
         if root_path in self.failing_roots:
-            raise RuntimeError("project provisioning failed")
-        # ProjectLinksController._link_dict is the producer of this response shape.
+            raise RuntimeError("project inspection failed")
+        project_id = self.saved_links.get(root_path)
+        # ProjectLinksController.inspect_root is the producer of this response shape.
         return {
-            "link": {
-                "projectId": "project-id",
-                "projectName": name,
-                "directoryPath": self.canonical_roots.get(root_path, root_path),
-            }
+            "eligible": True,
+            "root": {"directoryPath": self.canonical_roots.get(root_path, root_path)},
+            "savedLink": (
+                {"projectId": project_id, "projectName": "Linked"}
+                if project_id is not None
+                else None
+            ),
+            "staleLinkCleared": False,
         }
 
 
@@ -603,6 +607,15 @@ async def test_claude_runner_stamps_imported_sessions_with_their_project(
 
 
 @pytest.mark.asyncio
+async def test_claude_runner_imports_an_unlinked_folder_without_a_project(
+    tmp_path: Path,
+) -> None:
+    await _claude_importer(tmp_path, local_projects=None, linked_project_id=None).run()
+
+    assert not _imported_meta(tmp_path).exists()
+
+
+@pytest.mark.asyncio
 async def test_claude_runner_stamps_the_local_project_backed_by_the_import_project(
     tmp_path: Path, config_dir: Path
 ) -> None:
@@ -642,7 +655,10 @@ async def test_claude_runner_rerun_leaves_an_imported_sessions_metadata_alone(
 
 
 def _claude_importer(
-    tmp_path: Path, *, local_projects: LocalProjectStore | None
+    tmp_path: Path,
+    *,
+    local_projects: LocalProjectStore | None,
+    linked_project_id: str | None = "project-id",
 ) -> ClaudeImportService:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -671,7 +687,13 @@ def _claude_importer(
     return ClaudeImportService(
         ClaudeProjectSource(config_path),
         ClaudeSessionSource(projects_path.parent),
-        VibeProjectService(RecordingProjectLinks()),
+        VibeProjectService(
+            RecordingProjectLinks(
+                {str(workspace): linked_project_id}
+                if linked_project_id is not None
+                else None
+            )
+        ),
         build_writer,
     )
 
@@ -724,6 +746,9 @@ async def test_app_server_discovers_claude_projects_and_their_sessions(
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
     )
 
@@ -736,50 +761,44 @@ async def test_app_server_discovers_claude_projects_and_their_sessions(
 
 
 @pytest.mark.asyncio
-async def test_vibe_project_service_provisions_every_import_project() -> None:
-    """*Prepare*: Source projects whose links resolve to canonical roots.
-    *Do*: Provision the import projects.
-    *Assert*: Returned projects retain source roots and use canonical destinations.
+async def test_vibe_project_service_reuses_saved_links() -> None:
+    """*Prepare*: One linked source project whose link resolves to a canonical root.
+    *Do*: Resolve the import projects.
+    *Assert*: The project keeps its source root and uses the linked project.
     """
     # Prepare
     project_links = RecordingProjectLinks(
-        canonical_roots={"/workspace/one": "/repos/one", "/workspace/two": "/repos/two"}
+        saved_links={"/workspace/one": "project-one"},
+        canonical_roots={"/workspace/one": "/repos/one"},
     )
     service = VibeProjectService(project_links)
-    projects = [
-        ImportProject(name="One", cwd=Path("/workspace/one")),
-        ImportProject(name="Two", cwd=Path("/workspace/two")),
-    ]
+    projects = [ImportProject(name="One", cwd=Path("/workspace/one"))]
 
     # Do
-    provisioned = await service.ensure_projects(projects)
+    resolved = await service.ensure_projects(projects)
 
     # Assert
-    assert project_links.calls == [("/workspace/one", "One"), ("/workspace/two", "Two")]
-    assert provisioned == [
+    assert project_links.calls == ["/workspace/one"]
+    assert resolved == [
         ImportProject(
             name="One",
             cwd=Path("/repos/one"),
             source_cwd=Path("/workspace/one"),
-            project_id="project-id",
-        ),
-        ImportProject(
-            name="Two",
-            cwd=Path("/repos/two"),
-            source_cwd=Path("/workspace/two"),
-            project_id="project-id",
-        ),
+            project_id="project-one",
+        )
     ]
 
 
 @pytest.mark.asyncio
-async def test_vibe_project_service_skips_failed_projects_and_continues() -> None:
-    """*Prepare*: Two source projects with one provisioning failure.
-    *Do*: Provision both projects.
-    *Assert*: The failure is skipped and the successful project is canonicalized.
+async def test_vibe_project_service_leaves_unlinked_and_failed_folders_unlinked() -> (
+    None
+):
+    """*Prepare*: One unlinked source project and one whose inspection fails.
+    *Do*: Resolve the import projects without local projects.
+    *Assert*: Both stay importable without a project.
     """
     # Prepare
-    project_links = RecordingProjectLinks({"/workspace/one"})
+    project_links = RecordingProjectLinks(failing_roots={"/workspace/two"})
     service = VibeProjectService(project_links)
     projects = [
         ImportProject(name="One", cwd=Path("/workspace/one")),
@@ -787,15 +806,49 @@ async def test_vibe_project_service_skips_failed_projects_and_continues() -> Non
     ]
 
     # Do
-    provisioned = await service.ensure_projects(projects)
+    resolved = await service.ensure_projects(projects)
 
     # Assert
-    assert project_links.calls == [("/workspace/one", "One"), ("/workspace/two", "Two")]
-    assert provisioned == [
-        ImportProject(
-            name="Two",
-            cwd=Path("/workspace/two"),
-            source_cwd=Path("/workspace/two"),
-            project_id="project-id",
-        )
-    ]
+    assert project_links.calls == ["/workspace/one", "/workspace/two"]
+    assert resolved == projects
+
+
+@pytest.mark.asyncio
+async def test_vibe_project_service_creates_one_local_project_per_unlinked_folder(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """*Prepare*: An unlinked folder with local projects enabled.
+    *Do*: Resolve the import projects twice.
+    *Assert*: One local project is created and reused on the second run.
+    """
+    # Prepare
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    store = LocalProjectStore(config_dir / "local_projects.toml")
+
+    async def local_projects() -> LocalProjectStore:
+        return store
+
+    service = VibeProjectService(RecordingProjectLinks(), local_projects)
+    projects = [ImportProject(name="Workspace", cwd=workspace)]
+
+    # Do
+    first = await service.ensure_projects(projects)
+    second = await service.ensure_projects(projects)
+
+    # Assert
+    [local] = store.list_projects()
+    assert local.name == "Workspace"
+    assert local.root_paths == (workspace,)
+    assert (
+        first
+        == second
+        == [
+            ImportProject(
+                name="Workspace",
+                cwd=workspace,
+                source_cwd=workspace,
+                project_id=local.id,
+            )
+        ]
+    )

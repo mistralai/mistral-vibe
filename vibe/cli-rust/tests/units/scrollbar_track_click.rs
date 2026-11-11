@@ -28,6 +28,16 @@ fn click_above_thumb_pages_transcript_up() {
 }
 
 #[test]
+fn a_track_click_under_a_pinned_prompt_pages_by_the_rows_it_leaves_visible() {
+    let mut app = transcript(90);
+    app.view.sticky_prompt = Some((0, 3));
+
+    click(&mut app, 0);
+
+    assert_eq!(app.view.scroll_target, 7);
+}
+
+#[test]
 fn click_below_thumb_pages_transcript_down() {
     let mut app = transcript(50);
     app.view.scroll = 40;
@@ -200,8 +210,8 @@ fn track_side_and_page_follow_the_thumb() {
     assert_eq!(state.track_side((10, 10)), None);
     assert_eq!(state.track_side((10, 4)), Some(Side::Above));
     assert_eq!(state.track_side((10, 6)), Some(Side::Below));
-    assert_eq!(state.page(Side::Above), Some(40));
-    assert_eq!(state.page(Side::Below), Some(50));
+    assert_eq!(state.page(Side::Above, 0), Some(40));
+    assert_eq!(state.page(Side::Below, 0), Some(50));
     assert_eq!(state.track_side((10, 5)), None);
 }
 

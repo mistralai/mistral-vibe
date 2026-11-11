@@ -14,7 +14,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import AppServerEvent, Timeline
+from e2e.app_server.scenario import AppServerEvent, Timeline, take_snapshot
 
 
 def _snapshot(retrying: dict[str, Any] | None) -> AppServerEvent:
@@ -44,4 +44,5 @@ timeline: Timeline = [
     {"release": 4},
     {"release": 1},
     {"release": 2},
+    take_snapshot(),
 ]

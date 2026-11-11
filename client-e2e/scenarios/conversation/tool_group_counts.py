@@ -44,4 +44,6 @@ timeline: Timeline = [
     "\x0f",
     # A narrow terminal ellipsizes the group header to one row.
     {"resize": (40, 40)},
+    # One wheel step up shows the prompt itself, so it no longer pins over the group header.
+    "\x1b[<64;20;10M",
 ]

@@ -62,6 +62,20 @@ def test_missing_key_missing_file_and_corrupt_file_all_return_none(
     assert load_keyed_entry(path, "user-a", ttl_seconds=_TTL, parse=_parse) is None
 
 
+def test_non_utf8_file_is_ignored_and_overwritten(tmp_path: Path) -> None:
+    path = tmp_path / "cache.json"
+    store_keyed_entry(path, "user-a", {"value": 1})
+    with path.open("ab") as f:
+        f.write(b"\xff")
+
+    assert load_keyed_entry(path, "user-a", ttl_seconds=_TTL, parse=_parse) is None
+
+    store_keyed_entry(path, "user-a", {"value": 2})
+    assert load_keyed_entry(path, "user-a", ttl_seconds=_TTL, parse=_parse) == {
+        "value": 2
+    }
+
+
 def test_parse_rejecting_the_payload_returns_none(tmp_path: Path) -> None:
     path = tmp_path / "cache.json"
     store_keyed_entry(path, "user-a", {"not_value": 1})

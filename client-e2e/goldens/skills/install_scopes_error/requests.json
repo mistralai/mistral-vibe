@@ -1,0 +1,59 @@
+[
+ {
+  "method": "skills/updates",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/installed",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/catalog",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "skills/detail",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "skillId": "skill-translate",
+   "version": 4
+  }
+ },
+ {
+  "method": "skills/versions",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "skillId": "skill-translate"
+  }
+ },
+ {
+  "method": "skills/detail",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "skillId": "skill-translate",
+   "version": 3
+  }
+ },
+ {
+  "method": "skills/import",
+  "params": {
+   "alias": "latest",
+   "scope": "global",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "skillId": "skill-translate",
+   "version": null
+  }
+ },
+ {
+  "method": "skills/installed",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

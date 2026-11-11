@@ -21,6 +21,7 @@ from vibe.app_server.protocol import (
     AppServerResponseError,
     ClientCapabilities,
     ConfigWriteOpWire,
+    ModelConfigWriteParams,
     ProtocolErrorCode,
     SessionOptions,
 )
@@ -290,6 +291,157 @@ async def test_explicit_active_model_target_controls_session_pin_update(
 
 @pytest.mark.both_paths
 @pytest.mark.asyncio
+async def test_a_queued_turn_pins_the_model_a_resume_restores(
+    config_dir: Path,
+    tmp_path: Path,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A session whose user moves the default to another model.
+    *Do*: Send the prompt through the queue, as the CLI does, then move the
+    default back and resume the session.
+    *Assert*: The queued turn pinned its model and agent, and the resumed
+    session runs that model rather than the current default.
+    """
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["models"].append({
+        "name": "alternate-model",
+        "provider": "mistral",
+        "alias": "alternate",
+    })
+    session_root = tmp_path / "sessions"
+    config["session_logging"] = {"enabled": True, "save_dir": str(session_root)}
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("stored")
+    )
+
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    session = await connection.host.open_session()
+    try:
+        default_model = session.resources.config.current.active_model.alias
+        assert default_model != "alternate"
+        await session.resources.config.update(
+            {"active_model": "alternate"}, target_layer="user-toml", reload_runtime=True
+        )
+        assert session.resources.config.current.active_model.alias == "alternate"
+        agent = session.resources.agents.active.name
+        await session.enqueue("pin this model")
+        await asyncio.wait_for(_next_turn_completed(session), timeout=5)
+        session_id = session.session_id
+    finally:
+        await session.close()
+
+    assert _stored_active_model(session_root, session_id) == "alternate"
+    assert _stored_agent_name(session_root, session_id) == agent
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["active_model"] = default_model
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+    resumed_connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    resumed = await resumed_connection.host.resume_session(session_id)
+    try:
+        assert resumed.resources.config.current.active_model.alias == "alternate"
+        assert resumed.resources.config.current.active_model_pinned is True
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_model_picked_mid_turn_is_pinned_by_the_turn_queued_behind_it(
+    config_dir: Path,
+    tmp_path: Path,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A session running a turn.
+    *Do*: Queue a prompt and pick another model for this session while the
+    turn runs, then let both turns finish.
+    *Assert*: The queued turn records the pick, which only the session's own
+    layer holds, and a resume runs it.
+    """
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["models"].append({
+        "name": "alternate-model",
+        "provider": "mistral",
+        "alias": "alternate",
+    })
+    session_root = tmp_path / "sessions"
+    config["session_logging"] = {"enabled": True, "save_dir": str(session_root)}
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    started = asyncio.Event()
+    release = asyncio.Event()
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_gated_mistral_response(
+                "first", started=started, release=release
+            ),
+            backend_contract_mistral_response("second"),
+        ]
+    )
+
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    session = await connection.host.open_session()
+    try:
+        default_model = session.resources.config.current.active_model.alias
+        assert default_model != "alternate"
+        await session.enqueue("first")
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await session.enqueue("second")
+        # Session-only, as the CLI's `s` key picks: nothing records it on the
+        # session but the turn that runs on it.
+        await connection.client.request(
+            "config/model/write",
+            ModelConfigWriteParams(
+                session_id=session.session_id,
+                model_alias="alternate",
+                session_only=True,
+            ),
+        )
+        release.set()
+        await asyncio.wait_for(_next_turn_completed(session), timeout=5)
+        await asyncio.wait_for(_next_turn_completed(session), timeout=5)
+        session_id = session.session_id
+    finally:
+        await session.close()
+
+    assert _stored_active_model(session_root, session_id) == "alternate"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["active_model"] = default_model
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+    resumed_connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    resumed = await resumed_connection.host.resume_session(session_id)
+    try:
+        assert resumed.resources.config.current.active_model.alias == "alternate"
+    finally:
+        await resumed.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
 async def test_removed_session_active_model_falls_back_to_default(
     config_dir: Path,
     tmp_path: Path,
@@ -368,6 +520,16 @@ def _stored_active_model(session_root: Path, session_id: str) -> str | None:
     )
 
 
+def _stored_agent_name(session_root: Path, session_id: str) -> str | None:
+    from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
+
+    return (
+        UnifiedSessionStore(session_root, session_id)
+        .load()
+        .runtime_state.session_metadata.agent_name
+    )
+
+
 def _session_model_is_persisted(session_root: Path, session_id: str) -> bool:
     from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 
@@ -421,7 +583,7 @@ async def _turn_running(
 
 @pytest.mark.one_path
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", ["write", "mixed_write", "reload", "teleport"])
+@pytest.mark.parametrize("operation", ["write", "mixed_write", "reload"])
 async def test_turn_affecting_mutations_conflict_while_a_turn_is_running(
     operation: str,
     backend_contract_gated_mistral_response: Callable[..., httpx.Response],
@@ -443,10 +605,8 @@ async def test_turn_affecting_mutations_conflict_while_a_turn_is_running(
                         "theme": "nord",
                         "disabled_tools": ["grep"],
                     })
-                case "reload":
-                    await resources.config.reload()
                 case _:
-                    await resources.vibe_code.open_projects(for_teleport=True)
+                    await resources.config.reload()
 
     assert exc_info.value.error.code is ProtocolErrorCode.CONFLICT
 
@@ -501,25 +661,6 @@ async def test_proxy_settings_save_while_a_turn_is_running(
 
     settings = await config.read_proxy()
     assert settings.values["HTTP_PROXY"] == "http://proxy.example.com:8080"
-
-
-@pytest.mark.one_path
-@pytest.mark.asyncio
-async def test_remote_project_picker_reaches_the_repository_check_while_a_turn_is_running(
-    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
-    backend_contract_mistral_api: respx.Route,
-    backend_contract_session: AppServerSession,
-) -> None:
-    async with _turn_running(
-        backend_contract_session,
-        backend_contract_gated_mistral_response,
-        backend_contract_mistral_api,
-    ):
-        with pytest.raises(AppServerResponseError) as exc_info:
-            await backend_contract_session.resources.vibe_code.open_projects()
-
-    assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
-    assert "requires a git repository" in exc_info.value.error.message
 
 
 @pytest.mark.both_paths

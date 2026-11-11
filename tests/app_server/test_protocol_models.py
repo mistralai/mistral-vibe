@@ -1013,3 +1013,21 @@ def test_validate_backend_wire_still_requires_fields_without_defaults() -> None:
 
     with pytest.raises(ValidationError):
         validate_backend_wire(_Needs, {"unrelated": 1})
+
+
+def test_cumulative_budgets_validate_values_in_every_mode() -> None:
+    """*Prepare*: Interactive and headless session configs with cumulative budgets.
+    *Do*: Validate zero, interactive, negative, and non-finite budget values.
+    *Assert*: Budgets need no headless flag; negative and non-finite values fail.
+    """
+    # Prepare / Do / Assert
+    config = AgentConfig(headless=True, max_session_tokens=0, max_price=0)
+    assert config.max_session_tokens == 0
+    assert config.max_price == 0
+    interactive = AgentConfig(max_session_tokens=10, max_price=1.5)
+    assert interactive.max_session_tokens == 10
+    assert interactive.max_price == 1.5
+    with pytest.raises(ValueError, match="greater than or equal to 0"):
+        AgentConfig(max_session_tokens=-1)
+    with pytest.raises(ValueError, match="finite number"):
+        AgentConfig(max_price=float("nan"))

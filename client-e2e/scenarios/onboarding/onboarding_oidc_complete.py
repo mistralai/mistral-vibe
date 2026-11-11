@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Action, Timeline, advance
+from e2e.app_server.scenario import Action, Timeline, advance, take_snapshot
 
 client_args = ("--setup",)
-capture_startup = False
-capture_steps = {4}
 exit_after_last_step = True
 request_methods = {
     "setup/status",
@@ -30,6 +28,7 @@ timeline: Timeline = [
     "\x1b[B",  # select atom-one-dark
     "\r",  # theme -> auth method
     "\r",  # browser -> target
-    "\r",  # Mistral AI -> OIDC: "Sign-in complete"
+    "\r",
+    take_snapshot(),  # Mistral AI -> OIDC: "Sign-in complete"
     advance(2000),  # the success dwell ends: choices, then session
 ]

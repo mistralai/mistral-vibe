@@ -25,7 +25,6 @@ _SKILLS = [
 
 handshake = {"runtime/read": {"runtime": {"skills": _SKILLS}}}
 
-capture_startup = False
 screen_contains = (
     "user · Draft the changelog entry.",
     "project · Summarize the CI run.",

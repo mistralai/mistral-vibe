@@ -21,7 +21,7 @@ from pydantic import (
 )
 
 from vibe.core.experiments.models import EvalResponse
-from vibe.core.session.artifacts import SessionArtifact
+from vibe.core.session.artifacts import SessionArtifact, WorktreeArtifact
 from vibe.user_content import UserDisplayContent, UserResource
 from vibe.utils.tool_presentation import ToolCallPresentation, ToolResultPresentation
 
@@ -125,6 +125,7 @@ class SessionMetadata(BaseModel):
     # Durable external work products (PRs/MRs) observed during this session.
     # Absent from sessions written before this field existed; defaults to [].
     artifacts: list[SessionArtifact] = Field(default_factory=list)
+    worktrees: list[WorktreeArtifact] = Field(default_factory=list)
 
 
 class FunctionCall(BaseModel):

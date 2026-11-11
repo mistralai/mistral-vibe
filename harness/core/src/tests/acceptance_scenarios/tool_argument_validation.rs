@@ -104,6 +104,58 @@ fn invalid_direct_provided_tool_arguments_return_to_model_context_without_dispat
 }
 
 ///
+/// *Prepare*: A direct provided tool whose input schema is `{}`, which accepts any value.
+/// *Do*: The model calls it with a string, a list, a number or `null` instead of an object.
+/// *Assert*: Core never dispatches the tool and returns the schema failure to the model.
+///
+#[test]
+fn direct_call_with_a_value_other_than_an_object_returns_to_model_context_without_dispatch() {
+    for arguments in [json!("x"), json!([1]), json!(5), json!(null)] {
+        // Prepare
+        let turn_id = "turn-non-object-arguments";
+        let tool = json!({"name": "search", "exposure": "direct", "input_schema": {}});
+        let mut harness_config = config();
+        harness_config.capabilities.tool_groups = serde_json::from_value(json!([{
+            "name": "customers",
+            "description": "Customer tools",
+            "tools": [tool],
+        }]))
+        .expect("provided tool configuration is valid");
+        let mut runtime = SynchronousRuntime::new(harness_config);
+        let first_completion = runtime.start_turn(turn_id, "search");
+        let calls = vec![tool_call("non-object-call", "search", arguments.clone())];
+
+        // Do
+        let error = schema_error(&format!("{arguments} is not of type \"object\""));
+        let retry = runtime
+            .apply(
+                tool_call_completion(action_id(&first_completion), calls.clone()),
+                running(turn_id)
+                    .dispatch(llm_call(1))
+                    .observe(assistant_tool_calls_committed(
+                        turn_id,
+                        &first_completion,
+                        &calls,
+                    ))
+                    .observe(tool_execution_started(turn_id, "non-object-call"))
+                    .observe(tool_execution_finished(
+                        turn_id,
+                        "non-object-call",
+                        invalid_tool_call_result(&error),
+                    )),
+            )
+            .only_action();
+
+        // Assert
+        let expected_messages = [
+            model_assistant_tool_calls(&calls),
+            model_invalid_tool_call("non-object-call", "search", &error),
+        ];
+        runtime.assert_last_model_message_update(&retry, "append", &expected_messages);
+    }
+}
+
+///
 /// *Prepare*: A turn has the direct Runtime-owned `read_file` tool, which rejects unknown fields.
 /// *Do*: The model calls it with `file_path` instead of `path`.
 /// *Assert*: The error lists the fields the tool accepts and names the one the model most likely meant.

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -240,8 +239,7 @@ class LocalSkillsController:
         """
         files = self._session_files(project_root)
         if project_root is not None and trust_workspace:
-            files = replace(files, trust_store=files.trust_store.for_session())
-            files.trust_store.trust_for_session(project_root)
+            files = files.trusting(project_root)
         orchestrator = await self._load_orchestrator(files)
         config = orchestrator.config
         return SkillToggles(
@@ -265,7 +263,7 @@ def _remaining_names(
     configured = SkillManager(
         lambda: config, harness_files=HarnessFilesManager(sources=())
     )
-    names.update(skill.name for skill in configured.installed_skills())
+    names.update(skill.info.name for skill in configured.installed_skills())
     # Pins count before they are downloaded: sessions fetch them later.
     if config.experimental_enable_registry_skills:
         names |= pinned_names_sync([root for root in roots if root is not None])

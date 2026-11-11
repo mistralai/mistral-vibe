@@ -153,6 +153,12 @@ class LegacySessionStore:
             last_event_id=0,
         )
 
+    def has_session(self, session_id: str) -> bool:
+        return (
+            SessionLoader.find_session_by_id(session_id, self._config.session_logging)
+            is not None
+        )
+
     def resolver(self) -> LegacySourceResolver:
         """Callable the host uses to map a requested ID to a legacy folder.
 

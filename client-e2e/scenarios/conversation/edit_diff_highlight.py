@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import edit_file, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "edit the file"
 
@@ -15,4 +15,5 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     edit_file("greet.py", [(3, _OLD, _NEW)]),
     turn_completed(),
+    take_snapshot(),
 ]

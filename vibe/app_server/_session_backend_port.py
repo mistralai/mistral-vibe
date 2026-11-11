@@ -56,6 +56,8 @@ from vibe.app_server.protocol import (
     SessionListParams,
     SessionListResponse,
     SessionMarkAsSeenParams,
+    SessionMoveParams,
+    SessionMoveResponse,
     SessionPinParams,
     SessionPinResponse,
     SessionReadParams,
@@ -355,11 +357,14 @@ class SessionBackendError(Exception):
         *,
         after_response: Callable[[], None] | None = None,
         on_response_abandoned: Callable[[], None] | None = None,
+        expected: bool = False,
     ) -> None:
         self.code = code
         self.data = data
         self.after_response = after_response
         self.on_response_abandoned = on_response_abandoned
+        # A refusal or run outcome the client explains to the user, never a Vibe bug.
+        self.expected = expected
         super().__init__(message)
 
     @classmethod
@@ -416,6 +421,8 @@ class SessionHistoryClearResult:
     state: PublicSessionState
     session_log: SessionLogSummary
     after_response: Callable[[], None] | None = None
+    # Run if the server fails to adopt ``backend``: the source session goes on.
+    on_failure: Callable[[], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -734,6 +741,15 @@ class SessionBackendHostRelocate(Protocol):
 
 
 @runtime_checkable
+class SessionBackendHostMove(Protocol):
+    """Optional selected-backend ownership of moving a session to another project."""
+
+    async def move(
+        self, params: SessionMoveParams, attached: SessionBackend | None
+    ) -> SessionMoveResponse: ...
+
+
+@runtime_checkable
 class SessionBackendHistoryClearHost(Protocol):
     async def clear_history(
         self, source: SessionBackend, params: SessionHistoryClearParams
@@ -753,6 +769,13 @@ class SessionBackendRewindForkHost(Protocol):
     async def rewind_fork(
         self, source: SessionBackend, params: SessionRewindParams
     ) -> SessionRewindForkResult: ...
+
+
+@runtime_checkable
+class SessionBackendHostClientLoss(Protocol):
+    """Optional report that the client went away without a ``session/stop``."""
+
+    def mark_client_disconnected(self) -> None: ...
 
 
 @runtime_checkable

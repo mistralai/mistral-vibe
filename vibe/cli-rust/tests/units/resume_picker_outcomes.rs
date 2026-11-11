@@ -2,10 +2,11 @@
 
 use crossterm::event::KeyCode;
 use serde_json::json;
-use vibe_rs::app::{App, Status};
+use vibe_rs::app::{App, Severity, Status};
 use vibe_rs::resume_picker::{self, Event, Session};
 use vibe_rs::server::PublicSessionState;
 
+use crate::feedback_support::notice;
 use crate::support::{message, messages, session_state, stub};
 
 pub const CURRENT: &str = "current-session";
@@ -95,8 +96,110 @@ async fn a_successful_resume_retires_the_running_turn() {
         messages(&app),
         [
             row("user", "Saved question"),
-            row("command_status", "Resumed session `saved-se`")
+            row("command_status", "Resumed session `ession-1`")
         ]
+    );
+}
+
+#[tokio::test]
+async fn resuming_a_session_mid_turn_shows_its_loader() {
+    let mut app = picking();
+    resuming(&mut app);
+    let mut state = session_state(
+        SAVED,
+        vec![json!({
+            "id": "saved-wait",
+            "type": "effect",
+            "turnId": "turn-waiting",
+            "generationStatus": "in_progress",
+            "detail": {
+                "toolName": "self.wait",
+                "kind": "tool",
+                "display": {"statusText": "Waiting for background work"},
+            },
+            "state": {"status": "running"},
+        })],
+    );
+    state.session.status = serde_json::from_value(json!({
+        "type": "running",
+        "activeTurnId": "turn-waiting",
+    }))
+    .ok();
+    resume_picker::apply_event(
+        &mut app,
+        &stub(),
+        Event::Resumed {
+            id: SAVED.into(),
+            state,
+        },
+    );
+    assert!(matches!(app.session.status, Status::Generating { .. }));
+    assert_eq!(app.session.active_turn_id.as_deref(), Some("turn-waiting"));
+    assert_eq!(app.view.loading.label(), "Waiting for background work");
+}
+
+#[tokio::test]
+async fn resuming_a_mid_turn_session_over_a_generating_one_restarts_its_loader() {
+    let mut app = picking_while_generating();
+    app.view
+        .loading
+        .set_label("Running the old session's tests");
+    let old_since = app.session.status;
+    resuming(&mut app);
+    let mut state = session_state(
+        SAVED,
+        vec![
+            json!({
+                "id": "earlier-call",
+                "type": "effect",
+                "turnId": "turn-earlier",
+                "generationStatus": "in_progress",
+                "detail": {"toolName": "file_system.bash", "kind": "tool",
+                           "display": {"statusText": "Running tests"}},
+                "state": {"status": "running"},
+            }),
+            message("saved-user", "user", "Saved question"),
+        ],
+    );
+    state.session.status = serde_json::from_value(json!({
+        "type": "running",
+        "activeTurnId": "turn-streaming",
+    }))
+    .ok();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    resume_picker::apply_event(
+        &mut app,
+        &stub(),
+        Event::Resumed {
+            id: SAVED.into(),
+            state,
+        },
+    );
+    assert!(
+        app.session.status != old_since,
+        "the resumed turn keeps the old timer"
+    );
+    // The resumed turn runs no call: neither the old session's label nor the
+    // call an earlier turn left unsettled names it.
+    assert_ne!(app.view.loading.label(), "Running the old session's tests");
+    assert_ne!(app.view.loading.label(), "Running tests");
+}
+
+#[tokio::test]
+async fn a_resume_names_the_session_the_server_resumed() {
+    let mut app = picking();
+    resuming(&mut app);
+    resume_picker::apply_event(
+        &mut app,
+        &stub(),
+        Event::Resumed {
+            id: SAVED.into(),
+            state: session_state("imported-0a1b2c3d", vec![]),
+        },
+    );
+    assert_eq!(
+        messages(&app).last(),
+        Some(&row("command_status", "Resumed session `0a1b2c3d`"))
     );
 }
 
@@ -108,7 +211,7 @@ async fn a_failed_resume_keeps_the_running_turn() {
     resume_picker::apply_event(
         &mut app,
         &stub(),
-        Event::Error("Failed to resume session.".into()),
+        Event::Error(Severity::Error, "Failed to resume session.".into()),
     );
     assert!(matches!(app.session.status, Status::Generating { .. }));
     assert!(
@@ -119,14 +222,18 @@ async fn a_failed_resume_keeps_the_running_turn() {
     assert!(!app.resume_picker.open);
     assert_eq!(
         messages(&app).last(),
-        Some(&row("command_error", "Failed to resume session."))
+        Some(&row("user", "Current question"))
+    );
+    assert_eq!(
+        notice(&app),
+        Some((Severity::Error, "Failed to resume session."))
     );
 }
 
 #[tokio::test]
 async fn a_cancelled_resume_drops_its_late_answer_quietly() {
     for late in [
-        Event::Error("Failed to resume session.".into()),
+        Event::Error(Severity::Error, "Failed to resume session.".into()),
         Event::Resumed {
             id: SAVED.into(),
             state: saved_state(),
@@ -145,7 +252,7 @@ async fn a_cancelled_resume_drops_its_late_answer_quietly() {
 }
 
 #[tokio::test]
-async fn a_picker_resume_never_shows_the_post_init_notices_again() {
+async fn a_picker_resume_drops_the_post_init_notices_for_good() {
     let runtime = json!({"runtime": {"mcp": {"sources": [{"name": "weather", "kind": "server",
         "transport": "http", "status": "needs_auth", "tools": [], "error": null}]}}});
     let mut app = picking();
@@ -168,7 +275,7 @@ async fn a_picker_resume_never_shows_the_post_init_notices_again() {
         },
     );
     assert_eq!(app.session.session_id.as_deref(), Some(SAVED));
-    assert_eq!(notices(&app), 1);
+    assert_eq!(notices(&app), 0);
     assert!(app.overlays.notice.is_none());
 }
 
@@ -180,14 +287,12 @@ async fn a_failed_resume_over_a_preview_restores_the_current_transcript() {
     resume_picker::apply_event(
         &mut app,
         &stub(),
-        Event::Error("Failed to resume session.".into()),
+        Event::Error(Severity::Error, "Failed to resume session.".into()),
     );
+    assert_eq!(messages(&app), [row("user", "Current question")]);
     assert_eq!(
-        messages(&app),
-        [
-            row("user", "Current question"),
-            row("command_error", "Failed to resume session.")
-        ]
+        notice(&app),
+        Some((Severity::Error, "Failed to resume session."))
     );
 }
 
@@ -203,39 +308,19 @@ async fn a_failed_resume_without_a_preview_keeps_the_notices_shown_meanwhile() {
     resume_picker::apply_event(
         &mut app,
         &stub(),
-        Event::Error("Failed to resume session.".into()),
+        Event::Error(Severity::Error, "Failed to resume session.".into()),
     );
     assert_eq!(
         messages(&app),
         [
             row("user", "Current question"),
-            row("command_result", "Shown while picking"),
-            row("command_error", "Failed to resume session.")
+            row("command_result", "Shown while picking")
         ]
     );
-}
-
-#[tokio::test]
-async fn a_startup_teleport_runs_with_its_prompt_once_a_session_is_picked() {
-    let mut app = picking();
-    app.session.initial_prompt = Some("continue the work".into());
-    app.session.teleport_on_start = true;
-    resuming(&mut app);
-    resume_picker::apply_event(
-        &mut app,
-        &stub(),
-        Event::Resumed {
-            id: SAVED.into(),
-            state: saved_state(),
-        },
-    );
-    assert!(app.vibe_code_project.teleport_pending);
     assert_eq!(
-        app.vibe_code_project.teleport_prompt.as_deref(),
-        Some("continue the work")
+        notice(&app),
+        Some((Severity::Error, "Failed to resume session."))
     );
-    assert!(app.queue.is_empty());
-    assert_eq!(app.session.initial_prompt, None);
 }
 
 #[tokio::test]

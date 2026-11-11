@@ -122,6 +122,39 @@ class RecordingSandbox:
             return None
 
 
+class FakeFailingSandbox(RecordingSandbox):
+    """Its helper answers an operation in ``failing`` with that error, exiting 0 as the
+    helper does when it reports a tool failure.
+    """
+
+    def __init__(self, workspace: Path) -> None:
+        super().__init__(workspace)
+        self.down = False
+        self.unreachable = 0
+        self.failing: dict[str, str] = {}
+
+    async def execute(
+        self, command: str, cwd: str, timeout: float | None
+    ) -> SandboxExecResult:
+        if self.down:
+            self.unreachable += 1
+            raise ConnectionError("sandbox down")
+        error = self.failing.get(_helper_operation(command))
+        if error is None:
+            return await super().execute(command, cwd, timeout)
+        self.commands.append(command)
+        answer = {"ok": False, "error": error}
+        return SandboxExecResult(exit_code=0, stdout=json.dumps(answer), stderr="")
+
+
+def _helper_operation(command: str) -> str:
+    argv = shlex.split(command)
+    for option in ("--request-base64", "--request-file"):
+        if option in argv:
+            return argv[argv.index(option) - 1]
+    return ""
+
+
 def build_trusted_project(root: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A git repository with a root and a subdirectory AGENTS.md, trusted on the host."""
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")

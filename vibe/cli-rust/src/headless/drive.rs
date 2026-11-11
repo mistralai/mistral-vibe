@@ -1,6 +1,7 @@
 //! Driving one headless run to its report: one work task raced against one
 //! stop request, one grace period to wind down.
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -41,6 +42,8 @@ pub(super) struct RunState {
     pub(super) config: Option<Value>,
     pub(super) usage_baseline: UsageBaseline,
     pub(super) warnings: Vec<RunWarning>,
+    // The history entry ids of the denials already reported.
+    pub(super) reported_denials: HashSet<String>,
 }
 
 /// Drive one headless run to its report: one work task raced against one
@@ -80,9 +83,15 @@ pub async fn drive(
     let (outcome, stop_reason, error, final_response) = match race {
         Race::Work(end) => match end {
             Ok(WorkEnd::Turn(TurnEnd::Completed {
+                budget_outcome,
                 stop_reason,
                 final_response,
-            })) => (turn_outcome(stop_reason), stop_reason, None, final_response),
+            })) => (
+                budget_outcome.unwrap_or_else(|| turn_outcome(stop_reason)),
+                stop_reason,
+                None,
+                final_response,
+            ),
             Ok(WorkEnd::Turn(TurnEnd::Failed { code, message })) => {
                 let outcome = turn_error_outcome(code.as_deref());
                 (outcome, None, Some(RunError { message, code }), None)
@@ -185,7 +194,9 @@ fn turn_outcome(stop_reason: Option<TurnStop>) -> RunOutcome {
 /// wire in lower case, as the app server's `TurnErrorCode` StrEnum values.
 pub fn turn_error_outcome(code: Option<&str>) -> RunOutcome {
     match code {
-        Some("invalid_api_key") | Some("invalid_model") => RunOutcome::ConfigError,
+        Some("invalid_api_key") | Some("invalid_model") | Some("pricing_unavailable") => {
+            RunOutcome::ConfigError
+        }
         Some("context_too_long") | Some("response_too_long") => RunOutcome::Length,
         // The model's own answer, so the run is scored rather than dropped.
         Some("refusal") => RunOutcome::Refusal,
@@ -274,7 +285,7 @@ async fn finalize_stopped(
     };
     let (client, session_id) = (client?, session_id?);
     let output = Output::new(format.clone());
-    let finalized = finalize_output(&client, &session_id, turn_id.as_deref(), &output);
+    let finalized = finalize_output(&client, &session_id, turn_id.as_deref(), &output, state);
     match tokio::time::timeout_at(grace_ends, finalized).await {
         Ok(Ok(response)) => response,
         // The stop's outcome stands; the output just could not be delivered.

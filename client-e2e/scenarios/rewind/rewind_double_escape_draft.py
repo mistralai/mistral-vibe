@@ -20,5 +20,4 @@ timeline: Timeline = [
 handshake = {"session/rewind/read": {"hasFileChanges": False, "paths": []}}
 request_methods = {"session/rewind/read"}
 
-capture_steps = {1, 2}
 screen_excludes = ("unsent draft", "Edit message from here")

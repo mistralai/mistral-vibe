@@ -5,7 +5,7 @@
 
 use sentry::protocol::{Event, Exception, Frame, Stacktrace};
 use vibe_rs::observability::scrub::scrub_paths;
-use vibe_rs::observability::sentry::{is_environmental, scrub_event};
+use vibe_rs::observability::sentry::{is_environmental, panic_fingerprint, scrub_event};
 
 #[test]
 fn keeps_the_basename_of_a_posix_path() {
@@ -85,6 +85,33 @@ fn treats_terminal_and_disk_faults_as_environmental() {
 }
 
 #[test]
+fn treats_running_out_of_memory_as_environmental() {
+    let error = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::OutOfMemory))
+        .context("spawn worker");
+    assert!(is_environmental(&error));
+}
+
+#[test]
+fn groups_panics_whose_messages_differ_only_by_numbers() {
+    let narrow = panic_fingerprint(
+        "src/buffer.rs",
+        "index outside of buffer: the area is Rect { x: 0, y: 0, width: 10, height: 48 } but index is (10, 41)",
+    );
+    let wide = panic_fingerprint(
+        "src/buffer.rs",
+        "index outside of buffer: the area is Rect { x: 0, y: 0, width: 100, height: 30 } but index is (100, 2)",
+    );
+    let other = panic_fingerprint("src/buffer.rs", "attempt to subtract with overflow");
+
+    assert_eq!(narrow, wide);
+    assert_eq!(
+        narrow[2],
+        "index outside of buffer: the area is Rect { x: N, y: N, width: N, height: N } but index is (N, N)"
+    );
+    assert_ne!(narrow, other);
+}
+
+#[test]
 fn reports_real_faults() {
     assert!(!is_environmental(&anyhow::anyhow!("protocol error")));
     let not_found = anyhow::Error::from(std::io::Error::from_raw_os_error(2));
@@ -139,4 +166,23 @@ fn drops_breadcrumbs_and_the_user_ip() {
 
     assert!(event.breadcrumbs.values.is_empty());
     assert!(event.user.unwrap().ip_address.is_none());
+}
+
+#[test]
+fn every_event_carries_the_same_random_launch_id() {
+    let mut first = Event {
+        user: Some(sentry::protocol::User {
+            id: Some("account-42".to_owned()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut second = Event::default();
+
+    scrub_event(&mut first);
+    scrub_event(&mut second);
+
+    let id = first.user.unwrap().id.unwrap();
+    assert_eq!(second.user.unwrap().id.as_deref(), Some(id.as_str()));
+    assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 4);
 }

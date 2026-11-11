@@ -12,7 +12,6 @@ _state = json.loads(FIXTURE_PATH.read_text())["handshake"]["session/start"]["sta
 
 _MESSAGE = "/config"
 
-capture_startup = False
 request_methods = {"workspace/prompt/prepare", "telemetry/record"}
 screen_contains = ("> /config",)
 

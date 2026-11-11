@@ -238,6 +238,10 @@ def _route_from_completion(
     ``config/write`` carries a whole ``AgentConfig``, so a sampling setting or
     output cap absent from ``completion`` returns to the route's default, not
     left as it was. The model is kept: a write names the model it runs.
+
+    ``completion`` carries no price, so the route keeps its current pricing. A
+    host that changes the price under a price budget applies the route directly
+    instead of writing it here.
     """
     thinking = (
         _DEFAULT_ROUTE.thinking

@@ -2,16 +2,14 @@
 
 use std::io::{self, Write};
 use std::process::ExitCode;
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
+use crate::server::deadline::{within, REQUEST_TIMEOUT};
 use crate::server::{
     method, signal, Client, ClientCapabilities, ClientInfo, InitializeParams, Launch,
 };
-
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, clap::Subcommand)]
 pub enum ConfigCommand {
@@ -88,9 +86,8 @@ fn schema_document(response: &Value) -> Result<Value> {
 }
 
 async fn request(client: &Client, method: &str, params: Value) -> Result<Value> {
-    tokio::time::timeout(REQUEST_TIMEOUT, client.request(method, params))
-        .await
-        .with_context(|| format!("{method} timed out"))?
+    within(method, REQUEST_TIMEOUT, client.request(method, params))
+        .await?
         .with_context(|| format!("{method} failed"))
 }
 

@@ -5,7 +5,6 @@ from __future__ import annotations
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-capture_steps = {1, 2, 3, 4}
 expected_clipboard = "Log Level"
 
 # Drag across the picker title (1-based SGR coordinates), then scroll down over the box.

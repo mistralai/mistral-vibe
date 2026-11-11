@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-use crate::app::App;
+use crate::app::{App, Severity};
 use crate::external_editor;
 use crate::server::signal::ShutdownSignal;
 use crate::server::{Client, Notification};
@@ -135,5 +135,5 @@ async fn stop(child: &mut tokio::process::Child) {
 }
 
 fn show_error(app: &mut App, message: String) {
-    crate::notices::failed(app, &message);
+    crate::notices::inline(app, Severity::Error, &message);
 }

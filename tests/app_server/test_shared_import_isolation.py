@@ -47,7 +47,6 @@ def test_shared_server_helpers_do_not_import_legacy_execution() -> None:
             "vibe.app_server._state",
             "vibe.app_server._workspace",
             "vibe.app_server._root_session",
-            "vibe.app_server._vibe_code",
             "vibe.app_server._utils",
             "vibe.app_server._legacy_import",
             "vibe.app_server._unified_harness_backend_adapter",

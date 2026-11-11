@@ -13,6 +13,7 @@ from .types import (
     NO_REASONING,
     TEXT_AND_IMAGE,
     TEXT_ONLY,
+    FixedImageCost,
     KnownModel,
     ReasoningControl,
     ReasoningLevel,
@@ -74,20 +75,28 @@ def _openai_model(
     )
 
 
+# The most one image costs on these Mistral models: a 1,540-pixel side in 28-pixel
+# cells gives 55 rows of 55 image tokens, each row ended by one more token.
+_MISTRAL_IMAGE_COST = FixedImageCost(tokens=3_080)
 _MISTRAL_MEDIUM_3_5 = KnownModel(
     context_window=262_144,
     input_modalities=TEXT_AND_IMAGE,
     reasoning=ReasoningSupport(("high",), can_turn_off=True),
+    image_cost=_MISTRAL_IMAGE_COST,
 )
 # The Mistral API card lists mistral-large-latest as an alias of mistral-large-2512,
 # a model without reasoning that rejects every reasoning effort.
 _MISTRAL_LARGE_2512 = KnownModel(
-    context_window=262_144, input_modalities=TEXT_AND_IMAGE, reasoning=NO_REASONING
+    context_window=262_144,
+    input_modalities=TEXT_AND_IMAGE,
+    reasoning=NO_REASONING,
+    image_cost=_MISTRAL_IMAGE_COST,
 )
 _MISTRAL_LARGE_4 = KnownModel(
     context_window=1_048_576,
     input_modalities=TEXT_AND_IMAGE,
-    reasoning=ReasoningSupport(("low", "high", "max"), can_turn_off=False),
+    reasoning=ReasoningSupport(("low", "medium", "high"), can_turn_off=False),
+    image_cost=_MISTRAL_IMAGE_COST,
 )
 
 # The Mistral API lists this window and no image input for GLM 5.3, and takes only

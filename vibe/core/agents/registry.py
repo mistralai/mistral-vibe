@@ -13,6 +13,7 @@ from vibe.core.agents.models import BUILTIN_AGENTS, AgentProfile
 from vibe.core.config._setting_keys import UnusedConfigKeysError
 from vibe.core.config.builder import InvalidConfigError
 from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.layers.agent_profile import (
     AgentProfileLayer,
     refuse_profile_shell_timeouts,
@@ -38,7 +39,37 @@ def apply_profile_overrides(
 
     A rebuild that refuses the overrides puts the previous layer back, so the
     config the orchestrator holds and its layers still agree.
+
+    Off the event loop only; code on it uses ``apply_profile_overrides_async``.
     """
+    previous = _install_profile_layer(orchestrator, overrides, profile_name)
+    try:
+        orchestrator.rebuild()
+    except Exception:
+        _restore_profile_layer(orchestrator, previous)
+        raise
+
+
+async def apply_profile_overrides_async(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    overrides: dict[str, object],
+    *,
+    profile_name: str | None = None,
+) -> None:
+    """``apply_profile_overrides``, rebuilding on the event loop."""
+    previous = _install_profile_layer(orchestrator, overrides, profile_name)
+    try:
+        await orchestrator.arebuild()
+    except BaseException:
+        _restore_profile_layer(orchestrator, previous)
+        raise
+
+
+def _install_profile_layer(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    overrides: dict[str, object],
+    profile_name: str | None,
+) -> ConfigLayer[RawConfig] | None:
     previous = next(
         (
             layer
@@ -51,14 +82,17 @@ def apply_profile_overrides(
         AgentProfileLayer.NAME,
         AgentProfileLayer(data=overrides, profile_name=profile_name),
     )
-    try:
-        orchestrator.rebuild()
-    except Exception:
-        if previous is None:
-            orchestrator.remove_layer(len(orchestrator.layers) - 1)
-        else:
-            orchestrator.replace_or_append_layer(AgentProfileLayer.NAME, previous)
-        raise
+    return previous
+
+
+def _restore_profile_layer(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    previous: ConfigLayer[RawConfig] | None,
+) -> None:
+    if previous is None:
+        orchestrator.remove_layer(len(orchestrator.layers) - 1)
+    else:
+        orchestrator.replace_or_append_layer(AgentProfileLayer.NAME, previous)
 
 
 @dataclass(frozen=True, slots=True)

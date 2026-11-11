@@ -234,6 +234,8 @@ pub(in crate::core::checkpoint::v1) enum CheckpointMessage {
     },
     User {
         content: Vec<ContentBlock>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        context: bool,
     },
     Assistant {
         content: Vec<CheckpointAssistantPart>,
@@ -254,8 +256,9 @@ impl CheckpointMessage {
             Message::System { content } => Self::System {
                 content: content.clone(),
             },
-            Message::User { content } => Self::User {
+            Message::User { content, context } => Self::User {
                 content: content.clone(),
+                context: *context,
             },
             Message::Assistant { content } => Self::Assistant {
                 content: content
@@ -282,7 +285,7 @@ impl CheckpointMessage {
     pub(in crate::core::checkpoint::v1) fn restore(self) -> Message {
         match self {
             Self::System { content } => Message::System { content },
-            Self::User { content } => Message::User { content },
+            Self::User { content, context } => Message::User { content, context },
             Self::Assistant { content } => Message::Assistant {
                 content: content
                     .into_iter()

@@ -8,10 +8,10 @@ from scenarios.slash_command._branch_fixtures import REQUEST_METHODS, fork_hands
 handshake = fork_handshake("unified")
 request_methods = REQUEST_METHODS
 
-capture_startup = False
 screen_contains = (
-    "Branched to a new session.",
-    "session: 00000000 → 22222222",
-    "Resume the copy with: vibe --resume 22222222",
+    "Session forked",
+    "Copy and paste this command to resume it:",
+    "vibe --resume 22222222-0000-4000-8000-000000000002",
 )
+screen_excludes = ("Branched to a new session.",)
 timeline: Timeline = ["/fork\r"]

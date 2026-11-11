@@ -16,8 +16,6 @@ env = {
     "SSH_TTY": "/dev/pts/0",
 }
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 2, 3}
 expected_clipboard = "Permission for the bash tool"
 screen_contains = ("echo second",)
 

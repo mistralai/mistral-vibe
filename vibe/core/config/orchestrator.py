@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 import copy
 from dataclasses import dataclass
 from typing import Any
@@ -48,6 +48,14 @@ class FieldMutation:
     """What ``mutate_field`` read on its last attempt, and that attempt's failures."""
 
     previous: Any
+    failures: list[BaseException]
+
+
+@dataclass(frozen=True)
+class FieldsMutation:
+    """What ``mutate_fields`` read on its last attempt, by path, and its failures."""
+
+    previous: Mapping[str, Any]
     failures: list[BaseException]
 
 
@@ -175,8 +183,21 @@ class ConfigOrchestrator[S: ConfigSchema]:
         return self._config
 
     def rebuild(self) -> None:
-        """Re-merge the layer stack synchronously and install the result."""
+        """Re-merge the layer stack synchronously and install the result.
+
+        Off the event loop only: on it, a reload holding the build would wait
+        for the loop this call blocks. Code on the loop uses ``arebuild``.
+        """
         self._config = run_sync(self._builder.build())
+
+    async def arebuild(self) -> None:
+        """Re-merge the layer stack and install the result, on the loop.
+
+        Serialised with reloads and writes, so none of them installs a config
+        it built before this one changed the layers.
+        """
+        async with self._mutation_lock:
+            self._config = await self._builder.build()
 
     @property
     def layers(self) -> tuple[ConfigLayer[RawConfig], ...]:
@@ -239,6 +260,14 @@ class ConfigOrchestrator[S: ConfigSchema]:
         """Force-reload all layers and atomically replace the config snapshot."""
         async with self._mutation_lock:
             await self._reload_locked(preflight=preflight)
+
+    async def reload_files(self) -> None:
+        """Re-read the file layers other processes write, and re-merge without events."""
+        async with self._mutation_lock:
+            for layer in self._builder.layers:
+                if layer.shared_store:
+                    await layer.invalidate_cache()
+            await self._rebuild_locked(force_load=False, preflight=None)
 
     async def reload_layer(
         self, name: str, *, preflight: Callable[[S], Awaitable[None]] | None = None
@@ -313,27 +342,52 @@ class ConfigOrchestrator[S: ConfigSchema]:
         preflight: Callable[[S], Awaitable[None]] | None = None,
     ) -> FieldMutation:
         """Read, transform, and persist one field; an unchanged value writes nothing."""
-        previous: Any = None
+        mutation = await self.mutate_fields(
+            {path: mutate},
+            reason,
+            default=default,
+            target_layer=target_layer,
+            preflight=preflight,
+        )
+        return FieldMutation(
+            previous=mutation.previous.get(path), failures=mutation.failures
+        )
+
+    async def mutate_fields(
+        self,
+        mutations: Mapping[str, Callable[[Any], Any]],
+        reason: str = "No reason",
+        *,
+        default: Any = None,
+        target_layer: str | None = None,
+        preflight: Callable[[S], Awaitable[None]] | None = None,
+    ) -> FieldsMutation:
+        """``mutate_field`` for several fields of one layer, written together or not at all."""
+        previous: dict[str, Any] = {}
 
         async def write() -> list[BaseException]:
-            nonlocal previous
             layer_name = target_layer or self._resolve_default_layer_name()
             try:
                 raw = await self._read_fresh_layer(layer_name)
             except (KeyError, ConfigLayerError) as exc:
                 return [exc]
-            current = JsonPointer(path).resolve(raw, default=copy.deepcopy(default))
-            previous = current
-            value = mutate(copy.deepcopy(current))
-            if value == current:
-                # Another session may have saved this value: adopt it without a write.
+            operations: list[PatchOp] = []
+            for path, mutate in mutations.items():
+                current = JsonPointer(path).resolve(raw, default=copy.deepcopy(default))
+                previous[path] = current
+                value = mutate(copy.deepcopy(current))
+                if value != current:
+                    operations.append(
+                        AddOperationPatch(
+                            path=path, value=value, target_layer_name=layer_name
+                        )
+                    )
+            if not operations:
+                # Another session may have saved these values: adopt them without a write.
                 before = self._config.model_dump(mode="json")
                 await self._reload_locked(preflight=preflight)
                 self._publish_changes(before, reason)
                 return []
-            operations: list[PatchOp] = [
-                AddOperationPatch(path=path, value=value, target_layer_name=layer_name)
-            ]
             self._validate_patch_shape(operations)
             outcome = await self._apply_patch_locked(
                 operations,
@@ -344,8 +398,10 @@ class ConfigOrchestrator[S: ConfigSchema]:
             return outcome.failures
 
         async with self._mutation_lock:
-            failures = await retry_on_conflict(write, description=f"writing {path}")
-        return FieldMutation(previous=previous, failures=failures)
+            failures = await retry_on_conflict(
+                write, description=f"writing {', '.join(mutations)}"
+            )
+        return FieldsMutation(previous=previous, failures=failures)
 
     async def upsert_field(
         self,
@@ -470,7 +526,9 @@ class ConfigOrchestrator[S: ConfigSchema]:
             layer_name: asyncio.create_task(
                 self._apply_patch_to_layer(
                     layer_name=layer_name,
-                    layer_operations=list(layer_operations),
+                    layer_operations=self._on_layer_keys(
+                        layer_name, list(layer_operations)
+                    ),
                     reason=reason,
                     on_conflict=on_conflict,
                 )
@@ -523,6 +581,13 @@ class ConfigOrchestrator[S: ConfigSchema]:
             )
         except (JsonPatchException, JsonPointerException, ValidationError) as exc:
             raise ConfigPatchValidationError.from_error(exc) from exc
+        except InvalidConfigError:
+            raise
+        except ValueError as exc:
+            # A layer the patch produces can fail to normalize (e.g. a model
+            # key/alias mismatch); report it like any other preflight failure,
+            # keeping the reason.
+            raise ConfigPatchValidationError(InvalidConfigError(str(exc))) from exc
 
     async def preview_patch(
         self, operations: list[PatchOp], *, without: Collection[str] = ()
@@ -547,6 +612,7 @@ class ConfigOrchestrator[S: ConfigSchema]:
                 if layer.cached_data is None or layer.fingerprint is None:
                     raise LayerNotLoadedError(layer_name)
                 raw = layer.cached_data.model_dump()
+                layer_operations = self._on_layer_keys(layer_name, layer_operations)
                 patched = apply_patch(
                     ensure_parent_paths(raw, layer_operations),
                     patch=[operation.to_json_patch() for operation in layer_operations],
@@ -559,6 +625,27 @@ class ConfigOrchestrator[S: ConfigSchema]:
             return await self._builder.build(layer_overrides=overrides)
         except (JsonPatchException, JsonPointerException, ValidationError) as exc:
             raise ConfigPatchValidationError.from_error(exc) from exc
+        except InvalidConfigError:
+            raise
+        except ValueError as exc:
+            # A layer the patch produces can fail to normalize (e.g. a model
+            # key/alias mismatch); report it like any other preflight failure,
+            # keeping the reason.
+            raise ConfigPatchValidationError(InvalidConfigError(str(exc))) from exc
+
+    def _on_layer_keys(
+        self, layer_name: str, operations: list[PatchOp]
+    ) -> list[PatchOp]:
+        """``operations`` on the keys ``layer_name`` keeps its entries under."""
+        data = self.get_layer(layer_name).cached_data
+        if data is None:
+            return list(operations)
+        raw = data.model_dump()
+        return [
+            mapped
+            for op in operations
+            for mapped in self._config.expand_layer_write(op, raw)
+        ]
 
     async def _apply_patch_to_layer(
         self,

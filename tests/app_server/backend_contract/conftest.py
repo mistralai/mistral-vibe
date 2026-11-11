@@ -269,11 +269,18 @@ def backend_contract_mistral_api(respx_mock: respx.MockRouter) -> respx.Route:
 @pytest.fixture
 def backend_contract_mistral_response() -> Callable[..., httpx.Response]:
     def build(
-        content: str, *, tool_calls: list[dict[str, Any]] | None = None
+        content: str,
+        *,
+        tool_calls: list[dict[str, Any]] | None = None,
+        finish_reason: str | None = None,
     ) -> httpx.Response:
         return httpx.Response(
             200,
-            stream=httpx.ByteStream(stream=_mistral_sse_payload(content, tool_calls)),
+            stream=httpx.ByteStream(
+                stream=_mistral_sse_payload(
+                    content, tool_calls, finish_reason=finish_reason
+                )
+            ),
             headers={"Content-Type": "text/event-stream"},
         )
 
@@ -344,7 +351,10 @@ def _mistral_sse_terminator() -> bytes:
 
 
 def _mistral_sse_payload(
-    content: str, tool_calls: list[dict[str, Any]] | None
+    content: str,
+    tool_calls: list[dict[str, Any]] | None,
+    *,
+    finish_reason: str | None = None,
 ) -> bytes:
     response = mistral_completion(content, tool_calls=tool_calls)
     response["model"] = "mistral-vibe-cli-latest"
@@ -354,6 +364,8 @@ def _mistral_sse_payload(
     if tool_calls is None:
         message.pop("tool_calls")
     choice["delta"] = message
+    if finish_reason is not None:
+        choice["finish_reason"] = finish_reason
     return b"data: " + json.dumps(response).encode() + b"\n\ndata: [DONE]"
 
 

@@ -4,14 +4,16 @@ import argparse
 import asyncio
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import sys
 from threading import Event
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
 
+from tests.stubs.process_services import fake_process_services
 from vibe.app_server import stdio
 from vibe.app_server._agent_socket import AgentSocketMount
 from vibe.app_server._process_services import ProcessServices
@@ -54,23 +56,19 @@ class CountingWriter(BytesIO):
         super().flush()
 
 
-class _RecordingCleanup:
-    def __init__(self) -> None:
-        self.sweeps = 0
-
-    def sweep(self) -> None:
-        self.sweeps += 1
-
-
-def _stub_stdio_main(monkeypatch: pytest.MonkeyPatch) -> _RecordingCleanup:
-    cleanup = _RecordingCleanup()
+def _stub_stdio_main(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    served: list[object] = []
+    monkeypatch.setenv("PATH", os.environ.get("PATH", ""))
     monkeypatch.setattr(
-        "vibe.app_server._worktree_cleanup.worktree_cleanup", lambda: cleanup
+        stdio.asyncio,
+        "run",
+        lambda coroutine: served.append(coroutine) or coroutine.close(),
     )
     monkeypatch.setattr(
         stdio,
         "parse_arguments",
         lambda _argv: argparse.Namespace(
+            plugin_mcp=False,
             experimental_harness=False,
             legacy_harness=False,
             multiplex=False,
@@ -78,8 +76,10 @@ def _stub_stdio_main(monkeypatch: pytest.MonkeyPatch) -> _RecordingCleanup:
             agent_socket=None,
         ),
     )
-    monkeypatch.setattr(stdio, "init_harness_files_manager", lambda *_: None)
-    monkeypatch.setattr(stdio, "init_file_logging", lambda _: None)
+    monkeypatch.setattr(
+        "vibe.core.config.harness_files.init_harness_files_manager", lambda *_: None
+    )
+    monkeypatch.setattr("vibe.observability.logging.init_file_logging", lambda _: None)
     monkeypatch.setattr(stdio, "_neutralize_stdout", lambda: None)
     monkeypatch.setattr("setproctitle.setproctitle", lambda _: None)
     monkeypatch.setattr("vibe.core.config.load_dotenv_values", lambda: None)
@@ -87,14 +87,13 @@ def _stub_stdio_main(monkeypatch: pytest.MonkeyPatch) -> _RecordingCleanup:
         "vibe.core.utils.windows_asyncio.silence_proactor_transport_teardown_warnings",
         lambda: None,
     )
-    return cleanup
+    return served
 
 
 def test_stdio_main_names_the_process(monkeypatch: pytest.MonkeyPatch) -> None:
     titles: list[str] = []
     _stub_stdio_main(monkeypatch)
     monkeypatch.setattr("setproctitle.setproctitle", titles.append)
-    monkeypatch.setattr(stdio.asyncio, "run", lambda coroutine: coroutine.close())
 
     stdio.main()
 
@@ -107,34 +106,67 @@ def test_stdio_main_starts_when_naming_the_process_fails(
     def fail(_: str) -> None:
         raise OSError("cannot rename")
 
-    cleanup = _stub_stdio_main(monkeypatch)
+    served = _stub_stdio_main(monkeypatch)
     monkeypatch.setattr("setproctitle.setproctitle", fail)
-    monkeypatch.setattr(stdio.asyncio, "run", lambda coroutine: coroutine.close())
 
     stdio.main()
 
-    assert cleanup.sweeps == 1
+    assert len(served) == 1
 
 
-def test_stdio_main_finishes_worktree_reaps_an_earlier_process_left(
+def test_stdio_main_preserves_the_clients_shell_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A reap left by a process that exited mid-cleanup is picked up at startup."""
-    cleanup = _stub_stdio_main(monkeypatch)
-    monkeypatch.setattr(stdio.asyncio, "run", lambda coroutine: coroutine.close())
-
+    monkeypatch.setenv("PATH", "/user/bin")
+    _stub_stdio_main(monkeypatch)
     stdio.main()
+    assert os.environ["PATH"] == "/user/bin"
 
-    assert cleanup.sweeps == 1
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("left_behind", [True, False])
+async def test_serving_finishes_worktree_reaps_an_earlier_process_left(
+    monkeypatch: pytest.MonkeyPatch, config_dir: Path, left_behind: bool
+) -> None:
+    """A reap left by a process that exited mid-cleanup is picked up at
+    startup; a process with no managed worktree starts no worker for it, even
+    once the claims' lock files exist.
+    """
+    trash = config_dir / "worktrees" / ".trash"
+    trash.mkdir(parents=True)
+    claims = config_dir / "worktrees" / ".claims"
+    claims.mkdir()
+    (claims / ".prune").touch()
+    (claims / ".registry").touch()
+    if left_behind:
+        (trash / "interrupted").mkdir()
+    services = fake_process_services()
+    sweeps: list[object] = []
+    monkeypatch.setattr(services.worktrees, "sweep", lambda **kw: sweeps.append(kw))
+    monkeypatch.setattr(ProcessServices, "create", classmethod(lambda _cls: services))
+    monkeypatch.setattr(stdio, "_serve_with", AsyncMock())
+
+    await stdio._serve(
+        cast(Any, None),
+        multiplex=True,
+        additional_builtin_plugin_roots=(),
+        agent_socket=None,
+    )
+
+    assert len(sweeps) == (1 if left_behind else 0)
 
 
+@pytest.mark.parametrize("plugin_mcp", [False, True])
+@pytest.mark.parametrize("serving_failed", [False, True])
 def test_stdio_main_neutralizes_stdout_after_serving(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, plugin_mcp: bool, serving_failed: bool
 ) -> None:
     neutralized = False
 
     def run(coroutine: Any) -> None:
         coroutine.close()
+        if serving_failed:
+            raise OSError("stdio disconnected")
 
     def neutralize_stdout() -> None:
         nonlocal neutralized
@@ -145,11 +177,16 @@ def test_stdio_main_neutralizes_stdout_after_serving(
         stdio,
         "parse_arguments",
         lambda _argv: argparse.Namespace(
-            multiplex=False, additional_builtin_plugin_roots=[], agent_socket=None
+            plugin_mcp=plugin_mcp,
+            multiplex=False,
+            additional_builtin_plugin_roots=[],
+            agent_socket=None,
         ),
     )
-    monkeypatch.setattr(stdio, "init_harness_files_manager", lambda *_: None)
-    monkeypatch.setattr(stdio, "init_file_logging", lambda _: None)
+    monkeypatch.setattr(
+        "vibe.core.config.harness_files.init_harness_files_manager", lambda *_: None
+    )
+    monkeypatch.setattr("vibe.observability.logging.init_file_logging", lambda _: None)
     monkeypatch.setattr(stdio.asyncio, "run", run)
     monkeypatch.setattr(stdio, "_neutralize_stdout", neutralize_stdout)
     monkeypatch.setattr("vibe.core.config.load_dotenv_values", lambda: None)
@@ -158,7 +195,11 @@ def test_stdio_main_neutralizes_stdout_after_serving(
         lambda: None,
     )
 
-    stdio.main()
+    if serving_failed:
+        with pytest.raises(OSError, match="stdio disconnected"):
+            stdio.main()
+    else:
+        stdio.main()
 
     assert neutralized
 
@@ -169,7 +210,7 @@ async def test_stdio_server_creates_the_harness_behind_its_transport(
 ) -> None:
     harness = AsyncMock(spec=HarnessServer)
     factory = AsyncMock(return_value=harness)
-    monkeypatch.setattr(stdio, "create_harness_server", factory)
+    monkeypatch.setattr("vibe.app_server._runtime.create_harness_server", factory)
     warmed: list[HarnessProcess] = []
     monkeypatch.setattr(
         HarnessProcess, "start_connector_warm_up", lambda self: warmed.append(self)
@@ -205,9 +246,11 @@ async def test_stdio_server_with_an_agent_socket_mounts_it_in_its_process(
 ) -> None:
     harness = AsyncMock(spec=HarnessServer)
     factory = AsyncMock(return_value=harness)
-    monkeypatch.setattr(stdio, "create_harness_server", factory)
+    monkeypatch.setattr("vibe.app_server._runtime.create_harness_server", factory)
     built: list[dict[str, Any]] = []
-    monkeypatch.setattr(stdio, "HarnessProcess", lambda **kwargs: built.append(kwargs))
+    monkeypatch.setattr(
+        "vibe.app_server._runtime.HarnessProcess", lambda **kwargs: built.append(kwargs)
+    )
     mount = AgentSocketMount(Path("/tmp/agent.sock"))
 
     await stdio.serve_stdio(reader=BytesIO(), writer=BytesIO(), agent_socket=mount)

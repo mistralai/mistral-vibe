@@ -25,7 +25,7 @@ screen_contains = ("PRs (30)",)
 screen_excludes = ("Pull Requests", "again to quit")
 
 _LABEL = "PRs (30)"
-_CLICK_COL = len("/test/workdir ⧉  ") + len(_LABEL) // 2 + 1
+_CLICK_COL = len("/test/workdir  ") + len(_LABEL) // 2 + 1
 _BAR_CLICK = f"\x1b[<0;{_CLICK_COL};{ROWS}M\x1b[<0;{_CLICK_COL};{ROWS}m"
 
 timeline: Timeline = [

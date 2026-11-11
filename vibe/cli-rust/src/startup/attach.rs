@@ -34,45 +34,58 @@ pub(super) async fn attach_session(
     agent_config: AgentConfig,
     list_error: Option<String>,
 ) -> Result<(Value, Attach), StartError> {
-    let started = start_session(client, agent_config.clone()).await?;
+    let started = start_session(client, agent_config.clone(), &resume).await?;
     rebind(client, started, resume, &agent_config, list_error)
         .await
         .map_err(StartError::Other)
 }
 
 /// Start the fresh session a resume rebinds onto.
+///
+/// With a resume intent it is only a warm-up: the server opens it for the user
+/// (session_start, new-session telemetry) once it gets a message, so a resume
+/// that replaces it reports nothing for it.
 pub(super) async fn start_session(
     client: &Arc<Client>,
     agent_config: AgentConfig,
+    resume: &StartupResume,
 ) -> Result<Value, StartError> {
     let start = SessionStartParams {
         agent_config,
         history_limit: HISTORY_LIMIT,
         model: None,
         session_only: false,
+        kind: start_kind(resume),
     };
     let params = serde_json::to_value(&start).map_err(|e| StartError::Other(e.into()))?;
     let result = client
-        .request_err(method::SESSION_START, params)
+        .request(method::SESSION_START, params)
         .await
-        .map_err(|err| {
-            if err.is_unauthorized() {
-                StartError::Auth(Box::new(err))
-            } else if err.is_config_error() {
-                StartError::Config(Box::new(err))
-            } else {
-                StartError::Other(anyhow::anyhow!(
-                    "session/start failed: [{}] {}",
-                    err.code(),
-                    err.message
-                ))
-            }
-        })?;
+        .map_err(start_error)?;
     result
         .get("state")
         .cloned()
         .with_context(|| "session/start response missing state")
         .map_err(StartError::Other)
+}
+
+/// Keeps the failure typed, so the startup report tells a server refusal from a dead server.
+fn start_error(error: anyhow::Error) -> StartError {
+    match error.downcast::<RequestFailure>() {
+        Ok(RequestFailure::Rpc(rpc)) if rpc.is_unauthorized() => StartError::Auth(Box::new(rpc)),
+        Ok(RequestFailure::Rpc(rpc)) if rpc.is_config_error() => StartError::Config(Box::new(rpc)),
+        Ok(failure) => {
+            StartError::Other(anyhow::Error::new(failure).context("session/start failed"))
+        }
+        Err(error) => StartError::Other(error),
+    }
+}
+
+/// The `session/start` kind: `ephemeral` for a warm-up a resume replaces at
+/// once. The picker's session is the user's own until they pick another, so it
+/// starts as a normal one, ready from the start.
+pub fn start_kind(resume: &StartupResume) -> Option<&'static str> {
+    matches!(resume, StartupResume::ById(_) | StartupResume::Continue).then_some("ephemeral")
 }
 
 /// Rebind onto the saved session the resume intent names, or keep the fresh
@@ -186,7 +199,7 @@ pub(super) async fn settle_worktree_session(
         + crate::worktree_gate::SETTLE_WAIT;
     let (settle, waited) = crate::worktree_gate::absorb_until_settled(&mut stream, deadline)
         .await
-        .map_err(anyhow::Error::msg)?;
+        .map_err(|message| anyhow::Error::new(super::failure::ServerFailure(message)))?;
     let settled = settle.cwd;
     let prepared = settle.worktree;
     let absorbed = waited.notifications;

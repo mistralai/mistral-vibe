@@ -56,7 +56,12 @@ def test_unified_system_instructions_advise_backgrounding_only_with_background_p
 
     background, foreground = (
         runtime_module._build_unified_system_instructions(
-            config, harness_files, cwd=tmp_path, base=base, background_processes=enabled
+            config,
+            harness_files,
+            cwd=tmp_path,
+            surface="cli",
+            base=base,
+            background_processes=enabled,
         )
         for enabled in (True, False)
     )

@@ -100,6 +100,13 @@ def cleared_state() -> dict[str, Any]:
     return state
 
 
+def live_snapshot(*events: AppServerEvent) -> AppServerEvent:
+    """A same-session `session/snapshot` whose history holds the given added entries."""
+    state = json.loads(json.dumps(_fixture["handshake"]["session/start"]["state"]))
+    state["history"] = [event["params"]["entry"] for event in events]
+    return _event("session/snapshot", {"sessionId": SESSION_ID, "state": state})
+
+
 def paste(text: str) -> str:
     """Wrap clipboard text in terminal bracketed-paste markers."""
     return f"\x1b[200~{text}\x1b[201~"
@@ -741,6 +748,62 @@ def subagent_wait_started() -> AppServerEvent:
             },
             state={"status": "running", "outputText": ""},
         )
+    )
+
+
+def model_wait_started() -> AppServerEvent:
+    """Build the running standalone `wait` the model calls for its background work."""
+    return _added(
+        _entry(
+            "effect",
+            entry_id="effect-model-wait",
+            generation_status="in_progress",
+            title="self.wait",
+            detail={
+                "toolName": "self.wait",
+                "display": {
+                    "summary": "Waiting for background work",
+                    "content": None,
+                    "suffix": "",
+                    "verb": "Waiting",
+                    "message": "for background work",
+                    "settledVerb": "Waited",
+                    "settledMessage": "for background work",
+                    "statusText": "Waiting for background work",
+                },
+                "kind": "tool",
+                "input": {"timeout_ms": 3_600_000},
+            },
+            state={"status": "running", "outputText": ""},
+        )
+    )
+
+
+def model_wait_completed() -> AppServerEvent:
+    """Settle the standalone `wait` once new input reached the model."""
+    return _updated(
+        "effect-model-wait",
+        [
+            {
+                "op": "replace",
+                "path": "/state",
+                "value": {
+                    "status": "completed",
+                    "output": {
+                        "type": "success",
+                        "content": [],
+                        "structured_content": {"reason": "input_available"},
+                    },
+                    "outputText": "",
+                    "display": {
+                        "success": True,
+                        "verb": "Waited",
+                        "message": "for background work",
+                    },
+                },
+            },
+            {"op": "replace", "path": "/generationStatus", "value": "completed"},
+        ],
     )
 
 
@@ -1642,5 +1705,13 @@ def artifact_created(artifact: dict[str, Any]) -> AppServerEvent:
     """The `artifacts/created` notification announcing a discovered artifact."""
     return _event(
         "artifacts/created",
+        {"sessionId": SESSION_ID, "emittedAt": _TIMESTAMP, "artifact": artifact},
+    )
+
+
+def artifact_updated(artifact: dict[str, Any]) -> AppServerEvent:
+    """The `artifacts/updated` notification carrying a synced artifact."""
+    return _event(
+        "artifacts/updated",
         {"sessionId": SESSION_ID, "emittedAt": _TIMESTAMP, "artifact": artifact},
     )

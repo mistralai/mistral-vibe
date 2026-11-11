@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The probe-positive boot (the harness sets MISTRAL_API_KEY=fake-key) skips
 # setup/status entirely; the handshake's unauthorized session/start raises the
@@ -27,9 +27,14 @@ request_methods = {
 }
 
 timeline: Timeline = [
-    "\r",  # welcome -> theme
-    "\r",  # theme -> auth method
-    "\x1b[B\r",  # auth: Use an API key -> api key screen
-    "test-key-123",  # the masked card fills and validates
-    "\r",  # submit: the retried handshake reaches a fresh Ready
+    "\r",
+    take_snapshot(),  # welcome -> theme
+    "\r",
+    take_snapshot(),  # theme -> auth method
+    "\x1b[B\r",
+    take_snapshot(),  # auth: Use an API key -> api key screen
+    "test-key-123",
+    take_snapshot(),  # the masked card fills and validates
+    "\r",
+    take_snapshot(),  # submit: the retried handshake reaches a fresh Ready
 ]

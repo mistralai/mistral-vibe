@@ -104,7 +104,10 @@ pub fn spans(app: &App, buf: &Buffer, chat: Rect) -> Vec<RowSpan> {
         return Vec::new();
     };
     if let Some(table_cell) = &selection.table_cell {
-        return table::screen_spans(app, table_cell, chat);
+        return table::screen_spans(app, table_cell, chat)
+            .into_iter()
+            .flat_map(|span| split(&app.view.selection_chrome, span))
+            .collect();
     }
     let region = get(app, selection.owner);
     let (area, origin) = match selection.scroll_target {
@@ -114,6 +117,12 @@ pub fn spans(app: &App, buf: &Buffer, chat: Rect) -> Vec<RowSpan> {
             (region.area, region.origin(ScrollTarget::None))
         }
         target => (chat, region.origin(target)),
+    };
+    let area = match app.view.bottom_app_selection_halves {
+        Some(halves) if selection.owner == RegionId::BottomApp => {
+            half(halves, selection.anchor.0, area)
+        }
+        _ => area,
     };
     let chrome = selection.owner == RegionId::Main;
     let gutters: &[RowSpan] = if chrome { &app.view.diff_hitmap } else { &[] };
@@ -210,6 +219,16 @@ pub fn selectable(app: &App, at: (u16, u16), owner: RegionId) -> bool {
     !chrome
         .iter()
         .any(|&(y, x0, x1)| y == at.1 && at.0 >= x0 && at.0 <= x1)
+}
+
+/// The columns of `area` a selection keeps to in a box split in `halves`: those of the half its anchor `column` is in.
+fn half((left, right): (Rect, Rect), column: u16, area: Rect) -> Rect {
+    let half = if column < left.right() { left } else { right };
+    Rect {
+        x: half.x,
+        width: half.width,
+        ..area
+    }
 }
 
 /// Cut the cells a screen painted as chrome out of a row span.

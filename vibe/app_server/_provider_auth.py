@@ -4,7 +4,12 @@ A read-only view for ``/status``: it inspects credential *sources* — never
 sends a provider request, never resolves Google ADC, and never lets credential
 material or a raw storage error into the view. The precedence itself lives in
 ``active_api_key``, which resolution also consumes; this module reports on it
-without changing it.
+without changing it. Where the CLI OIDC sign-in replaces the API key
+(``uses_cli_oidc_credential``), no API-key source is inspected: the sign-in is
+the only source resolution reads. The predicate is resolution's own, not the
+connection's (``uses_cli_oidc``): in OIDC mode no connection ever reads an
+API-key source for ``MISTRAL_API_KEY``, so none is ever reported as in use.
+The view describes a CLI connection (``/status``, ``/whoami``, ``--setup``).
 """
 
 from __future__ import annotations
@@ -34,7 +39,7 @@ from vibe.core.config import EnvValueOrigin, VibeConfigSchema, env_value_origin
 from vibe.core.config.models import ModelConfig, ProviderConfig
 from vibe.core.paths import GLOBAL_ENV_FILE
 from vibe.observability.logging import logger
-from vibe.utils.api_keys import ApiKeySource, active_api_key
+from vibe.utils.api_keys import ApiKeySource, active_api_key, uses_cli_oidc_credential
 from vibe.utils.keyring import probe_api_key_from_keyring
 from vibe.utils.url import display_url
 
@@ -171,6 +176,18 @@ def probe_keyring(env_var: str) -> SourceProbe:
         return SourceProbe(unavailable=True)
 
 
+def probe_cli_oidc() -> SourceProbe:
+    """Inspect the CLI OIDC sign-in the way resolution reads it.
+
+    ``stored_oidc_credential`` answers the non-secret marker when a sign-in
+    matching the configured issuer is stored, and reads unreadable storage as
+    signed out — the same answer resolution acts on.
+    """
+    from vibe.setup.auth._oidc_runtime import stored_oidc_credential
+
+    return SourceProbe(value=stored_oidc_credential())
+
+
 def _auth_kind(provider: ProviderConfig) -> ProviderAuthKind:
     if provider.uses_vertex:
         return ProviderAuthKind.GOOGLE_ADC
@@ -194,6 +211,29 @@ def _shadowed_sources(
     if probe.value is not None:
         return [ProviderCredentialSourceView(kind=kind)]
     return []
+
+
+def _cli_oidc_sources(probe: SourceProbe) -> list[ProviderCredentialSourceView]:
+    """The source list while the CLI OIDC sign-in replaces the API key.
+
+    Resolution reads no API-key source then, so none is listed: the sign-in is
+    in use, could not be inspected, or the list is empty (signed out).
+    """
+    if probe.unavailable:
+        return [
+            ProviderCredentialSourceView(
+                kind=ProviderCredentialSourceKind.CLI_OIDC,
+                state=ProviderCredentialSourceState.UNAVAILABLE,
+            )
+        ]
+    if probe.value is None:
+        return []
+    return [
+        ProviderCredentialSourceView(
+            kind=ProviderCredentialSourceKind.CLI_OIDC,
+            state=ProviderCredentialSourceState.IN_USE,
+        )
+    ]
 
 
 def _api_key_sources(
@@ -258,6 +298,29 @@ def _api_key_sources(
     ]
 
 
+def _sources(
+    *,
+    env_var: str,
+    environ: Mapping[str, str],
+    origin_of: Callable[[str], EnvValueOrigin | None] | None,
+    env_file_probe: SourceProbe,
+    keyring_probe: SourceProbe,
+    cli_oidc_probe: SourceProbe | None,
+) -> list[ProviderCredentialSourceView]:
+    """The source list for an API-key provider: the CLI OIDC sign-in alone
+    when it was probed (it replaces the API key), the API-key sources otherwise.
+    """
+    if cli_oidc_probe is not None:
+        return _cli_oidc_sources(cli_oidc_probe)
+    return _api_key_sources(
+        env_var=env_var,
+        environ=environ,
+        origin_of=origin_of,
+        env_file_probe=env_file_probe,
+        keyring_probe=keyring_probe,
+    )
+
+
 def build_provider_auth_view(
     model: ModelConfig,
     provider: ProviderConfig,
@@ -266,13 +329,15 @@ def build_provider_auth_view(
     origin_of: Callable[[str], EnvValueOrigin | None] | None = None,
     env_file_probe: SourceProbe = _EMPTY_PROBE,
     keyring_probe: SourceProbe = _EMPTY_PROBE,
+    cli_oidc_probe: SourceProbe | None = None,
 ) -> ProviderAuthView:
     """Project one active provider into the redacted public view.
 
     The probes must describe ``provider``'s own ``api_key_env_var``: the
     caller resolves the provider once and passes it here, so the source list
     and the redaction set cannot be built against a provider other than the
-    one that was probed.
+    one that was probed. ``_probe_provider_sources`` returns them in the
+    shape this expects.
     """
     kind = _auth_kind(provider)
     env_var = provider.api_key_env_var
@@ -290,12 +355,13 @@ def build_provider_auth_view(
             secrets.append(env_file_probe.value)
         if keyring_probe.value is not None:
             secrets.append(keyring_probe.value)
-        sources = _api_key_sources(
+        sources = _sources(
             env_var=env_var,
             environ=environ,
             origin_of=origin_of,
             env_file_probe=env_file_probe,
             keyring_probe=keyring_probe,
+            cli_oidc_probe=cli_oidc_probe,
         )
 
     return ProviderAuthView(
@@ -370,7 +436,9 @@ async def read_provider_auth(config: VibeConfigSchema) -> ProviderAuthView:
     provider = config.get_provider_for_model(model)
     if _auth_kind(provider) is not ProviderAuthKind.API_KEY:
         return build_provider_auth_view(model, provider, environ=os.environ)
-    env_file_probe, keyring_probe = await _probe_sources(provider.api_key_env_var)
+    env_file_probe, keyring_probe, cli_oidc_probe = await _probe_provider_sources(
+        provider.api_key_env_var
+    )
     return build_provider_auth_view(
         model,
         provider,
@@ -378,6 +446,7 @@ async def read_provider_auth(config: VibeConfigSchema) -> ProviderAuthView:
         origin_of=env_value_origin,
         env_file_probe=env_file_probe,
         keyring_probe=keyring_probe,
+        cli_oidc_probe=cli_oidc_probe,
     )
 
 
@@ -387,21 +456,34 @@ async def active_credential_source(
     """The source ``provider``'s next model call would send, as ``/status`` reports it."""
     if _auth_kind(provider) is not ProviderAuthKind.API_KEY:
         return None
-    env_file_probe, keyring_probe = await _probe_sources(provider.api_key_env_var)
-    sources = _api_key_sources(
+    env_file_probe, keyring_probe, cli_oidc_probe = await _probe_provider_sources(
+        provider.api_key_env_var
+    )
+    sources = _sources(
         env_var=provider.api_key_env_var,
         environ=os.environ,
         origin_of=env_value_origin,
         env_file_probe=env_file_probe,
         keyring_probe=keyring_probe,
+        cli_oidc_probe=cli_oidc_probe,
     )
     in_use = (s for s in sources if s.state is ProviderCredentialSourceState.IN_USE)
     return next((source.kind for source in in_use), None)
 
 
-async def _probe_sources(env_var: str) -> tuple[SourceProbe, SourceProbe]:
+async def _probe_provider_sources(
+    env_var: str,
+) -> tuple[SourceProbe, SourceProbe, SourceProbe | None]:
+    """The ``.env``, keyring, and CLI OIDC probes for ``env_var``.
+
+    Where the CLI OIDC sign-in replaces the API key, only the sign-in is
+    inspected: resolution reads no API-key source then, so none is touched.
+    """
+    if uses_cli_oidc_credential(env_var):
+        cli_oidc_probe = await _probe_with_deadline(probe_cli_oidc)
+        return _EMPTY_PROBE, _EMPTY_PROBE, cli_oidc_probe
     env_file_probe, keyring_probe = await asyncio.gather(
         _probe_with_deadline(lambda: probe_env_file(GLOBAL_ENV_FILE.path, env_var)),
         _probe_with_deadline(lambda: probe_keyring(env_var)),
     )
-    return env_file_probe, keyring_probe
+    return env_file_probe, keyring_probe, None

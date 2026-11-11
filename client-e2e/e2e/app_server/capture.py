@@ -80,6 +80,9 @@ class Capture:
     snapshots: list[Snapshot]
     actions: list[Action]
     requests: list[Request]
+    final: Snapshot
+    """The last settled frame, which screen and clipboard expectations check."""
+    titles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,19 +130,21 @@ def capture_scenario(scenario: Scenario, launch: Launcher = exec_launch) -> Capt
             ),
         )
         try:
-            snapshots = capture(
+            frames = capture(
                 spec,
                 releases=tuple(step.release for step in scenario.steps),
                 releases_after=tuple(step.release_after for step in scenario.steps),
-                capture_startup=scenario.capture_startup,
-                capture_steps=scenario.capture_steps,
+                startup_label=scenario.startup_snapshot,
+                step_labels=tuple(step.snapshot for step in scenario.steps),
                 step_fd=step_fd,
                 launch=launch,
             )
             return Capture(
-                snapshots,
+                frames.snapshots,
                 _read_actions(action_log),
                 _read_requests(request_log, scenario.request_methods),
+                frames.final,
+                frames.titles,
             )
         finally:
             if step_fd is not None:

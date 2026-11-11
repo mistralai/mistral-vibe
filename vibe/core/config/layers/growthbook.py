@@ -4,12 +4,11 @@ from collections.abc import Callable, Mapping
 import json
 from typing import Any, Final
 
-from pydantic import ValidationError
-
 from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.config._catalog_filter import CATALOG_FILTER_KEY, parse_catalog_filter
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
-from vibe.core.config.models import ModelConfig
+from vibe.core.config.models import parse_routed_model_payload
 from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.core.experiments.active import ExperimentName
 
@@ -128,14 +127,23 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
     ExperimentName.SMART_APPROVE: (("smart_approve_available", _map_on),),
     ExperimentName.DEFAULT_AGENT: (("default_agent", _map_default_agent),),
     ExperimentName.REGISTRY_SKILLS: (("experimental_enable_registry_skills", _map_on),),
-    ExperimentName.PR_MONITORING: (("experimental_enable_pr_monitoring", _map_on),),
     ExperimentName.MISTRAL_MCP_CONNECTOR: (
         ("experimental_enable_mistral_mcp_connector", _map_on),
     ),
     ExperimentName.LOCAL_RUNTIME_SESSION_API: (
         ("experimental_local_runtime_session_api", _map_on),
     ),
+    ExperimentName.MODEL_CATALOG: (("experimental_enable_model_catalog", _map_on),),
 }
+
+
+# The model catalog replaces these: their models and default would duplicate or
+# override the catalog's. Keyed on the flag, not on whether the catalog loaded,
+# so this layer depends on no other layer's state.
+_CATALOG_REPLACED_EXPERIMENTS: Final = frozenset({
+    ExperimentName.CLI_MODEL_ROUTING,
+    ExperimentName.CLI_EXTRA_MODELS,
+})
 
 
 class GrowthbookLayer(ConfigLayer[RawConfig]):
@@ -144,10 +152,19 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
     def __init__(self, *, name: str = NAME) -> None:
         super().__init__(name=name)
         self._variants: dict[str, object] = {}
+        self._catalog_filter: dict[str, Any] | None = None
 
     def set_variants(self, variants: Mapping[str, object]) -> None:
         """Receive config-scoped variants, not telemetry assignments."""
         self._variants = dict(variants)
+        # Parsed once per variants, not on every config rebuild, so a dropped
+        # part is logged once.
+        catalog_filter = self._variants.get(ExperimentName.MODEL_CATALOG_FILTER.value)
+        self._catalog_filter = (
+            None
+            if catalog_filter is None
+            else parse_catalog_filter(_as_json_value(catalog_filter))
+        )
 
     @property
     def variants(self) -> Mapping[str, object]:
@@ -160,8 +177,13 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
         if not self._variants:
             return EMPTY_CONFIG_SNAPSHOT
 
+        catalog_on = (
+            _map_on(self._variants.get(ExperimentName.MODEL_CATALOG.value)) is True
+        )
         data: dict[str, Any] = {}
         for experiment_name, field_mappers in GROWTHBOOK_CONFIG_MAPPINGS.items():
+            if catalog_on and experiment_name in _CATALOG_REPLACED_EXPERIMENTS:
+                continue
             variant = self._variants.get(experiment_name.value)
             if variant is None:
                 continue
@@ -169,6 +191,9 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
                 mapped_value = map_variant(variant)
                 if mapped_value is not None:
                     data[config_field] = mapped_value
+
+        if self._catalog_filter:
+            data[CATALOG_FILTER_KEY] = self._catalog_filter
 
         models = _routed_models(data)
         if models:
@@ -197,13 +222,8 @@ def _routed_models(data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         decoded = json.loads(value)
         entries = decoded if isinstance(decoded, list) else [decoded]
         for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            try:
-                model = ModelConfig.model_validate(entry)
-            except ValidationError:
-                continue
-            if not model.alias:
+            model = parse_routed_model_payload(entry)
+            if model is None or not model.alias:
                 continue
             models[model.alias] = entry
     return models

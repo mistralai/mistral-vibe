@@ -6,8 +6,6 @@ from e2e.app_server.events import worktree_settled
 from e2e.app_server.scenario import Timeline
 
 client_args = ("--worktree", "feature")
-capture_startup = False
-capture_steps = {4}
 
 # The gate's handshake buffers the missing-key verdict; the wizard round's
 # fresh child stores the key, retiring the pinned unauthorized on that
@@ -39,6 +37,7 @@ request_methods = {
     "setup/store-credential",
     "setup/submit-choices",
 }
+screen_contains = ("Type /help for more information",)
 
 timeline: Timeline = [
     "\r",  # welcome -> theme

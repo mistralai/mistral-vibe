@@ -30,6 +30,7 @@ from vibe.core.platform_auth import (
 from vibe.setup.auth._oidc_config import OidcError, registered_web_origin
 from vibe.setup.auth._oidc_tenant import (
     OidcTenantResolver,
+    OidcUnauthorized,
     TenantSelection,
     tenant_principal,
 )
@@ -133,8 +134,8 @@ class ConnectionPlatformCredentialProvider:
         ):
             return PlatformCredentialRequired(reason="invalid")
         tenant = await self._tenant(audience, resolved.token, generation)
-        if isinstance(tenant, PlatformCredentialRequired):
-            return tenant
+        if not isinstance(tenant, tuple):
+            return await self._without_tenant(tenant, target, resolved.revision)
         tenant_headers, principal = tenant
         return PlatformCredentialSnapshot(
             kind=self._kind,
@@ -146,10 +147,30 @@ class ConnectionPlatformCredentialProvider:
             principal=principal,
         )
 
+    async def _without_tenant(
+        self,
+        failure: PlatformCredentialRequired | Literal["unauthorized"],
+        target: PlatformCredentialTarget,
+        revision: str,
+    ) -> PlatformCredentialResult:
+        """Why the token cannot be sent. When workspace discovery refused it,
+        Desktop decides: it refreshes the token once, and answers
+        ``unauthorized_after_refresh`` when the refreshed one is refused.
+        """
+        if failure != "unauthorized":
+            return failure
+        return await self._resolve(target, rejected_revision=revision)
+
     async def _tenant(
         self, audience: str, id_token: str, generation: int
-    ) -> tuple[dict[str, str], str | None] | PlatformCredentialRequired:
-        """An ID token's tenant headers and principal; none for an access token."""
+    ) -> (
+        tuple[dict[str, str], str | None]
+        | PlatformCredentialRequired
+        | Literal["unauthorized"]
+    ):
+        """An ID token's tenant headers and principal; none for an access token.
+        ``"unauthorized"`` when the platform refused the token itself.
+        """
         if self._kind != "oidc_id_token":
             return {}, None
         claims = _unverified_claims(id_token)
@@ -171,6 +192,8 @@ class ConnectionPlatformCredentialProvider:
             tenant = await self._tenants.resolve(
                 audience, user, id_token, TenantSelection()
             )
+        except OidcUnauthorized:
+            return "unauthorized"
         except OidcError:
             return PlatformCredentialRequired(reason="reauthentication_required")
         if generation != self._generation:

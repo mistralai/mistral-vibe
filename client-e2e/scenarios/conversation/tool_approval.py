@@ -8,12 +8,10 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 env = {"VIBE_INPUT_GRACE_PERIOD_MS": "0", "VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 2, 3, 4, 5}
 
 _DOWN = "\x1b[B"
 _CHILD_SESSION_ID = "00000000-0000-4000-8000-000000000002"
@@ -103,5 +101,6 @@ timeline: Timeline = [
     _DOWN,
     "\r",
     "3",
+    take_snapshot(),
     "4",
 ]

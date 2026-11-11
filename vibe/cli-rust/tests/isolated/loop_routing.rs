@@ -37,13 +37,13 @@ fn every_loop_form_is_a_verbatim_prompt_not_a_local_command_or_skill() {
 #[test]
 fn loop_remains_a_discoverable_builtin_not_a_side_channel() {
     assert_eq!(
-        entries(&[])
+        entries(&[], |_| true)
             .iter()
             .filter(|entry| entry.label == "/loop")
             .count(),
         1
     );
-    let description = entries(&[])
+    let description = entries(&[], |_| true)
         .into_iter()
         .find(|entry| entry.label == "/loop")
         .unwrap()
@@ -55,7 +55,7 @@ fn loop_remains_a_discoverable_builtin_not_a_side_channel() {
 #[test]
 fn loop_argument_hint_matches_the_loop_description() {
     let hint = argument_hint(Some('/'), "loop ").unwrap();
-    let description = entries(&[])
+    let description = entries(&[], |_| true)
         .into_iter()
         .find(|entry| entry.label == "/loop")
         .unwrap()

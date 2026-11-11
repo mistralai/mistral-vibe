@@ -12,6 +12,14 @@ fn stop(turn: Value) -> Option<TurnStop> {
 }
 
 #[test]
+fn a_budget_stop_reason_is_read_from_the_turn() {
+    let turn = PublicTurn::read(&json!({
+        "turn": {"status": "interrupted", "budgetStopReason": "price_limit"}
+    }));
+    assert_eq!(turn.budget_stop_reason.as_deref(), Some("price_limit"));
+}
+
+#[test]
 fn outcome_exit_codes() {
     assert_eq!(RunOutcome::Finished.exit_code(), 0);
     assert_eq!(RunOutcome::UsageError.exit_code(), 1);

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from e2e.app_server.mcp import connector, handshake as mcp_handshake, server, tool
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _URL = "https://auth.example.invalid/connectors/gmail?state=e2e"
 
@@ -20,4 +20,15 @@ handshake["config/read"] = {"config": {"theme": "ansi-light"}}
 handshake["runtime/read"]["runtime"]["config"] = {"theme": "ansi-light"}
 env = {"VIBE_THEME": "ansi-light", "SSH_TTY": "/dev/pts/0"}
 _DOWN = "\x1b[B"
-timeline: Timeline = ["/mcp\r", _DOWN, "\r", _DOWN, "\r"]
+timeline: Timeline = [
+    "/mcp\r",
+    take_snapshot(),
+    _DOWN,
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+    _DOWN,
+    take_snapshot(),
+    "\r",
+    take_snapshot(),
+]

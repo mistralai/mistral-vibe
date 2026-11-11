@@ -9,7 +9,7 @@ import shutil
 import tempfile
 
 from e2e.app_server.config import MINIMAL_HOME_CONFIG, WHATS_NEW_HISTORY_FIXTURE
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The user last saw v9.1.0: the six newer releases are unseen, five show.
 _home = tempfile.mkdtemp(prefix="e2e_whatsnew_since_")
@@ -25,6 +25,5 @@ env = {"VIBE_HOME": _home, "VIBE_WHATS_NEW_DIR": os.fspath(WHATS_NEW_HISTORY_FIX
 screen_contains = ("Release notes", "v9.9.9", "v9.4.0", "2 earlier releases not shown")
 screen_excludes = ("v9.3.0", "already seen")
 
-# The banner mounts after startup; the capture after typing settles it.
-capture_startup = False
-timeline: Timeline = ["x"]
+# The banner mounts after startup; typing settles it before the snapshot.
+timeline: Timeline = ["x", take_snapshot()]

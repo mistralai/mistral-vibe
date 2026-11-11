@@ -14,7 +14,12 @@ from vibe.app_server._cached_layers import apply_cached_layers
 from vibe.app_server._config_errors import USER_CONFIG_ERRORS, user_config_error
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
+from vibe.app_server._experiments_service import ExperimentsService
 from vibe.app_server._history_projection import project_message_history
+from vibe.app_server._local_plugins_controller import (
+    LOCAL_PLUGIN_METHODS,
+    LocalPluginsController,
+)
 from vibe.app_server._local_projects_controller import (
     LOCAL_PROJECT_METHODS,
     LocalProjectsController,
@@ -25,18 +30,22 @@ from vibe.app_server._local_skills_controller import (
 )
 from vibe.app_server._missing_layers import MissingLayerFetches
 from vibe.app_server._model import ProtocolModel, validate_wire
+from vibe.app_server._model_catalog_service import ModelCatalogService
 from vibe.app_server._org_config_service import OrgConfigService
 from vibe.app_server._project_links import (
-    ProjectLinksAuthError,
     ProjectLinksController,
     ProjectLinksError,
-    ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
 from vibe.app_server._projection import (
     project_agent_summaries,
     project_config_view,
     project_skill_summaries,
+)
+from vibe.app_server._session_config_cache import (
+    BuiltSessionConfig,
+    SessionConfigCache,
+    SessionConfigKey,
 )
 from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._setup import SetupRequestHandler, _launch_context
@@ -47,7 +56,7 @@ from vibe.app_server._workspace import (
     read_untrusted_config_dirs,
     read_workspace_trust,
 )
-from vibe.app_server._worktree_cleanup import session_finished, worktree_cleanup
+from vibe.app_server._worktree_housekeeping import WorktreeHousekeeping
 from vibe.app_server.protocol import (
     AgentsListParams,
     AgentsListResponse,
@@ -57,16 +66,10 @@ from vibe.app_server.protocol import (
     ConfigSchemaReadResponse,
     EmptyResponse,
     ProjectLinkMutationResponse,
-    ProjectLinksCreateParams,
     ProjectLinksInspectRootParams,
     ProjectLinksInspectRootResponse,
-    ProjectLinksLinkParams,
     ProjectLinksListParams,
     ProjectLinksListResponse,
-    ProjectLinksPickerLoadMoreParams,
-    ProjectLinksPickerLoadMoreResponse,
-    ProjectLinksPickerLoadParams,
-    ProjectLinksPickerLoadResponse,
     ProjectLinksResolveRootParams,
     ProjectLinksResolveRootResponse,
     ProjectLinksSaveParams,
@@ -142,12 +145,8 @@ _HOST_METHODS = frozenset({
     "agents/list",
     "config/read",
     "config/schema",
-    "projectLinks/create",
     "projectLinks/inspectRoot",
-    "projectLinks/link",
     "projectLinks/list",
-    "projectLinks/picker/load",
-    "projectLinks/picker/loadMore",
     "projectLinks/resolveRoot",
     "projectLinks/save",
     "projectLinks/unlink",
@@ -165,6 +164,7 @@ _HOST_METHODS = frozenset({
     "setup/submit-choices",
     "skills/list",
     *LOCAL_SKILL_METHODS,
+    *LOCAL_PLUGIN_METHODS,
     "workspace/trust/decision",
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
@@ -182,22 +182,35 @@ class HostRequestHandler:
         harness_files: HarnessFilesManager,
         *,
         org_config: OrgConfigService,
+        worktrees: WorktreeHousekeeping,
+        experiments: ExperimentsService,
+        model_catalog: ModelCatalogService,
         credentials: PlatformCredentialFactory | None = None,
         image_fallback: bool = False,
         builtin_plugin_roots: Sequence[Path] | None = None,
     ) -> None:
         self._harness_files = harness_files
         self._org_config = org_config
+        self._model_catalog = model_catalog
         self._credentials = credentials or api_key_credentials
+        self._worktrees = worktrees
+        self._worktree_limit_configs = SessionConfigCache()
         self._image_fallback = image_fallback
         self._builtin_plugin_roots = builtin_plugin_roots
-        self._project_links = ProjectLinksController(self._credentials)
+        self._project_links = ProjectLinksController()
         self._local_projects = LocalProjectsController()
         self._setup = SetupRequestHandler(harness_files)
         self._local_skills = LocalSkillsController(
             self._local_skill_files, self._load_orchestrator
         )
-        self._missing_layers = MissingLayerFetches(org_config, self._credentials)
+        self._local_plugins = LocalPluginsController(
+            self._local_skill_files,
+            self._load_orchestrator,
+            self._resolved_builtin_plugin_roots,
+        )
+        self._missing_layers = MissingLayerFetches(
+            org_config, experiments, model_catalog, self._credentials
+        )
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
@@ -230,12 +243,8 @@ class HostRequestHandler:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         except GitError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
-        except ProjectLinksAuthError as exc:
-            raise RequestFailure(ProtocolErrorCode.UNAUTHORIZED, str(exc)) from exc
         except ProjectLinksInvalidRequest as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
-        except ProjectLinksInternalError as exc:
-            raise RequestFailure(ProtocolErrorCode.INTERNAL_ERROR, str(exc)) from exc
         except ProjectLinksError as exc:
             raise RequestFailure(ProtocolErrorCode.INTERNAL_ERROR, str(exc)) from exc
         except FileNotFoundError as exc:
@@ -275,6 +284,8 @@ class HostRequestHandler:
                 )
             case _ if method in LOCAL_SKILL_METHODS:
                 response = await self._local_skills.dispatch(method, raw_params)
+            case _ if method in LOCAL_PLUGIN_METHODS:
+                response = await self._local_plugins.dispatch(method, raw_params)
             case _ if method in LOCAL_PROJECT_METHODS:
                 response = await self._local_projects.dispatch(method, raw_params)
             case _ if method.startswith("setup/"):
@@ -400,10 +411,7 @@ class HostRequestHandler:
         cwd = self._cwd(params.cwd)
         session_files = self._session_files(params.cwd)
         if params.trust_workspace:
-            session_files = replace(
-                session_files, trust_store=session_files.trust_store.for_session()
-            )
-            session_files.trust_store.trust_for_session(cwd)
+            session_files = session_files.trusting(cwd)
         orchestrator = await self._load_picker_orchestrator(
             params.cwd,
             client_info=client_info,
@@ -487,32 +495,6 @@ class HostRequestHandler:
                 response = ProjectLinksInspectRootResponse.model_validate(
                     await self._project_links.inspect_root(params.root_path)
                 )
-            case "projectLinks/picker/load":
-                params = validate_wire(ProjectLinksPickerLoadParams, raw_params)
-                response = ProjectLinksPickerLoadResponse.model_validate(
-                    await self._project_links.picker_load(params.root_path)
-                )
-            case "projectLinks/picker/loadMore":
-                params = validate_wire(ProjectLinksPickerLoadMoreParams, raw_params)
-                response = ProjectLinksPickerLoadMoreResponse.model_validate(
-                    await self._project_links.picker_load_more(
-                        params.root_path, params.cursor
-                    )
-                )
-            case "projectLinks/create":
-                params = validate_wire(ProjectLinksCreateParams, raw_params)
-                response = ProjectLinkMutationResponse.model_validate(
-                    await self._project_links.create(
-                        params.root_path, params.name, params.default_branch
-                    )
-                )
-            case "projectLinks/link":
-                params = validate_wire(ProjectLinksLinkParams, raw_params)
-                response = ProjectLinkMutationResponse.model_validate(
-                    await self._project_links.link(
-                        params.root_path, params.project_id, params.project_name
-                    )
-                )
             case "projectLinks/save":
                 params = validate_wire(ProjectLinksSaveParams, raw_params)
                 response = ProjectLinkMutationResponse.model_validate(
@@ -589,13 +571,10 @@ class HostRequestHandler:
                 )
             case "workspace/git/worktrees/prune":
                 validate_wire(WorkspaceWorktreePruneParams, raw_params)
-                worktree_cleanup().sweep(trust_store=self._harness_files.trust_store)
-                orchestrator = await self._load_orchestrator(self._session_files(None))
-                removed = await asyncio.to_thread(
-                    ManagedWorktree.prune,
-                    orchestrator.config.worktree_limit,
-                    session_finished,
-                    trust_store=self._harness_files.trust_store.for_session(),
+                trust_store = self._harness_files.trust_store
+                self._worktrees.sweep(trust_store=trust_store)
+                removed = await self._worktrees.prune(
+                    await self._worktree_limit(), trust_store=trust_store
                 )
                 response = WorkspaceWorktreePruneResponse(removed=removed)
             case "workspace/git/checkouts":
@@ -739,6 +718,37 @@ class HostRequestHandler:
     async def _load_config(self, cwd: str | None) -> VibeConfigSchema:
         return (await self._load_orchestrator(self._session_files(cwd))).config
 
+    async def _worktree_limit(self) -> int:
+        # Desktop prunes on every session start: rebuilt only when the config
+        # it reads changed, not built whole each time on the event loop.
+        files = self._session_files(None)
+
+        async def build() -> BuiltSessionConfig:
+            orchestrator = await build_default_orchestrator(harness_files=files)
+            pre_org_config = orchestrator.config
+            key, tried, failure = await apply_cached_layers(
+                orchestrator,
+                self._org_config,
+                self._credentials,
+                model_catalog=self._model_catalog,
+            )
+            return BuiltSessionConfig(
+                orchestrator,
+                pre_org_config=pre_org_config,
+                org_config_key=key,
+                org_config_tried=tried,
+                org_config_failure=failure,
+            )
+
+        config = await self._worktree_limit_configs.config(
+            SessionConfigKey.of(self._cwd(None), {}, org_config=True),
+            files,
+            self._org_config,
+            build,
+            self._credentials,
+        )
+        return config.worktree_limit
+
     def _session_files(self, cwd: str | None) -> HarnessFilesManager:
         return self._harness_files.for_session(self._cwd(cwd))
 
@@ -748,6 +758,18 @@ class HostRequestHandler:
             return replace(self._session_files(None), sources=("user",))
         return self._session_files(str(project_root))
 
+    def _resolved_builtin_plugin_roots(self) -> list[Path]:
+        from vibe.app_server._plugins import packaged_builtin_plugin_roots
+
+        if self._builtin_plugin_roots is None:
+            return packaged_builtin_plugin_roots()
+        return list(self._builtin_plugin_roots)
+
+    async def telemetry_enabled(self) -> bool:
+        """The telemetry gate from local and cached config, never fetched."""
+        orchestrator = await self._load_orchestrator(self._session_files(None))
+        return orchestrator.config.enable_telemetry
+
     async def _load_orchestrator(
         self, session_files: HarnessFilesManager, *, org_config: bool = True
     ) -> ConfigOrchestrator[VibeConfigSchema]:
@@ -755,7 +777,10 @@ class HostRequestHandler:
         # Match the session path so host reads (agents/list) see rollout flags
         # like smart_approve_available and the enforced default agent.
         await apply_cached_layers(
-            orchestrator, self._org_config if org_config else None, self._credentials
+            orchestrator,
+            self._org_config if org_config else None,
+            self._credentials,
+            model_catalog=self._model_catalog,
         )
         return orchestrator
 

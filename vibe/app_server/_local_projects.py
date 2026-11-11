@@ -123,6 +123,14 @@ class LocalProjectStore:
             if (project := _parse(entry)) is not None
         ]
 
+    def project_ids(self) -> set[str]:
+        # Raw, so an entry this server can't parse still counts as existing.
+        return {
+            project_id
+            for entry in _entries(self._read())
+            if isinstance(project_id := entry.get("id"), str)
+        }
+
     def create(self, *, name: str, root_path: Path) -> LocalProject:
         entry = _new_entry(_clean_name(name), root_path, now_ms())
         with exclusive_file_lock(self._path):
@@ -236,8 +244,10 @@ def _import_links(
 ) -> bool:
     """Applies the links to ``entries`` in place; returns whether anything changed."""
     now = now_ms()
+    # Read before following links: a backing dropped in this pass still names its cloud project.
+    names = _cloud_names(entries)
     # Only the whole set of links can tell that a folder was unlinked.
-    changed = complete and _follow_links(entries, links, now)
+    changed = complete and _follow_links(entries, links, names, now)
     # Read raw so an entry this server can't parse still counts as imported.
     linked: set[tuple[Path, str]] = set()
     backed_roots: set[Path] = set()
@@ -266,10 +276,13 @@ def _import_links(
             or not os.path.isdir(root)
         ):
             continue
+        name = names.setdefault(link.project_id, _link_name(link, root))
         entry = unbacked.pop(root, None)
         if entry is None:
-            entry = _new_entry(link.project_name.strip() or root.name, root, now)
+            entry = _new_entry(name, root, now)
             entries.append(entry)
+        else:
+            entry["name"] = name
         _set_cloud(entry, CloudBacking(project_id=link.project_id, state="backed"), now)
         linked.add(key)
         backed_roots.add(root)
@@ -278,31 +291,56 @@ def _import_links(
 
 
 def _follow_links(
-    entries: list[dict[str, object]], links: Sequence[ProjectLink], now: int
+    entries: list[dict[str, object]],
+    links: Sequence[ProjectLink],
+    names: dict[str, str],
+    now: int,
 ) -> bool:
     """Points each backing at its folder's current link, or drops it once unlinked."""
-    project_ids = {
-        project_link_path(link): link.project_id
-        for link in links
-        if link.project_id.strip()
+    links_by_root = {
+        project_link_path(link): link for link in links if link.project_id.strip()
     }
     changed = False
     for entry in entries:
         project = _parse(entry)
         if project is None or project.cloud is None or project.cloud.state != "backed":
             continue
-        linked_ids = {project_ids.get(root) for root in project.root_paths}
+        linked_ids = {
+            link.project_id
+            for root in project.root_paths
+            if (link := links_by_root.get(root)) is not None
+        }
         if project.cloud.project_id in linked_ids:
             continue
-        project_id = project_ids.get(project.root_paths[0])
-        if project_id is None:
+        root = project.root_paths[0]
+        link = links_by_root.get(root)
+        if link is None:
             # The local project stays, under its local id.
             del entry["cloud"]
             entry["updated_at"] = now
         else:
-            _set_cloud(entry, CloudBacking(project_id=project_id, state="backed"), now)
+            # The old name belongs to the old cloud project.
+            entry["name"] = names.setdefault(link.project_id, _link_name(link, root))
+            _set_cloud(
+                entry, CloudBacking(project_id=link.project_id, state="backed"), now
+            )
         changed = True
     return changed
+
+
+def _cloud_names(entries: list[dict[str, object]]) -> dict[str, str]:
+    """The name each cloud project goes by: its first backed entry's, as the runner merges them."""
+    names: dict[str, str] = {}
+    for entry in entries:
+        project = _parse(entry)
+        cloud = project.cloud if project is not None else None
+        if project is not None and cloud is not None and cloud.state == "backed":
+            names.setdefault(cloud.project_id, project.name)
+    return names
+
+
+def _link_name(link: ProjectLink, root: Path) -> str:
+    return link.project_name.strip() or root.name
 
 
 def _raw_roots(entry: dict[str, object]) -> list[Path]:

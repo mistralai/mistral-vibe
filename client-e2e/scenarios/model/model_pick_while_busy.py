@@ -5,8 +5,8 @@ from __future__ import annotations
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-capture_startup = False
-request_methods = {"config/reload"}
+# A parked pick is accepted, so its selection is recorded.
+request_methods = {"config/reload", "telemetry/record"}
 handshake = {"config/model/write": {"status": "pending"}}
 
 timeline: Timeline = [
@@ -27,4 +27,4 @@ timeline: Timeline = [
 ]
 
 screen_contains = ("Saved; it applies when the current turn ends.",)
-screen_excludes = ("Failed to apply", "Configuration reloaded")
+screen_excludes = ("Failed to apply", "Applied:")

@@ -20,7 +20,7 @@ use crate::server::Client;
 use crate::server::{method, MCPState};
 use serde_json::{json, Value};
 
-use crate::app::App;
+use crate::app::{App, Severity};
 use crate::commands::submission::new_message_id;
 use crate::transcript::local;
 use rows::Row;
@@ -174,7 +174,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
         // Notify and repaint from the server; only this toggle's paint is stale.
         Event::ToggleFailed { toggle, message } => {
             toggle::revert(app, &toggle);
-            crate::notices::failed(app, &message);
+            crate::notices::inline(app, Severity::Error, &message);
         }
         Event::ActionRequested => browser::hand_off(app, client),
         Event::Connected { name, response } => connect::finished(app, client, &name, &response),

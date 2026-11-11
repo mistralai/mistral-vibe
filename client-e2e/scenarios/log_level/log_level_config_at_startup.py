@@ -6,7 +6,6 @@ from e2e.app_server.scenario import Timeline
 
 handshake = {"config/read": {"config": {"logLevel": "ERROR"}}}
 
-capture_startup = False
 timeline: Timeline = ["/log-level", "\r"]
 
 screen_contains = ("Effective: ERROR  (config.toml: ERROR)",)

@@ -84,19 +84,15 @@ def _no_provider_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.asyncio
 async def test_a_pr_created_by_a_shell_command_is_announced_to_the_client(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    model_creates_a_pr: None,
-    process_services: ProcessServices,
+    tmp_path: Path, model_creates_a_pr: None, process_services: ProcessServices
 ) -> None:
-    """*Prepare*: PR monitoring on, a real adapter on the Session API path with a
-        recording client, and a model whose bash call prints a PR URL after
-        ``gh pr create``.
+    """*Prepare*: PR monitoring left at its default (on), a real adapter on the
+        Session API path with a recording client, and a model whose bash call
+        prints a PR URL after ``gh pr create``.
     *Do*: Run the Turn and read the stream until it completes.
     *Assert*: The client receives one ``artifacts/created`` for that PR.
     """
     # Prepare
-    monkeypatch.setenv("VIBE_EXPERIMENTAL_ENABLE_PR_MONITORING", "true")
     services = FakeSessionBackendServices()
     options = SessionOptions(cwd=str(tmp_path), auto_approve=True)
     async with api_adapter(
