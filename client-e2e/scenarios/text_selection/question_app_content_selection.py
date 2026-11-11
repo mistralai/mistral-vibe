@@ -14,8 +14,6 @@ from e2e.app_server.scenario import Timeline
 
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0", "SSH_TTY": "/dev/pts/0"}
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
-capture_steps = {1, 2, 3}
 clipboard_contains = ("Which color scheme do you prefer?",)
 screen_contains = ("2. Nord", "Copied")
 

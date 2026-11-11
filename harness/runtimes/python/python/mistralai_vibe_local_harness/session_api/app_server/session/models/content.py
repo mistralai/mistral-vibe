@@ -48,14 +48,16 @@ class ContentAnnotations(SessionModel):
     audience: list[ContentAudience] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    """Who the block is for: ``"user"``, ``"assistant"`` or both. ``None`` for both."""
     priority: float | None = Field(
         default=None,
         ge=0,
         le=1,
         exclude_if=lambda value: value is None,
-        description="Read as none when outside 0 to 1. A request refuses such a value.",
+        description="How much the block matters. Must be between 0 and 1.",
     )
     last_modified: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """When the block's content last changed, as an ISO 8601 timestamp."""
     # Kept for refuse_unsupported_blocks, so a request still refuses what a reader drops.
     _dropped_priority: float | None = PrivateAttr(default=None)
 
@@ -81,16 +83,34 @@ class _ContentBlockBase(SessionModel):
     annotations: ContentAnnotations | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    """Who the block is for and how much it matters, as MCP annotations."""
     meta: dict[str, JsonValue] | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
         description=(
-            "Host metadata, MCP `_meta`. Never shown to the model. Read as none when it is not "
-            "an object. A request refuses such a value."
+            "Metadata for your client, as MCP `_meta`. The model never sees it. "
+            "Must be a JSON object."
         ),
     )
     # Kept for refuse_unsupported_blocks, so a request still refuses what a reader drops.
     _dropped_meta: bool = PrivateAttr(default=False)
+    # The Runtime block this one was read from, for a Hook's view of the Turn: handed back
+    # unchanged, the block becomes that Runtime block again, as it was, so a Hook passing
+    # content through never changes what the model receives. Set by
+    # ``to_session_content(keep_origin=True)``.
+    _core_origin: object | None = PrivateAttr(default=None)
+
+    def __eq__(self, other: object) -> bool:
+        # The origin is where the block came from, not its value: a block of a Hook's view
+        # equals the same block built by hand.
+        if not isinstance(other, _ContentBlockBase):
+            return NotImplemented
+        return (
+            type(self) is type(other)
+            and self.__dict__ == other.__dict__
+            and self.__pydantic_extra__ == other.__pydantic_extra__
+            and self._dropped_meta == other._dropped_meta
+        )
 
     @model_validator(mode="wrap")
     @classmethod
@@ -111,13 +131,17 @@ class _ContentBlockBase(SessionModel):
 class TextContentBlock(_ContentBlockBase):
     type: Literal["text"] = "text"
     text: str = ""
+    """The text."""
 
 
 class ImageContentBlock(_ContentBlockBase):
     type: Literal["image"] = "image"
     uri: Uri
+    """The image's URI, such as a ``data:`` URI that holds the image in base64."""
     media_type: str | None = None
+    """The image's media type, such as ``"image/png"``."""
     alt_text: str | None = None
+    """A text description of the image."""
 
     @classmethod
     def from_bytes(
@@ -128,7 +152,14 @@ class ImageContentBlock(_ContentBlockBase):
         alt_text: str | None = None,
         annotations: ContentAnnotations | None = None,
     ) -> "ImageContentBlock":
-        """An inline image; the media type is read from PNG, JPEG, GIF or WebP bytes."""
+        """An inline image; the media type is read from PNG, JPEG, GIF or WebP bytes.
+
+        Args:
+            data: The image's bytes.
+            media_type: The image's media type. Defaults to the one read from the bytes.
+            alt_text: A text description of the image.
+            annotations: Who the block is for and how much it matters.
+        """
         resolved = media_type or sniff_image_media_type(data)
         if resolved is None:
             raise ValueError("cannot tell the image type from its bytes; pass media_type")
@@ -149,7 +180,14 @@ class ImageContentBlock(_ContentBlockBase):
         annotations: ContentAnnotations | None = None,
     ) -> "ImageContentBlock":
         """An inline image read from a local file whose base64 is at most
-        ``MAX_MEDIA_BASE64_CHARS`` characters."""
+        ``MAX_MEDIA_BASE64_CHARS`` characters.
+
+        Args:
+            path: The image file.
+            media_type: The image's media type. Defaults to the one read from the file's bytes.
+            alt_text: A text description of the image.
+            annotations: Who the block is for and how much it matters.
+        """
         # Base64 takes 4 characters for every 3 bytes, so this is the largest file whose
         # base64 fits the limit.
         max_bytes = MAX_MEDIA_BASE64_CHARS // 4 * 3
@@ -165,25 +203,37 @@ class ImageContentBlock(_ContentBlockBase):
 class AudioContentBlock(_ContentBlockBase):
     type: Literal["audio"] = "audio"
     uri: Uri
+    """The clip's URI, such as a ``data:`` URI that holds the clip in base64."""
     media_type: str | None = None
+    """The clip's media type, such as ``"audio/wav"``."""
 
 
 class ResourceLinkContentBlock(_ContentBlockBase):
     type: Literal["resource_link"] = "resource_link"
     uri: Uri
+    """The resource's URI."""
     name: str | None = None
+    """The resource's name."""
     title: str | None = None
+    """A name for people."""
     description: str | None = None
+    """What the resource is."""
     media_type: str | None = None
+    """The resource's media type."""
     size: Annotated[int | None, Field(ge=0)] = None
+    """The resource's size, in bytes."""
 
 
 class EmbeddedResourceContentBlock(_ContentBlockBase):
     type: Literal["embedded_resource"] = "embedded_resource"
     uri: Uri
+    """The resource's URI."""
     media_type: str | None = None
+    """The resource's media type."""
     text: str | None = None
+    """The resource's text. Set exactly one of ``text`` and ``blob``."""
     blob: str | None = None
+    """The resource's data, in base64. Set exactly one of ``text`` and ``blob``."""
 
     @model_validator(mode="after")
     def validate_content(self) -> "EmbeddedResourceContentBlock":
@@ -203,21 +253,21 @@ def sniff_image_media_type(data: bytes) -> str | None:
 
 
 class UnknownContentBlock(SessionModel):
-    """A content block of a type this reader does not know.
+    """A content block of a type added after your SDK version.
 
-    A newer Runtime can add block types. Such a block is kept, so that it does not fail
-    the whole message, history page or event that holds it. Its type is saved in
-    ``original_type`` and its other fields, ``annotations`` and ``meta`` included, are
-    kept as they came. Its own ``type`` is ``unknown``, so a ``match`` on ``type`` still
-    works for the known blocks. Serialized, it is the block as it came: its own ``type``,
-    no ``original_type``. Blocks of a known type are validated as before. A Turn cannot
-    run such a block: requests refuse it.
+    Such a block is kept, so that it does not fail the whole message, history page or event
+    that holds it. Its type is saved in ``original_type`` and its other fields,
+    ``annotations`` and ``meta`` included, are kept as they came. Its own ``type`` is
+    ``unknown``, so a ``match`` on ``type`` still works for the known blocks. Serialized, it
+    is the block as it came: its own ``type``, no ``original_type``. Blocks of a known type
+    are validated as before. A Turn cannot run such a block: requests refuse it.
     """
 
     model_config = ConfigDict(extra="allow")
 
     type: Literal["unknown"] = "unknown"
     original_type: str
+    """The block's type as it came."""
 
     @model_validator(mode="before")
     @classmethod
@@ -264,27 +314,61 @@ UNSUPPORTED_CONTENT_ERROR = "unsupported_content_block"
 that ``ClientEvent`` reads the event as unknown, as it did before ``UnknownContentBlock``."""
 
 
-def refuse_unsupported_blocks(blocks: list[ContentBlock]) -> list[ContentBlock]:
+def refuse_unsupported_blocks(
+    blocks: list[ContentBlock], *, refuse_audio: bool = True
+) -> list[ContentBlock]:
     """Return ``blocks``; raise ``ValueError`` if a Turn cannot run one of them.
 
-    A reader keeps a block of a type it does not know and an audience it does not know,
-    and drops a priority outside 0 to 1 and a ``meta`` that is not an object, but a request
-    must only send what a Turn can run.
+    A reader keeps a block of a type it does not know, audio, and an audience it does not
+    know, and drops a priority outside 0 to 1 and a ``meta`` that is not an object, but a
+    request must only send what a Turn can run. No completion provider takes audio yet.
+    ``refuse_audio=False`` leaves audio to the Turn, for content this check accepted it in
+    before, such as a tool result or a client tool answer.
     """
     for block in blocks:
         if isinstance(block, UnknownContentBlock):
             raise ValueError(f"content block type {block.original_type!r} is not supported")
+        if block._core_origin is not None:
+            # Read from the Turn, so the Turn runs it; ``to_core_content`` refuses it if changed.
+            continue
+        if refuse_audio and isinstance(block, AudioContentBlock):
+            raise ValueError(AUDIO_NOT_SUPPORTED)
         if block._dropped_meta:
             raise ValueError("content block meta must be an object")
-        if block.annotations is None:
-            continue
-        for audience in block.annotations.audience or []:
-            if audience not in _KNOWN_AUDIENCES:
-                raise ValueError(f"content audience {audience!r} is not supported")
-        priority = block.annotations._dropped_priority
-        if priority is not None:
-            raise ValueError(f"content priority {priority:g} is not between 0 and 1")
+        refusal = _annotations_refusal(block.annotations)
+        if refusal is not None:
+            raise ValueError(refusal)
     return blocks
+
+
+AUDIO_NOT_SUPPORTED = "audio content is not supported yet"
+
+
+def drop_refused_metadata(block: ContentBlock) -> ContentBlock:
+    """Return ``block`` without the annotations or ``meta`` that ``refuse_unsupported_blocks``
+    refuses, for a client that dropped them before the Session checked them."""
+    if isinstance(block, UnknownContentBlock):
+        return block
+    update: dict[str, object] = {}
+    if _annotations_refusal(block.annotations) is not None:
+        update["annotations"] = None
+    if not update and not block._dropped_meta:
+        return block
+    kept = block.model_copy(update=update)
+    kept._dropped_meta = False
+    return kept
+
+
+def _annotations_refusal(annotations: ContentAnnotations | None) -> str | None:
+    if annotations is None:
+        return None
+    for audience in annotations.audience or []:
+        if audience not in _KNOWN_AUDIENCES:
+            return f"content audience {audience!r} is not supported"
+    priority = annotations._dropped_priority
+    if priority is not None:
+        return f"content priority {priority:g} is not between 0 and 1"
+    return None
 
 
 _KNOWN_AUDIENCES: frozenset[str] = frozenset(get_args(get_args(ContentAudience.__value__)[0]))

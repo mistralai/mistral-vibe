@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 import copy
 from typing import Any
 
@@ -18,10 +18,11 @@ from vibe.core.config.layers.user import UserConfigLayer
 from vibe.core.config.orchestrator import (
     ConfigOrchestrator,
     FieldMutation,
+    FieldsMutation,
     _changed_keys_between,
     _sparse_override_model_aliases,
 )
-from vibe.core.config.patch import PatchOp, ensure_parent_paths
+from vibe.core.config.patch import AddOperationPatch, PatchOp, ensure_parent_paths
 from vibe.core.config.types import ConfigChangeEvent, ConflictStrategy
 from vibe.core.utils.concurrency import run_sync
 
@@ -75,6 +76,12 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         return self._extra_layers.pop(index)
 
     def rebuild(self) -> None:
+        self._install(run_sync(self._builder_for_rebuild().build()))
+
+    async def arebuild(self) -> None:
+        self._install(await self._builder_for_rebuild().build())
+
+    def _builder_for_rebuild(self) -> ConfigBuilder[C]:
         builder = ConfigBuilder(type(self._base_config))
         builder.add_layer(
             OverridesLayer(
@@ -82,7 +89,9 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
             )
         )
         builder.add_layers(list(self._extra_layers))
-        result = run_sync(builder.build())
+        return builder
+
+    def _install(self, result: C) -> None:
         # The verbatim base is already validated (e.g. active_model fixed up), so
         # re-validation won't reproduce its warnings; carry them forward to match
         # the real orchestrator, which re-merges raw layer snapshots.
@@ -172,6 +181,35 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         )
         return FieldMutation(previous=current, failures=failures)
 
+    async def mutate_fields(
+        self,
+        mutations: Mapping[str, Callable[[Any], Any]],
+        reason: str = "No reason",
+        *,
+        default: Any = None,
+        target_layer: str | None = None,
+        preflight: Callable[[C], Awaitable[None]] | None = None,
+    ) -> FieldsMutation:
+        raw = (await self.load_persistence_layer()).model_dump()
+        previous: dict[str, Any] = {}
+        operations: list[PatchOp] = []
+        for path, mutate in mutations.items():
+            current = JsonPointer(path).resolve(raw, default=copy.deepcopy(default))
+            previous[path] = current
+            value = mutate(copy.deepcopy(current))
+            if value != current:
+                operations.append(
+                    AddOperationPatch(
+                        path=path, value=value, target_layer_name=target_layer
+                    )
+                )
+        if not operations:
+            if preflight is not None:
+                await preflight(self.config)
+            return FieldsMutation(previous=previous, failures=[])
+        failures = await self.apply_patch(operations, reason, preflight=preflight)
+        return FieldsMutation(previous=previous, failures=failures)
+
     async def preview_patch(
         self, operations: list[PatchOp], *, without: Collection[str] = ()
     ) -> C:
@@ -233,6 +271,9 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         self, name: str, *, preflight: Callable[[C], Awaitable[None]] | None = None
     ) -> None:
         await self.reload(preflight=preflight)
+
+    async def reload_files(self) -> None:
+        await self.reload()
 
     async def _persistence_orchestrator(self) -> ConfigOrchestrator[C]:
         layer = UserConfigLayer()

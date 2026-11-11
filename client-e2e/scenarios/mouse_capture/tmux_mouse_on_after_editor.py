@@ -27,6 +27,5 @@ env = {
     "TMUX_PANE": "%1",
     "VISUAL": "sh -c 'echo 1 > \"$VIBE_HOME/tmux_mouse\"' editor",
 }
-capture_startup = False
 mouse_tracking = True
 timeline: Timeline = ["x", _CTRL_G]

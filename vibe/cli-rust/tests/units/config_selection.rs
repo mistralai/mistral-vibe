@@ -117,7 +117,7 @@ fn a_failed_refresh_replaces_the_hints() {
 
     let screen = rows(&redraw(&mut app)).join("\n");
     assert!(screen.contains("Failed to load settings: app-server closed"));
-    assert!(app.config_screen.status.as_ref().unwrap().shown);
+    assert!(app.config_screen.status.as_ref().unwrap().shown());
 }
 
 #[test]
@@ -143,12 +143,12 @@ fn a_status_waits_for_a_screen_large_enough_to_paint_it() {
 
     crate::support::render(18, 6, |frame| app.draw(frame));
     assert!(
-        !app.config_screen.status.as_ref().unwrap().shown,
+        !app.config_screen.status.as_ref().unwrap().shown(),
         "too small to paint it"
     );
 
     redraw(&mut app);
-    assert!(app.config_screen.status.as_ref().unwrap().shown);
+    assert!(app.config_screen.status.as_ref().unwrap().shown());
 }
 
 #[test]
@@ -162,11 +162,11 @@ fn a_status_under_the_edit_dialog_waits_for_it_to_close() {
 
     redraw(&mut app);
     assert!(
-        !app.config_screen.status.as_ref().unwrap().shown,
+        !app.config_screen.status.as_ref().unwrap().shown(),
         "covered by the dialog"
     );
 
     app.config_screen.edit = None;
     redraw(&mut app);
-    assert!(app.config_screen.status.as_ref().unwrap().shown);
+    assert!(app.config_screen.status.as_ref().unwrap().shown());
 }

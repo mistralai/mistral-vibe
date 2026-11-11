@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Callable, Mapping, Set
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 import fcntl
 import os
@@ -88,24 +88,36 @@ def exec_launch(spec: CaptureSpec) -> tuple[int, int]:
     return pid, fd
 
 
+@dataclass(frozen=True)
+class Frames:
+    """The labeled frames a run captured, plus what every run records."""
+
+    snapshots: list[Snapshot]
+    final: Snapshot
+    """The last settled frame, captured whether or not it was labeled."""
+    titles: tuple[str, ...]
+    """The terminal title once startup and each settled step finished."""
+
+
 def capture(
     spec: CaptureSpec,
     *,
     releases: tuple[int, ...] = (),
     releases_after: tuple[int, ...] = (),
-    capture_startup: bool = True,
-    capture_steps: Set[int] | None = None,
+    startup_label: str | None = None,
+    step_labels: tuple[str | None, ...] = (),
     step_fd: int | None = None,
     launch: Launcher = exec_launch,
-) -> list[Snapshot]:
-    """Capture startup and one settled frame after each input step."""
+) -> Frames:
+    """Drive every step, capturing the settled frames that carry a label."""
     pid, fd = launch(spec)
     client = _Client(
         fd, spec, Terminal(spec.rows, spec.columns), (spec.rows, spec.columns)
     )
     try:
         client.settle()
-        snapshots = [client.snapshot("startup")] if capture_startup else []
+        snapshots = [] if startup_label is None else [client.snapshot(startup_label)]
+        titles = [client.terminal.title]
         for index, step in enumerate(spec.steps):
             client.release(step_fd, releases[index] if index < len(releases) else 0)
             if spec.exit_after_last_step and index == len(spec.steps) - 1:
@@ -119,9 +131,11 @@ def capture(
                 client.resize(*resize)
             after = releases_after[index] if index < len(releases_after) else 0
             client.release(step_fd, after)
-            if capture_steps is None or index in capture_steps:
-                snapshots.append(client.snapshot(f"step{index}"))
-        return snapshots
+            titles.append(client.terminal.title)
+            label = step_labels[index] if index < len(step_labels) else None
+            if label is not None:
+                snapshots.append(client.snapshot(label))
+        return Frames(snapshots, client.snapshot("final"), tuple(titles))
     finally:
         _terminate(pid, fd)
 

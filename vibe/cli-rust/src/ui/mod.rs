@@ -1,7 +1,6 @@
 //! UI components; each submodule owns one region of the screen.
 
 pub mod approval;
-pub mod artifacts_checks;
 pub mod artifacts_modal;
 pub mod auth_app;
 pub mod banner;
@@ -9,6 +8,8 @@ pub(crate) mod bottom_app;
 pub mod bottom_bar;
 mod bottom_bar_parts;
 pub mod braille_renderer;
+pub mod branch_app;
+pub(crate) mod browser_box;
 pub mod chat_input;
 pub mod completion_popup;
 pub(crate) mod composer_layout;
@@ -38,6 +39,7 @@ pub mod model_picker;
 pub mod narrator;
 pub mod notice;
 pub mod plugins;
+pub mod pr_row;
 pub mod proxy_setup;
 pub mod pulse;
 pub mod question_app;
@@ -53,6 +55,7 @@ pub mod rng;
 pub mod scrollbar;
 pub(crate) mod search_field;
 pub mod selection;
+pub mod skills_browser;
 mod styled_text;
 pub mod subagent_list;
 pub mod tab_cells;
@@ -66,7 +69,7 @@ mod trust_folders_layout;
 mod trust_folders_paint;
 pub(crate) mod trust_folders_selection;
 mod trust_folders_text;
-pub mod vibe_code_project;
+pub(crate) mod visual_lines;
 pub mod voice_app;
 
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -112,11 +115,12 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::Approval => approval::draw(app, f, area),
         Focus::Question => question_app::draw(app, f, area),
         Focus::VoiceApp => voice_app::draw(app, f, area),
+        Focus::BranchApp => branch_app::draw(app, f, area),
         Focus::ProxySetup => proxy_setup::draw(app, f, area),
-        Focus::VibeCodeProject => vibe_code_project::draw(app, f, area),
         Focus::ResumePicker => resume_picker::draw(app, f, area),
         Focus::Mcp => mcp::draw(app, f, area),
         Focus::Plugins => plugins::draw(app, f, area),
+        Focus::Skills => skills_browser::draw(app, f, area),
         Focus::ContextApp => context_app::draw(app, f, area),
         Focus::McpOAuth => mcp_oauth::draw(app, f, area),
         Focus::ConnectorAuth => connector_auth::draw(app, f, area),
@@ -241,7 +245,11 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
 /// narrator status, the loading spinner, the inline notice and the feedback
 /// bar, laid out left to right.
 pub(crate) fn draw_loading_area(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
-    let notice_width = notice::width(app);
+    // A squeezed area keeps the loading row: the block only gets the rows beyond it.
+    let block = notice_block(app, area.width).min(area.height.saturating_sub(2));
+    let [area, block_area] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(block)]).areas(area);
+    let notice_width = if block > 0 { 0 } else { notice::width(app) };
     let feedback_width = feedback_bar::width(app);
     // The narrator row is laid out before the loading spinner; zero width
     // while idle keeps the split identical to before.
@@ -257,12 +265,21 @@ pub(crate) fn draw_loading_area(app: &mut App, f: &mut Frame, area: ratatui::lay
     narrator::draw(app, f, loading_chunks[0]);
     loading::draw(app, f, loading_chunks[1]);
     feedback_bar::draw(app, f, loading_chunks[4]);
-    notice::draw(app, f, loading_chunks[2]);
+    match block > 0 {
+        true => notice::draw(app, f, block_area, true),
+        false => notice::draw(app, f, loading_chunks[2], false),
+    }
 }
 
-/// A failed startup grows the area so the whole error wraps under the
-/// padding row.
+/// Rows of the wrapped-failure block under the loading row: 0 when the notice fits beside the narrator and feedback.
+fn notice_block(app: &App, width: u16) -> u16 {
+    let feedback = feedback_bar::width(app);
+    let others = narrator::width(app) + feedback + u16::from(feedback > 0);
+    notice::block_rows(app, width.saturating_sub(others), width)
+}
+
+/// A failed startup grows the area so its error wraps under the padding row; a wrapped failure adds its block below.
 pub(crate) fn loading_height(app: &App, width: u16) -> u16 {
     let base = if app.view.transcript.is_empty() { 3 } else { 2 };
-    base.max(loading::failure::rows(app, width).saturating_add(1))
+    base.max(loading::failure::rows(app, width).saturating_add(1)) + notice_block(app, width)
 }

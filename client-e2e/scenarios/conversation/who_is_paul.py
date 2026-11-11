@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     web_search_completed,
     web_search_started,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "who is paul vezia? search web"
 _ANSWER = (
@@ -26,4 +26,5 @@ timeline: Timeline = [
     web_search_completed("Paul Vezia", _ANSWER),
     assistant_msg(f"Based on the search, {_ANSWER}"),
     turn_completed(),
+    take_snapshot(),
 ]

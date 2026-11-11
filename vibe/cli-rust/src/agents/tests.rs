@@ -73,20 +73,10 @@ fn a_refused_switch_shows_the_servers_reason_and_keeps_the_running_agent() {
     settle(&mut app, &client, "broken", Err(REFUSAL.into()));
     assert_eq!(displayed(&app).name, "ask");
     assert!(!switching(&app));
-    let row = app
-        .view
-        .transcript
-        .lines()
-        .last()
-        .expect("the refusal is shown");
-    let crate::server::HistoryEntry::Message(message) = row.entry else {
-        panic!("the refusal is a message row");
-    };
-    assert_eq!(message.role, "command_error");
-    assert!(matches!(
-        message.content.first(),
-        Some(crate::server::MessageContent::Text { text }) if *text == format!("Failed to switch agent: {REFUSAL}")
-    ));
+    let notice = app.overlays.notice.as_ref().expect("the refusal is shown");
+    assert_eq!(notice.severity, crate::app::Severity::Error);
+    assert_eq!(notice.text, format!("Failed to switch agent: {REFUSAL}"));
+    assert_eq!(app.view.transcript.lines().count(), 0);
 }
 
 #[test]

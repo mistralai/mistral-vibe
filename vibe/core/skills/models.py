@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import StrEnum, auto
 from pathlib import Path
 from typing import Any
@@ -152,6 +153,16 @@ class SkillInfo(BaseModel):
             scope=scope,
             registry=registry,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class InstalledSkill:
+    """``active`` says whether the skill's name loads this one, not whether it is
+    enabled.
+    """
+
+    info: SkillInfo
+    active: bool
 
 
 class SkillConfigIssue(BaseModel):

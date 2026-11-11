@@ -17,7 +17,7 @@ on_request = {"session/resume": [_RESUMED]}
 timeline: Timeline = ["\r"]
 
 screen_contains = (
-    "Resumed session 00000000",
+    "Resumed session 00000003",
     "─ Devstral Small 2[off] · accept edits ─",
 )
 screen_excludes = ("mistral-medium-3.5[medium]",)

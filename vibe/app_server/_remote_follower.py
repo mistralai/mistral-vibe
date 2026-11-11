@@ -57,6 +57,12 @@ class RemoteFollower[V]:
         self._loaded = value
         self._forced = False
 
+    def force(self) -> None:
+        """Have the value held loaded at the next boundary, even one refused
+        before: what refused it has changed.
+        """
+        self._forced = True
+
     async def refresh(self, fetch: Callable[[], Awaitable[object]]) -> None:
         """Fetch now (``/reload``) and have the value held then loaded, even one
         loaded or refused before: what it is checked against may have changed.

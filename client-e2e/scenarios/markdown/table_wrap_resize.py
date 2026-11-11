@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline, resize
+from e2e.app_server.scenario import Timeline, resize, take_snapshot
 
 screen_contains = (
-    "│ Table   │ Long table cell text wraps",
-    "│ cells   │ instead of disappearing",
-    "│         │ beyond the viewport",
-    "│ aligned and every word",
-    "└─────────┴───────────────────────────────┴────────────────────────┘",
+    "│ Table cells │ Long table cell text wraps",
+    "│             │ instead of disappearing",
+    "│             │ beyond the viewport",
+    "│ borders aligned and │",
+    "└─────────────┴──────────────────────────────┴─────────────────────┘",
 )
 
 _PROMPT = "compare table wrapping"
@@ -29,7 +29,11 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     assistant_msg(_ANSWER),
     turn_completed(),
+    take_snapshot(),
     resize(40, 72),
+    take_snapshot(),
     resize(40, 96),
+    take_snapshot(),
     resize(40, 72),
+    take_snapshot(),
 ]

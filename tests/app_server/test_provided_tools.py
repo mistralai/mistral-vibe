@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from urllib.error import URLError
 
 from pydantic import JsonValue
 import pytest
@@ -31,6 +32,8 @@ from vibe.app_server._provided_tools import (
     vibe_tool_groups,
 )
 from vibe.app_server._session_spawn import (
+    MAX_SESSION_HOPS,
+    MAX_TURN_STARTED_SESSIONS,
     START_SESSION_TOOL_NAME,
     SessionOriginResolver,
     SessionSettings,
@@ -74,10 +77,15 @@ def _executor(
     session_origin: SessionOriginResolver | None = None,
 ) -> _Executor:
     holder = tools if tools is not None else VibeProvidedTools()
+
+    async def resolve_loops(session_id: str) -> UnifiedScheduledLoops:
+        assert scheduled_loops is not None
+        return scheduled_loops(session_id)
+
     return holder.executor_factory(
         root,
         max_todos=max_todos or (lambda: TodoConfig().max_todos),
-        scheduled_loops=scheduled_loops,
+        scheduled_loops=resolve_loops if scheduled_loops is not None else None,
         session_spawner=session_spawner,
         session_origin=session_origin or _parent_in_a_managed_worktree,
     )(session_id)
@@ -378,6 +386,8 @@ def test_todo_is_routed_to_the_name_its_permission_is_configured_under() -> None
         f"{VIBE_TOOL_GROUP}.send_to_session": "send_to_session",
         f"{VIBE_TOOL_GROUP}.archive_sessions": "archive_sessions",
         f"{VIBE_TOOL_GROUP}.restore_sessions": "restore_sessions",
+        f"{VIBE_TOOL_GROUP}.mark_sessions_seen": "mark_sessions_seen",
+        f"{VIBE_TOOL_GROUP}.enter_worktree": "enter_worktree",
     }
     assert VIBE_PROVIDED_TOOL_MODES == {
         TODO_TOOL_NAME: "ask",
@@ -388,7 +398,9 @@ def test_todo_is_routed_to_the_name_its_permission_is_configured_under() -> None
         "send_to_session": "ask",
         "archive_sessions": "ask",
         "restore_sessions": "ask",
+        "mark_sessions_seen": "ask",
         SCRATCHPAD_TOOL_NAME: "allow",
+        "enter_worktree": "allow",
     }
 
 
@@ -951,6 +963,35 @@ async def test_start_session_runs_on_the_model_the_user_asked_for(
 
 
 @pytest.mark.asyncio
+async def test_start_session_takes_a_catalog_alias_for_its_model(
+    tmp_path: Path,
+) -> None:
+    spawner = _FakeSpawner()
+
+    def origin(_session_id: str) -> SessionSpawnOrigin:
+        return SessionSpawnOrigin(
+            checkout=SessionSpawnManagedWorktree(path="/repo/.worktrees/parent"),
+            settings=_PARENT_SETTINGS,
+            models=_MODELS,
+            model_names={"opus-old": "claude-opus-5"},
+        )
+
+    started = await _executor(tmp_path, session_spawner=spawner, session_origin=origin)(
+        _start_session(
+            "start",
+            prompt="Fix it",
+            placement="new_worktree",
+            model="opus-old",
+            reasoning_effort="max",
+        )
+    )
+
+    assert isinstance(started, RustToolSucceededEvent)
+    [request] = spawner.requests
+    assert (request.model, request.reasoning_effort) == ("claude-opus-5", "max")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("asked", "reason"),
     [
@@ -990,31 +1031,147 @@ async def test_start_session_without_a_spawner_is_a_correctable_tool_failure(
     assert "not available" in rejected.result.error.message
 
 
+class _Turn:
+    """Counts the sessions a turn starts, as the adapter does."""
+
+    def __init__(self, *, started_by: str | None = None, starts: int = 0) -> None:
+        self.started_by = started_by
+        self.starts = starts
+
+    def origin(self, hops: int) -> SessionSpawnOrigin:
+        parent = _parent_in_a_managed_worktree("session-1")
+        return SessionSpawnOrigin(
+            checkout=parent.checkout,
+            settings=parent.settings,
+            hops=hops,
+            started_by=self.started_by,
+            turn_starts=self.starts,
+            count_turn_start=self.count,
+        )
+
+    def count(self, delta: int = 1) -> None:
+        self.starts += delta
+
+
+async def _start_from(
+    tmp_path: Path, spawner: _FakeSpawner, turn: _Turn, hops: int = 0
+) -> RustEvent:
+    return await _executor(
+        tmp_path, session_spawner=spawner, session_origin=lambda _id: turn.origin(hops)
+    )(_start_session("start", prompt="Fix it", placement="current_checkout"))
+
+
 @pytest.mark.asyncio
-async def test_a_started_session_cannot_start_sessions_before_the_user_writes(
+async def test_a_session_another_one_started_cannot_start_sessions(
     tmp_path: Path,
 ) -> None:
-    """*Prepare*: A session another session started, not yet written to by the
-    user.
-    *Do*: Call start_session from it.
-    *Assert*: The call fails back to the model without reaching the client, so
-    started sessions cannot chain on their own.
+    """*Prepare*: A session the user started, and one another session started.
+    *Do*: Call start_session from each.
+    *Assert*: The user's session starts one; the other fails back to the model
+    with a reason the client can read, without reaching the client.
     """
     spawner = _FakeSpawner()
 
-    def handed_task(session_id: str) -> SessionSpawnOrigin:
-        origin = _parent_in_a_managed_worktree(session_id)
-        return SessionSpawnOrigin(
-            checkout=origin.checkout, settings=origin.settings, awaits_user=True
-        )
+    allowed = await _start_from(tmp_path, spawner, _Turn())
+    refused = await _start_from(tmp_path, spawner, _Turn(started_by="parent-1"))
 
-    rejected = await _executor(
-        tmp_path, session_spawner=spawner, session_origin=handed_task
-    )(_start_session("start", prompt="Fix it", placement="current_checkout"))
+    assert isinstance(allowed, RustToolSucceededEvent)
+    assert isinstance(refused, RustToolFailedEvent)
+    assert "Do the task here" in refused.result.error.message
+    assert refused.result.error.details == {"reason": "session_depth"}
+    assert len(spawner.requests) == 1
 
-    assert isinstance(rejected, RustToolFailedEvent)
-    assert "Do the task here" in rejected.result.error.message
-    assert spawner.requests == []
+
+@pytest.mark.asyncio
+async def test_a_turn_starts_no_more_sessions_than_the_cap(tmp_path: Path) -> None:
+    """*Prepare*: A turn one start short of the cap, whose client takes a
+        while to create each session.
+    *Do*: Call start_session twice at once.
+    *Assert*: The first counts before it reaches the client, so the second is
+    refused at the cap with a reason the client can read.
+    """
+    release = asyncio.Event()
+
+    async def slow(params: SessionSpawnParams) -> SessionSpawnResponse:
+        await release.wait()
+        return SessionSpawnResponse(session_id="spawned-1", title=params.title)
+
+    spawner = _FakeSpawner(slow)
+    turn = _Turn(starts=MAX_TURN_STARTED_SESSIONS - 1)
+    first = asyncio.ensure_future(_start_from(tmp_path, spawner, turn))
+    await asyncio.sleep(0.05)
+    second = await _start_from(tmp_path, spawner, turn)
+    release.set()
+
+    assert isinstance(await first, RustToolSucceededEvent)
+    assert isinstance(second, RustToolFailedEvent)
+    assert "Do the rest of the work here" in second.result.error.message
+    assert second.result.error.details == {"reason": "started_sessions"}
+    assert len(spawner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_start_the_client_refuses_does_not_count_against_the_turn(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A turn at its last start.
+    *Do*: The client refuses one start, then accepts the next.
+    *Assert*: The refused start gave its slot back, so the next one goes out.
+    """
+    answers = iter(["refuse", "accept"])
+
+    async def answer(params: SessionSpawnParams) -> SessionSpawnResponse:
+        if next(answers) == "refuse":
+            raise SessionSpawnError("Could not check whether sessions may start.")
+        return SessionSpawnResponse(session_id="spawned-1", title=params.title)
+
+    spawner = _FakeSpawner(answer)
+    turn = _Turn(starts=MAX_TURN_STARTED_SESSIONS - 1)
+
+    refused = await _start_from(tmp_path, spawner, turn)
+    started = await _start_from(tmp_path, spawner, turn)
+
+    assert isinstance(refused, RustToolFailedEvent)
+    assert isinstance(started, RustToolSucceededEvent)
+    assert turn.starts == MAX_TURN_STARTED_SESSIONS
+
+
+@pytest.mark.asyncio
+async def test_a_failure_carries_only_a_session_limit_as_its_reason(
+    tmp_path: Path,
+) -> None:
+    """An OSError such as ``URLError`` has a ``reason`` of its own, which is no
+    session limit for a client to read.
+    """
+
+    async def unreachable(_params: SessionSpawnParams) -> SessionSpawnResponse:
+        raise URLError("no route to host")
+
+    failed = await _start_from(tmp_path, _FakeSpawner(unreachable), _Turn())
+
+    assert isinstance(failed, RustToolFailedEvent)
+    assert failed.result.error.details is None
+
+
+@pytest.mark.asyncio
+async def test_a_started_session_carries_one_hop_more_than_its_starter(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session in a turn another session's message started, and
+    one at the hop limit.
+    *Do*: Call start_session from each.
+    *Assert*: The first hands the new session one hop more; the one at the
+    limit is refused, so starting sessions cannot extend a loop of messages.
+    """
+    spawner = _FakeSpawner()
+
+    allowed = await _start_from(tmp_path, spawner, _Turn(), hops=2)
+    refused = await _start_from(tmp_path, spawner, _Turn(), hops=MAX_SESSION_HOPS)
+
+    assert isinstance(allowed, RustToolSucceededEvent)
+    assert [request.hops for request in spawner.requests] == [3]
+    assert isinstance(refused, RustToolFailedEvent)
+    assert refused.result.error.details == {"reason": "session_hops"}
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,8 @@
 
 mod fork;
 mod positions;
-pub mod teleport;
 
-pub use fork::{add_branch_created, add_rewind_fork};
+pub use fork::add_rewind_fork;
 pub(super) use positions::preserve_file_image_links;
 pub use positions::{preserve, restore, restore_positions};
 
@@ -175,8 +174,10 @@ pub fn add_status(transcript: &mut Transcript, id: &str, text: &str) {
 }
 
 /// Mount a `✕` error row; the body is sanitized and prefixed at render time.
+/// Callers that append a hint bound the message first, so the cap never cuts it.
 pub fn add_command_error(transcript: &mut Transcript, id: &str, text: &str) {
-    add_message(transcript, id, "command_error", text);
+    let text = crate::utils::text::bounded_row(text);
+    add_message(transcript, id, "command_error", &text);
 }
 
 /// Mount a client-owned notice (e.g. app-server crash) preserved across snapshots.
@@ -252,7 +253,10 @@ pub fn add_progress_status(transcript: &mut Transcript, id: &str, text: &str) {
 /// Settle the compact status indicator: ✓ on success, ✕ on error.
 pub fn settle_compact_status(transcript: &mut Transcript, id: &str, error: Option<&str>) {
     match error {
-        Some(msg) => settle_status(transcript, id, &format!("Error: {msg}")),
+        Some(msg) => {
+            let msg = crate::utils::text::bounded_message(msg);
+            settle_status(transcript, id, &format!("Error: {msg}"))
+        }
         None => settle_status(transcript, id, "Compaction completed."),
     }
 }

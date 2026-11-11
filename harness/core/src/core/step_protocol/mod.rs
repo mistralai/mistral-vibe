@@ -28,7 +28,7 @@ use crate::core::hooks::{HookPoint, HookResult};
 use crate::core::wire::completion::CompletionResult;
 use crate::core::wire::content::ContentBlock;
 use crate::core::wire::tool::{ProtocolError, ToolResult};
-use crate::core::wire::user_message::UserMessageMode;
+use crate::core::wire::user_message::{OutputType, UserMessageMode};
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -109,9 +109,19 @@ pub(crate) enum HarnessCommandRejection {
 }
 
 pub(crate) fn invalid_command(message: impl Into<String>) -> HarnessCommandRejection {
+    coded_invalid_command("invalid_command", message)
+}
+
+/// The code of a steer whose output type is not the active Turn's.
+pub(crate) const OUTPUT_TYPE_MISMATCH_CODE: &str = "output_type_mismatch";
+
+pub(crate) fn coded_invalid_command(
+    code: &str,
+    message: impl Into<String>,
+) -> HarnessCommandRejection {
     HarnessCommandRejection::InvalidCommand {
         error: Box::new(ProtocolError {
-            code: "invalid_command".to_string(),
+            code: code.to_string(),
             message: message.into(),
             retryable: false,
             details: Value::Null,
@@ -163,6 +173,8 @@ pub(crate) enum HarnessCommand {
         turn_id: String,
         content: Vec<ContentBlock>,
         mode: UserMessageMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_type: Option<OutputType>,
     },
     ContextMessage {
         content: Vec<ContentBlock>,

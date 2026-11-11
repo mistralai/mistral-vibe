@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Action, Timeline
+from e2e.app_server.scenario import Action, Timeline, take_snapshot
 
 _PROMPT = "give me an editor link to the README"
 _URL = "vscode://file/tmp/README.md:1"
@@ -18,5 +18,7 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     assistant_msg(_ANSWER),
     turn_completed(),
+    take_snapshot(),
     _CLICK,
+    take_snapshot(),
 ]

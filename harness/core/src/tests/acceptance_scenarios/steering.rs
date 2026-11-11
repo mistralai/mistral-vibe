@@ -278,6 +278,128 @@ fn steering_and_notifications_keep_their_shared_admission_order() {
     );
 }
 
+///
+/// *Prepare*: One completion is pending for an active turn.
+/// *Do*: Receive a context message, a notification, then steering, and restore and finish the
+/// retained completion.
+/// *Assert*: The next model call reads the three in the order Core received them.
+///
+#[test]
+fn context_notifications_and_steering_keep_their_admission_order() {
+    // Prepare
+    let turn_id = "turn-context-notification-steer";
+    let mut runtime = SynchronousRuntime::new(config());
+    let original_completion = runtime.start_turn(turn_id, "prepare the answer");
+    let notification = notification("notification-after-context", "background evidence is ready");
+
+    // Do
+    runtime.apply(
+        json!({
+            "type": "context_message",
+            "content": [{"type": "text", "text": "github is down"}],
+        }),
+        running(turn_id).keep(&original_completion),
+    );
+    runtime.receive_notification(turn_id, &notification, &[&original_completion]);
+    runtime.receive_steering(turn_id, "use the evidence", &[&original_completion]);
+    runtime.restart_from_checkpoint();
+    let follow_up_completion = runtime
+        .apply(
+            text_completion(&original_completion, "first answer"),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(assistant_text_committed(
+                    turn_id,
+                    &original_completion,
+                    "first answer",
+                ))
+                .observe(notification_delivered(
+                    turn_id,
+                    observed_notification(&notification),
+                ))
+                .observe(turn_steered(turn_id, "use the evidence")),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &follow_up_completion,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("prepare the answer"),
+            model_assistant_text("first answer"),
+            model_context_text("github is down"),
+            model_notifications(&[&notification]),
+            model_user_text("use the evidence"),
+        ],
+    );
+    runtime.finish_turn_with_text(turn_id, &follow_up_completion, "answer with the evidence");
+}
+
+///
+/// *Prepare*: One completion is pending for an active turn.
+/// *Do*: Receive a notification, a context message, then steering, and restore and finish the
+/// retained completion.
+/// *Assert*: The next model call reads the three in the order Core received them.
+///
+#[test]
+fn notifications_context_and_steering_keep_their_admission_order() {
+    // Prepare
+    let turn_id = "turn-notification-context-steer";
+    let mut runtime = SynchronousRuntime::new(config());
+    let original_completion = runtime.start_turn(turn_id, "check the connection");
+    let notification = notification("notification-before-context", "github was disconnected");
+
+    // Do
+    runtime.receive_notification(turn_id, &notification, &[&original_completion]);
+    runtime.apply(
+        json!({
+            "type": "context_message",
+            "content": [{"type": "text", "text": "github is connected now"}],
+        }),
+        running(turn_id).keep(&original_completion),
+    );
+    runtime.receive_steering(
+        turn_id,
+        "continue with the latest state",
+        &[&original_completion],
+    );
+    runtime.restart_from_checkpoint();
+    let follow_up_completion = runtime
+        .apply(
+            text_completion(&original_completion, "first answer"),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(assistant_text_committed(
+                    turn_id,
+                    &original_completion,
+                    "first answer",
+                ))
+                .observe(notification_delivered(
+                    turn_id,
+                    observed_notification(&notification),
+                ))
+                .observe(turn_steered(turn_id, "continue with the latest state")),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &follow_up_completion,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("check the connection"),
+            model_assistant_text("first answer"),
+            model_notifications(&[&notification]),
+            model_context_text("github is connected now"),
+            model_user_text("continue with the latest state"),
+        ],
+    );
+    runtime.finish_turn_with_text(turn_id, &follow_up_completion, "continue");
+}
+
 #[test]
 fn stops_at_iteration_limit_before_delivering_pending_steering() {
     let turn_id = "turn-steer-at-iteration-limit";

@@ -14,75 +14,6 @@ fn request_first_wins() {
     assert_eq!(stop.requested_outcome(), Some(RunOutcome::Terminated));
 }
 
-#[test]
-fn observe_usage_under_limits_does_not_stop() {
-    let stop = StopRequests::new(RunLimits {
-        max_turns: None,
-        max_price: Some(1.0),
-        max_tokens: Some(1000),
-        time_limit_s: None,
-    });
-    stop.observe_usage(500, 0.5);
-    assert_eq!(stop.requested_outcome(), None);
-}
-
-#[test]
-fn observe_usage_token_limit_triggers() {
-    let stop = StopRequests::new(RunLimits {
-        max_turns: None,
-        max_price: None,
-        max_tokens: Some(1000),
-        time_limit_s: None,
-    });
-    stop.observe_usage(1001, 0.0);
-    assert_eq!(stop.requested_outcome(), Some(RunOutcome::TokenLimit));
-}
-
-#[test]
-fn observe_usage_price_limit_triggers() {
-    let stop = StopRequests::new(RunLimits {
-        max_turns: None,
-        max_price: Some(1.0),
-        max_tokens: None,
-        time_limit_s: None,
-    });
-    stop.observe_usage(0, 1.01);
-    assert_eq!(stop.requested_outcome(), Some(RunOutcome::PriceLimit));
-}
-
-#[test]
-fn observe_usage_token_checked_before_price() {
-    // When both limits are exceeded, token limit wins (checked first).
-    let stop = StopRequests::new(RunLimits {
-        max_turns: None,
-        max_price: Some(0.5),
-        max_tokens: Some(100),
-        time_limit_s: None,
-    });
-    stop.observe_usage(101, 0.6);
-    assert_eq!(stop.requested_outcome(), Some(RunOutcome::TokenLimit));
-}
-
-#[test]
-fn observe_usage_exact_limit_does_not_trigger() {
-    let stop = StopRequests::new(RunLimits {
-        max_turns: None,
-        max_price: Some(1.0),
-        max_tokens: Some(1000),
-        time_limit_s: None,
-    });
-    // Exactly at the limit should not trigger (uses >).
-    stop.observe_usage(1000, 1.0);
-    assert_eq!(stop.requested_outcome(), None);
-}
-
-#[test]
-fn observe_usage_no_limits_does_not_stop() {
-    let stop = StopRequests::new(RunLimits::default());
-    stop.observe_usage(u64::MAX, f64::MAX);
-    assert_eq!(stop.requested_outcome(), None);
-}
-
 #[tokio::test]
 async fn wait_returns_immediately_when_already_requested() {
     let stop = StopRequests::new(RunLimits::default());
@@ -159,6 +90,22 @@ fn invalid_time_limit_rejects_non_positive_and_non_finite() {
     assert!(invalid_time_limit(Some(f64::NAN)).is_some());
     assert!(invalid_time_limit(Some(f64::INFINITY)).is_some());
     assert!(invalid_time_limit(Some(f64::NEG_INFINITY)).is_some());
+}
+
+#[test]
+fn invalid_price_limit_requires_a_nonnegative_finite_value() {
+    use vibe_rs::headless_run::invalid_price_limit;
+
+    assert_eq!(invalid_price_limit(None), None);
+    assert_eq!(invalid_price_limit(Some(0.0)), None);
+    assert_eq!(invalid_price_limit(Some(1.5)), None);
+    assert!(invalid_price_limit(Some(-1.0)).is_some());
+    assert!(invalid_price_limit(Some(f64::NAN)).is_some());
+    assert!(invalid_price_limit(Some(f64::INFINITY)).is_some());
+    assert_eq!(
+        invalid_price_limit(Some(-1.0)).as_deref(),
+        Some("--max-price must be a nonnegative finite number: -1")
+    );
 }
 
 #[test]

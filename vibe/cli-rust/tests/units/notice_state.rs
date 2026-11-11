@@ -79,9 +79,36 @@ fn a_refusal_is_drawn_above_the_input() {
 fn painting_a_refusal_marks_it_seen() {
     let mut app = App::default();
     notice::show_sticky(&mut app, Severity::Error, "Image is too large");
-    assert!(!app.overlays.notice.as_ref().unwrap().shown);
+    assert!(!app.overlays.notice.as_ref().unwrap().shown());
 
     redraw(&mut app);
 
-    assert!(app.overlays.notice.as_ref().unwrap().shown);
+    assert!(app.overlays.notice.as_ref().unwrap().shown());
+}
+
+#[test]
+fn a_key_cannot_hide_a_failure_before_its_hold_has_passed() {
+    let mut app = App::default();
+    notice::show_failure(&mut app, Severity::Error, "Failed to switch agent");
+    redraw(&mut app);
+
+    notice::answered(&mut app);
+    assert_eq!(notice_text(&app), Some("Failed to switch agent"));
+
+    let hold = notice::FAILURE_HOLD;
+    let painted = app.overlays.notice.as_mut().unwrap();
+    painted.shown_at = painted.shown_at.and_then(|at| at.checked_sub(hold));
+    notice::answered(&mut app);
+    assert_eq!(notice_text(&app), None);
+}
+
+#[test]
+fn release_notes_over_a_notice_keep_it_unseen() {
+    let mut app = App::default();
+    vibe_rs::release_notes::open(&mut app);
+    notice::show_failure(&mut app, Severity::Error, "Voice transcription failed");
+
+    redraw(&mut app);
+
+    assert!(!app.overlays.notice.as_ref().unwrap().shown());
 }

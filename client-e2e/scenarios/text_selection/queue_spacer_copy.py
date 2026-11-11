@@ -11,8 +11,6 @@ expected_clipboard = "Working on it."
 # Drag from the reply into the blank rows that hold the queued prompt at the bottom.
 _SELECT = "\x1b[<0;3;11M\x1b[<32;120;18M\x1b[<0;120;18m"
 
-capture_steps = {2, 3}
-
 timeline: Timeline = [
     "first\r",
     turn_started(),

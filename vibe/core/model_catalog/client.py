@@ -86,3 +86,16 @@ class ModelCatalogClient:
         if self._http is not None:
             await self._http.aclose()
             self._http = None
+
+
+async def fetch_model_catalog(
+    api_base: str, credentials: PlatformCredentialProvider
+) -> ModelCatalogResponse | None:
+    """One request to the catalog of the provider at ``api_base``; ``None``
+    when it failed.
+    """
+    client = ModelCatalogClient(url=build_model_catalog_url(api_base))
+    try:
+        return await client.fetch(credentials)
+    finally:
+        await client.aclose()

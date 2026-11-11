@@ -1,6 +1,6 @@
 //! Shared list search: `/` focuses, typing filters, ↑↓/Enter reach the list, Esc leaves then clears.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::Rect;
 
 use crate::hints::{action, key, Hint};
@@ -113,6 +113,32 @@ pub fn paste(search: &mut Search, text: &str) -> bool {
     true
 }
 
+/// What a left press in a browser with a search row landed on.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Press {
+    /// The field, which it focused.
+    Field,
+    /// An option of the list, which took focus from the field.
+    Option,
+    Other,
+}
+
+/// Focus the field on a press on it while `shown`, and leave it on a press on an option.
+pub fn press(search: &mut Search, event: &MouseEvent, shown: bool, on_option: bool) -> Press {
+    if event.kind != MouseEventKind::Down(MouseButton::Left) {
+        return Press::Other;
+    }
+    if shown && search.area.contains((event.column, event.row).into()) {
+        search.focused = true;
+        return Press::Field;
+    }
+    if !on_option {
+        return Press::Other;
+    }
+    search.focused = false;
+    Press::Option
+}
+
 /// Footer hints for the search state: typing keys hide while focused, and Esc says what it does.
 pub fn hints(focused: bool, filtered: bool, list: &[Hint]) -> Vec<Hint> {
     let esc = match (focused, filtered) {
@@ -130,7 +156,7 @@ pub fn hints(focused: bool, filtered: bool, list: &[Hint]) -> Vec<Hint> {
         .collect()
 }
 
-/// Keys the focused field consumes as text: letters, `/` and Backspace.
+/// Keys the focused field consumes as text: letters, `/`, Space and Backspace.
 fn types_into_field(name: &str) -> bool {
-    name.chars().count() == 1 || name == key::BACKSPACE
+    name.chars().count() == 1 || name == key::BACKSPACE || name == key::SPACE
 }

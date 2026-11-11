@@ -56,30 +56,33 @@ pub async fn write(
 }
 
 /// Write a saved model/thinking pick through `config/model/write`, which a
-/// running turn parks until it ends; `Ok(true)` means parked. A server without
-/// that method gets `fallback` through the idle-only `config/write`.
+/// running turn parks until it ends (see `is_parked`). A server without that
+/// method gets `fallback` through the idle-only `config/write`.
 pub async fn write_model(
     client: &Client,
     session_id: &str,
     mut pick: Value,
     fallback: Vec<Value>,
     reason: &str,
-) -> Result<bool, String> {
+) -> Result<Value, String> {
     pick["sessionId"] = json!(session_id);
     let value = match client.request_err(method::CONFIG_MODEL_WRITE, pick).await {
         Ok(value) => value,
         Err(error) if error.is_method_not_found() => {
-            return write(client, session_id, fallback, reason)
-                .await
-                .map(|_| false);
+            return write(client, session_id, fallback, reason).await;
         }
         Err(error) if error.message.is_empty() => return Err(error.code()),
         Err(error) => return Err(error.message),
     };
     match mutation_error(&value) {
         Some(error) => Err(error),
-        None => Ok(value.get("status").and_then(Value::as_str) == Some("pending")),
+        None => Ok(value),
     }
+}
+
+/// Whether a write answer holds the pick until the running turn ends.
+pub fn is_parked(value: &Value) -> bool {
+    value.get("status").and_then(Value::as_str) == Some("pending")
 }
 
 /// The error of a rejected or failed config mutation, if any.

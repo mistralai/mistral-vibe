@@ -2,9 +2,6 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock
-
-import pytest
 
 from vibe.core.model_catalog import (
     ModelCatalogResponse,
@@ -33,42 +30,26 @@ def _catalog(models: list[dict[str, Any]] | None = None) -> ModelCatalogResponse
     return parsed
 
 
-def _config(*, has_credential: bool = True) -> Any:
-    config = MagicMock()
-    if has_credential:
-        provider = MagicMock(api_base="https://x")
-        # Unset env var: the real credential resolver (used by the
-        # no-credential test path) yields no key, and the fixed-key fixture
-        # bypasses resolution everywhere else.
-        provider.api_key_env_var = "VIBE_TEST_UNSET_CATALOG_KEY"
-        config.get_mistral_provider.return_value = provider
-    else:
-        config.get_mistral_provider.return_value = None
-    return config
+def _loaded(key: str) -> ModelCatalogResponse | None:
+    record = load_cached_model_catalog(key)
+    return record[0] if record is not None else None
 
 
-@pytest.fixture
-def _fixed_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        cache, "_cache_key", lambda _config, _credentials=None: "user-abc"
-    )
+def test_store_then_load_round_trips() -> None:
+    store_cached_model_catalog("user-abc", _catalog())
 
-
-def test_store_then_load_round_trips(_fixed_key: None) -> None:
-    store_cached_model_catalog(_config(), _catalog())
-
-    loaded = load_cached_model_catalog(_config())
+    loaded = _loaded("user-abc")
 
     assert loaded is not None
     assert loaded.models[0].id == "mistral-medium-3.5"
 
 
-def test_load_returns_none_when_cache_missing(_fixed_key: None) -> None:
-    assert load_cached_model_catalog(_config()) is None
+def test_load_returns_none_when_cache_missing() -> None:
+    assert load_cached_model_catalog("user-abc") is None
 
 
-def test_load_returns_none_when_entry_is_stale(_fixed_key: None) -> None:
-    store_cached_model_catalog(_config(), _catalog())
+def test_load_returns_none_when_entry_is_stale() -> None:
+    store_cached_model_catalog("user-abc", _catalog())
 
     path = MODEL_CATALOG_CACHE_FILE.path
     entries = json.loads(path.read_text())
@@ -77,40 +58,33 @@ def test_load_returns_none_when_entry_is_stale(_fixed_key: None) -> None:
     )
     path.write_text(json.dumps(entries))
 
-    assert load_cached_model_catalog(_config()) is None
+    assert load_cached_model_catalog("user-abc") is None
 
 
-def test_load_fails_open_on_corrupt_file(_fixed_key: None) -> None:
+def test_load_fails_open_on_corrupt_file() -> None:
     path = MODEL_CATALOG_CACHE_FILE.path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{ not valid json")
 
-    assert load_cached_model_catalog(_config()) is None
+    assert load_cached_model_catalog("user-abc") is None
 
 
-def test_store_overwrites_previous_catalog_with_empty_list(_fixed_key: None) -> None:
-    store_cached_model_catalog(_config(), _catalog())
-    store_cached_model_catalog(_config(), _catalog(models=[]))
+def test_store_overwrites_previous_catalog_with_empty_list() -> None:
+    store_cached_model_catalog("user-abc", _catalog())
+    store_cached_model_catalog("user-abc", _catalog(models=[]))
 
-    loaded = load_cached_model_catalog(_config())
+    loaded = _loaded("user-abc")
 
     assert loaded is not None
     assert loaded.models == []
 
 
-def test_entries_are_isolated_per_credential(monkeypatch: pytest.MonkeyPatch) -> None:
-    current = {"key": "user-a"}
-    monkeypatch.setattr(
-        cache, "_cache_key", lambda _config, _credentials=None: current["key"]
-    )
+def test_entries_are_isolated_per_key() -> None:
+    store_cached_model_catalog("user-a", _catalog())
+    store_cached_model_catalog("user-b", _catalog(models=[]))
 
-    store_cached_model_catalog(_config(), _catalog())
-    current["key"] = "user-b"
-    store_cached_model_catalog(_config(), _catalog(models=[]))
-
-    loaded_b = load_cached_model_catalog(_config())
-    current["key"] = "user-a"
-    loaded_a = load_cached_model_catalog(_config())
+    loaded_a = _loaded("user-a")
+    loaded_b = _loaded("user-b")
 
     assert loaded_b is not None
     assert loaded_b.models == []
@@ -118,9 +92,10 @@ def test_entries_are_isolated_per_credential(monkeypatch: pytest.MonkeyPatch) ->
     assert loaded_a.models[0].id == "mistral-medium-3.5"
 
 
-def test_no_credential_means_no_cache_access() -> None:
-    config = _config(has_credential=False)
+def test_the_stored_time_is_kept() -> None:
+    store_cached_model_catalog("user-abc", _catalog(), stored_at=1_900_000_000)
 
-    assert cache._cache_key(config) is None
-    store_cached_model_catalog(config, _catalog())
-    assert load_cached_model_catalog(config) is None
+    record = load_cached_model_catalog("user-abc")
+
+    assert record is not None
+    assert record[1] == 1_900_000_000

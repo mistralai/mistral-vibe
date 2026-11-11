@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _CTRL_BACKSPACE = "\x1b[127;5u"
 _OPTION_BACKSPACE = "\x1b\x7f"
@@ -19,6 +19,5 @@ timeline: Timeline = [
     "alpha beta",
     _HOME,
     _OPTION_DELETE,
+    take_snapshot(),
 ]
-
-capture_steps = {1, 2, 4, 7}

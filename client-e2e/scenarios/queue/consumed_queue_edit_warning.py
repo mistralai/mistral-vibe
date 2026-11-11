@@ -9,7 +9,6 @@ _UP = "\x1b[A"
 _WARNING = "This message was already processed"
 
 screen_contains = (_WARNING,)
-capture_steps = {10}
 
 timeline: Timeline = [
     "first\r",

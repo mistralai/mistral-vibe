@@ -47,20 +47,31 @@ pub struct ScrollAnchor {
     pub height: u16,
     /// Viewport row its header lands on when the header had scrolled out above.
     pub landing: u16,
+    /// Rows the pinned prompt covered at the top: a header under them counts as scrolled out.
+    pub inset: u16,
     /// The clicked toggle key; `None` for the Ctrl+O bulk toggle.
     pub key: Option<String>,
     /// Whether the toggle expanded `key`, so its block scrolls into view.
     pub reveal: bool,
 }
 
-/// Ctrl+O anchor: the entry at the viewport top, or none while pinned to the newest content.
-pub fn bulk_toggle_anchor(target: u16, rows: &[(usize, i32, u16)]) -> Option<ScrollAnchor> {
-    let &(index, row, height) = rows.first().filter(|_| target != 0)?;
+/// Ctrl+O anchor: the first entry below the pinned prompt's `inset` rows; none while following the newest content.
+pub fn bulk_toggle_anchor(
+    target: u16,
+    rows: &[(usize, i32, u16)],
+    inset: u16,
+) -> Option<ScrollAnchor> {
+    let inset = i32::from(inset);
+    let &(index, row, height) = rows
+        .iter()
+        .find(|(_, top, height)| top + i32::from(*height) > inset)
+        .filter(|_| target != 0)?;
     Some(ScrollAnchor {
         index,
         row,
         height,
-        landing: 0,
+        landing: inset as u16,
+        inset: inset as u16,
         key: None,
         reveal: false,
     })
@@ -68,7 +79,7 @@ pub fn bulk_toggle_anchor(target: u16, rows: &[(usize, i32, u16)]) -> Option<Scr
 
 /// Viewport row for the anchored entry's top once `height` tall; its header sits `header` rows below.
 pub fn anchored_row(anchor: &ScrollAnchor, header: u16, height: u16) -> i32 {
-    let header_hidden = anchor.row + i32::from(header) < 0;
+    let header_hidden = anchor.row + i32::from(header) < i32::from(anchor.inset);
     if header_hidden && height != anchor.height {
         return i32::from(anchor.landing) - i32::from(header);
     }

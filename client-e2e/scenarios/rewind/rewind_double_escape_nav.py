@@ -29,5 +29,4 @@ timeline: Timeline = [
 handshake = {"session/rewind/read": {"hasFileChanges": False, "paths": []}}
 request_methods = {"session/rewind/read", "session/rewind"}
 
-capture_steps = {2, 3, 4, 5, 6, 7}
 screen_excludes = ("Keep in current session", "Edit message from here")

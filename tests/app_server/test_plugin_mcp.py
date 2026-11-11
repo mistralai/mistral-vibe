@@ -36,7 +36,7 @@ from vibe.app_server.protocol import (
 )
 from vibe.core.agents.manager import AgentManager
 from vibe.core.auth.mcp_oauth import Fingerprint
-from vibe.core.config import MCPHttp, MCPOAuth, MCPStaticAuth
+from vibe.core.config import MCPHttp, MCPOAuth, MCPStaticAuth, MCPStdio
 from vibe.core.plugins import PluginMCPAuthorizationRequired, PluginMCPServerDefinition
 from vibe.core.tools.mcp.registry import MCPRegistry
 from vibe.core.tools.mcp.tools import RemoteTool
@@ -216,6 +216,36 @@ async def _dispatch(
         notify=notify,
     )
     return result.response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["python", "node"])
+async def test_plugin_catalog_preserves_independent_server_commands(
+    command: str,
+) -> None:
+    server = MCPStdio(
+        name=_ALIAS,
+        transport="stdio",
+        command=[command],
+        args=["server.py"],
+        env={"PLUGIN_ROOT": "/plugins/browser", "PLUGIN_DATA": "/data/browser"},
+    )
+    definition = PluginMCPServerDefinition(
+        plugin_name="browser",
+        plugin_namespace="browser",
+        source_id="browser",
+        private_alias=_ALIAS,
+        server=server,
+        config_file=Path("/plugins/browser/mcp.json"),
+    )
+    catalog = PluginMCPCatalog(MCPRegistry(), MCPAuthenticationService())
+    await catalog.bind([definition])
+    entry = catalog.entry("browser")
+    assert entry is not None
+    assert isinstance(entry.server, MCPStdio)
+    assert entry.server.argv() == [command, "server.py"]
+    assert entry.server.env == server.env
+    assert server.argv() == [command, "server.py"]
 
 
 @pytest.mark.asyncio

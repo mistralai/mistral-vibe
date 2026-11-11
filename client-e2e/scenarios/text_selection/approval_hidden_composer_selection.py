@@ -18,7 +18,6 @@ env = {
     "SSH_TTY": "/dev/pts/0",
 }
 handshake = {"callback/result": {"accepted": True}}
-capture_startup = False
 clipboard_contains = ("answer line 25",)
 
 _SHIFT_ENTER = "\x1b[13;2u"
@@ -45,4 +44,3 @@ timeline: Timeline = [
     {"release": 2},
     _DRAG,
 ]
-capture_steps = {len(_DRAFT) + 1, len(_DRAFT) + 2, len(_DRAFT) + 3}

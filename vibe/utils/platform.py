@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 import enum
 from functools import lru_cache
@@ -8,9 +10,12 @@ from pathlib import Path, PureWindowsPath
 import platform
 import shutil
 import sys
+import threading
 from typing import Final
 
 _GIT_EXECUTABLE_ENV: Final = "GIT_PYTHON_GIT_EXECUTABLE"
+_GIT_IMPORT_LOCK: Final = threading.Lock()
+_pinned_git_executable: str | None = None
 
 _PLATFORM_IDS: Final[dict[str, str]] = {
     "win32": "windows",
@@ -160,11 +165,29 @@ def resolve_ssh_executable(*, cwd: Path | None = None) -> str | None:
 
 
 def configure_git_python_executable(*, cwd: Path | None = None) -> str | None:
-    """Pin GitPython to the same trusted executable used by direct callers."""
-    executable = resolve_git_executable(cwd=cwd)
-    if executable is not None:
+    """Return the trusted executable GitPython stays pinned to for the process."""
+    global _pinned_git_executable
+    if os.environ.get(_GIT_EXECUTABLE_ENV) or _pinned_git_executable is None:
+        _pinned_git_executable = resolve_git_executable(cwd=cwd)
+    return _pinned_git_executable
+
+
+@contextmanager
+def git_python_import_environment(executable: str) -> Iterator[None]:
+    """Expose the executable to GitPython's import-time refresh, not to children."""
+    with _GIT_IMPORT_LOCK:
+        if "git" in sys.modules:
+            yield
+            return
+        previous = os.environ.get(_GIT_EXECUTABLE_ENV)
         os.environ[_GIT_EXECUTABLE_ENV] = executable
-    return executable
+        try:
+            yield
+        finally:
+            if previous is None:
+                os.environ.pop(_GIT_EXECUTABLE_ENV, None)
+            else:
+                os.environ[_GIT_EXECUTABLE_ENV] = previous
 
 
 def get_platform_id() -> str:

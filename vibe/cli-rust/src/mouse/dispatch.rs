@@ -31,10 +31,11 @@ pub(super) fn dispatch(
         MouseTarget::BottomBar => bottom_bar_event(app, client, event),
         MouseTarget::Loading => loading_event(app, event),
         MouseTarget::Question => question_input::handle_mouse(app, client, event),
-        MouseTarget::RemoteProject => crate::vibe_code_project::input::mouse(app, client, event),
         MouseTarget::Approval => approval::handle_mouse(app, client, event),
         MouseTarget::Mcp => mcp::mouse(app, event),
         MouseTarget::Plugins => crate::plugins::mouse(app, event),
+        MouseTarget::Skills => crate::skills_browser::mouse(app, client, event),
+        MouseTarget::SkillsBody => bottom_app_event(app, event, |_, _| {}),
         MouseTarget::ReleaseNotes => crate::release_notes::mouse(app, event),
         MouseTarget::McpOAuth => {
             if picked(app, event, |app| &mut app.mcp_oauth.list) {
@@ -81,7 +82,7 @@ pub(super) fn dispatch(
             }
         }
         MouseTarget::ArtifactsModal => {
-            if picked(app, event, |app| &mut app.artifacts_modal.list) {
+            if confirmed(app, event, |app| &mut app.artifacts_modal.list) {
                 artifacts_modal::select(app);
             }
         }
@@ -90,6 +91,11 @@ pub(super) fn dispatch(
         MouseTarget::JumpToBottom => {
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
                 crate::mouse::scroll_chat(app, false, u16::MAX);
+            }
+        }
+        MouseTarget::StickyPrompt => {
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
+                app.view.scroll_to_entry = app.view.sticky_prompt.map(|(index, _)| index);
             }
         }
         // A click on the pinned todo line opens the full plan.
@@ -144,9 +150,9 @@ pub(crate) fn option_list(app: &mut App, target: MouseTarget) -> Option<&mut dyn
         MouseTarget::LogLevelPicker => &mut app.log_level_picker.list,
         MouseTarget::ArtifactsModal => &mut app.artifacts_modal.list,
         MouseTarget::ResumePicker => &mut app.resume_picker.list,
-        MouseTarget::RemoteProject => &mut app.vibe_code_project.list,
         MouseTarget::Mcp => &mut app.mcp.list,
         MouseTarget::Plugins => &mut app.plugins.list,
+        MouseTarget::Skills => crate::skills_browser::visible_list(&mut app.skills_browser),
         MouseTarget::Config => &mut app.config_screen.list,
         MouseTarget::ConfigEditor => &mut app.config_screen.edit.as_mut()?.list,
         MouseTarget::Question => &mut app.question_app.list,
@@ -250,7 +256,14 @@ fn bottom_bar_event(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
             // it; the text was cached at paint time, so no buffer is read.
             crate::ui::bottom_bar::honor_pending_copy(app);
             app.overlays.notice = None;
-            selection::bottom_bar::press(app, at);
+            // A press on a clickable item is a button press: no text selection, no click chain.
+            if crate::ui::bottom_bar::clickable_at(app, at) {
+                selection::cancel_drag(app);
+                app.selection.chain = Default::default();
+                app.selection.press = Some(at);
+            } else {
+                selection::bottom_bar::press(app, at);
+            }
         }
         MouseEventKind::Drag(MouseButton::Left) => selection::bottom_bar::drag(app, at),
         MouseEventKind::Up(MouseButton::Left) => {
@@ -258,34 +271,39 @@ fn bottom_bar_event(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
             let pressed = app.selection.press;
             let dragged = app.selection.dragged;
             let release = selection::release(app);
-            // A plain click on a painted link opens the PR/MR, lists several, or copies the cwd.
+            // A plain click on a painted link toggles the PR/MR list or copies the cwd.
             if pressed == Some(at) && !matches!(release, Release::Selected) {
                 let action =
                     crate::ui::bottom_bar::link_at(app, at).map(|link| link.action.clone());
                 match action {
-                    Some(crate::ui::bottom_bar::BarLinkAction::OpenUrl(url)) => {
-                        external_url::open(&url)
-                    }
                     Some(crate::ui::bottom_bar::BarLinkAction::ListArtifacts) => {
-                        artifacts_modal::open(app)
+                        // A quick second click toggles again instead of selecting a word.
+                        app.selection.chain = Default::default();
+                        if app.artifacts_modal.open {
+                            artifacts_modal::close(app);
+                        } else {
+                            artifacts_modal::show(app, client);
+                            crate::telemetry::slash_command_clicked(app, "/pr", "footer");
+                        }
                     }
                     Some(crate::ui::bottom_bar::BarLinkAction::CopyPath(path)) => {
-                        // A double click copies twice instead of selecting the icon.
-                        app.selection.chain = Default::default();
                         crate::ui::notice::copied(app, &path)
                     }
                     None => {}
                 }
             }
-            // A plain click on the context gauge opens `/context`, a side-channel
+            // A plain click on the context gauge toggles `/context`, a side-channel
             // read that also works while a turn generates.
             let tokens_click = !dragged
                 && pressed.is_some_and(|press| crate::ui::bottom_bar::tokens_at(app, press))
                 && crate::ui::bottom_bar::tokens_at(app, at);
             if matches!(release, Release::Nothing) && tokens_click {
-                app.selection.chain = Default::default();
-                crate::context_app::open(app, client);
-                crate::telemetry::slash_command_clicked(app, "/context", "footer");
+                if app.context_app.open {
+                    crate::context_app::close(app);
+                } else {
+                    crate::context_app::open(app, client);
+                    crate::telemetry::slash_command_clicked(app, "/context", "footer");
+                }
             }
         }
         _ => {}
@@ -422,6 +440,7 @@ fn anchor_toggle(app: &mut App, row: u16, key: String, reveal: bool) {
             row,
             height,
             landing,
+            inset: app.view.sticky_prompt.map_or(0, |(_, rows)| rows),
             key: Some(key),
             reveal,
         });

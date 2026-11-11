@@ -38,35 +38,6 @@ class ProjectLinksResolveRootRequest(BaseModel):
     root_path: str = Field(alias="rootPath", min_length=1)
 
 
-class ProjectLinksPickerLoadRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-
-    root_path: str = Field(alias="rootPath", min_length=1)
-
-
-class ProjectLinksPickerLoadMoreRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-
-    root_path: str = Field(alias="rootPath", min_length=1)
-    cursor: str = Field(min_length=1)
-
-
-class ProjectLinksCreateRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-
-    root_path: str = Field(alias="rootPath", min_length=1)
-    name: str = Field(min_length=1)
-    default_branch: str = Field(alias="defaultBranch", min_length=1)
-
-
-class ProjectLinksLinkRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-
-    root_path: str = Field(alias="rootPath", min_length=1)
-    project_id: str = Field(alias="projectId", min_length=1)
-    project_name: str = Field(alias="projectName", min_length=1)
-
-
 class ProjectLinksUnlinkRequest(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 

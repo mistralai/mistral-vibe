@@ -1,9 +1,13 @@
-//! Raw-key pastes coalesce into one paste event; typing stays key by key.
+//! Raw-key pastes coalesce into one paste, typing stays key by key, CR and LF both break lines.
 
 use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use serde_json::json;
+use vibe_rs::app::App;
+use vibe_rs::input::handle_paste;
 use vibe_rs::key_burst::{KeyBurst, KEY_GAP, PASTE_GAP};
+use vibe_rs::{config, config_edit, config_fields};
 
 use crate::support::{ctrl, key};
 
@@ -21,15 +25,30 @@ fn release(code: KeyCode) -> Event {
 
 fn code(character: char) -> KeyCode {
     match character {
-        '\n' => KeyCode::Enter,
+        '\r' | '\n' => KeyCode::Enter,
         character => KeyCode::Char(character),
     }
+}
+
+/// ConPTY reads a CR as Enter and an LF as Ctrl+Enter.
+fn console_key(character: char, kind: KeyEventKind) -> Event {
+    let modifiers = if character == '\n' {
+        KeyModifiers::CONTROL
+    } else {
+        KeyModifiers::NONE
+    };
+    Event::Key(KeyEvent::new_with_kind(code(character), modifiers, kind))
 }
 
 /// The press/release pairs crossterm reads from a Windows console paste.
 fn windows_paste(text: &str) -> Vec<Event> {
     text.chars()
-        .flat_map(|character| [press(code(character)), release(code(character))])
+        .flat_map(|character| {
+            [
+                console_key(character, KeyEventKind::Press),
+                console_key(character, KeyEventKind::Release),
+            ]
+        })
         .collect()
 }
 
@@ -42,13 +61,39 @@ fn feed_one_by_one(bursts: &mut KeyBurst, events: Vec<Event>, now: Instant) -> V
     out
 }
 
+const LINE_ENDINGS: [&str; 3] = ["line1\rline2", "line1\nline2", "line1\r\nline2"];
+
 #[test]
 fn windows_multiline_paste_becomes_one_paste() {
-    let mut bursts = KeyBurst::default();
+    for text in LINE_ENDINGS {
+        let mut bursts = KeyBurst::default();
 
-    let out = feed_one_by_one(&mut bursts, windows_paste("line1\nline2\n"), Instant::now());
+        let out = feed_one_by_one(&mut bursts, windows_paste(text), Instant::now());
 
-    assert_eq!(out, vec![Event::Paste("line1\nline2\n".into())]);
+        assert_eq!(out, vec![Event::Paste(text.into())], "{text:?}");
+    }
+}
+
+#[test]
+fn paste_targets_read_every_line_ending_as_a_line_break() {
+    for text in LINE_ENDINGS {
+        let mut app = App::default();
+        app.config_screen.open = true;
+        let fields = json!({
+            "fields": [{"name": "prompt", "path": "/prompt", "kind": "str", "value": ""}],
+            "targets": ["user-toml"],
+        });
+        config::apply_loaded(&mut app, config_fields::parse(&fields));
+        let field = config::filtered(&app)[0].clone();
+        config_edit::open(&mut app, field);
+
+        handle_paste(&mut app, text.into());
+        config_edit::paste(&mut app, text.into());
+
+        assert_eq!(app.chat_input.input, "line1\nline2", "{text:?}");
+        let draft = &app.config_screen.edit.as_ref().unwrap().draft;
+        assert_eq!(draft, "line1\nline2", "{text:?}");
+    }
 }
 
 #[test]
@@ -57,7 +102,7 @@ fn typing_stays_key_by_key_and_enter_submits() {
     let start = Instant::now();
     let mut out = Vec::new();
 
-    for (index, character) in "hi\n".chars().enumerate() {
+    for (index, character) in "hi\r".chars().enumerate() {
         let at = start + KEY_GAP * 3 * index as u32;
         out.extend(bursts.push(vec![press(code(character))], at));
         out.extend(bursts.push(vec![release(code(character))], at + KEY_GAP * 2));
@@ -76,11 +121,15 @@ fn typing_stays_key_by_key_and_enter_submits() {
 
 #[test]
 fn short_bursts_stay_keys() {
-    let mut bursts = KeyBurst::default();
+    for enter in ['\r', '\n'] {
+        let mut bursts = KeyBurst::default();
+        let text = format!("a{enter}");
 
-    let out = feed_one_by_one(&mut bursts, windows_paste("a\n"), Instant::now());
+        let out = feed_one_by_one(&mut bursts, windows_paste(&text), Instant::now());
 
-    assert_eq!(out, vec![press(code('a')), press(KeyCode::Enter)]);
+        let enter = console_key(enter, KeyEventKind::Press);
+        assert_eq!(out, vec![press(code('a')), enter]);
+    }
 }
 
 #[test]

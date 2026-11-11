@@ -12,7 +12,6 @@ _DIR = Path("/tmp/vibe_e2e_fixtures/blur_paste")
 _DIR.mkdir(parents=True, exist_ok=True)
 (_DIR / "notes.md").write_text("notes\n", encoding="utf-8")
 
-capture_startup = False
 screen_contains = (f"@{_DIR}/notes.md",)
 
 timeline: Timeline = ["\x1b[O" + paste(f"{_DIR}/notes.md") + "\x1b[I"]

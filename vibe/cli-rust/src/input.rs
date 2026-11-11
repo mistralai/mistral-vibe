@@ -14,10 +14,10 @@ use crate::quit_manager::QuitConfirmKey;
 use crate::server::Client;
 use crate::utils::input_edit;
 use crate::{
-    agents, chat_input, clipboard, completion_manager, config, config_write, connector_auth,
-    debug_console, feedback, keymap, log_level_picker, mcp, mcp_oauth, message_queue, model_picker,
-    paste_files, paste_image, paste_path, question_input, reverse_search, rewind, subagents,
-    theme_picker, thinking_picker, turn_summary, voice,
+    agents, chat_input, clipboard, completion_manager, composer_yank, config, config_write,
+    connector_auth, debug_console, feedback, keymap, log_level_picker, mcp, mcp_oauth,
+    message_queue, model_picker, paste_files, paste_image, paste_path, question_input,
+    reverse_search, rewind, subagents, theme_picker, thinking_picker, turn_summary, voice,
 };
 
 fn is_ctrl_c(key: &KeyEvent) -> bool {
@@ -72,9 +72,8 @@ fn is_copy_key(key: &KeyEvent) -> bool {
     let command = key.modifiers.contains(KeyModifiers::SUPER);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
     (command && key.code == KeyCode::Char('c'))
-        || (ctrl
-            && ((cfg!(unix) && key.code == KeyCode::Char('y') && !shift)
-                || (matches!(key.code, KeyCode::Char('c' | 'C')) && shift)))
+        || composer_yank::is_yank_key(key)
+        || (ctrl && shift && matches!(key.code, KeyCode::Char('c' | 'C')))
 }
 
 /// The cached text of an active mouse selection (region or bottom bar),
@@ -96,15 +95,20 @@ pub(crate) fn handle_copy_key(app: &mut App, key: &KeyEvent) -> bool {
         return false;
     }
     app.chat_input.normalize_positions();
-    if !copy_selected_input(app) {
-        if let Some(text) = selection_text(app) {
-            // Region and bottom-bar text are cached at paint time so the copy
-            // works regardless of the autocopy setting.
-            clipboard::copy_to_clipboard(&text);
-            crate::telemetry::user_copied_text(app, &text);
-        }
+    if copy_selected_input(app) {
+        return true;
     }
-    true
+    if let Some(text) = selection_text(app) {
+        // Region and bottom-bar text are cached at paint time so the copy
+        // works regardless of the autocopy setting.
+        clipboard::copy_to_clipboard(&text);
+        crate::telemetry::user_copied_text(app, &text);
+        return true;
+    }
+    // A mouse selection whose text the next paint reads still owns the key.
+    let mouse_selection = app.selection.region.is_some() || app.selection.bottom_bar.is_some();
+    // With nothing selected, Ctrl+Y reaches the composer as a yank.
+    !(composer_yank::is_yank_key(key) && composer_owns_key(app) && !mouse_selection)
 }
 
 /// Toggle the plan panel: Cmd+\, or the Alt+\ (ESC \) remap terminals deliver instead.
@@ -119,20 +123,12 @@ fn is_todo_key(key: &KeyEvent) -> bool {
 /// Handle application-level bindings before a modal consumes local keys.
 pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -> Option<bool> {
     if key.code == KeyCode::BackTab {
-        if app.focus() == Focus::VibeCodeProject {
-            return None;
-        }
         agents::cycle(app, client);
         return Some(false);
     }
     // The crash notice says "Press Ctrl+C to exit": nothing is left to copy, cancel or confirm.
     if is_ctrl_c(&key) && app.server_closed {
         return Some(true);
-    }
-    if (is_ctrl_c(&key) || is_copy_key(&key))
-        && crate::vibe_code_project::input::copy_selection(app, false)
-    {
-        return Some(false);
     }
     if is_ctrl_c(&key) && crate::proxy_setup::copy_selection(app, false) {
         return Some(false);
@@ -202,7 +198,7 @@ fn copy_selected_input(app: &App) -> bool {
     true
 }
 
-fn composer_owns_key(app: &App) -> bool {
+pub(crate) fn composer_owns_key(app: &App) -> bool {
     app.focus() == Focus::Composer && (app.queue.selected.is_none() || app.queue.editing)
 }
 
@@ -363,6 +359,10 @@ fn handle_key_inner(
         }
         return false;
     }
+    if composer_yank::is_yank_key(&key) {
+        composer_yank::yank(app);
+        return false;
+    }
     if paste_image::is_paste_image_key(&key, paste_image::is_supported()) {
         paste_image::request(app, true);
         return false;
@@ -398,10 +398,14 @@ fn handle_key_inner(
                     .map_or(input.cursor, |anchor| anchor.min(input.cursor));
                 input_edit::line_bounds(&input.input, first).0
             });
-            app.chat_input
+            let removed = app
+                .chat_input
                 .edit_atomically(line_start, |input, cursor, anchor| {
                     chat_input::apply(&action, input, cursor, anchor);
                 });
+            if action.is_kill() && !removed.is_empty() {
+                app.chat_input.kill_buffer = removed;
+            }
             // Raw-keystroke drops only get image mentions; mixed lists need a bracketed paste.
             crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
             completion_manager::input_changed(app);
@@ -432,10 +436,6 @@ fn handle_key_inner(
         KeyCode::Esc if completion_manager::dismiss(app) => app.overlays.last_escape = None,
         KeyCode::Esc if app.session.shell_operation_id.is_some() => {
             crate::commands::shell::interrupt(app, client);
-            app.overlays.last_escape = Some(crate::clock::now());
-        }
-        KeyCode::Esc if crate::teleport::busy(app) => {
-            crate::teleport::interrupt(app, client);
             app.overlays.last_escape = Some(crate::clock::now());
         }
         // Only a docked panel owns Esc; a dropped column must not swallow the interrupt.
@@ -503,7 +503,7 @@ fn handle_key_inner(
         // An agent switch in flight swallows the submit.
         KeyCode::Enter if agents::switching(app) => {}
         KeyCode::Enter => {
-            if completion_manager::accept(app) {
+            if completion_manager::accept_on_enter(app) {
                 completion_manager::input_changed(app);
             }
             let exit = submission::submit(app, client, config_tx);
@@ -676,7 +676,7 @@ pub fn handle_thinking_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
 }
 
 /// The artifacts modal owns keys: arrows/jk navigate, Enter opens the
-/// highlighted link, Esc closes.
+/// highlighted link, `c` its first CI check, `f` drafts a fix prompt, Esc closes.
 pub fn handle_artifacts_modal_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc => crate::artifacts_modal::close(app),
@@ -687,6 +687,8 @@ pub fn handle_artifacts_modal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Home => crate::artifacts_modal::edge(app, false),
         KeyCode::End => crate::artifacts_modal::edge(app, true),
         KeyCode::Enter => crate::artifacts_modal::select(app),
+        KeyCode::Char('c') if key.modifiers.is_empty() => crate::artifacts_modal::open_check(app),
+        KeyCode::Char('f') if key.modifiers.is_empty() => crate::artifacts_modal::fix(app),
         _ => {}
     }
 }
@@ -790,7 +792,7 @@ fn park_after_load(app: &mut App) {
 }
 
 /// Mark the caret as moved off a loaded history entry so Up/Down edit text next.
-fn mark_cursor_moved(app: &mut App) {
+pub(crate) fn mark_cursor_moved(app: &mut App) {
     if app.chat_input.cursor_pos_after_load.is_some()
         && !app.chat_input.cursor_moved_since_load
         && app.chat_input.cursor_pos_after_load != Some(app.chat_input.cursor)
@@ -930,10 +932,6 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
         question_input::handle_key(app, client, esc);
         return false;
     }
-    if app.vibe_code_project.open || app.vibe_code_project.pending {
-        crate::vibe_code_project::input::handle_key(app, client, esc);
-        return false;
-    }
     // An active narrator stops first, before the queue step.
     if turn_summary::cancel(app) {
         return false;
@@ -950,10 +948,6 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
     // Running jobs the loading hint offers to interrupt.
     if app.session.shell_operation_id.is_some() {
         crate::commands::shell::interrupt(app, client);
-        return false;
-    }
-    if crate::teleport::busy(app) {
-        crate::teleport::interrupt(app, client);
         return false;
     }
     if matches!(app.session.status, Status::Generating { .. }) {

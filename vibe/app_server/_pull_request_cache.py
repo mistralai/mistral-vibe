@@ -250,6 +250,13 @@ class PullRequestCache:
             registered.sessions.pop(session_id, None)
         self._forget_unwatched()
 
+    def unwatch_all(self, owner: object) -> None:
+        """Drop every session ``owner`` watches; it stays registered."""
+        registered = self._owners.get(owner)
+        if registered is not None:
+            registered.sessions.clear()
+        self._forget_unwatched()
+
     def _forget_unwatched(self) -> None:
         watched = self._watched_keys()
         for external_key in list(self._details):

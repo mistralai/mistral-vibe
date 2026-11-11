@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 from scenarios.footer.usage_gauge import handshake as _base
 
 handshake = copy.deepcopy(_base)
@@ -13,6 +13,6 @@ handshake["account/read"]["account"]["budget"] = {
     "paygEnabled": False,
 }
 
-timeline: Timeline = []
+timeline: Timeline = [take_snapshot()]
 screen_contains = ("usage ██████ 100% · ctx",)
 screen_excludes = ("paused", "PAYG")

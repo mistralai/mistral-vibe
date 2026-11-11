@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::app::{App, Status};
+use crate::app::{App, Severity, Status};
 use serde_json::Value;
 
 use crate::server::{Client, ImageAttachment};
@@ -201,7 +201,7 @@ pub(super) fn settle_completion(app: &mut App) {
 }
 
 fn show_replacement_error(app: &mut App) {
-    crate::notices::failed(app, "Failed to update queued message");
+    crate::notices::inline(app, Severity::Error, "Failed to update queued message");
 }
 
 /// Copy unsent revisions away from a consumed server queue item.

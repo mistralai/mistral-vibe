@@ -25,7 +25,6 @@ _SKILLS = [
 
 handshake = {"runtime/read": {"runtime": {"skills": _SKILLS}}}
 
-capture_startup = False
 screen_contains = ("project · Summarize", "user · Apply the")
 
 timeline: Timeline = ["/c", resize(30, 32)]

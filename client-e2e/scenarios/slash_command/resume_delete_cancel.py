@@ -30,5 +30,4 @@ timeline: Timeline = [
     _ESCAPE,
 ]
 
-capture_startup = False
 screen_excludes = ("Resume cancelled.",)

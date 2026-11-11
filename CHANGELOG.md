@@ -5,6 +5,137 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.2] - 2026-11-10
+
+### Added
+
+- Installed plugins can be turned off with the `disabled_plugins` setting: a disabled plugin stays installed but contributes nothing to sessions
+- Plugins can be off by default (`defaultEnabled: false` in their `ai.mistral.vibe` extension) and turned on with the `enabled_plugins` setting
+- `/skills` lists your installed skills, one row per name, with search, a Space toggle to turn each one on or off, and the highlighted skill's body under the list or beside it on wide terminals.
+- With registry skills on, `/skills` lists shared skills to add on a Shared tab and lets you pin a version or alias per scope, preview each version, unpin a scope, or remove the skill.
+
+### Changed
+
+- With registry skills on, a project's skills, files or pins, win over global ones of the same name, including skills from `skill_paths`.
+- With registry skills on, cached shared skill versions unused for 30 days are deleted when the registry can still serve them.
+- While the agent only waits for background work, the status line says what it waits for and that a message reaches it at once.
+- A tool group header now counts the calls still running apart from the settled ones ("Calling 1 tool, called 2 tools").
+- Opening a session no longer fetches the model catalog: it is cached on disk and refreshed in the background, and running sessions pick up the refresh when their turn ends
+- Crash reports now cover app-server and session resume errors, and no longer include routine error logs or network outages.
+
+### Fixed
+
+- Headless --max-tokens and --max-price limits now stop the run before another root or subagent completion starts. Models priced at 0 count as free under --max-price.
+- With registry skills on, sessions fetch the pinned skills missing from this machine again when they start, sandboxed sessions included.
+- A message sent while the agent waits for its subagents or background processes now reaches it at once instead of staying queued until the wait ends.
+- The "Interrupted" marker no longer jumps below later messages when the agent starts a background process
+
+## [3.1.1] - 2026-11-09
+
+### Added
+
+- `vibe-acp` notifies the client when the administrator changes the organization's Vibe Code configuration.
+- Vim Normal and Insert modes in the prompt input, enabled with the `vim_keybindings` config option
+- The prompt of the conversation section at the top of the screen stays pinned while you scroll, and a click jumps back to it
+- `enable_sticky_prompt = false` turns the pinned prompt off
+- `pre_agent` hooks run before the model reads a user message: they can block it, rewrite its text, or add context for the model.
+- `notification` hooks run in the background when Vibe needs your approval or an answer, or when a turn completes or fails.
+- `session_start` hooks run when a session starts, resumes, is cleared or forked, and can add context for the model to the next message.
+- `session_end` hooks run in the background when a session ends, with the reason (`exit`, `clear` or `other`).
+- Built-in `/vibe:import` skill that finds your setup from other coding agents and imports instructions, skills, subagents, commands, hooks, MCP servers and permissions into Vibe
+- `vibe -p` reports each denied tool call on stderr and in the export's `warnings`
+- `vibe -p` says on stderr when the agent finishes without an answer
+- Commands the agent runs get `VIBE_SESSION=1` in their environment, so scripts can detect they run under Vibe
+- On macOS and Linux, with nothing selected, `Ctrl+Y` pastes back the text last deleted with `Ctrl+K`, `Ctrl+U`, `Ctrl+W` or `Alt+D`.
+- App servers offer a new `agentWorktrees` client capability: its sessions get the `enter_worktree` tool, and before editing the user's checkout the agent asks whether to work in a new git worktree or in place. A session can hold several worktrees; each is listed in `artifacts/list` and cleaned up when the session is archived.
+- With the model catalog enabled, a model's old name (its catalog aliases) now works everywhere a model is named: `[models.<old name>]` settings apply to the model, and `--model <old name>` or the ACP `model` option picks it
+- `/pr` lists the session's pull and merge requests with their number, title and state (green open, grey draft, purple merged, red closed).
+- In `/pr`, `c` opens the first failing CI check and `f` drafts a prompt asking the agent to fix what blocks the PR.
+
+### Changed
+
+- Session ids shown for `vibe --resume` now use the last 8 characters of the id; the first 8 still resume older sessions.
+- Quitting Vibe waits up to 5 seconds for `notification` and `session_end` hooks still running.
+- On macOS and Linux, what a `bash` command or a hook starts with `&` is stopped when it exits: long-running commands go through background processes.
+- `/branch` now works while the agent is running, forking the conversation as it was before the current turn, and shows the command that resumes the copy in a panel instead of the conversation.
+- Errors from pickers and keyboard actions (session resume, model, thinking, log level, agent switch, MCP browser, image paste, voice, external editor, queued-message edits) now show above the input until the next key instead of staying in the conversation.
+- The startup Warnings box now goes away after your first message or when you resume another session.
+- Markdown tables wider than the terminal size their columns to render as few lines as possible, keeping words whole where they can.
+- `--yolo` / `--auto-approve` on a new session now starts the `auto-approve` agent instead of a hidden bypass on `ask`, `accept-edits` or `smart-approve`, so Shift+Tab can leave it; the session resumes on that agent.
+- Hovering the model, the PR link or the context gauge now tints and bolds them instead of painting them blue
+- The footer's copy-path icon now appears only when the working directory is shortened.
+- Prompts sent by a scheduled loop now show only the loop's title, with its instructions and fired-at line folded until clicked or expanded with Ctrl+O, and scheduling a loop shows only its title.
+- A model pick now saves `active_model` under the name the config file already uses for that model (during the catalog rollout), so older versions sharing the file still resolve it
+- When the model catalog is turned on for your account, the model list no longer shows a second copy of a catalog model, and the catalog's recommended model is the default.
+- With the model catalog enabled and listing at least one model, the built-in default model is not available anymore: the pickers show one row per catalog model, and a catalog alias can take the built-in's name (e.g. a pin on `mistral-medium-3.5` runs the catalog's `mistral-medium-latest` when the catalog lists that alias)
+- `allowed_models` patterns now also match a model's catalog aliases, so an allowlist written against a retired built-in's name (e.g. `mistral-vibe-cli-*`) keeps matching the catalog model that replaces it
+- Pull requests and merge requests of a session are now tracked by default (with `gh` or `glab`); set `enable_pr_monitoring = false` (or `VIBE_ENABLE_PR_MONITORING=false`) to turn this off
+- Sessions of one account and client now share one experiment evaluation per app server, kept on disk, so opening a session no longer waits on it after the first run
+- The footer shortens a long working directory one word at a time instead of jumping to its last folder.
+- An unreachable MCP server is retried after a growing delay instead of by every session that opens, and a server due a refresh is refreshed once for every session.
+- When Mistral refuses your sign-in again right after renewing it, Vibe now asks you to update Vibe or sign in again.
+- Plugin skills, knowledge and agents are named after the plugin as written (`my-plugin:review`) instead of its tool namespace (`my_plugin:review`)
+- Custom agents whose `enabled_skills` or `disabled_skills` name plugin skills by the tool namespace (`my_plugin:*`) need the plugin name instead (`my-plugin:*`)
+- Clicking the footer's PR/MR link opens `/pr` and refreshes the statuses; clicking it again closes the list.
+- The footer's PR/MR status names its cause (`CI failing`, `changes requested`, `conflicts`, `CI running`, `review required`), prefers the open PR over merged or closed ones, and reads bold until a new status has been seen.
+- A refused rewind or fork now says what is still running, such as a background process or a subagent, and a refused rewind shows as a notice instead of a conversation row.
+- In vibe-acp and headless runs, the agent no longer assumes its replies are shown in a terminal, and writes markdown that reads well in any client
+
+### Fixed
+
+- Rust CLI: moving the mouse outside the terminal window no longer highlights the subagent row or footer item on the same line.
+- The update prompt no longer reports a failed update when uv shows a download progress bar
+- Links in the transcript and onboarding open with your terminal's own link click (such as Cmd+click), including over SSH.
+- New files follow the line endings the repository's .gitattributes sets for them.
+- The agent no longer stops editing a file because of Windows (CRLF) line endings.
+- Queued messages run again after a turn fails on a storage error such as a full disk, once the disk has space.
+- On Windows, the agent writes paths in PowerShell and Git Bash commands so backslashes no longer break them.
+- Update checks work again with uv older than 0.10.10 instead of silently finding no new version
+- A subagent's scheduled prompts now run in that subagent, and it can only list, cancel or clear its own, not the main session's.
+- Reading a log full of control characters no longer floods the context window.
+- A model whose auto-compaction threshold does not fit its context window now compacts at the closest threshold that fits, with a warning, instead of failing to start or to be picked
+- Release notes no longer stay pinned below the conversation when the first prompt is sent at startup
+- The input caret no longer disappears when your text reaches the right edge of the input.
+- The context gauge keeps its unused part visible while hovered
+- `vibe -p --agent` with an unknown or unavailable agent exits as a usage error (exit 1), and `--agent plan` says it was removed and names its replacement
+- A `default_agent` in the config that cannot start is reported as a configuration error
+- Mistral Large 4's thinking picker offers Low, Medium and High, the levels the API now takes, instead of Low, High and Max when its config lists no levels.
+- On Windows, multi-line pastes in terminals that send LF line breaks, such as WezTerm, no longer submit a prompt at each line.
+- A provider error echoing a large payload, such as a rejected image, no longer freezes the terminal UI.
+- `/clear` now starts a conversation with no scheduled prompts; the cleared session keeps its own and runs them again when resumed.
+- Picking a model or thinking level no longer shows a false "A turn is already running" error when you send a prompt right after.
+- Connectors no longer all fail to load with "Connector bootstrap cache projection exceeds 2 MiB" on accounts with many connectors
+- Fixed sessions that failed and could not be resumed after a script passed a tool something other than an object
+- A resumed session uses the model and agent it last ran, instead of the current default.
+- Sessions start again when a cache file in `~/.vibe` contains invalid UTF-8 bytes.
+- Commands run by Vibe no longer inherit `GIT_PYTHON_GIT_EXECUTABLE`, which broke `import git` in containers or remote jobs where Git lives elsewhere.
+- Subagent spawns no longer fail as often because the model left out the task message.
+- `/compact` no longer fails and blocks the session when a warning arrives during the compaction, such as a cut-off summary.
+- Skills whose frontmatter values contain an unquoted colon now load instead of failing with an invalid YAML error
+- `vibe` doing nothing on Windows machines without the Visual C++ Redistributable
+- On dedicated deployments where only `api_base` is set, the admin-managed config and account links now use the deployment's chat URL instead of `chat.mistral.ai`
+- Ctrl+Z on Linux no longer occasionally hangs without returning to the shell prompt.
+- File autocomplete no longer rescans the whole folder when dependencies change ignore files, such as during `npm install`.
+- Clicking the footer's context gauge again now closes `/context`.
+- Clicking a footer link or the context gauge no longer starts a text selection.
+- A turn interrupted right after it starts no longer stays shown as running.
+- Interrupting or messaging a subagent no longer fails when the parent turn ends while the request is still running.
+- A managed worktree whose checkout lost its `.git` is reported once in the log instead of every few seconds.
+- Plugins with an unknown top-level `plugin.json` field now load, with a warning, instead of being skipped.
+- Plugins whose `ai.mistral.vibe` extension has an unknown key or declares `volumes` now keep their hooks, knowledge, and agents.
+- A pull request the agent opens after writing its description in a heredoc that contains an apostrophe now shows up on the session.
+- The same pull request no longer shows twice in the footer's PR list.
+- A command that creates several PRs/MRs now records all of them.
+- Rewinding no longer fails after a background process finishes between turns.
+
+### Removed
+
+- The `/teleport` command is gone from `vibe-acp`.
+- The `/remote-project` command is gone.
+- The `/teleport` command, the `&` prompt prefix and the `--teleport` flag are gone; passing `--teleport` is now an error.
+- The `experimental_enable_pr_monitoring` and `experimental_enable_pr_discovery` settings and the `VIBE_EXPERIMENTAL_ENABLE_PR_MONITORING` variable are gone and now ignored; use `enable_pr_monitoring`
+- A skill named `pr` can no longer be run as `/pr`, which now opens the built-in PR list.
+
 ## [3.1.0] - 2026-11-03
 
 ### Added

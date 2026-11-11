@@ -166,14 +166,19 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
         and not resolve_api_key(provider.api_key_env_var)
     ):
         return None
-    if telemetry is not None:
+
+    def report_request(reasoning_effort: str) -> None:
+        if telemetry is None:
+            return
         telemetry.send_request_sent(
             model=model.alias,
             nb_context_chars=len(system_prompt) + len(user_content),
             nb_context_messages=2,
             nb_prompt_chars=len(user_content),
             call_type=call_type,
+            reasoning_effort=reasoning_effort,
         )
+
     result = await complete_once(
         provider=provider,
         model=model,
@@ -191,6 +196,7 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
             timeout_s=request_timeout_seconds,
             retry_budget_s=retry_budget_seconds,
         ),
+        on_request=report_request,
     )
     return result.text
 

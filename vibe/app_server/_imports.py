@@ -14,8 +14,7 @@ from vibe.app_server._import_jobs import (
     ImportJobSnapshot,
 )
 from vibe.app_server._model import ProtocolModel
-from vibe.app_server._project_links import ProjectLinksController
-from vibe.app_server._vibe_projects import VibeProjectService
+from vibe.app_server._vibe_projects import LocalProjectStoreFactory, VibeProjectService
 from vibe.app_server.models import ImportHarness, ImportHarnessDiscovery
 from vibe.app_server.protocol import (
     ImportDiscoveryResponse,
@@ -29,7 +28,6 @@ from vibe.core.imports._session import ImportedSessionWriter
 from vibe.core.imports.adapters.claude_home import ClaudeHome
 from vibe.core.imports.adapters.claude_project import ClaudeProjectSource
 from vibe.core.imports.adapters.claude_session import ClaudeSessionSource
-from vibe.core.platform_auth import PlatformCredentialFactory
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +49,7 @@ IMPORTS_UPDATED = "imports/updated"
 
 def build_local_imports_service(
     session_writer_factory: Callable[[], Awaitable[ImportedSessionWriter]],
-    credentials: PlatformCredentialFactory | None = None,
+    local_projects: LocalProjectStoreFactory,
 ) -> ImportsService:
     """Builds imports from harnesses installed on this machine."""
     claude_home = ClaudeHome.for_current_user()
@@ -59,7 +57,7 @@ def build_local_imports_service(
         ImportHarness.CLAUDE: ClaudeImportService(
             ClaudeProjectSource(claude_home.configuration_path),
             ClaudeSessionSource(claude_home.projects_path),
-            VibeProjectService(ProjectLinksController(credentials)),
+            VibeProjectService(local_projects=local_projects),
             session_writer_factory,
         )
     })

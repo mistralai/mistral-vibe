@@ -19,7 +19,7 @@ pub use grouping::{effect_kind, groups_with_tools, Group};
 pub use older::HistoryCursor;
 use patch::appended_text;
 pub use patch::apply_json_patch;
-pub use scheduled_loop::FiredLoop;
+pub use scheduled_loop::{split_prompt as split_loop_prompt, FiredLoop};
 
 #[derive(Default)]
 pub struct Transcript {
@@ -41,6 +41,9 @@ pub struct Transcript {
     highest_image_label: usize,
     /// Where paging resumes when older server history is not loaded yet.
     history_before_cursor: Option<HistoryCursor>,
+    /// Whether a running `wait` hides behind the waiting status line. Only the
+    /// main transcript has that line; a subagent's view keeps its `wait` row.
+    hides_live_waits: bool,
 }
 
 pub struct Snapshot {
@@ -506,6 +509,10 @@ impl Transcript {
         {
             return true;
         }
+        // A running wait paints nothing: the waiting status line says it.
+        if self.is_live_wait(stored) {
+            return true;
+        }
         !self.show_reasoning && matches!(stored.typed, HistoryEntry::Reasoning(_))
     }
 
@@ -584,24 +591,42 @@ impl Transcript {
             HistoryEntry::Effect(effect) => Some(effect.as_ref()),
             _ => None,
         });
-        let kinds = if first {
-            grouping::count_kinds(effects)
+        // A group whose only calls still running are hidden waits reads as done:
+        // the waiting status line says the rest.
+        let mut live = self.entries[start..end]
+            .iter()
+            .filter(|stored| {
+                matches!(&stored.typed, HistoryEntry::Effect(effect)
+                    if !stored.local && !effect.is_terminal())
+            })
+            .peekable();
+        let only_waits = live.peek().is_some() && live.all(|stored| self.is_live_wait(stored));
+        let finalized = stored.local
+            || stored.historical
+            || end < self.entries.len()
+            || !self.live_tail_open
+            || only_waits;
+        let (running, kinds) = if first {
+            grouping::count_kinds(effects, !finalized)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         let reasoning = visible
             .iter()
             .any(|(_, entry)| matches!(entry.typed, HistoryEntry::Reasoning(_)));
+        let thinking = !finalized
+            && visible.iter().any(|(_, entry)| {
+                matches!(entry.typed, HistoryEntry::Reasoning(_)) && entry.typed.in_progress()
+            });
         Some(Group {
             key: format!("{}{}", grouping::KEY_PREFIX, first_entry.id),
             first,
             last: index == last_index,
-            finalized: stored.local
-                || stored.historical
-                || end < self.entries.len()
-                || !self.live_tail_open,
+            finalized,
             kinds,
+            running,
             reasoning,
+            thinking,
         })
     }
 
@@ -626,6 +651,14 @@ impl Transcript {
     /// Monotonic content revision used to invalidate ordered render layouts.
     pub fn revision(&self) -> u64 {
         self.next_rev
+    }
+
+    /// The main transcript: a running `wait` hides behind the waiting status line.
+    pub fn main() -> Self {
+        Self {
+            hides_live_waits: true,
+            ..Self::default()
+        }
     }
 
     pub fn set_show_reasoning(&mut self, show: bool) {
@@ -670,7 +703,7 @@ impl Transcript {
             .is_some_and(|&index| self.entries[index].pending)
     }
 
-    /// Whether the entry `id` toggles on click: a tool row or a reasoning trace.
+    /// Whether the entry `id` toggles on click: a tool row, reasoning trace, or loop prompt.
     pub fn is_expandable(&self, id: &str) -> bool {
         if let Some(entry_id) = id.strip_prefix(grouping::KEY_PREFIX) {
             return self
@@ -696,6 +729,7 @@ impl Transcript {
                                 .is_some_and(|output| !output.is_empty()))
                 }
                 HistoryEntry::Reasoning(_) => true,
+                HistoryEntry::Message(_) => stored.fired_loop.is_some(),
                 _ => false,
             },
             _ => false,
@@ -758,6 +792,74 @@ impl Transcript {
                 && stored.id != skip
                 && matches!(&stored.typed, HistoryEntry::Effect(effect) if !effect.is_terminal())
         })
+    }
+
+    /// The `statusText` of the latest call of `turn_id` still running, for a
+    /// loader adopted mid-turn. A call an earlier turn left unsettled never counts.
+    pub fn live_status_text<'a>(&'a self, turn_id: &str) -> Option<&'a str> {
+        self.turn_entries(turn_id)
+            .find_map(|stored| match &stored.typed {
+                HistoryEntry::Effect(effect) if !effect.is_terminal() => {
+                    Some(effect.status_text()).filter(|text| !text.is_empty())
+                }
+                _ => None,
+            })
+    }
+
+    /// The server entries of `turn_id`, newest first. The walk stops at the
+    /// first entry of another turn, so its cost follows the turn, not the
+    /// session: the loader asks on every frame.
+    fn turn_entries<'a, 'b>(
+        &'a self,
+        turn_id: &'b str,
+    ) -> impl Iterator<Item = &'a StoredEntry> + use<'a, 'b> {
+        self.entries
+            .iter()
+            .rev()
+            .filter(|stored| !stored.local)
+            .take_while(move |stored| {
+                stored.raw["turnId"]
+                    .as_str()
+                    .is_none_or(|turn| turn == turn_id)
+            })
+            .filter(move |stored| stored.raw["turnId"].as_str() == Some(turn_id))
+    }
+
+    /// A standalone `wait` of the latest turn that has not settled. One an
+    /// earlier turn left unsettled is not live: it paints like any other call.
+    fn is_live_wait(&self, stored: &StoredEntry) -> bool {
+        let HistoryEntry::Effect(effect) = &stored.typed else {
+            return false;
+        };
+        self.hides_live_waits
+            && !stored.local
+            && effect.is_model_wait()
+            && !effect.is_terminal()
+            && stored.raw["turnId"].as_str() == self.latest_turn_id()
+    }
+
+    /// The turn of the latest server entry that belongs to a turn. Entries
+    /// outside any turn, like hook notices, carry a null `turnId`.
+    fn latest_turn_id(&self) -> Option<&str> {
+        self.entries
+            .iter()
+            .rev()
+            .filter(|stored| !stored.local)
+            .find_map(|stored| stored.raw["turnId"].as_str())
+    }
+
+    /// Whether the agent only runs a standalone `wait` for its background work:
+    /// some call of `turn_id` still runs, and every one is such a wait. A call
+    /// an earlier turn left unsettled never counts.
+    pub fn only_model_waiting(&self, turn_id: &str) -> bool {
+        let mut live = self
+            .turn_entries(turn_id)
+            .filter_map(|stored| match &stored.typed {
+                HistoryEntry::Effect(effect) if !effect.is_terminal() => Some(effect),
+                _ => None,
+            })
+            .peekable();
+        live.peek().is_some() && live.all(|effect| effect.is_model_wait())
     }
 }
 

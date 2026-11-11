@@ -7,16 +7,11 @@ use crate::selection;
 /// End the captured gesture, keeping (and copying) the selection in flight or aborting it.
 pub(crate) fn cancel_capture(app: &mut App, keep_selection: bool) {
     if let Some(Capture::Target(target)) = app.view.mouse.capture.take() {
-        if target == MouseTarget::RemoteProject {
-            app.vibe_code_project.list.cancel();
-            app.vibe_code_project.dragged_field = None;
-        }
         if matches!(
             target,
             MouseTarget::Transcript
                 | MouseTarget::Composer
                 | MouseTarget::Trust
-                | MouseTarget::RemoteProject
                 | MouseTarget::BottomBar
                 | MouseTarget::Loading
                 | MouseTarget::Question
@@ -31,6 +26,8 @@ pub(crate) fn cancel_capture(app: &mut App, keep_selection: bool) {
                 | MouseTarget::ResumePicker
                 | MouseTarget::Mcp
                 | MouseTarget::Plugins
+                | MouseTarget::Skills
+                | MouseTarget::SkillsBody
                 | MouseTarget::McpOAuth
                 | MouseTarget::ConnectorAuth
         ) {

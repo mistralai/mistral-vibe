@@ -16,6 +16,10 @@ use vibe_rs::startup::{
     StartupRecorder,
 };
 use vibe_rs::telemetry::{self, event, TelemetryEvent};
+use vibe_rs::update_notifier::cache::{
+    FileSystemUpdateCacheRepository, UpdateCache, UpdateCacheRepository,
+};
+use vibe_rs::utils::cache_store;
 use vibe_rs::utils::startup_cache::StartupConfig;
 
 /// Guards VIBE_HOME, which is process-global across this binary's tests.
@@ -61,6 +65,10 @@ impl Startup {
     }
 
     fn ready_with(&mut self, startup_cache: StartupConfig, is_cold_start: bool) {
+        self.ready_runtime(startup_cache, is_cold_start, json!({"runtime": {}}));
+    }
+
+    fn ready_runtime(&mut self, startup_cache: StartupConfig, is_cold_start: bool, runtime: Value) {
         let ready = Ready {
             startup_cache,
             config: ConfigRead {
@@ -70,7 +78,7 @@ impl Startup {
             },
             state: json!({"eventId": 0, "session": {"id": "session"}}),
             attach: Attach::Started,
-            runtime: json!({"runtime": {}}),
+            runtime,
             is_cold_start,
             settled: None,
             prepared: None,
@@ -81,10 +89,30 @@ impl Startup {
 
     /// The `vibe.startup` events sent so far.
     fn startup_events(&mut self) -> Vec<BTreeMap<String, Value>> {
+        self.events(event::STARTUP)
+    }
+
+    /// The events named `name` sent so far; the others are dropped.
+    fn events(&mut self, name: &str) -> Vec<BTreeMap<String, Value>> {
         std::iter::from_fn(|| self.telemetry.try_recv().ok())
-            .filter(|sent| sent.name == event::STARTUP)
+            .filter(|sent| sent.name == name)
             .map(|sent| sent.properties)
             .collect()
+    }
+
+    /// The next event named `name`, waiting for async effects to send it.
+    async fn next_event(&mut self, name: &str) -> BTreeMap<String, Value> {
+        let wait = async {
+            loop {
+                let sent = self.telemetry.recv().await.expect("telemetry channel open");
+                if sent.name == name {
+                    return sent.properties;
+                }
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(30), wait)
+            .await
+            .expect("event sent")
     }
 }
 
@@ -115,6 +143,16 @@ async fn ready_sends_one_startup_event_with_agent_ready_after_the_first_frame() 
     assert_eq!(properties["session_init_duration_ms"], Value::Null);
     assert_eq!(properties["is_cold_start"], true);
     assert_eq!(properties["mouse_capture"], true);
+    assert_eq!(properties["vim_keybindings"], false);
+}
+
+#[tokio::test]
+async fn a_config_with_vim_keybindings_reports_it_on() {
+    let mut startup = Startup::painted();
+    let runtime = json!({"runtime": {"config": {"vimKeybindings": true}}});
+    startup.ready_runtime(StartupConfig::default(), true, runtime);
+
+    assert_eq!(startup.startup_events()[0]["vim_keybindings"], true);
 }
 
 #[tokio::test]
@@ -159,4 +197,78 @@ async fn the_picker_and_trust_prompt_shown_before_ready_are_reported() {
     let properties = &startup.startup_events()[0];
     assert_eq!(properties["show_resume_picker"], true);
     assert_eq!(properties["prompt_for_workspace_trust"], true);
+}
+
+#[tokio::test]
+async fn the_install_source_of_the_last_update_check_is_reported_while_its_tag_holds() {
+    let mut startup = Startup::painted();
+    write_update_cache("brew", 100, 100);
+    startup.ready(true);
+    assert_eq!(startup.startup_events()[0]["install_source"], "brew");
+}
+
+#[tokio::test]
+async fn a_voided_install_source_tag_is_not_reported() {
+    let mut startup = Startup::painted();
+    write_update_cache("brew", 200, 100);
+    startup.ready(true);
+    assert_eq!(startup.startup_events()[0]["install_source"], Value::Null);
+}
+
+#[tokio::test]
+async fn a_new_version_reports_the_change_once_with_this_installs_manager() {
+    let mut startup = Startup::painted();
+    let current = env!("CARGO_PKG_VERSION");
+    write_update_cache("brew", 100, 100);
+    cache_store::write_string("telemetry", "last_run_version", "0.0.1");
+
+    startup.ready(true);
+
+    let change = startup.next_event(event::VERSION_UPDATED).await;
+    assert_eq!(change["from_version"], "0.0.1");
+    assert_eq!(change["to_version"], current);
+    // A test binary is neither a uv tool nor a brew formula.
+    assert_eq!(change["install_source"], "pypi");
+    assert_eq!(
+        cache_store::read_string("telemetry", "last_run_version").as_deref(),
+        Some(current)
+    );
+}
+
+#[tokio::test]
+async fn an_unchanged_version_reports_nothing() {
+    let mut startup = Startup::painted();
+    cache_store::write_string("telemetry", "last_run_version", env!("CARGO_PKG_VERSION"));
+
+    startup.ready(true);
+
+    let change = startup.next_event(event::VERSION_UPDATED);
+    assert!(tokio::time::timeout(Duration::from_secs(2), change)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn a_first_run_only_stamps_its_version() {
+    let mut startup = Startup::painted();
+
+    startup.ready(true);
+
+    assert!(startup.events(event::VERSION_UPDATED).is_empty());
+    assert_eq!(
+        cache_store::read_string("telemetry", "last_run_version").as_deref(),
+        Some(env!("CARGO_PKG_VERSION"))
+    );
+}
+
+fn write_update_cache(source: &str, stored_at: i64, source_stored_at: i64) {
+    let cache = UpdateCache {
+        latest_version: "0.0.1".to_owned(),
+        stored_at_timestamp: stored_at,
+        seen_whats_new_version: None,
+        dismissed_version: None,
+        source: Some(source.to_owned()),
+        source_stored_at: Some(source_stored_at),
+    };
+    FileSystemUpdateCacheRepository.set(&cache).unwrap();
 }

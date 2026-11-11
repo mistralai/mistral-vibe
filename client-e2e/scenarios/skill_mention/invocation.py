@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "use /lint and /code-review please"
 _MESSAGE_ID = "user-skill-mentions"
@@ -72,4 +72,5 @@ timeline: Timeline = [
     assistant_msg("Both applied."),
     turn_completed(),
     "\x0f",
+    take_snapshot(),
 ]

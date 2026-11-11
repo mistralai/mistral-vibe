@@ -31,7 +31,5 @@ timeline: Timeline = [
     "\r",
 ]
 
-capture_startup = False
-capture_steps = {0, 4}
 screen_contains = ("Saved session restored.",)
 screen_excludes = ("File the follow-ups",)

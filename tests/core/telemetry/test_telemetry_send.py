@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import platform
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+import warnings
 
 import pytest
 
@@ -16,6 +18,7 @@ from vibe.core.telemetry.build_metadata import (
 )
 from vibe.core.telemetry.send import (
     TelemetryClient,
+    config_snapshot,
     send_unified_subagent_tool_call_finished,
     send_unified_tool_call_finished,
 )
@@ -386,135 +389,6 @@ class TestTelemetryClient:
         assert properties["session_id"] == "session-id"
         assert properties["parent_session_id"] == "parent-session-id"
 
-    def test_send_teleport_completed_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_teleport_completed(push_required=True, nb_session_messages=4)
-
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe.teleport_completed"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "push_required": True,
-            "nb_session_messages": 4,
-            "context_summary": "skipped",
-            "context_summary_chars": None,
-        }
-
-    def test_send_teleport_completed_payload_includes_project_picker_context(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_teleport_completed(
-            push_required=True,
-            nb_session_messages=4,
-            project_picker={
-                "project_picker_shown": True,
-                "project_selection_source": "selected_existing",
-                "project_candidate_count_loaded": 3,
-                "project_multi_repo_match_count": 1,
-                "saved_project_link_cleared": False,
-                "project_repo_remote_changed": False,
-            },
-        )
-
-        assert telemetry_events[0]["event_name"] == "vibe.teleport_completed"
-        assert {
-            "project_picker_shown": True,
-            "project_selection_source": "selected_existing",
-            "project_candidate_count_loaded": 3,
-            "project_multi_repo_match_count": 1,
-            "saved_project_link_cleared": False,
-            "project_repo_remote_changed": False,
-        }.items() <= telemetry_events[0]["properties"].items()
-
-    def test_send_teleport_failed_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_teleport_failed(
-            stage="push",
-            error_class="ServiceTeleportError",
-            push_required=True,
-            nb_session_messages=4,
-        )
-
-        assert len(telemetry_events) == 1
-        assert telemetry_events[0]["event_name"] == "vibe.teleport_failed"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "stage": "push",
-            "error_class": "ServiceTeleportError",
-            "push_required": True,
-            "nb_session_messages": 4,
-            "context_summary": "skipped",
-            "context_summary_chars": None,
-        }
-
-    def test_send_teleport_failed_payload_includes_error_details(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_teleport_failed(
-            stage="workflow_start",
-            error_class="ServiceTeleportError",
-            push_required=False,
-            nb_session_messages=4,
-            error_details={"failure_kind": "http_error", "http_status_code": 502},
-        )
-
-        assert telemetry_events[0]["event_name"] == "vibe.teleport_failed"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "stage": "workflow_start",
-            "error_class": "ServiceTeleportError",
-            "push_required": False,
-            "nb_session_messages": 4,
-            "context_summary": "skipped",
-            "context_summary_chars": None,
-            "failure_kind": "http_error",
-            "http_status_code": 502,
-        }
-
-    def test_send_remote_project_configured_payload(
-        self, telemetry_events: list[dict[str, Any]]
-    ) -> None:
-        config = build_test_vibe_config(enable_telemetry=True)
-        client = TelemetryClient(config_getter=lambda: config)
-
-        client.send_remote_project_configured(
-            outcome="configured",
-            project_picker={
-                "project_picker_shown": True,
-                "project_selection_source": "selected_existing",
-                "project_candidate_count_loaded": 2,
-                "project_multi_repo_match_count": 0,
-                "saved_project_link_cleared": False,
-                "project_repo_remote_changed": False,
-            },
-        )
-
-        assert telemetry_events[0]["event_name"] == "vibe.remote_project_configured"
-        assert telemetry_events[0]["properties"] == {
-            **_expected_system_metadata(),
-            "outcome": "configured",
-            "project_picker_shown": True,
-            "project_selection_source": "selected_existing",
-            "project_candidate_count_loaded": 2,
-            "project_multi_repo_match_count": 0,
-            "saved_project_link_cleared": False,
-            "project_repo_remote_changed": False,
-        }
-
     def test_send_new_session_payload(
         self, telemetry_events: list[dict[str, Any]]
     ) -> None:
@@ -538,6 +412,7 @@ class TestTelemetryClient:
             has_outside_workdir_deny=False,
             nb_post_agent_scoped_hooks=2,
             nb_post_agent_main_hooks=1,
+            nb_hooks_by_type={"pre_agent": 2, "notification": 1},
         )
 
         assert len(telemetry_events) == 1
@@ -550,6 +425,8 @@ class TestTelemetryClient:
         assert properties["nb_models"] == 3
         assert properties["nb_post_agent_scoped_hooks"] == 2
         assert properties["nb_post_agent_main_hooks"] == 1
+        assert properties["nb_hooks_pre_agent"] == 2
+        assert properties["nb_hooks_notification"] == 1
         assert properties["entrypoint"] == "cli"
         assert properties["host_kind"] == "local"
         assert properties["client_name"] == "vscode"
@@ -560,6 +437,53 @@ class TestTelemetryClient:
         assert "version" in properties
         assert type(properties["terminal_emulator"]) is str
         _assert_system_metadata(properties, TerminalEmulator.VSCODE)
+
+    def test_send_new_session_reports_config_without_free_text(
+        self, telemetry_events: list[dict[str, Any]]
+    ) -> None:
+        config = build_test_vibe_config(
+            enable_telemetry=True,
+            vim_keybindings=True,
+            worktree_limit=7,
+            theme="my-secret-theme",
+        )
+        client = TelemetryClient(config_getter=lambda: config)
+
+        client.send_new_session(
+            has_agents_md=False,
+            nb_skills=0,
+            nb_mcp_servers=0,
+            nb_models=1,
+            has_outside_workdir_deny=False,
+            nb_post_agent_scoped_hooks=0,
+            nb_post_agent_main_hooks=0,
+        )
+
+        snapshot = telemetry_events[0]["properties"]["config"]
+        assert snapshot["vim_keybindings"] is True
+        assert snapshot["worktree_limit"] == 7
+        assert snapshot["auto_compact_threshold"] == config.auto_compact_threshold
+        assert snapshot["outside_workdir"] == config.outside_workdir.value
+        for free_text in ("theme", "active_model", "otel_endpoint", "log_level"):
+            assert free_text not in snapshot
+        for nested in ("mcp_servers", "models", "skill_paths", "project_context"):
+            assert nested not in snapshot
+
+    def test_config_snapshot_stays_json_and_skips_retired_settings(self) -> None:
+        config = build_test_vibe_config(api_timeout=float("inf"))
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            snapshot = config_snapshot(config)
+
+        assert snapshot["api_timeout"] is None
+        json.dumps(snapshot, allow_nan=False)
+        for retired in (
+            "api_connect_timeout",
+            "include_model_info",
+            "context_warnings",
+        ):
+            assert retired not in snapshot
 
     def test_send_new_session_metadata_includes_managed_shell_experiment(
         self, telemetry_events: list[dict[str, Any]]
@@ -627,7 +551,7 @@ class TestTelemetryClient:
         client._client.post = mock_post
         client._client.aclose = AsyncMock()
 
-        client.send_session_closed()
+        client.send_session_closed(reason="exit")
         await client.aclose()
 
         mock_post.assert_called_once_with(
@@ -642,6 +566,7 @@ class TestTelemetryClient:
                     "client_version": "1.0.0",
                     "session_id": "current-session",
                     "parent_session_id": "current-parent-session",
+                    "reason": "exit",
                 },
             },
             headers={
@@ -899,12 +824,14 @@ class TestTelemetryClient:
             nb_context_messages=5,
             nb_prompt_chars=42,
             call_type="main_call",
+            reasoning_effort="medium",
         )
 
         assert len(telemetry_events) == 1
         assert telemetry_events[0]["event_name"] == "vibe.request_sent"
         properties = telemetry_events[0]["properties"]
         assert properties["model"] == "codestral"
+        assert properties["reasoning_effort"] == "medium"
         assert properties["nb_context_chars"] == 1234
         assert properties["nb_context_messages"] == 5
         assert properties["nb_prompt_chars"] == 42
@@ -926,6 +853,7 @@ class TestTelemetryClient:
             nb_context_messages=5,
             nb_prompt_chars=42,
             call_type="main_call",
+            reasoning_effort="medium",
             attachment_counts={AttachmentKind.IMAGE: 2},
         )
 
@@ -945,6 +873,7 @@ class TestTelemetryClient:
             nb_context_messages=5,
             nb_prompt_chars=42,
             call_type="main_call",
+            reasoning_effort="medium",
             attachment_counts={AttachmentKind.IMAGE: 0},
         )
 

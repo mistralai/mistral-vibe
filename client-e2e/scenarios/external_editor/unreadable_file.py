@@ -9,7 +9,7 @@ _CTRL_G = "\x07"
 # Exits successfully after deleting the file it was given.
 env = {"VISUAL": "sh -c 'rm \"$1\"' editor"}
 
-capture_startup = False
 screen_contains = ("keep my draft", "Could not read the edited text")
 
 timeline: Timeline = ["keep my draft", _CTRL_G]
+screen_excludes = ("✕",)

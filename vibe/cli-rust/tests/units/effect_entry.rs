@@ -132,3 +132,19 @@ fn subagent_body_keeps_status_paths_and_generic_output() {
     );
     assert_eq!(body(&wait_ok), ["type: success"]);
 }
+
+#[test]
+fn a_huge_failed_tool_error_body_is_capped() {
+    use vibe_rs::utils::text::{MESSAGE_MAX_CHARS, MESSAGE_TRUNCATION_MARKER};
+    let failed = effect(json!({
+        "detail": {"kind": "tool", "toolName": "file_system.read_file"},
+        "state": {"status": "failed", "error": {"message": "A".repeat(1_200_000)}}
+    }));
+    assert_eq!(
+        body(&failed),
+        [format!(
+            "Error: {}{MESSAGE_TRUNCATION_MARKER}",
+            "A".repeat(MESSAGE_MAX_CHARS)
+        )]
+    );
+}

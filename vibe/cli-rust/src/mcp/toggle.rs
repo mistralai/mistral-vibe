@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::rows::{self, Row};
 use super::Event;
-use crate::app::App;
+use crate::app::{App, Severity};
 
 /// One toggle request, kept to undo its paint on rejection.
 pub struct Toggle {
@@ -67,8 +67,9 @@ fn reject_plugin_toggle(app: &mut App, name: &str, kind: MCPSourceKind) -> bool 
     else {
         return false;
     };
-    crate::notices::refused(
+    crate::notices::inline(
         app,
+        Severity::Warning,
         &format!("{name} is managed by the {plugin} plugin and cannot be toggled here."),
     );
     true

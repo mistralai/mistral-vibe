@@ -9,9 +9,9 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
-screen_rows = {1: "⏷ Ran 40 commands"}
+screen_rows = {3: "⏷ Ran 40 commands"}
 
 _PROMPT = "run many commands"
 
@@ -27,6 +27,8 @@ timeline: Timeline = [
     *(bash(f"echo step {index:02d}", f"step {index:02d}") for index in range(1, 41)),
     assistant_msg("Done."),
     turn_completed(),
+    take_snapshot(),
     # SGR row 11 hits the collapsed group header.
     _click(11),
+    take_snapshot(),
 ]

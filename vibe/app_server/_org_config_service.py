@@ -17,6 +17,7 @@ from typing import Final
 
 from vibe.app_server._admin_config import MANAGED_CONFIG_FETCH_BUDGET
 from vibe.core.config import DEFAULT_VIBE_BASE_URL, VibeConfigSchema
+from vibe.core.config._vibe_base_url import resolve_vibe_base_url
 from vibe.core.config.admin_config import (
     AdminConfigApplyResult,
     AdminConfigOutcome,
@@ -30,11 +31,13 @@ from vibe.core.config.managed_config_cache import (
 )
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.platform_auth import (
-    CachedPrincipal,
     PlatformCredentialFactory,
     PlatformCredentialProvider,
 )
-from vibe.core.platform_auth._mistral import is_user_principal, mistral_credentials
+from vibe.core.platform_auth._mistral import (
+    fetched_for_current_account,
+    mistral_credentials,
+)
 from vibe.core.utils.remote_cache import (
     Cached,
     CacheStore,
@@ -91,10 +94,7 @@ class DiskOrgConfigStore:
         return Cached(toml_text, stored_at=stored_at)
 
     def save(self, key: OrgConfigKey, entry: Cached[str]) -> None:
-        if is_user_principal(key.cache_key) and (
-            not isinstance(key.credentials, CachedPrincipal)
-            or key.credentials.cached_principal() != key.cache_key
-        ):
+        if not fetched_for_current_account(key.credentials, key.cache_key):
             # A sign-in during the fetch makes it another account's.
             return
         store_cached_managed_config(
@@ -130,6 +130,12 @@ class OrgConfigService:
             clock=clock,
         )
 
+    def on_changed(self, callback: Callable[[OrgConfigKey], None]) -> None:
+        """The first place an org-config change is observable process-wide,
+        before any session loads it at its next turn boundary.
+        """
+        self._cache.on_changed(callback)
+
     @staticmethod
     def key_for(
         orchestrator: ConfigOrchestrator[VibeConfigSchema],
@@ -151,7 +157,9 @@ class OrgConfigService:
         if mistral is None or cache_key is None:
             return None
         return OrgConfigKey(
-            cache_key, base_url=config.vibe_base_url, credentials=mistral.credentials
+            cache_key,
+            base_url=resolve_vibe_base_url(config),
+            credentials=mistral.credentials,
         )
 
     async def ensure(self, key: OrgConfigKey | None) -> AdminConfigApplyResult | None:

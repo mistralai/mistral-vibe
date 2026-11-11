@@ -163,6 +163,16 @@ fn single_in_use_source_renders_one_credential_line() {
 }
 
 #[test]
+fn cli_oidc_source_renders_the_session_label() {
+    let text =
+        render_provider_auth_section(&auth_view("api_key", json!([source("cli_oidc", "in_use")])));
+    assert!(
+        text.contains("- **Credential (ANTHROPIC\\_API\\_KEY)**: CLI OIDC session"),
+        "{text}"
+    );
+}
+
+#[test]
 fn multiple_sources_render_a_precedence_list() {
     let text = render_provider_auth_section(&auth_view(
         "api_key",

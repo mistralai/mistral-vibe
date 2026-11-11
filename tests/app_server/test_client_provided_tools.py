@@ -31,12 +31,12 @@ from mistralai_vibe_local_harness.protocol import (
 )
 from tests.stubs.local_sandbox import EXECUTE_COMPLETION, build_trusted_project
 from vibe.app_server._client_provided_tools import (
-    ClientProvidedTools,
     ClientToolCall,
     ClientToolCaller,
     ClientToolDeclarationError,
     ClientToolDefinition,
     ClientToolError,
+    ClientToolExecutor,
     ClientToolResult,
     ClientTools,
 )
@@ -390,7 +390,7 @@ def test_a_tool_vibe_cannot_offer_is_refused(tools: list[ClientToolDefinition]) 
     *Assert*: Each declaration is refused.
     """
     with pytest.raises(ClientToolDeclarationError):
-        ClientProvidedTools(ClientTools(definitions=tools, runner=_Runner(_found)))
+        ClientToolExecutor(ClientTools(definitions=tools, runner=_Runner(_found)))
 
 
 def test_a_namespace_named_like_an_mcp_server_is_refused() -> None:
@@ -398,7 +398,7 @@ def test_a_namespace_named_like_an_mcp_server_is_refused() -> None:
     named `kb` and `docs`, and against `docs` alone.
     *Assert*: Only the clash is refused, naming the namespace.
     """
-    tools = ClientProvidedTools(
+    tools = ClientToolExecutor(
         ClientTools(definitions=[_LOOKUP], runner=_Runner(_found))
     )
 

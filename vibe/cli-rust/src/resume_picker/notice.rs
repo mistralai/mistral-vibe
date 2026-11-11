@@ -48,7 +48,6 @@ const PREVIEW_ERROR_ID: &str = "rs-resume-preview-error";
 pub(super) fn preview_failed(app: &mut App) {
     scroll_to_bottom(app);
     app.view.transcript.remove(PREVIEW_ERROR_ID);
-    clear_attempts(app);
     let notices = local::preserve(&app.view.transcript);
     app.view.transcript.clear();
     local::restore(&mut app.view.transcript, notices);
@@ -65,7 +64,6 @@ pub(super) fn preview_failed(app: &mut App) {
 /// Show a loaded preview, dropping the failure notice a previous one left.
 pub(super) fn show_preview(app: &mut App, state: &PublicSessionState) {
     app.view.transcript.remove(PREVIEW_ERROR_ID);
-    clear_attempts(app);
     load_history(app, state);
 }
 
@@ -92,23 +90,10 @@ pub(super) fn close(app: &mut App) {
     }
 }
 
-/// The server's resume refusal mounts under one id, so a second attempt
-/// replaces the first instead of stacking under it.
-pub(super) const ATTEMPT_ERROR_ID: &str = "rs-resume-attempt-error";
-
-/// Drop the attempt error, which preservation would otherwise carry into the next transcript.
-pub(super) fn clear_attempts(app: &mut App) {
-    app.view.transcript.remove(ATTEMPT_ERROR_ID);
-}
-
 pub(super) fn result(app: &mut App, text: &str) {
     local::add_command_status(
         &mut app.view.transcript,
         &submission::new_message_id(),
         text,
     );
-}
-
-pub(super) fn error(app: &mut App, id: &str, text: &str) {
-    local::add_command_error(&mut app.view.transcript, id, text);
 }

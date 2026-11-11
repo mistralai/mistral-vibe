@@ -202,12 +202,61 @@ fn a_gesture_holds_cell_reports_from_its_press_to_its_end() {
     assert!(feed(&mut app, MouseEventKind::Moved, 6, 5));
 }
 
+#[test]
+fn keys_and_clicks_the_composer_misses_cancel_a_vim_operator() {
+    let _guard = pixels::tests::reset(false);
+    let (config_tx, _config_rx) = mpsc::channel(1);
+    let client = Arc::new(Client::stub());
+    let mut app = App {
+        vim: crate::vim::Vim {
+            enabled: true,
+            mode: crate::vim::Mode::Normal,
+            ..crate::vim::Vim::default()
+        },
+        ..App::default()
+    };
+    app.chat_input.input = "hello world".into();
+    let shift_tab = Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+    let click = mouse(MouseEventKind::Down(MouseButton::Left), 0);
+    for event in [shift_tab, click, Event::Paste("X".into())] {
+        handle_input_event(&mut app, &client, &config_tx, Some(key('d')));
+        assert_eq!(app.vim.pending, Some('d'));
+        handle_input_event(&mut app, &client, &config_tx, Some(event));
+        assert_eq!(app.vim.pending, None);
+    }
+    handle_input_event(&mut app, &client, &config_tx, Some(key('d')));
+    let moved = mouse(MouseEventKind::Moved, 0);
+    handle_input_event(&mut app, &client, &config_tx, Some(moved));
+    assert_eq!(app.vim.pending, Some('d'));
+    // A digit rating feedback reaches the composer but bypasses vim.
+    app.feedback.message = crate::feedback::Message::Prompt;
+    handle_input_event(&mut app, &client, &config_tx, Some(key('0')));
+    assert_eq!(app.vim.pending, None);
+}
+
+#[test]
+fn a_normal_mode_paste_leaves_the_caret_on_the_last_character() {
+    let (config_tx, _config_rx) = mpsc::channel(1);
+    let client = Arc::new(Client::stub());
+    let mut app = App {
+        vim: crate::vim::Vim {
+            enabled: true,
+            mode: crate::vim::Mode::Normal,
+            ..crate::vim::Vim::default()
+        },
+        ..App::default()
+    };
+    let paste = Event::Paste("abc".into());
+    handle_input_event(&mut app, &client, &config_tx, Some(paste));
+    handle_input_event(&mut app, &client, &config_tx, Some(key('x')));
+    assert_eq!(app.chat_input.input, "ab");
+}
+
 /// A sticky notice of `severity` already painted once, as a key would find it.
 fn painted(severity: Severity, text: &str) -> Notice {
-    Notice {
-        shown: true,
-        ..Notice::new(severity, text, None)
-    }
+    let mut notice = Notice::new(severity, text, None);
+    notice.mark_shown();
+    notice
 }
 
 fn send(app: &mut App, event: Event) {
@@ -244,7 +293,7 @@ fn a_key_before_the_first_paint_leaves_the_refusal_up() {
 fn a_key_leaves_a_confirmation_to_its_timer() {
     let mut app = App::default();
     crate::ui::notice::show(&mut app, Severity::Information, "Copied to clipboard", 4);
-    app.overlays.notice.as_mut().unwrap().shown = true;
+    app.overlays.notice.as_mut().unwrap().mark_shown();
 
     send(&mut app, key('x'));
 

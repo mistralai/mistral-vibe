@@ -2,6 +2,7 @@
 //! pre-tool hook results all use it; each words a rejection for its reader.
 
 use serde_json::Value;
+use serde_json::json;
 
 use crate::core::helpers::schema_error_detail;
 use crate::core::tools::external::RuntimeBuiltinToolName;
@@ -44,11 +45,20 @@ impl ArgumentsRejection<'_> {
 /// source of its structural rules. A built-in tool may word a schema error in
 /// its own sentence, and may check rules the schema cannot state once the
 /// schema passes. `tool` is `None` for app-provided tools.
+///
+/// A Runtime takes every tool's arguments as a JSON object, so any other value
+/// is rejected first, even when the tool's schema does not say
+/// `"type": "object"`.
 pub(crate) fn validate_arguments<'a>(
     tool: Option<RuntimeBuiltinToolName>,
     schema: &Value,
     arguments: &'a Value,
 ) -> Result<(), ArgumentsRejection<'a>> {
+    if !arguments.is_object() {
+        // Only a value that is not an object builds this validator, so its error is
+        // worded as any schema error.
+        validate_json_schema(&json!({"type": "object"}), arguments)?;
+    }
     validate_json_schema(schema, arguments).map_err(|rejection| match rejection {
         ArgumentsRejection::Schema { error, .. } => ArgumentsRejection::Schema {
             explained: tool.and_then(|tool| tool.explain_schema_error(schema, &error)),

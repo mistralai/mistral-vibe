@@ -10,7 +10,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "inspect and run"
 
@@ -27,4 +27,5 @@ timeline: Timeline = [
     turn_completed(),
     "\x0f",
     "\x0f",
+    take_snapshot(),
 ]

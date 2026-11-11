@@ -10,7 +10,7 @@ const OSC11_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_RESPONSE_BYTES: usize = 256;
 const OS_APPEARANCE_TIMEOUT: Duration = Duration::from_secs(1);
 
-#[link(name = "msvcrt")]
+// No #[link]: naming msvcrt would pull in the DLL CRT even with crt-static.
 extern "C" {
     fn _kbhit() -> i32;
     fn _getch() -> i32;

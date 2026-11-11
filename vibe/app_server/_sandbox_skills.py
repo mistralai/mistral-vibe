@@ -19,8 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
 import hashlib
 import os
 from pathlib import Path, PurePosixPath
@@ -33,7 +33,7 @@ from pydantic import BaseModel, ValidationError
 from mistralai_vibe_local_harness.vibe import SandboxToolError, run_helper
 from vibe.app_server.models import ConfigIssue
 from vibe.core.plugins._native import plugin_skill_runtime_path
-from vibe.core.skills.models import SkillInfo, SkillMetadata, SkillScope
+from vibe.core.skills.models import InstalledSkill, SkillInfo, SkillMetadata, SkillScope
 from vibe.core.skills.parser import (
     SkillParseError,
     parse_openai_skill_metadata,
@@ -60,6 +60,7 @@ _SKILL_ENTRY_FILE = "SKILL.md"
 _PROJECT_SKILL_DIRS = (".vibe/skills", ".agents/skills")
 _OPENAI_METADATA_MAX_BYTES = 64 * 1024
 _TIMEOUT_SECONDS = 60.0
+_COPY_FAILED = "copy-failed"
 
 
 class _SkillCopyError(ValueError):
@@ -96,15 +97,82 @@ class SandboxSkillLocation:
     """The sample of its other files the skill tool lists."""
 
 
-@dataclass(frozen=True, slots=True)
 class SandboxSessionSkills:
     """What one sandboxed session takes from its sandbox's skills."""
 
-    project_skills: Mapping[str, SkillInfo]
-    """The open roots' own skills, by name, at their sandbox paths."""
-    issues: tuple[ConfigIssue, ...]
-    """The project skills that failed to load, and the host skills left out."""
-    locate: Callable[[SkillInfo], SandboxSkillLocation | None]
+    def __init__(
+        self,
+        sandbox: SandboxSkills,
+        project_skills: Mapping[str, SkillInfo],
+        issues: Iterable[ConfigIssue],
+    ) -> None:
+        self._sandbox = sandbox
+        self.project_skills = project_skills
+        """At their sandbox paths, not the host's."""
+        self._opened = tuple(issues)
+        self._left_out: tuple[ConfigIssue, ...] = ()
+
+    @property
+    def issues(self) -> tuple[ConfigIssue, ...]:
+        """Includes the host skills left out by the latest :meth:`install`, not only
+        those left out as the session opened.
+        """
+        return (*self._opened, *self._left_out)
+
+    def locate(self, skill: SkillInfo) -> SandboxSkillLocation | None:
+        return self._sandbox.locate(skill)
+
+    async def install(self, skills: Iterable[SkillInfo]) -> None:
+        """A skill the copy leaves out stays among the :attr:`issues` until the next
+        copy. A failed copy is logged once until one succeeds, and the session goes on
+        with the copies there are.
+        """
+        try:
+            left_out = await self._sandbox.install(skills)
+        except Exception:
+            if self._sandbox.first_report(_COPY_FAILED):
+                logger.exception("Failed to copy the session's skills into its sandbox")
+            return
+        self._sandbox.recovered(_COPY_FAILED)
+        reported = {issue.file for issue in self._opened}
+        self._left_out = tuple(
+            issue for issue in left_out if issue.file not in reported
+        )
+
+    def copied_version(self, skill: SkillInfo, *, quiet: bool = False) -> SkillInfo:
+        """An alias pin whose version has no copy keeps the newest older copy, as the
+        same pin (name, scope and alias); logged once unless ``quiet``. A pin on a
+        version number gets no stand-in, and a newer copy never stands in: the alias may
+        have moved back.
+        """
+        registry = skill.registry
+        if registry is None or registry.alias is None or self.locate(skill) is not None:
+            return skill
+        copied = self._sandbox.copied(registry.skill_id, registry.version)
+        if copied is None or copied.registry is None:
+            return skill
+        kept = copied.registry.version
+        report = ("kept", skill.name, kept, registry.version)
+        if not quiet and self._sandbox.first_report(report):
+            logger.warning(
+                "Kept v%d of skill %r: v%d has no copy in the sandbox",
+                kept,
+                skill.name,
+                registry.version,
+            )
+        version = registry.model_copy(update={"version": kept})
+        return copied.model_copy(
+            update={"name": skill.name, "scope": skill.scope, "registry": version}
+        )
+
+    def installed(self, skills: Iterable[InstalledSkill]) -> list[InstalledSkill]:
+        """Each active one in the version :meth:`copied_version` keeps for it."""
+        return [
+            replace(skill, info=self.copied_version(skill.info, quiet=True))
+            if skill.active
+            else skill
+            for skill in skills
+        ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,46 +192,79 @@ class SandboxSkills:
         # By the host path of a skill's SKILL.md, or the sandbox path of a
         # project skill's.
         self._locations: dict[str, SandboxSkillLocation] = {}
+        self._registry_copies: dict[str, dict[int, SkillInfo]] = {}
+        self._reported: set[Hashable] = set()
+        self._unlisted: str | None = None
 
     async def prepare_session(
         self, skills: Iterable[SkillInfo], *, roots: Sequence[Path]
     ) -> SandboxSessionSkills:
         """Copy ``skills`` into the sandbox and read the project skills of ``roots``.
 
-        A skill that cannot be copied is left out, as is every skill when the
-        sandbox cannot run the copy, and each one left out is a config issue.
-        Raises :class:`SandboxUnavailableError` when the sandbox itself fails.
+        A skill that cannot be copied is left out, as is every skill without a
+        copy from before when the sandbox cannot run the copy, and each one left
+        out is a config issue. Raises :class:`SandboxUnavailableError` when the
+        sandbox itself fails.
         """
-        trees, issues = await asyncio.to_thread(_read_trees, skills)
+        skills = list(skills)
+        trees, issues = await self._read_trees(skills)
         scan = await self._scan(trees, roots=roots, issues=issues)
         if scan is None:
-            return SandboxSessionSkills(
-                project_skills={}, issues=tuple(issues), locate=self.locate
-            )
-        await self._upload(trees, issues)
-        project = self._project_skills(scan, issues)
-        return SandboxSessionSkills(
-            project_skills=project, issues=tuple(issues), locate=self.locate
-        )
+            return SandboxSessionSkills(self, {}, issues)
+        await self._upload(trees, issues, skills)
+        return SandboxSessionSkills(self, self._project_skills(scan, issues), issues)
 
-    async def install(self, skills: Iterable[SkillInfo]) -> None:
-        """Copy ``skills`` into the sandbox, unless they are already there.
-
-        A skill left out is only logged: this runs outside a session's setup,
-        with no config issues to report it in.
+    async def install(self, skills: Iterable[SkillInfo]) -> list[ConfigIssue]:
+        """Copy ``skills`` into the sandbox, unless they are already there; the
+        ones left out, each logged the first time.
         """
-        trees, issues = await asyncio.to_thread(_read_trees, skills)
+        skills = list(skills)
+        trees, issues = await self._read_trees(skills)
         if self._root is None or any(
             tree.digest not in self._present for _, tree in trees
         ):
             if await self._scan(trees, roots=(), issues=issues) is None:
-                return
-        await self._upload(trees, issues)
+                return issues
+        await self._upload(trees, issues, skills)
+        return issues
 
     def locate(self, skill: SkillInfo) -> SandboxSkillLocation | None:
         """Where ``skill`` is in the sandbox, or None when it was not copied."""
         entry = plugin_skill_runtime_path(skill)
         return None if entry is None else self._locations.get(str(entry))
+
+    def copied(self, skill_id: str, below: int) -> SkillInfo | None:
+        copies = self._registry_copies.get(skill_id, {})
+        older = [version for version in copies if version < below]
+        return copies[max(older)] if older else None
+
+    def first_report(self, key: Hashable) -> bool:
+        """A problem every derivation meets again is logged once, until
+        :meth:`recovered` says it went away.
+        """
+        if key in self._reported:
+            return False
+        self._reported.add(key)
+        return True
+
+    def recovered(self, key: Hashable) -> None:
+        self._reported.discard(key)
+
+    async def _read_trees(
+        self, skills: Iterable[SkillInfo]
+    ) -> tuple[list[tuple[str, _SkillTree]], list[ConfigIssue]]:
+        trees, failures = await asyncio.to_thread(_read_trees, skills)
+        return trees, [
+            self._left_out(entry, f"it cannot be copied: {error}")
+            for entry, error in failures
+        ]
+
+    def _left_out(self, entry: str, reason: str) -> ConfigIssue:
+        if self.first_report((entry, reason)):
+            logger.warning("Dropped skill %s: %s", entry, reason)
+        return ConfigIssue(
+            file=entry, message=f"Skill left out of the sandbox: {reason}"
+        )
 
     async def _scan(
         self,
@@ -187,24 +288,32 @@ class SandboxSkills:
         try:
             scan = _Scan.model_validate(await self._run("skills-scan", request))
         except (SandboxToolError, ValidationError) as error:
-            logger.warning(
-                "Skills are off for this sandboxed session: the sandbox could "
-                "not list them (%s)",
-                error,
-            )
+            if str(error) != self._unlisted:
+                logger.warning(
+                    "Skills are off for this sandboxed session: the sandbox could "
+                    "not list them (%s)",
+                    error,
+                )
+            self._unlisted = str(error)
             issues.extend(
-                _left_out(entry, f"the sandbox could not list skills: {error}")
+                self._left_out(entry, f"the sandbox could not list skills: {error}")
                 for entry, _ in trees
+                if entry not in self._locations
             )
             return None
         self._root = scan.root
         self._present.update(scan.present)
+        self._unlisted = None
         return scan
 
     async def _upload(
-        self, trees: Sequence[tuple[str, _SkillTree]], issues: list[ConfigIssue]
+        self,
+        trees: Sequence[tuple[str, _SkillTree]],
+        issues: list[ConfigIssue],
+        skills: Iterable[SkillInfo],
     ) -> None:
         assert self._root is not None
+        pinned = _registry_skills_by_entry(skills)
         missing = {
             tree.digest: tree for _, tree in trees if tree.digest not in self._present
         }
@@ -231,7 +340,9 @@ class SandboxSkills:
         for entry, tree in trees:
             if tree.digest in failures:
                 issues.append(
-                    _left_out(entry, f"it could not be copied: {failures[tree.digest]}")
+                    self._left_out(
+                        entry, f"it could not be copied: {failures[tree.digest]}"
+                    )
                 )
                 continue
             base_dir = posixpath.join(self._root, tree.digest)
@@ -240,6 +351,10 @@ class SandboxSkills:
                 base_dir=base_dir,
                 files=_sample(path for path, _ in tree.files),
             )
+            skill = pinned.get(entry)
+            if skill is not None and skill.registry is not None:
+                copies = self._registry_copies.setdefault(skill.registry.skill_id, {})
+                copies[skill.registry.version] = skill
 
     def _project_skills(
         self, scan: _Scan, issues: list[ConfigIssue]
@@ -268,10 +383,13 @@ class SandboxSkills:
         )
 
 
-def _left_out(entry: str, reason: str) -> ConfigIssue:
-    """Log and report a host skill the sandboxed session goes without."""
-    logger.warning("Dropped skill %s: %s", entry, reason)
-    return ConfigIssue(file=entry, message=f"Skill left out of the sandbox: {reason}")
+def _registry_skills_by_entry(skills: Iterable[SkillInfo]) -> dict[str, SkillInfo]:
+    pinned: dict[str, SkillInfo] = {}
+    for skill in skills:
+        entry = plugin_skill_runtime_path(skill)
+        if skill.registry is not None and entry is not None:
+            pinned.setdefault(str(entry), skill)
+    return pinned
 
 
 def relocate_plugin_contexts(
@@ -318,9 +436,9 @@ def relocate_plugin_contexts(
 
 def _read_trees(
     skills: Iterable[SkillInfo],
-) -> tuple[list[tuple[str, _SkillTree]], list[ConfigIssue]]:
+) -> tuple[list[tuple[str, _SkillTree]], list[tuple[str, Exception]]]:
     trees: dict[str, _SkillTree] = {}
-    issues: list[ConfigIssue] = []
+    failures: list[tuple[str, Exception]] = []
     for skill in skills:
         entry = plugin_skill_runtime_path(skill)
         if entry is None or str(entry) in trees:
@@ -328,8 +446,8 @@ def _read_trees(
         try:
             trees[str(entry)] = _read_tree(entry)
         except (OSError, _SkillCopyError) as error:
-            issues.append(_left_out(str(entry), f"it cannot be copied: {error}"))
-    return list(trees.items()), issues
+            failures.append((str(entry), error))
+    return list(trees.items()), failures
 
 
 def _read_tree(entry: Path) -> _SkillTree:

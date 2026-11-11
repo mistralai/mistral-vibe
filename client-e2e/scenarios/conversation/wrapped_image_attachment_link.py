@@ -39,7 +39,6 @@ handshake = {
 }
 
 client_args = ("--continue",)
-capture_startup = False
 
 expected_actions = [Action("open_url", f"file://{quote(_PATH)}")]
 

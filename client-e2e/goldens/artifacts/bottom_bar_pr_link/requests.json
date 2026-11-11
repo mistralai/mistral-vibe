@@ -4,5 +4,20 @@
   "params": {
    "sessionId": "00000000-0000-4000-8000-000000000001"
   }
+ },
+ {
+  "method": "artifacts/sync",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "artifacts/markViewed",
+  "params": {
+   "artifactIds": [
+    "artifact-pr-123"
+   ],
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
  }
 ]

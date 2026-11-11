@@ -1,1 +1,29 @@
-[]
+[
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "model",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.model_selection.opened",
+   "properties": {
+    "has_model_choice": true,
+    "has_reasoning_effort_choice": true,
+    "host_kind": "local",
+    "picker": "model",
+    "source": "session"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

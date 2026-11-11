@@ -34,15 +34,24 @@ pub async fn headers(
     let client = client.ok_or("OIDC authentication needs the app server")?;
     let value = tokio::time::timeout(
         Duration::from_secs(60),
-        client.request("platformCredentials/headers", json!({"url": url})),
+        client.request_err("platformCredentials/headers", json!({"url": url})),
     )
     .await
     .map_err(|_| "OIDC credential resolution timed out")?
-    .map_err(|_| "OIDC credential resolution failed; explicitly re-login")?;
+    .map_err(failure_message)?;
     let response: HeadersResponse =
         serde_json::from_value(value).map_err(|_| "Invalid OIDC credential response")?;
     if !response.headers.contains_key("Authorization") {
         return Err("OIDC credential response has no authorization".into());
     }
     Ok(response.headers)
+}
+
+/// The server's own message when its credential was refused after a successful refresh.
+fn failure_message(error: crate::server::RpcError) -> String {
+    let reason = error.data.as_ref().and_then(|d| d.get("reason"));
+    if reason.and_then(|r| r.as_str()) == Some("unauthorized_after_refresh") {
+        return error.message;
+    }
+    "OIDC credential resolution failed; explicitly re-login".into()
 }

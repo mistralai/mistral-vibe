@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from mistralai_vibe_local_harness.vibe.completion_profile import WireFormat
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_utility_completion import FakeUtilityCompletion
 from vibe.core.config import ModelConfig, ProviderConfig, UtilityFeature
@@ -327,9 +328,51 @@ class TestRunUtilityCompletion:
         (event,) = telemetry.request_events
         assert event["call_type"] == "title_generation"
         assert event["model"] == "mistral-small"
+        assert event["reasoning_effort"] == "off"
         assert event["nb_context_chars"] == len("system prompt") + len("user prompt")
         assert event["nb_context_messages"] == 2
         assert event["nb_prompt_chars"] == len("user prompt")
+
+    @pytest.mark.asyncio
+    async def test_request_sent_reports_the_reasoning_the_request_sends(
+        self, monkeypatch
+    ) -> None:
+        # A model that cannot stop reasoning runs at its lowest level when no
+        # level is configured, so the configured "off" must not be reported.
+        class RecordingTelemetry(TelemetryClient):
+            def __init__(self) -> None:
+                super().__init__(config_getter=build_test_vibe_config)
+                self.request_events: list[dict] = []
+
+            def send_request_sent(self, **kwargs) -> None:
+                self.request_events.append(kwargs)
+
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+        telemetry = RecordingTelemetry()
+        config = build_test_vibe_config(
+            models=[
+                ModelConfig(name="mistral-large-4", provider="mistral", alias="large")
+            ],
+            active_model="large",
+            utility_models={"title": "large"},
+        )
+
+        await run_utility_completion(
+            config=config,
+            system_prompt="system prompt",
+            user_content="user prompt",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            feature=UtilityFeature.TITLE,
+            telemetry=telemetry,
+        )
+
+        (event,) = telemetry.request_events
+        (request,) = completion.requests
+        sent = request.route.reasoning_setting(WireFormat.MISTRAL)
+        assert sent == "low"
+        assert event["reasoning_effort"] == sent
 
     @pytest.mark.asyncio
     async def test_without_a_telemetry_client_no_event_is_emitted(

@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "3.1.0"
+version = "3.1.2"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -121,7 +121,6 @@ dependencies = [
     "uvicorn==0.46.0 ; sys_platform != 'emscripten'",
     "watchfiles==1.2.0",
     "websockets==16.0",
-    "zstandard==0.25.0",
 ]
 
 [project.optional-dependencies]

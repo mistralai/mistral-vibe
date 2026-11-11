@@ -149,6 +149,7 @@ pub(super) fn update_sessions(app: &mut App) {
 
 /// The event-time list refresh.
 pub fn refresh(app: &mut App) {
+    crate::background_work::sync_wait_target(app);
     if !app.subagents.status_list_enabled {
         if app.subagents.viewed_subagent_id.is_some() {
             show_main_chat(app, true);

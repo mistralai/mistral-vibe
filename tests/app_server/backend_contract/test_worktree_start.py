@@ -24,9 +24,15 @@ import httpx
 import pytest
 import respx
 
+from mistralai_vibe_local_harness.vibe import UnifiedHarnessSessionBackend
 from tests.app_server.backend_contract.conftest import connect_backend_contract_host
 from vibe.app_server._model import validate_wire
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._session_artifacts import SessionArtifactService
+from vibe.app_server._unified_harness_backend_adapter import (
+    UnifiedHarnessBackendAdapter,
+)
+from vibe.app_server._unified_permissions import UnifiedPermissionResolver
 from vibe.app_server._worktree_session import SessionWorktrees, WorktreeResolution
 from vibe.app_server.events import CallbackRequested
 from vibe.app_server.models import (
@@ -54,6 +60,7 @@ from vibe.core.git.worktree import (
     WorktreeProgressCallback,
     WorktreeRepository,
 )
+import vibe.core.session.worktrees as worktree_lifecycle_module
 from vibe.core.trusted_folders import TrustedFoldersManager
 
 
@@ -905,5 +912,1056 @@ async def test_live_worktree_removal_uses_session_source_git_trust(
         else:
             assert response["outcome"] == "kept_dirty"
             assert (target.root / "file.txt").read_text() == "S:changed\n"
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_the_agent_enters_a_worktree_mid_turn(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    _init_repo(tmp_path)
+
+    def call(call_id: str, index: int, name: str, arguments: dict[str, object]):
+        return {
+            "id": call_id,
+            "index": index,
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }
+
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    call("enter-1", 0, "enter_worktree", {"name": "fix login"}),
+                    call("bash-1", 1, "bash", {"command": "touch before"}),
+                ],
+            ),
+            backend_contract_mistral_response(
+                "", tool_calls=[call("bash-2", 0, "bash", {"command": "touch after"})]
+            ),
+            backend_contract_mistral_response("done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["bash", "enter_worktree"],
+            auto_approve=True,
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+
+        _ = [event async for event in session.act("fix the login bug")]
+
+        with WorktreeRepository.open(tmp_path) as repository:
+            linked = repository.linked()
+        assert len(linked) == 1
+        worktree = linked[0].path
+        managed = ManagedWorktree.at(worktree)
+        # The call planned beside the move ran where it was planned; the next
+        # step ran in the worktree.
+        assert (tmp_path / "before").exists()
+        assert not (tmp_path / "after").exists()
+        assert (worktree / "after").exists()
+        assert not (worktree / "before").exists()
+        assert Repo(worktree).active_branch.name.startswith("vibe/fix-login")
+        assert managed is not None
+        assert session.state.session.id in managed.holders()
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_an_entered_worktree_is_the_sessions_own_directory(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    _init_repo(tmp_path)
+    written: list[Path] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        tool_messages = [m for m in payload["messages"] if m["role"] == "tool"]
+        if not tool_messages:
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "enter-1",
+                        "index": 0,
+                        "function": {
+                            "name": "enter_worktree",
+                            "arguments": json.dumps({"name": "notes"}),
+                        },
+                    }
+                ],
+            )
+        if len(tool_messages) == 1:
+            entered = json.loads(tool_messages[0]["content"])
+            target = Path(entered["path"]) / "notes.md"
+            written.append(target)
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "write-1",
+                        "index": 0,
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps({
+                                "path": str(target),
+                                "content": "written\n",
+                            }),
+                        },
+                    }
+                ],
+            )
+        return backend_contract_mistral_response("done")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["write_file", "enter_worktree"],
+        ),
+        capabilities=ClientCapabilities(
+            agent_worktrees=True, callback_kinds=["approval"]
+        ),
+        process_services=process_services,
+    )
+    approvals: list[CallbackRequested] = []
+    try:
+        session = await connection.host.open_session()
+        async for event in session.act("write notes"):
+            if isinstance(event, CallbackRequested):
+                approvals.append(event)
+                await session.deny_callback(event.callback)
+
+        assert len(written) == 1
+        worktree = written[0].parent
+        # Writing in the worktree is writing in the session's own directory:
+        # no approval, as for a session started there.
+        assert not approvals
+        assert written[0].read_text() == "written\n"
+        # Clients learn where the session now runs, and so does the model.
+        assert _cwd(session) == worktree
+        final = json.loads(backend_contract_mistral_api.calls[-1].request.content)
+        entered = json.loads(
+            next(m for m in final["messages"] if m["role"] == "tool")["content"]
+        )
+        assert str(worktree) in entered["message"]
+        # The worktree is one of the session's artifacts, listed beside its PRs.
+        listed = await connection.client.request(
+            "artifacts/list", {"sessionId": session.state.session.id}
+        )
+        assert [
+            (artifact["path"], artifact["branch"]) for artifact in listed["worktrees"]
+        ] == [(str(worktree), entered["branch"])]
+    finally:
+        await connection.host.close()
+
+
+def _tool_call(call_id: str, name: str, arguments: dict[str, object]):
+    return {
+        "id": call_id,
+        "index": 0,
+        "function": {"name": name, "arguments": json.dumps(arguments)},
+    }
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_ask_mode_still_asks_before_writing_in_an_entered_worktree(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    _init_repo(tmp_path)
+    written: list[Path] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        tool_messages = [m for m in payload["messages"] if m["role"] == "tool"]
+        if not tool_messages:
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "enter-1",
+                        "index": 0,
+                        "function": {
+                            "name": "enter_worktree",
+                            "arguments": json.dumps({"name": "notes"}),
+                        },
+                    }
+                ],
+            )
+        if len(tool_messages) == 1:
+            entered = json.loads(tool_messages[0]["content"])
+            target = Path(entered["path"]) / "notes.md"
+            written.append(target)
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "write-1",
+                        "index": 0,
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps({
+                                "path": str(target),
+                                "content": "written\n",
+                            }),
+                        },
+                    }
+                ],
+            )
+        return backend_contract_mistral_response("done")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["write_file", "enter_worktree"],
+            agent="ask",
+        ),
+        capabilities=ClientCapabilities(
+            agent_worktrees=True, callback_kinds=["approval"]
+        ),
+        process_services=process_services,
+    )
+    approvals: list[CallbackRequested] = []
+    try:
+        session = await connection.host.open_session()
+        async for event in session.act("write notes"):
+            if isinstance(event, CallbackRequested):
+                approvals.append(event)
+                await session.deny_callback(event.callback)
+
+        assert len(written) == 1
+        # Entering is no approval to edit: Ask mode asks inside the worktree
+        # exactly as it does inside the checkout the session started in.
+        assert len(approvals) == 1
+        assert not written[0].exists()
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_fork_branches_from_the_worktree_the_session_is_in(
+    backend_contract_persistent_config: None,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    checkout = tmp_path / "checkout"
+    _init_repo(checkout)
+    entered: list[Path] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        tools = [m for m in payload["messages"] if m["role"] == "tool"]
+        if len(tools) < 2:
+            if tools:
+                entered.append(Path(json.loads(tools[0]["content"])["path"]))
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _tool_call(
+                        f"enter-{len(tools)}",
+                        "enter_worktree",
+                        {"name": f"task {len(tools)}"},
+                    )
+                ],
+            )
+        if len(entered) == 1:
+            entered.append(Path(json.loads(tools[1]["content"])["path"]))
+            (entered[1] / "work.md").write_text("work\n")
+        return backend_contract_mistral_response("done")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(checkout),
+            workspace_roots=[str(checkout)],
+            enabled_tools=["write_file", "enter_worktree"],
+        ),
+        capabilities=ClientCapabilities(
+            agent_worktrees=True, callback_kinds=["approval"]
+        ),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        source_id = session.state.session.id
+        _ = [event async for event in session.act("enter two worktrees")]
+        first, current = entered
+        assert _cwd(session) == current
+
+        await session.resources.sessions.fork()
+
+        fork_cwd = _cwd(session)
+        assert session.state.session.id != source_id
+        # As a fork of a worktree session on main: a fresh worktree from the
+        # source's commit, not the source's own directory.
+        assert fork_cwd not in (current, first, checkout)
+        assert ManagedWorktree.at(fork_cwd) is not None
+        assert fork_cwd.name == f"{current.name}-fork"
+        assert first.is_dir() and current.is_dir()
+        # The source's worktrees stay the source's: archiving the fork must not
+        # remove them.
+        listed = await connection.client.request(
+            "artifacts/list", {"sessionId": session.state.session.id}
+        )
+        assert listed["worktrees"] == []
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_resumed_session_keeps_the_worktrees_it_entered(
+    backend_contract_persistent_config: None,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    checkout = tmp_path / "checkout"
+    _init_repo(checkout)
+    entered: list[Path] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        tools = [m for m in payload["messages"] if m["role"] == "tool"]
+        users = [m for m in payload["messages"] if m["role"] == "user"]
+        if len(users) == 1 and len(tools) < 2:
+            if tools:
+                entered.append(Path(json.loads(tools[0]["content"])["path"]))
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _tool_call(
+                        f"enter-{len(tools)}",
+                        "enter_worktree",
+                        {"name": f"task {len(tools)}"},
+                    )
+                ],
+            )
+        if len(users) == 1:
+            entered.append(Path(json.loads(tools[1]["content"])["path"]))
+            return backend_contract_mistral_response("entered")
+        if len(tools) == 2:
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _tool_call(
+                        "write-1",
+                        "write_file",
+                        {"path": str(entered[0] / "later.md"), "content": "x\n"},
+                    )
+                ],
+            )
+        return backend_contract_mistral_response("done")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    options = SessionOptions(
+        cwd=str(checkout),
+        workspace_roots=[str(checkout)],
+        enabled_tools=["write_file", "enter_worktree"],
+    )
+    first = await connect_backend_contract_host(
+        session_options=options,
+        capabilities=ClientCapabilities(
+            agent_worktrees=True, callback_kinds=["approval"]
+        ),
+        process_services=process_services,
+    )
+    try:
+        session = await first.host.open_session()
+        session_id = session.state.session.id
+        _ = [event async for event in session.act("start a worktree")]
+        await session.close()
+    finally:
+        await first.host.close()
+    first_worktree, worktree = entered
+    managed = ManagedWorktree.at(first_worktree)
+    assert managed is not None
+    assert session_id not in managed.holders()
+
+    second = await connect_backend_contract_host(
+        session_options=options,
+        capabilities=ClientCapabilities(
+            agent_worktrees=True, callback_kinds=["approval"]
+        ),
+        process_services=process_services,
+    )
+    approvals: list[CallbackRequested] = []
+    try:
+        # Listed from the stored session, before any runtime resumes it.
+        stored = await second.client.request(
+            "artifacts/list", {"sessionId": session_id}
+        )
+        assert sorted(w["path"] for w in stored["worktrees"]) == sorted(
+            str(path) for path in entered
+        )
+        resumed = await second.host.open_session()
+        await resumed.resume(session_id)
+        assert session_id in managed.holders()
+        async for event in resumed.act("keep writing"):
+            if isinstance(event, CallbackRequested):
+                approvals.append(event)
+                await resumed.deny_callback(event.callback)
+
+        # Resumed where it left off, with the earlier worktree still its own.
+        assert _cwd(resumed) == worktree
+        assert "did not take effect" not in json.dumps(
+            json.loads(backend_contract_mistral_api.calls.last.request.content)
+        )
+        assert not approvals
+        assert (first_worktree / "later.md").read_text() == "x\n"
+    finally:
+        await second.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_worktree_that_fails_to_be_recorded_is_let_go(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    checkout = tmp_path / "checkout"
+    _init_repo(checkout)
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "", tool_calls=[_tool_call("enter-1", "enter_worktree", {"name": "x"})]
+            ),
+            backend_contract_mistral_response("failed"),
+        ]
+    )
+
+    async def failing_record(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(SessionArtifactService, "record_worktree", failing_record)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(checkout),
+            workspace_roots=[str(checkout)],
+            enabled_tools=["enter_worktree"],
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        session_id = session.state.session.id
+        _ = [event async for event in session.act("fix it")]
+
+        with WorktreeRepository.open(checkout) as repository:
+            created = ManagedWorktree.at(repository.worktree_root / "x")
+        assert _cwd(session) == checkout.resolve()
+        assert created is not None
+        assert session_id not in created.holders()
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+@pytest.mark.parametrize("forget_fails", [False, True])
+async def test_a_move_that_never_landed_is_forgotten_on_close(
+    backend_contract_persistent_config: None,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    forget_fails: bool,
+) -> None:
+    checkout = tmp_path / "checkout"
+    _init_repo(checkout)
+    if forget_fails:
+
+        async def failing_forget(*_args: object, **_kwargs: object) -> None:
+            raise OSError("disk full")
+
+        monkeypatch.setattr(SessionArtifactService, "forget_worktree", failing_forget)
+    # The queue drain a finished turn schedules lands a staged move; the close
+    # must arrive first.
+    drain = UnifiedHarnessSessionBackend._schedule_turn_queue_drain
+    monkeypatch.setattr(
+        UnifiedHarnessSessionBackend, "_schedule_turn_queue_drain", lambda _self: None
+    )
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "", tool_calls=[_tool_call("enter-1", "enter_worktree", {"name": "x"})]
+            ),
+            backend_contract_mistral_response("still here"),
+        ]
+    )
+    options = SessionOptions(
+        cwd=str(checkout),
+        workspace_roots=[str(checkout)],
+        enabled_tools=["enter_worktree"],
+        # The turn ends on the call, so the move is still waiting to land.
+        max_turns=1,
+    )
+    first = await connect_backend_contract_host(
+        session_options=options,
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await first.host.open_session()
+        session_id = session.state.session.id
+        _ = [event async for event in session.act("fix it")]
+        await session.close()
+    finally:
+        await first.host.close()
+
+    monkeypatch.setattr(
+        UnifiedHarnessSessionBackend, "_schedule_turn_queue_drain", drain
+    )
+    second = await connect_backend_contract_host(
+        session_options=options.model_copy(update={"max_turns": None}),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        resumed = await second.host.open_session()
+        await resumed.resume(session_id)
+        listed = await second.client.request(
+            "artifacts/list", {"sessionId": session_id}
+        )
+
+        _ = [event async for event in resumed.act("go on")]
+
+        prompt = json.dumps(
+            json.loads(backend_contract_mistral_api.calls.last.request.content)[
+                "messages"
+            ]
+        )
+        # A record the close failed to forget stays listed, for archive to reap.
+        assert (listed["worktrees"] == []) is not forget_fails
+        assert _cwd(resumed) == checkout.resolve()
+        # The enter_worktree result said it moved: the next turn corrects it.
+        assert "did not take effect" in prompt
+    finally:
+        await second.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_rewind_past_the_move_tells_the_agent_where_it_runs(
+    backend_contract_persistent_config: None,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    checkout = tmp_path / "checkout"
+    _init_repo(checkout)
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "", tool_calls=[_tool_call("enter-1", "enter_worktree", {"name": "x"})]
+            ),
+            backend_contract_mistral_response("moved"),
+            backend_contract_mistral_response("after the rewind"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(checkout),
+            workspace_roots=[str(checkout)],
+            enabled_tools=["enter_worktree"],
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        _ = [event async for event in session.act("fix it", client_message_id="u1")]
+        worktree = _cwd(session)
+        assert any(
+            isinstance(entry, PublicEffectEntry)
+            and entry.detail.tool_name == "vibe.enter_worktree"
+            for entry in session.history
+        )
+        [entry_id] = [
+            entry.id
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "user"
+        ]
+        await session.resources.sessions.rewind(
+            entry_id, restore_files=False, inplace=True
+        )
+
+        _ = [event async for event in session.act("again", client_message_id="u2")]
+
+        prompt = json.dumps(
+            json.loads(backend_contract_mistral_api.calls.last.request.content)[
+                "messages"
+            ]
+        )
+        assert worktree != checkout.resolve()
+        assert _cwd(session) == worktree
+        assert str(worktree) in prompt
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_rewind_that_keeps_the_move_adds_no_note(
+    backend_contract_persistent_config: None,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    checkout = tmp_path / "checkout"
+    _init_repo(checkout)
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "", tool_calls=[_tool_call("enter-1", "enter_worktree", {"name": "x"})]
+            ),
+            backend_contract_mistral_response("moved"),
+            backend_contract_mistral_response("second"),
+            backend_contract_mistral_response("after the rewind"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(checkout),
+            workspace_roots=[str(checkout)],
+            enabled_tools=["enter_worktree"],
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        _ = [event async for event in session.act("fix it", client_message_id="u1")]
+        _ = [event async for event in session.act("more", client_message_id="u2")]
+        [_, second] = [
+            entry.id
+            for entry in session.history
+            if isinstance(entry, PublicMessageEntry) and entry.role == "user"
+        ]
+        await session.resources.sessions.rewind(
+            second, restore_files=False, inplace=True
+        )
+
+        _ = [event async for event in session.act("again", client_message_id="u3")]
+
+        prompt = json.dumps(
+            json.loads(backend_contract_mistral_api.calls.last.request.content)[
+                "messages"
+            ]
+        )
+        assert "You are working in the git worktree" not in prompt
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_configuration_change_keeps_the_session_in_its_worktree(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    _init_repo(tmp_path)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        tools = [m for m in payload["messages"] if m["role"] == "tool"]
+        users = [m for m in payload["messages"] if m["role"] == "user"]
+        if len(users) == 1:
+            if tools:
+                return backend_contract_mistral_response("entered")
+            return backend_contract_mistral_response(
+                "", tool_calls=[_tool_call("enter-1", "enter_worktree", {})]
+            )
+        if len(tools) == 1:
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _tool_call(
+                        "write-1", "write_file", {"path": "here", "content": "x\n"}
+                    )
+                ],
+            )
+        return backend_contract_mistral_response("done")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["write_file", "enter_worktree"],
+            auto_approve=True,
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        _ = [event async for event in session.act("enter a worktree")]
+        worktree = _cwd(session)
+        assert worktree != tmp_path
+
+        await connection.client.request(
+            "session/agent/update",
+            AgentSwitchParams(session_id=session.session_id, agent_name="accept-edits"),
+        )
+        _ = [event async for event in session.act("leave a mark")]
+
+        assert _cwd(session) == worktree
+        assert (worktree / "here").exists()
+        assert not (tmp_path / "here").exists()
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_an_unnamed_worktree_is_named_after_the_turns_message(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _init_repo(tmp_path)
+    asked: list[str | None] = []
+
+    async def suggest(prompt: str | None, **_kwargs: object) -> str:
+        asked.append(prompt)
+        return "repair-oauth-redirect"
+
+    monkeypatch.setattr(worktree_lifecycle_module, "suggest_worktree_name", suggest)
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "", tool_calls=[_tool_call("enter-1", "enter_worktree", {})]
+            ),
+            backend_contract_mistral_response("done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["enter_worktree"],
+            auto_approve=True,
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        _ = [event async for event in session.act("fix the oauth redirect")]
+
+        assert asked == ["fix the oauth redirect"]
+        assert Repo(_cwd(session)).active_branch.name == "vibe/repair-oauth-redirect"
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_the_agent_continues_an_existing_branch_in_a_worktree(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    repo = _init_repo(tmp_path)
+    repo.git.branch("feat/login")
+    tip = repo.commit("feat/login").hexsha
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _tool_call(
+                        "enter-1",
+                        "enter_worktree",
+                        {"name": "login", "branch": "feat/login"},
+                    )
+                ],
+            ),
+            backend_contract_mistral_response("done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["enter_worktree"],
+            auto_approve=True,
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        _ = [event async for event in session.act("continue the login branch")]
+
+        worktree = Repo(_cwd(session))
+        assert _cwd(session) != tmp_path
+        assert worktree.active_branch.name == "feat/login"
+        assert worktree.head.commit.hexsha == tip
+    finally:
+        await connection.host.close()
+    # The branch was the user's before the session: archiving or closing must
+    # never delete it.
+    assert "feat/login" in (head.name for head in repo.heads)
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_second_worktree_in_the_same_step_is_refused(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    _init_repo(tmp_path)
+    results: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        tools = [m for m in payload["messages"] if m["role"] == "tool"]
+        if not tools:
+            first = _tool_call("enter-a", "enter_worktree", {"name": "first"})
+            second = _tool_call("enter-b", "enter_worktree", {"name": "second"})
+            second["index"] = 1
+            return backend_contract_mistral_response("", tool_calls=[first, second])
+        if len(tools) == 2:
+            results.extend(json.loads(t["content"]) for t in tools)
+            entered = next(r for r in results if "path" in r)
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _tool_call(
+                        "write-1",
+                        "write_file",
+                        {
+                            "path": str(Path(str(entered["path"])) / "a.md"),
+                            "content": "a\n",
+                        },
+                    )
+                ],
+            )
+        return backend_contract_mistral_response("done")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["write_file", "enter_worktree"],
+        ),
+        capabilities=ClientCapabilities(
+            agent_worktrees=True, callback_kinds=["approval"]
+        ),
+        process_services=process_services,
+    )
+    approvals: list[CallbackRequested] = []
+    try:
+        session = await connection.host.open_session()
+        async for event in session.act("two tasks"):
+            if isinstance(event, CallbackRequested):
+                approvals.append(event)
+                await session.deny_callback(event.callback)
+
+        entered = [Path(str(r["path"])) for r in results if "path" in r]
+        refused = [r for r in results if "path" not in r]
+        assert len(entered) == 1
+        assert "next step" in json.dumps(refused)
+        assert _cwd(session) == entered[0]
+        assert not approvals
+        assert (entered[0] / "a.md").read_text() == "a\n"
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_landed_move_looks_for_pull_requests_again(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    _init_repo(tmp_path)
+    full_passes: list[Path] = []
+
+    def record(
+        self: UnifiedHarnessBackendAdapter, *, every_worktree: bool = True
+    ) -> None:
+        if every_worktree and self.cwd is not None:
+            full_passes.append(Path(self.cwd))
+
+    monkeypatch.setattr(UnifiedHarnessBackendAdapter, "schedule_pr_discovery", record)
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[_tool_call("enter-1", "enter_worktree", {"name": "fix"})],
+            ),
+            backend_contract_mistral_response("done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["enter_worktree"],
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        async for _event in session.act("fix it"):
+            pass
+
+        worktree = _cwd(session)
+        assert worktree != tmp_path
+        assert worktree in full_passes
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_worktree_the_session_could_not_move_into_is_not_kept(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    _init_repo(tmp_path)
+
+    def refuse(*_args: object) -> None:
+        raise RuntimeError("could not follow")
+
+    monkeypatch.setattr(UnifiedPermissionResolver, "move_to", refuse)
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "", tool_calls=[_tool_call("enter-1", "enter_worktree", {})]
+            ),
+            backend_contract_mistral_response("done"),
+        ]
+    )
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["enter_worktree"],
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        with pytest.raises(AppServerTurnError):
+            async for _event in session.act("fix it"):
+                pass
+
+        listed = await connection.client.request(
+            "artifacts/list", {"sessionId": session.state.session.id}
+        )
+        assert listed["worktrees"] == []
+        assert _cwd(session) == tmp_path
+    finally:
+        await connection.host.close()
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_worktree_that_is_gone_cannot_be_re_entered(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    _init_repo(tmp_path)
+    entered: list[Path] = []
+    results: list[dict[str, object]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        tools = [m for m in payload["messages"] if m["role"] == "tool"]
+        users = [m for m in payload["messages"] if m["role"] == "user"]
+        if len(users) == 1:
+            if tools:
+                entered.append(Path(json.loads(tools[0]["content"])["path"]))
+                return backend_contract_mistral_response("entered")
+            return backend_contract_mistral_response(
+                "", tool_calls=[_tool_call("enter-1", "enter_worktree", {})]
+            )
+        if len(tools) == 1:
+            return backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    _tool_call("enter-2", "enter_worktree", {"path": str(entered[0])})
+                ],
+            )
+        results.append({"content": tools[-1]["content"]})
+        return backend_contract_mistral_response("done")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(
+            cwd=str(tmp_path),
+            workspace_roots=[str(tmp_path)],
+            enabled_tools=["enter_worktree"],
+        ),
+        capabilities=ClientCapabilities(agent_worktrees=True),
+        process_services=process_services,
+    )
+    try:
+        session = await connection.host.open_session()
+        _ = [event async for event in session.act("enter")]
+        Repo(tmp_path).git.worktree("remove", "--force", str(entered[0]))
+
+        _ = [event async for event in session.act("go back")]
+
+        assert "this session can re-enter" in str(results[-1]["content"])
+        assert _cwd(session) == entered[0]
     finally:
         await connection.host.close()

@@ -7,8 +7,6 @@ use serde_json::json;
 
 use super::{text, Event};
 use crate::app::App;
-use crate::commands::CommandEvent;
-use crate::input::deliver;
 use crate::server::request_error::describe;
 use crate::server::{method, Client, PluginCatalogState, RequestFailure};
 
@@ -21,16 +19,7 @@ where
     F: FnOnce(Arc<Client>, String) -> Fut + Send + 'static,
     Fut: Future<Output = Event> + Send + 'static,
 {
-    let Some(session_id) = app.session.session_id.clone() else {
-        return false;
-    };
-    let tx = app.command_tx.clone();
-    let client = client.clone();
-    crate::work::spawn(async move {
-        let event = task(client, session_id).await;
-        deliver(tx, CommandEvent::Plugins(Box::new(event))).await;
-    });
-    true
+    crate::commands::spawn_session(app, client, task)
 }
 
 /// Two reads either side of `plugin/reload`.

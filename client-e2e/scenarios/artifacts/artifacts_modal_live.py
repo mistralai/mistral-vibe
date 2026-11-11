@@ -32,7 +32,7 @@ expected_actions = [Action("open_url", "https://github.com/mistral-ai/vibe/pull/
 screen_contains = ("PRs (3)",)
 
 _LABEL = "PRs (2)"
-_CLICK_COL = len("/test/workdir ⧉  ") + len(_LABEL) // 2 + 1
+_CLICK_COL = len("/test/workdir  ") + len(_LABEL) // 2 + 1
 _BAR_CLICK = f"\x1b[<0;{_CLICK_COL};{ROWS}M\x1b[<0;{_CLICK_COL};{ROWS}m"
 
 timeline: Timeline = [

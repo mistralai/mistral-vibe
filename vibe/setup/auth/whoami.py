@@ -243,7 +243,7 @@ def _read_whoami_entries() -> dict[str, Any]:
     try:
         with WHOAMI_CACHE_FILE.path.open(encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
 

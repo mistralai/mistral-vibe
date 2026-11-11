@@ -19,6 +19,7 @@ from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPToolRoute,
     ResolvedMCPServerConfig,
 )
+from mistralai_vibe_local_harness.vibe._tool_schemas import type_is_not_object
 
 NAMING_VERSION = "mistral.vibe.mcp-naming/v1"
 _IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
@@ -51,8 +52,12 @@ def build_route_snapshot(
         ):
             programmatic_name = programmatic_names[server.name][remote.remote_name]
             display_name = display_names[(server.name, remote.remote_name)]
-            enabled = remote.remote_name not in server.disabled_tools and (
-                tool_filter is None or tool_filter.allows(display_name)
+            # Core refuses a tool whose schema's type is not "object": only that
+            # tool is left out, and the server's other tools stay routed.
+            enabled = (
+                remote.remote_name not in server.disabled_tools
+                and (tool_filter is None or tool_filter.allows(display_name))
+                and not type_is_not_object(remote.input_schema)
             )
             descriptor = MCPToolDescriptor(
                 server_name=server.name,

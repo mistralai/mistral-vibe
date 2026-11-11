@@ -38,7 +38,7 @@ macro_rules! git_bash_description {
 
 - Each command runs independently in a fresh, stateless Git Bash process.
 - Use POSIX shell syntax and Unix-style command chaining, redirects, variables, and quoting, not PowerShell or cmd.exe syntax.
-- Write Windows drives as `/c/...` with forward slashes, never `C:\...`.
+- Write Windows drives as `/c/...` with forward slashes, never `C:\...`, even when the user or a tool gives one: bash drops unquoted backslashes, and in `"C:\dir\"` the `\"` keeps the quote open. Inside code passed to a Windows program (`python -c`, `node -e`), write `C:/...` instead: paths inside code are not converted.
 - Standard output and standard error are captured separately. Read `returncode` to determine whether the command succeeded.
 - Do not discard stderr (`2>/dev/null`) on exploratory commands like `find` or `ls`: an empty result would then hide a wrong path.
 - "#,
@@ -56,6 +56,11 @@ macro_rules! powershell_description {
 
 - Each command runs independently in a fresh, stateless PowerShell process.
 - Use PowerShell syntax, cmdlets, pipelines, variables, quoting, and path conventions, not Bash or cmd.exe syntax.
+- Backslash is not an escape character in PowerShell strings: write paths with single backslashes. Quote them with single quotes so `$` and `` ` `` stay literal, and double any `'` inside: `cd 'C:\O''Brien Project\src'`. Use double quotes only to expand a `$variable`; their escape is the backtick, so `\"` ends the string.
+- Do not put `"` inside an argument to a native program such as `git`, `python` or `node`: PowerShell may drop it. Put JSON or long text in a file with `write_file` first.
+- When an argument to a native program contains a space, leave the trailing backslash off a directory (`'C:\My Dir'`, not `'C:\My Dir\'`); keep a drive root as `C:\`.
+- In regex (`-match`, `-replace`, `-split`, `Select-String`) and in Python, JavaScript or JSON code, a backslash is an escape: match a literal path with `Select-String -SimpleMatch` or `[regex]::Escape(...)`, and in code passed to `python -c` or `node -e` use single-quoted strings with forward slashes, such as `'C:/My Dir/file.txt'`.
+- Run a program by a quoted path with the call operator: `& 'C:\Program Files\nodejs\node.exe' --version`.
 - Standard output and standard error are captured separately. Read `returncode` to determine whether the command succeeded.
 - "#,
             timeout_text!($mode),

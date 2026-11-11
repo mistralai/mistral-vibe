@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import read_file, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "read the big file"
 _CONTENT = "   1→first line\n   2→second line"
@@ -23,4 +23,5 @@ timeline: Timeline = [
     ),
     turn_completed(),
     _CLICK,
+    take_snapshot(),
 ]

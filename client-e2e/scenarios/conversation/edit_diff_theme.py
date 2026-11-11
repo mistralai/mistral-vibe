@@ -7,7 +7,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "edit the file"
 
@@ -27,4 +27,5 @@ timeline: Timeline = [
     "\r",
     "\x1b[B",
     "\r",
+    take_snapshot(),
 ]

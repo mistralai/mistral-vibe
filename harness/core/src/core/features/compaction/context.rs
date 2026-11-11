@@ -72,7 +72,7 @@ fn prompt_history(messages: &[StoredMessage]) -> Result<&[StoredMessage], CoreEr
     if !prompt.is_injected()
         || !matches!(
             &prompt.message,
-            Message::User { content } if is_prompt_content(content)
+            Message::User { content, .. } if is_prompt_content(content)
         )
     {
         return Err(CoreError::invalid_command(
@@ -91,7 +91,7 @@ pub(super) fn prompt_extra_instructions(
     messages: &[StoredMessage],
 ) -> Result<Option<String>, CoreError> {
     prompt_history(messages)?;
-    let Some(Message::User { content }) = messages.last().map(|stored| &stored.message) else {
+    let Some(Message::User { content, .. }) = messages.last().map(|stored| &stored.message) else {
         return Err(CoreError::invariant(
             "compaction context is missing its prompt message",
         ));
@@ -844,7 +844,7 @@ fn estimate_user_message_tokens(
 }
 
 fn truncate_text_user_message(message: &Message, max_tokens: usize) -> Option<Message> {
-    let Message::User { content } = message else {
+    let Message::User { content, .. } = message else {
         return None;
     };
     let text = content
@@ -1010,11 +1010,11 @@ fn longest_fitting_cut(
 }
 
 fn holds_image(message: &Message) -> bool {
-    matches!(message, Message::User { content } if content.iter().any(is_image_content))
+    matches!(message, Message::User { content, .. } if content.iter().any(is_image_content))
 }
 
 fn text_user_message(message: &Message) -> Option<String> {
-    let Message::User { content } = message else {
+    let Message::User { content, .. } = message else {
         return None;
     };
     content

@@ -507,3 +507,73 @@ async def test_a_failed_explicit_refresh_has_the_next_check_fetch_a_recent_copy(
 
     assert fetch.calls == 2
     assert cache.cached("k") == Cached("fresh", stored_at=clock.now)
+
+
+@pytest.mark.asyncio
+async def test_a_changed_refreshed_value_tells_the_change_listener_once() -> None:
+    clock, fetch = _Clock(), _Fetch(values=["fresh"])
+    store = _Store({"k": Cached("old", stored_at=clock.now - 601)})
+    cache = _cache(fetch, clock, store)
+    changed: list[str] = []
+    cache.on_changed(changed.append)
+
+    await _get(cache, "k")  # serves "old", starts the background refresh
+    await _settle()
+
+    assert changed == ["k"]
+    assert cache.cached("k") == Cached("fresh", stored_at=clock.now)
+
+    # An unchanged re-save never tells again; the value is already held.
+    await cache.refresh("k")
+    await _settle()
+    assert changed == ["k"]
+
+
+@pytest.mark.asyncio
+async def test_the_first_value_held_tells_nothing() -> None:
+    clock, fetch = _Clock(), _Fetch()
+    cache = _cache(fetch, clock)
+    changed: list[str] = []
+    cache.on_changed(changed.append)
+
+    await _first(cache, "k")
+    await _settle()
+
+    assert changed == []
+
+
+@pytest.mark.asyncio
+async def test_another_process_newer_copy_tells_the_listener() -> None:
+    clock, fetch = _Clock(), _Fetch()
+    store = _Store({"k": Cached("disk", stored_at=clock.now - 601)})
+    cache = _cache(fetch, clock, store)
+    await cache.load("k")
+    changed: list[str] = []
+    cache.on_changed(changed.append)
+
+    # Another process's copy is newer than the one held, but not stale: the
+    # next refresh adopts it and saves the request.
+    store.entries["k"] = Cached("newer", stored_at=clock.now - 60)
+    cache.check("k")
+    await _settle()
+
+    assert changed == ["k"]
+    assert cache.cached("k") == Cached("newer", stored_at=clock.now - 60)
+    assert fetch.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failing_listener_does_not_break_the_refresh() -> None:
+    clock, fetch = _Clock(), _Fetch(values=["fresh"])
+    store = _Store({"k": Cached("old", stored_at=clock.now - 601)})
+    cache = _cache(fetch, clock, store)
+
+    def refuse(_key: str) -> None:
+        raise RuntimeError("listener broken")
+
+    cache.on_changed(refuse)
+
+    await _get(cache, "k")
+    await _settle()
+
+    assert cache.cached("k") == Cached("fresh", stored_at=clock.now)

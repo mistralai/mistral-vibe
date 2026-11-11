@@ -131,7 +131,13 @@ impl Client {
         mpsc::Receiver<Notification>,
         watch::Receiver<bool>,
     )> {
-        let (child, stdin, stdout) = ChildHandle::launch(&launch, &[], &[])?;
+        use crate::observability::sentry::{dsn, CRASH_REPORT_DSN_ENV};
+        let dsn = dsn();
+        let env: Vec<_> = dsn
+            .iter()
+            .map(|dsn| (CRASH_REPORT_DSN_ENV, dsn.as_str()))
+            .collect();
+        let (child, stdin, stdout) = ChildHandle::launch(&launch, &[], &env)?;
         let (to_writer, writer_rx) = mpsc::unbounded_channel::<Option<String>>();
         // Single owner of stdin, so frame order follows event-handling order.
         wire::write_lines(stdin, writer_rx);
@@ -215,6 +221,11 @@ impl Client {
             .send(Some(frame))
             .map_err(|_| anyhow!("writer task gone"))?;
         Ok(())
+    }
+
+    /// Whether this client asked the server to stop, so its closing is expected.
+    pub fn is_shutting_down(&self) -> bool {
+        self.shutdown_requested.load(Ordering::Relaxed)
     }
 
     /// Close child stdin after queued frames, so the server sees EOF and exits.

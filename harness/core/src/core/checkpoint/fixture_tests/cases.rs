@@ -13,6 +13,7 @@ use crate::core::features::skills;
 use crate::core::hooks::hook_action_id;
 use crate::core::tools::execution::external_call::{ExternalCallStage, PendingExternalCall};
 use crate::core::tools::external::RuntimeBuiltinToolName;
+use crate::core::wire::user_message::OutputType;
 use crate::core::{
     ActivePhase, ActiveTurn, AssistantPart, AssistantRole, AssistantSemanticPart, CandidateMessage,
     CompletionCandidate, CompletionFinishReason, CompletionPurpose, ContentBlock, ExternalTool,
@@ -36,6 +37,10 @@ pub(super) fn fixture_cases() -> Vec<FixtureCase> {
         FixtureCase {
             file_name: "active-awaiting-agent-completion.json",
             state: awaiting_completion_state(CompletionPurpose::Agent),
+        },
+        FixtureCase {
+            file_name: "active-awaiting-agent-completion-output-type.json",
+            state: awaiting_typed_completion_state(),
         },
         FixtureCase {
             file_name: "active-awaiting-compaction-completion.json",
@@ -183,6 +188,22 @@ fn awaiting_completion_state(purpose: CompletionPurpose) -> HarnessState {
     }
 }
 
+fn awaiting_typed_completion_state() -> HarnessState {
+    let mut state = awaiting_state(None);
+    state
+        .active_mut()
+        .expect("the awaiting state has an active turn")
+        .output_type = Some(OutputType {
+        name: "City".to_string(),
+        schema: json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        }),
+    });
+    state
+}
+
 fn awaiting_compaction_state(phase: CompactionFixturePhase) -> HarnessState {
     awaiting_state(Some(phase))
 }
@@ -203,9 +224,9 @@ fn awaiting_state(compaction: Option<CompactionFixturePhase>) -> HarnessState {
                 "current raw request",
             )));
         let in_context = fixture_projection(&state, "");
-        let tools = state.resolved_tools.top_level_tools();
+        let tools = state.resolved_tools().top_level_tools();
         let budget = fixture_budgets(&state).request;
-        let prompts = &state.config.settings.prompts.compaction;
+        let prompts = &state.config().settings.prompts.compaction;
         match phase {
             CompactionFixturePhase::InContext => in_context,
             CompactionFixturePhase::Standalone => in_context
@@ -242,8 +263,10 @@ fn awaiting_state(compaction: Option<CompactionFixturePhase>) -> HarnessState {
         iterations,
         phase,
         pending_steer: Vec::new(),
+        pending_context: Vec::new(),
         model_input_ready: false,
         output_limit_retries: 0,
+        output_type: None,
     });
     // An earlier reply measured the estimate as short by a quarter.
     state.estimate_correction =
@@ -281,8 +304,10 @@ fn pre_agent_hook_state() -> HarnessState {
             },
         },
         pending_steer: Vec::new(),
+        pending_context: Vec::new(),
         model_input_ready: false,
         output_limit_retries: 0,
+        output_type: None,
     });
     state
 }
@@ -317,8 +342,10 @@ fn completion_hook_state(point: HookPoint) -> HarnessState {
         iterations: 2,
         phase: ActivePhase::AwaitingHook { pending },
         pending_steer: Vec::new(),
+        pending_context: Vec::new(),
         model_input_ready: false,
         output_limit_retries: 0,
+        output_type: None,
     });
     state
 }
@@ -366,8 +393,10 @@ fn tool_batch_state() -> HarnessState {
         pending_steer: vec![StoredMessage::visible(Message::user_text(
             "steer after the current batch",
         ))],
+        pending_context: Vec::new(),
         model_input_ready: false,
         output_limit_retries: 0,
+        output_type: None,
     });
     state
 }
@@ -399,14 +428,16 @@ fn skill_read_state() -> HarnessState {
             },
         },
         pending_steer: Vec::new(),
+        pending_context: Vec::new(),
         model_input_ready: false,
         output_limit_retries: 0,
+        output_type: None,
     });
     state
 }
 
 fn fixture_budgets(state: &HarnessState) -> CompactionBudgets {
-    CompactionBudgets::from_settings(&state.config.settings.context, state.estimate_correction)
+    CompactionBudgets::from_settings(&state.config().settings.context, state.estimate_correction)
 }
 
 fn fixture_projection(state: &HarnessState, extra_instructions: &str) -> CompactionProjection {
@@ -414,9 +445,9 @@ fn fixture_projection(state: &HarnessState, extra_instructions: &str) -> Compact
         state.context.messages(),
         state.generated_system_message(),
         extra_instructions,
-        state.resolved_tools.top_level_tools(),
+        state.resolved_tools().top_level_tools(),
         fixture_budgets(state).request,
-        &state.config.settings.prompts.compaction,
+        &state.config().settings.prompts.compaction,
     )
     .expect("fixture compaction projection can be estimated");
     let CompactionProjectionFit::Fitted(projection) = projection else {

@@ -9,7 +9,7 @@ import shutil
 import tempfile
 
 from e2e.app_server.config import MINIMAL_HOME_CONFIG, WHATS_NEW_FIXTURE
-from e2e.app_server.scenario import Action, Timeline
+from e2e.app_server.scenario import Action, Timeline, take_snapshot
 
 # A stale seen-version in a pinned VIBE_HOME trips the what's-new gate.
 _home = tempfile.mkdtemp(prefix="e2e_whatsnew_offer_")
@@ -31,8 +31,6 @@ handshake = {
             "plan": {"kind": "api", "name": "FREE", "title": None},
             "planOffer": {"kind": "switch_api_key", "url": _URL},
             "rateLimitAction": None,
-            "teleportEligible": True,
-            "teleportAction": None,
         }
     }
 }
@@ -43,6 +41,5 @@ expected_actions = [Action("open_url", _URL)]
 # The offer's `Vibe Pro API key` link spans one-based columns 18-33 on row 16.
 _CLICK = "\x1b[<0;20;16M\x1b[<0;20;16m"
 
-# The banner mounts after startup; the capture after typing settles it.
-capture_startup = False
-timeline: Timeline = ["x", _CLICK]
+# The banner mounts after startup; typing settles it before the snapshot.
+timeline: Timeline = ["x", take_snapshot(), _CLICK, take_snapshot()]

@@ -11,9 +11,10 @@ use crate::commands::{submission::new_message_id, CommandEvent};
 use crate::server::proto_proxy::{ConfigProxyReadResponse, ProxySettingsView};
 use crate::server::{method, Client};
 use crate::transcript::local;
-use crate::vibe_code_project::Field;
 
+mod field;
 mod input;
+pub use field::Field;
 pub use input::{copy_selection, handle_key, paste, press};
 
 pub const SAVED_MESSAGE: &str = "Proxy settings saved. Restart the CLI for changes to take effect.";

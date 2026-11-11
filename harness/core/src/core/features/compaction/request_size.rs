@@ -35,7 +35,7 @@ pub(crate) fn compaction_inputs<'a>(
 pub(crate) fn model_input_reaches_compaction_threshold(
     state: &HarnessState,
 ) -> Result<bool, CoreError> {
-    let Some(limits) = CompactionLimits::from_settings(&state.config.settings.context) else {
+    let Some(limits) = CompactionLimits::from_settings(&state.config().settings.context) else {
         return Ok(false);
     };
     Ok(corrected_model_input_tokens(state)? >= limits.threshold)
@@ -97,8 +97,8 @@ fn request_revision(state: &HarnessState) -> Option<RequestRevision> {
 /// The size of the next agent request as the check sees it.
 pub(crate) fn corrected_model_input_tokens(state: &HarnessState) -> Result<u64, CoreError> {
     corrected_request_tokens(
-        &state.config.settings,
-        state.resolved_tools.top_level_tools(),
+        &state.config().settings,
+        state.resolved_tools().top_level_tools(),
         state.context.messages(),
         RequestMeasurements::of(state),
     )
@@ -178,8 +178,8 @@ pub(crate) fn corrected_request_tokens(
 /// tools included.
 pub(crate) fn estimate_agent_request_tokens(state: &HarnessState) -> Result<u64, CoreError> {
     estimate_request_tokens(
-        &state.config.settings,
-        state.resolved_tools.top_level_tools(),
+        &state.config().settings,
+        state.resolved_tools().top_level_tools(),
         state.context.messages(),
     )
 }
@@ -209,8 +209,8 @@ pub(crate) fn estimate_summary_request_tokens(state: &HarnessState) -> Result<u6
         },
         _ => return Err(invalid_state()),
     };
-    let tools = state.resolved_tools.top_level_tools();
-    let inputs = compaction_inputs(&state.config.settings, tools, state.estimate_correction);
+    let tools = state.resolved_tools().top_level_tools();
+    let inputs = compaction_inputs(&state.config().settings, tools, state.estimate_correction);
     pending
         .projection()
         .request_estimate(tools, inputs.budgets.request)
@@ -243,9 +243,11 @@ mod tests {
 
     #[test]
     fn the_check_multiplies_the_estimate_by_the_correction() {
-        let mut state = started();
+        let mut state = started_with_long_request();
         let estimate = estimate_agent_request_tokens(&state).unwrap();
-        set_threshold(&mut state.config.settings, estimate + 1);
+        edit_config(&mut state, |config| {
+            set_threshold(&mut config.settings, estimate + 1)
+        });
 
         assert_eq!(corrected_model_input_tokens(&state).unwrap(), estimate);
         assert!(!model_input_reaches_compaction_threshold(&state).unwrap());
@@ -276,7 +278,7 @@ mod tests {
             &messages[last_reply + 1..],
             &[],
             ImageDeliveryMode::Native,
-            state.config.settings.context.model_facts.image_cost,
+            state.config().settings.context.model_facts.image_cost,
         )
         .unwrap();
         assert!(added > 0);
@@ -371,13 +373,13 @@ mod tests {
         state.estimate_correction = correction(1.5);
 
         // A change unrelated to the model keeps the correction.
-        let mut settings = state.config.settings.clone();
+        let mut settings = state.config().settings.clone();
         settings.turn.max_iterations = Some(3);
         let mut state = reconfigured(state, settings);
         assert_eq!(state.estimate_correction, correction(1.5));
 
         // A new threshold means new model facts.
-        let mut settings = state.config.settings.clone();
+        let mut settings = state.config().settings.clone();
         settings.context.model_facts.compaction_threshold = 50_000;
         state = reconfigured(state, settings);
         assert_eq!(state.estimate_correction, EstimateCorrection::NONE);

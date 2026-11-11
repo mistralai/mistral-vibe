@@ -10,7 +10,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The server settles the cut-off answer as discarded before it fails the turn.
 timeline: Timeline = [
@@ -24,4 +24,5 @@ timeline: Timeline = [
     turn_started(),
     assistant_msg("Hi there."),
     turn_completed(),
+    take_snapshot(),
 ]

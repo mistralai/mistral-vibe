@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use serde_json::json;
-use vibe_rs::app::{App, Status};
+use vibe_rs::app::{App, Severity, Status};
 use vibe_rs::message_queue::{self as mq, QueueController, QueueItem};
 
 use crate::support::{queued, stub, with_status};
@@ -406,6 +406,40 @@ fn finish_consumed_edit_exits_selection_mode() {
 }
 
 #[test]
+fn leaving_a_consumed_edit_keeps_a_held_failure_notice() {
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", None), item("b", "second", None)];
+    assert!(mq::enter(&mut app));
+    mq::edit_selected(&mut app);
+    mq::remove_selected(&mut app, &stub());
+    vibe_rs::notices::inline(&mut app, Severity::Error, "Failed to update queued message");
+
+    mq::end_edit(&mut app);
+
+    let notice = app
+        .overlays
+        .notice
+        .as_ref()
+        .map(|notice| notice.text.as_str());
+    assert_eq!(notice, Some("Failed to update queued message"));
+}
+
+#[test]
+fn finishing_a_consumed_edit_drops_its_hint() {
+    let mut app = generating_app();
+    app.queue.items = vec![item("a", "first", None), item("b", "second", None)];
+    assert!(mq::enter(&mut app));
+    mq::edit_selected(&mut app);
+    mq::remove_selected(&mut app, &stub());
+    assert!(mq::confirm_consumed_edit(&mut app));
+    assert!(app.overlays.notice.is_some());
+
+    assert!(mq::finish_consumed_edit(&mut app));
+
+    assert!(app.overlays.notice.is_none());
+}
+
+#[test]
 fn turn_started_drops_promoted_prompts() {
     let mut app = generating_app();
     app.queue.items = vec![item("a", "first", Some("q1"))];
@@ -468,4 +502,40 @@ fn queue_positions_resolve_by_message_id() {
     assert_eq!(controller.position("missing"), None);
     controller.selected = Some("missing".into());
     assert_eq!(controller.selected_position(), None);
+}
+
+#[tokio::test]
+async fn a_server_steer_that_beats_the_enqueue_answer_settles_the_prompt() {
+    let mut app = generating_app();
+    let client = stub();
+    mq::enqueue_prompt(&mut app, &client, "what about the docs?".into());
+    let message_id = app.queue.items[0].message_id.clone();
+    assert!(app.view.transcript.is_pending(&message_id));
+    assert!(app.queue.items[0].queue_item_id.is_none());
+
+    // The server steers the head into a turn that only waits on its own, and
+    // its history entry can land before the enqueue answer.
+    let steered = mq::steering_history_added(
+        &mut app,
+        &client,
+        &json!({"entry": {
+            "id": message_id, "type": "message", "role": "user", "source": "turn_steer",
+        }}),
+    );
+    let late_answer = mq::apply_event(
+        &mut app,
+        &client,
+        mq::QueueEvent::Accepted {
+            message_id: message_id.clone(),
+            queue_item_id: "q-1".into(),
+            session_id: "sess".into(),
+            images: Vec::new(),
+            mentions: None,
+        },
+    );
+
+    assert!(steered);
+    assert!(app.queue.is_empty());
+    assert!(late_answer.is_none());
+    assert!(!app.view.transcript.is_pending(&message_id));
 }

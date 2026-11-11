@@ -8,7 +8,7 @@
 //! to the config gate, and `flush` ships on every exit path.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use sentry::protocol::{Event, Value};
 use sentry::ClientOptions;
@@ -25,6 +25,9 @@ const SERVER_NAME: &str = "vibe-rs";
 const EIO: i32 = 5;
 
 static GUARD: Mutex<Option<sentry::ClientInitGuard>> = Mutex::new(None);
+
+/// Random per process and never persisted: alerts count affected launches, not events.
+static LAUNCH_ID: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
 /// Locks `GUARD` recovering from poison: poison means a panic under the lock,
 /// the payload is still valid, and flush-on-panic matters most.
@@ -64,13 +67,14 @@ fn env_dsn() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn dsn() -> Option<String> {
+/// Hands this binary's DSN to the app-server it spawns, so a launch reports to one project.
+pub const CRASH_REPORT_DSN_ENV: &str = "VIBE_CRASH_REPORT_DSN";
+
+pub fn dsn() -> Option<String> {
     env_dsn().or_else(|| CLI_SENTRY_DSN.map(str::to_owned))
 }
 
-/// The terminal went away or the disk filled: the environment broke, not Vibe.
-/// Matched on `ErrorKind`/errno rather than the `Display` text, which `strerror`
-/// localizes on Unix and which Windows words differently again.
+/// The environment broke, not Vibe; matched on errno, as `strerror` text is localized.
 pub fn is_environmental(error: &anyhow::Error) -> bool {
     error
         .chain()
@@ -78,9 +82,24 @@ pub fn is_environmental(error: &anyhow::Error) -> bool {
         .any(|io| {
             matches!(
                 io.kind(),
-                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::StorageFull
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::StorageFull
+                    | std::io::ErrorKind::OutOfMemory
+                    | std::io::ErrorKind::WouldBlock
             ) || io.raw_os_error() == Some(EIO)
+                || io.raw_os_error().is_some_and(is_windows_environmental)
         })
+}
+
+/// Uncategorized Windows codes: no process at the pipe's end (233), no system resources (1450).
+#[cfg(windows)]
+fn is_windows_environmental(code: i32) -> bool {
+    matches!(code, 233 | 1450)
+}
+
+#[cfg(not(windows))]
+fn is_windows_environmental(_code: i32) -> bool {
+    false
 }
 
 fn before_send(mut event: Event<'static>) -> Option<Event<'static>> {
@@ -88,11 +107,11 @@ fn before_send(mut event: Event<'static>) -> Option<Event<'static>> {
     Some(event)
 }
 
-/// Drops IP and breadcrumbs, then scrubs every path in the event.
+/// Drops IP and breadcrumbs, sets the launch id as user, then scrubs every path.
 pub fn scrub_event(event: &mut Event<'static>) {
-    if let Some(user) = event.user.as_mut() {
-        user.ip_address = None;
-    }
+    let user = event.user.get_or_insert_with(Default::default);
+    user.ip_address = None;
+    user.id = Some(LAUNCH_ID.clone());
     event.breadcrumbs.values.clear();
     scrub_named_fields(event);
     scrub_every_field(event);
@@ -214,15 +233,43 @@ pub fn install_panic_hook() {
             .location()
             .map(|at| format!("{}:{}", at.file(), at.line()))
             .unwrap_or_default();
-        tracing::error!(
-            vibe_boundary = "panic",
-            fatal = true,
-            location = %location,
-            "vibe-rs panicked: {payload}"
+        let fingerprint = panic_fingerprint(
+            info.location().map(|at| at.file()).unwrap_or_default(),
+            &payload,
         );
+        with_fingerprint(&fingerprint, || {
+            tracing::error!(
+                vibe_boundary = "panic",
+                fatal = true,
+                location = %location,
+                "vibe-rs panicked: {payload}"
+            );
+        });
         flush();
         previous(info);
     }));
+}
+
+/// Runs `log` with the Sentry event it emits grouped by `fingerprint`.
+pub fn with_fingerprint(fingerprint: &[String], log: impl FnOnce()) {
+    let parts: Vec<&str> = fingerprint.iter().map(String::as_str).collect();
+    sentry::with_scope(|scope| scope.set_fingerprint(Some(&parts)), log);
+}
+
+/// Groups a panic by file and digit-masked message, so sizes and indices do not split it.
+pub fn panic_fingerprint(file: &str, payload: &str) -> [String; 3] {
+    let mut masked = String::with_capacity(payload.len());
+    let mut in_digits = false;
+    for ch in payload.chars() {
+        let digit = ch.is_ascii_digit();
+        if !digit {
+            masked.push(ch);
+        } else if !in_digits {
+            masked.push('N');
+        }
+        in_digits = digit;
+    }
+    ["vibe-rs-panic".to_owned(), file.to_owned(), masked]
 }
 
 /// Blocks briefly so a fatal path still ships its event.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.mcp import connector, handshake as mcp_handshake, server, tool
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _TOOLS = [
     tool(
@@ -33,4 +33,10 @@ handshake = mcp_handshake(_SOURCES, toggled=_TOGGLED)
 _WHEEL_DOWN = "\x1b[<65;60;30M"
 _CLICK_TOOL_03 = "\x1b[<0;20;34M\x1b[<0;20;34m"
 
-timeline: Timeline = ["/mcp github_app\r", _WHEEL_DOWN * 3, _CLICK_TOOL_03, "d"]
+timeline: Timeline = [
+    "/mcp github_app\r",
+    _WHEEL_DOWN * 3,
+    _CLICK_TOOL_03,
+    "d",
+    take_snapshot(),
+]

@@ -35,8 +35,6 @@ handshake = {
     }
 }
 exit_after_last_step = True
-capture_startup = False
-capture_steps = set()
 timeline: Timeline = [
     "hi\r",
     worktree("feature", path="/home/user/worktrees/feature"),

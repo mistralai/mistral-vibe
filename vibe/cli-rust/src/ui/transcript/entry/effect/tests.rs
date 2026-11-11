@@ -158,3 +158,12 @@ fn running_header_wraps_at_the_full_width_before_its_suffix() {
         tagged.folds()
     );
 }
+
+#[test]
+fn an_expanded_header_with_a_huge_message_wraps_only_its_bounded_text() {
+    let rows = rows(&"A".repeat(1_200_000), "", true);
+    let painted: usize = rows.iter().map(|row| row.matches('A').count()).sum();
+    assert!(fits(&rows));
+    assert_eq!(painted, crate::utils::text::MESSAGE_MAX_CHARS);
+    assert!(rows.iter().any(|row| row.contains("[truncated]")));
+}

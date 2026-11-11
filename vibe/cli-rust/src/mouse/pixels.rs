@@ -240,6 +240,11 @@ pub fn grid() -> Option<Grid> {
     Grid::unpack(GRID.load(Ordering::Relaxed))
 }
 
+/// Whether a pointer row from `to_cells` lies in the window padding past the last row, which cells clamp onto the footer.
+pub fn past_last_row(row: f64) -> bool {
+    grid().is_some_and(|grid| row >= f64::from(grid.rows))
+}
+
 /// The cell event for a terminal mouse event, and its pointer row in fractional cells.
 pub fn to_cells(event: MouseEvent) -> (MouseEvent, f64) {
     if VALID.load(Ordering::Relaxed) == 0 {
@@ -291,7 +296,9 @@ pub fn cells(grid: Option<Grid>, event: MouseEvent) -> (MouseEvent, f64) {
     let (cell_width, cell_height) = grid.cell();
     let column = pixel(event.column) / cell_width;
     let row = pixel(event.row) / cell_height;
-    let cell = |value: f64, count: u16| (value as u16).min(count.saturating_sub(1));
+    // A move past the grid left the window: it lands one cell beyond, on nothing. Gestures clamp to the edge.
+    let outside = u16::from(event.kind == MouseEventKind::Moved);
+    let cell = |value: f64, count: u16| (value as u16).min((count + outside).saturating_sub(1));
     let cells = MouseEvent {
         column: cell(column, grid.columns),
         row: cell(row, grid.rows),
@@ -312,7 +319,8 @@ impl Coalesce {
         };
         let (cell, row) = cells(grid, *mouse);
         let drag = matches!(mouse.kind, MouseEventKind::Drag(_));
-        let row = if drag { (row * 8.0) as u16 } else { cell.row };
+        // Unclamped, so a move into the padding below the last row is not dropped as the footer's cell.
+        let row = if drag { (row * 8.0) as u16 } else { row as u16 };
         let key = (mouse.kind, cell.column, row, mouse.modifiers);
         if (drag || mouse.kind == MouseEventKind::Moved) && self.0 == Some(key) {
             return false;

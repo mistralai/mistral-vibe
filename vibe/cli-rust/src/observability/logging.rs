@@ -73,15 +73,22 @@ impl FormatTime for TimeAndPid {
     }
 }
 
-/// ERROR records become Sentry events; nothing else, since breadcrumbs are
-/// dropped anyway.
+/// Only fatal ERROR records (tagged `fatal = true`) are crashes worth a Sentry event.
+pub fn reports_to_sentry(metadata: &Metadata<'_>) -> bool {
+    *metadata.level() == tracing::Level::ERROR && metadata.fields().field("fatal").is_some()
+}
+
+/// Breadcrumbs are dropped anyway, so everything else is ignored.
 fn sentry_layer<S>() -> impl Layer<S>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     use sentry::integrations::tracing::EventFilter;
-    sentry::integrations::tracing::layer().event_filter(|metadata| match *metadata.level() {
-        tracing::Level::ERROR => EventFilter::Event,
-        _ => EventFilter::Ignore,
+    sentry::integrations::tracing::layer().event_filter(|metadata| {
+        if reports_to_sentry(metadata) {
+            EventFilter::Event
+        } else {
+            EventFilter::Ignore
+        }
     })
 }

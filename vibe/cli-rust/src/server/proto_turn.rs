@@ -18,6 +18,7 @@ pub struct PublicTurn {
     pub status: Option<String>,
     pub queue_item_id: Option<String>,
     pub stop_reason: Option<String>,
+    pub budget_stop_reason: Option<String>,
     #[serde(deserialize_with = "crate::utils::json::null_default")]
     pub error: TurnError,
 }

@@ -14,10 +14,17 @@ from e2e.app_server.scenario import Timeline
 # it is delivered in.
 env = {"VIBE_TYPING_GRACE_PERIOD_MS": "0"}
 handshake = {"callback/result": {"accepted": True}}
-# Capture from the released callback onward.
-capture_startup = False
-capture_steps = {1, 2, 3, 4, 5, 6, 7}
-expected_titles = ("? Vibe",) * 7
+expected_titles = (
+    "Vibe",
+    ">> Vibe",
+    "? Vibe",
+    "? Vibe",
+    "? Vibe",
+    "? Vibe",
+    "? Vibe",
+    "? Vibe",
+    "? Vibe",
+)
 
 _DOWN = "\x1b[B"
 _UP = "\x1b[A"

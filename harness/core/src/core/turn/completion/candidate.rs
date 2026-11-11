@@ -5,7 +5,7 @@ use crate::core::config::OutputLimitRecovery;
 use crate::core::features::output_limit_recovery;
 use crate::core::features::programmatic_tool_calling::is_private_wrapper;
 use crate::core::hooks::{CompletionHookOutput, HookPoint, PreLlmCallOutput};
-use crate::core::step_protocol::DeterminismContext;
+use crate::core::step_protocol::{DeterminismContext, TurnStopReason};
 use crate::core::tools::context::ToolContext;
 use crate::core::tools::execution::batch::{ToolBatchTransition, start_tool_batch};
 use crate::core::wire::completion::{
@@ -163,7 +163,13 @@ pub(in crate::core::turn) struct AcceptedCompletion {
 }
 
 pub(in crate::core::turn) enum AcceptedCompletionContinuation {
-    Complete { output: Vec<ContentBlock> },
+    /// `stop_reason`: `OutputLimit` when the model's reply stopped at the output limit and
+    /// recovery did not retry it. It follows the model's finish reason, also when a hook replaced
+    /// the reply's content.
+    Complete {
+        output: Vec<ContentBlock>,
+        stop_reason: Option<TurnStopReason>,
+    },
     ToolBatch(Box<ToolBatchTransition>),
 }
 
@@ -396,6 +402,8 @@ fn resolve_accepted(
     let continuation = if tool_calls.is_empty() {
         AcceptedCompletionContinuation::Complete {
             output: candidate.message.content_blocks(),
+            stop_reason: (candidate.finish_reason == CompletionFinishReason::Length)
+                .then_some(TurnStopReason::OutputLimit),
         }
     } else {
         AcceptedCompletionContinuation::ToolBatch(Box::new(start_tool_batch(
@@ -590,8 +598,9 @@ mod tests {
     #[test]
     fn completion_rejection_stores_only_the_rejection_state() {
         let mut state = started();
-        add_always_hook(&mut state.config, HookPoint::PostLlmCall);
-        rebuild_hook_binding_index(&mut state);
+        edit_config(&mut state, |config| {
+            add_always_hook(config, HookPoint::PostLlmCall)
+        });
         let messages = state.context.messages().to_vec();
         let action_id = awaiting_action_id(&state);
         let state = advance(
@@ -634,8 +643,9 @@ mod tests {
         let mut config = config();
         config.settings.turn.max_iterations = Some(1);
         let mut state = started_with(config);
-        add_always_hook(&mut state.config, HookPoint::PostLlmCall);
-        rebuild_hook_binding_index(&mut state);
+        edit_config(&mut state, |config| {
+            add_always_hook(config, HookPoint::PostLlmCall)
+        });
         let action_id = awaiting_action_id(&state);
         state = advance(
             state,

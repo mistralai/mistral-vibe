@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _SHIFT_TAB = "\x1b[Z"
 # Drag from the cat on the version row (SGR 2) to the end of the `Type /help` row (SGR 4).
@@ -20,4 +20,4 @@ expected_clipboard = (
 )
 
 # Settle a banner frame with Shift+Tab, then copy the whole banner.
-timeline: Timeline = [_SHIFT_TAB, _SELECT]
+timeline: Timeline = [_SHIFT_TAB, take_snapshot(), _SELECT, take_snapshot()]

@@ -46,11 +46,22 @@ from vibe.app_server._cron import (
     cron_input_schema,
     run_cron,
 )
+from vibe.app_server._enter_worktree import (
+    ENTER_WORKTREE_TOOL_DESCRIPTION,
+    ENTER_WORKTREE_TOOL_NAME,
+    EnterWorktreeArgs,
+    EnterWorktreeError,
+    EnterWorktreeResult,
+    WorktreeEnterer,
+    run_enter_worktree,
+)
 from vibe.app_server._session_peers import (
     ARCHIVE_SESSIONS_TOOL_DESCRIPTION,
     ARCHIVE_SESSIONS_TOOL_NAME,
     LIST_SESSIONS_TOOL_DESCRIPTION,
     LIST_SESSIONS_TOOL_NAME,
+    MARK_SESSIONS_SEEN_TOOL_DESCRIPTION,
+    MARK_SESSIONS_SEEN_TOOL_NAME,
     READ_SESSION_TOOL_DESCRIPTION,
     READ_SESSION_TOOL_NAME,
     RESTORE_SESSIONS_TOOL_DESCRIPTION,
@@ -58,15 +69,21 @@ from vibe.app_server._session_peers import (
     SEND_TO_SESSION_TOOL_DESCRIPTION,
     SEND_TO_SESSION_TOOL_NAME,
     ArchiveSessionsArgs,
-    AwaitsUser,
+    HopsOf,
     ListSessionsArgs,
+    MarkSessionsSeenArgs,
+    PeerContext,
     ReadSessionArgs,
     RestoreSessionsArgs,
+    SenderOf,
     SendToSessionArgs,
     SessionPeerError,
     SessionPeers,
+    StarterOf,
+    TurnStarts,
     run_archive_sessions,
     run_list_sessions,
+    run_mark_sessions_seen,
     run_read_session,
     run_restore_sessions,
     run_send_to_session,
@@ -98,6 +115,7 @@ from vibe.app_server._unified_scratchpad import (
 from vibe.app_server.protocol import (
     SessionPeerArchiveResponse,
     SessionPeerListResponse,
+    SessionPeerMarkSeenResponse,
     SessionPeerReadResponse,
     SessionPeerRestoreResponse,
     SessionPeerSendResponse,
@@ -129,12 +147,15 @@ VIBE_PROVIDED_TOOL_NAMES = {
     f"{VIBE_TOOL_GROUP}.{SEND_TO_SESSION_TOOL_NAME}": SEND_TO_SESSION_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{ARCHIVE_SESSIONS_TOOL_NAME}": ARCHIVE_SESSIONS_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{RESTORE_SESSIONS_TOOL_NAME}": RESTORE_SESSIONS_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{MARK_SESSIONS_SEEN_TOOL_NAME}": MARK_SESSIONS_SEEN_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{ENTER_WORKTREE_TOOL_NAME}": ENTER_WORKTREE_TOOL_NAME,
 }
 
 # "ask" routes through Vibe's permission resolver. Cron defaults to allowed there,
 # while explicit config and session permission overrides still take precedence.
 # Starting, messaging, archiving or restoring sessions acts on real work, so they
-# keep the resolver's default: ask. Listing and reading sessions default to allowed there.
+# keep the resolver's default: ask. Listing, reading and marking sessions seen
+# default to allowed there.
 # Scratchpad writes only inside the session's own storage and is pinned allowed.
 VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
     TODO_TOOL_NAME: "ask",
@@ -145,7 +166,10 @@ VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
     SEND_TO_SESSION_TOOL_NAME: "ask",
     ARCHIVE_SESSIONS_TOOL_NAME: "ask",
     RESTORE_SESSIONS_TOOL_NAME: "ask",
+    MARK_SESSIONS_SEEN_TOOL_NAME: "ask",
     SCRATCHPAD_TOOL_NAME: "allow",
+    # Moving off the user's checkout is the safe direction: never asked about.
+    ENTER_WORKTREE_TOOL_NAME: "allow",
 }
 
 
@@ -157,6 +181,8 @@ def vibe_tool_groups(
     session_spawn: Sequence[SpawnModel] | None = None,
     session_peers: bool = False,
     session_peer_restore: bool = False,
+    session_peer_mark_seen: bool = False,
+    enter_worktree: bool = False,
 ) -> list[RustToolGroupDefinition]:
     # Todo follows the legacy roster, so a tool switched off in config stays off here
     # too. The scratchpad has no catalogue entry to be filtered out of, so it reads
@@ -210,6 +236,18 @@ def vibe_tool_groups(
                 exposure="direct",
             )
         )
+    if enter_worktree and enter_worktree_offered(
+        enabled_tools=enabled_tools, disabled_tools=disabled_tools
+    ):
+        tools.append(
+            RustProvidedToolDefinition(
+                name=ENTER_WORKTREE_TOOL_NAME,
+                description=ENTER_WORKTREE_TOOL_DESCRIPTION,
+                input_schema=EnterWorktreeArgs.model_json_schema(),
+                output_schema=EnterWorktreeResult.model_json_schema(),
+                exposure="direct",
+            )
+        )
     if session_peers:
         for name, description, args, result in (
             (
@@ -242,8 +280,16 @@ def vibe_tool_groups(
                 RestoreSessionsArgs,
                 SessionPeerRestoreResponse,
             ),
+            (
+                MARK_SESSIONS_SEEN_TOOL_NAME,
+                MARK_SESSIONS_SEEN_TOOL_DESCRIPTION,
+                MarkSessionsSeenArgs,
+                SessionPeerMarkSeenResponse,
+            ),
         ):
             if name == RESTORE_SESSIONS_TOOL_NAME and not session_peer_restore:
+                continue
+            if name == MARK_SESSIONS_SEEN_TOOL_NAME and not session_peer_mark_seen:
                 continue
             if _passes_tool_filters(
                 name, enabled=enabled_tools, disabled=disabled_tools
@@ -271,6 +317,14 @@ def vibe_tool_groups(
     ]
 
 
+def enter_worktree_offered(
+    *, enabled_tools: Sequence[str], disabled_tools: Sequence[str]
+) -> bool:
+    return _passes_tool_filters(
+        ENTER_WORKTREE_TOOL_NAME, enabled=enabled_tools, disabled=disabled_tools
+    )
+
+
 def _passes_tool_filters(
     name: str, *, enabled: Sequence[str], disabled: Sequence[str]
 ) -> bool:
@@ -286,16 +340,21 @@ class VibeProvidedTools:
         # truncated history would let `todo read` return the discarded entries.
         self._todos: dict[str, list[TodoItem]] = {}
 
-    def executor_factory(
+    def executor_factory(  # noqa: PLR0913 - one optional hook per tool family, all keyword-only
         self,
         storage_root: str | Path,
         *,
         max_todos: Callable[[], int],
-        scheduled_loops: Callable[[str], UnifiedScheduledLoops] | None = None,
+        scheduled_loops: Callable[[str], Awaitable[UnifiedScheduledLoops]]
+        | None = None,
         session_spawner: SessionSpawner | None = None,
         session_origin: SessionOriginResolver | None = None,
         session_peers: SessionPeers | None = None,
-        awaits_user: AwaitsUser | None = None,
+        hops_of: HopsOf | None = None,
+        sender_of: SenderOf | None = None,
+        starter_of: StarterOf | None = None,
+        turn_starts: TurnStarts | None = None,
+        enter_worktree: WorktreeEnterer | None = None,
     ) -> ProvidedToolExecutorFactory:
         root = Path(storage_root).expanduser().resolve()
 
@@ -314,7 +373,7 @@ class VibeProvidedTools:
                             )
                         result = await run_cron(
                             CronArgs.model_validate(action.call.arguments),
-                            scheduled_loops=scheduled_loops(session_id),
+                            scheduled_loops=await scheduled_loops(session_id),
                         )
                     elif action.call.tool_name == START_SESSION_TOOL_NAME:
                         if session_spawner is None or session_origin is None:
@@ -328,13 +387,35 @@ class VibeProvidedTools:
                             origin_of=session_origin,
                             spawner=session_spawner,
                         )
+                    elif action.call.tool_name == ENTER_WORKTREE_TOOL_NAME:
+                        if enter_worktree is None:
+                            raise ValueError(
+                                "Worktrees are not available for this session"
+                            )
+                        result = await run_enter_worktree(
+                            EnterWorktreeArgs.model_validate(action.call.arguments),
+                            session_id=session_id,
+                            enter=enter_worktree,
+                        )
                     elif peer_tool := _PEER_TOOLS.get(action.call.tool_name):
-                        if session_peers is None or awaits_user is None:
+                        if session_peers is None or hops_of is None:
                             raise ValueError(
                                 "Other sessions are not reachable from this session"
                             )
                         result = await peer_tool(
-                            action, session_id, session_peers, awaits_user
+                            action,
+                            session_id,
+                            session_peers,
+                            PeerContext(
+                                hops_of=hops_of,
+                                sender_of=sender_of,
+                                starter_of=starter_of,
+                                **(
+                                    {}
+                                    if turn_starts is None
+                                    else {"turn_starts": turn_starts}
+                                ),
+                            ),
                         )
                     else:
                         result = await _run(
@@ -353,6 +434,7 @@ class VibeProvidedTools:
                     ScheduledLoopStoreError,
                     SessionSpawnError,
                     SessionPeerError,
+                    EnterWorktreeError,
                 ) as error:
                     return _failed(action, error)
                 return _succeeded(action, result)
@@ -387,43 +469,48 @@ async def _run(
 
 
 type _PeerToolRunner = Callable[
-    [RustProvidedToolCallAction, str, SessionPeers, AwaitsUser], Awaitable[BaseModel]
+    [RustProvidedToolCallAction, str, SessionPeers, PeerContext], Awaitable[BaseModel]
 ]
 
 _PEER_TOOLS: dict[str, _PeerToolRunner] = {
-    LIST_SESSIONS_TOOL_NAME: lambda action, _session_id, peers, _awaits_user: (
-        run_list_sessions(
-            ListSessionsArgs.model_validate(action.call.arguments), peers=peers
-        )
+    LIST_SESSIONS_TOOL_NAME: lambda action, session_id, peers, _peer: run_list_sessions(
+        ListSessionsArgs.model_validate(action.call.arguments),
+        session_id=session_id,
+        peers=peers,
     ),
-    READ_SESSION_TOOL_NAME: lambda action, _session_id, peers, _awaits_user: (
-        run_read_session(
-            ReadSessionArgs.model_validate(action.call.arguments), peers=peers
-        )
+    READ_SESSION_TOOL_NAME: lambda action, session_id, peers, _peer: run_read_session(
+        ReadSessionArgs.model_validate(action.call.arguments),
+        session_id=session_id,
+        peers=peers,
     ),
-    SEND_TO_SESSION_TOOL_NAME: lambda action, session_id, peers, awaits_user: (
+    SEND_TO_SESSION_TOOL_NAME: lambda action, session_id, peers, peer: (
         run_send_to_session(
             SendToSessionArgs.model_validate(action.call.arguments),
             session_id=session_id,
             invocation_id=action.action_id,
             peers=peers,
-            awaits_user=awaits_user,
+            peer=peer,
         )
     ),
-    ARCHIVE_SESSIONS_TOOL_NAME: lambda action, session_id, peers, awaits_user: (
+    ARCHIVE_SESSIONS_TOOL_NAME: lambda action, session_id, peers, _peer: (
         run_archive_sessions(
             ArchiveSessionsArgs.model_validate(action.call.arguments),
             session_id=session_id,
             peers=peers,
-            awaits_user=awaits_user,
         )
     ),
-    RESTORE_SESSIONS_TOOL_NAME: lambda action, session_id, peers, awaits_user: (
+    RESTORE_SESSIONS_TOOL_NAME: lambda action, session_id, peers, _peer: (
         run_restore_sessions(
             RestoreSessionsArgs.model_validate(action.call.arguments),
             session_id=session_id,
             peers=peers,
-            awaits_user=awaits_user,
+        )
+    ),
+    MARK_SESSIONS_SEEN_TOOL_NAME: lambda action, session_id, peers, _peer: (
+        run_mark_sessions_seen(
+            MarkSessionsSeenArgs.model_validate(action.call.arguments),
+            session_id=session_id,
+            peers=peers,
         )
     ),
 }
@@ -470,12 +557,20 @@ def _succeeded(
 def _failed(
     action: RustProvidedToolCallAction, error: Exception
 ) -> RustToolFailedEvent:
+    reason = (
+        error.reason
+        if isinstance(error, SessionSpawnError | SessionPeerError)
+        else None
+    )
     return RustToolFailedEvent(
         action_id=action.action_id,
         call_id=action.call_id,
         result=RustToolFailureResult(
             error=RustProtocolError(
-                code="tool_failed", message=str(error), retryable=False, details=None
+                code="tool_failed",
+                message=str(error),
+                retryable=False,
+                details=None if reason is None else {"reason": reason},
             )
         ),
     )

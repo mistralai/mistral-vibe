@@ -4,6 +4,7 @@ import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import keyring
 import pytest
 
 from tests.app_server._helpers import setup_client
@@ -12,7 +13,9 @@ from vibe.app_server._model import validate_wire
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._setup_oidc import SetupOidcHandler
 from vibe.app_server.protocol import SetupStatusResponse
+from vibe.app_server.provider_auth import ProviderCredentialSourceKind
 from vibe.setup.auth._oidc_service import OidcService
+from vibe.utils.oidc_marker import OIDC_API_KEY
 
 
 @pytest.mark.asyncio
@@ -112,3 +115,29 @@ async def test_setup_status_flag_does_not_replace_api_key_presence(
     finally:
         await client_transport.close()
         await server_transport.close()
+
+
+@pytest.mark.asyncio
+async def test_setup_status_reports_the_cli_oidc_session_over_a_keyring_key(
+    monkeypatch, process_services: ProcessServices
+):
+    monkeypatch.setenv("VIBE_CLI_OIDC_ENABLED", "true")
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    monkeypatch.setattr(
+        keyring, "get_password", lambda service, username: "keyring-api-key"
+    )
+    monkeypatch.setattr(
+        "vibe.setup.auth._oidc_runtime.stored_oidc_credential", lambda: OIDC_API_KEY
+    )
+    client, client_transport, server_transport = await setup_client(
+        process_services=process_services
+    )
+    try:
+        status = validate_wire(
+            SetupStatusResponse, await client.request("setup/status", {})
+        )
+    finally:
+        await client_transport.close()
+        await server_transport.close()
+
+    assert status.active_credential_source is ProviderCredentialSourceKind.CLI_OIDC

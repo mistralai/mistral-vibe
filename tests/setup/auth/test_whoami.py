@@ -557,6 +557,18 @@ def test_load_cached_whoami_fails_open_on_corrupt_file() -> None:
     assert load_cached_whoami("secret") is None
 
 
+def test_non_utf8_whoami_cache_is_ignored_and_overwritten() -> None:
+    path = WHOAMI_CACHE_FILE.path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b'{"k": "\xff"}')
+
+    assert load_cached_whoami("secret") is None
+
+    result = WhoAmIResult(plan_type=AccountPlanKind.CHAT, plan_name="TEAM")
+    store_cached_whoami("secret", result)
+    assert load_cached_whoami("secret") == result
+
+
 @pytest.mark.asyncio
 async def test_whoami_cache_resolve_reads_through_disk() -> None:
     # A brand-new cache instance (empty in-memory) must serve from the

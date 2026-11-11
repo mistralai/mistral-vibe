@@ -1,18 +1,22 @@
 //! Background command events: the enum a completed slash command reports to
 //! the UI reducer, plus the slot claim each dispatch makes.
 
+use std::future::Future;
+use std::sync::Arc;
+
 use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::app::{App, QueuedPrompt};
+use crate::input::deliver;
 use crate::post_ready::AccountReads;
+use crate::server::Client;
 
 /// A completed background slash command, returned to the UI reducer. Exactly one
 /// per dispatch, so the reducer can tell when the UI is settled again.
 pub enum CommandEvent {
-    RemoteProject(Box<crate::vibe_code_project::Reply>),
-    Teleport(Box<crate::teleport::Reply>),
     Plugins(Box<crate::plugins::Event>),
+    Skills(Box<crate::skills_browser::Event>),
     /// The `/context` breakdown read, with the generation it was requested at.
     Context(Box<(u64, crate::context_app::Event)>),
     Leanstall(Box<super::leanstall::Event>),
@@ -97,6 +101,36 @@ pub(super) fn dispatch(app: &mut App) -> Option<(String, mpsc::Sender<CommandEve
     let session_id = app.session.session_id.clone()?;
     let tx = app.command_tx.clone()?;
     Some((session_id, tx))
+}
+
+/// Run `task` for the session off the main thread, delivering its answer as a command event; false without a session.
+pub fn spawn_session<E, F, Fut>(app: &App, client: &Arc<Client>, task: F) -> bool
+where
+    E: Into<CommandEvent> + Send + 'static,
+    F: FnOnce(Arc<Client>, String) -> Fut + Send + 'static,
+    Fut: Future<Output = E> + Send + 'static,
+{
+    let Some(session_id) = app.session.session_id.clone() else {
+        return false;
+    };
+    let tx = app.command_tx.clone();
+    let client = client.clone();
+    crate::work::spawn(async move {
+        deliver(tx, task(client, session_id).await).await;
+    });
+    true
+}
+
+impl From<crate::plugins::Event> for CommandEvent {
+    fn from(event: crate::plugins::Event) -> Self {
+        Self::Plugins(Box::new(event))
+    }
+}
+
+impl From<crate::skills_browser::Event> for CommandEvent {
+    fn from(event: crate::skills_browser::Event) -> Self {
+        Self::Skills(Box::new(event))
+    }
 }
 
 /// Mounted once a `config/reload` lands.

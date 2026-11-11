@@ -12,16 +12,22 @@ import pytest
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.app_server import connector_catalog
+from vibe.app_server._model_catalog_service import (
+    DiskModelCatalogStore,
+    ModelCatalogKey,
+    ModelCatalogService,
+)
 from vibe.app_server._org_config_service import DiskOrgConfigStore, OrgConfigKey
 from vibe.core.config import managed_config_cache
 from vibe.core.experiments import cache as eval_cache, session as experiment_session
 from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.experiments.manager import hash_api_key
 from vibe.core.experiments.models import EvalResponse
-from vibe.core.model_catalog import cache as model_cache, session as model_session
+from vibe.core.model_catalog import cache as model_cache
 from vibe.core.model_catalog.models import ModelCatalogResponse
 from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.telemetry.send import mistral_credential_cache_key
+from vibe.core.utils.fetch_wait import FetchFailures
 from vibe.core.utils.remote_cache import Cached
 from vibe.setup.auth import _oidc_runtime
 from vibe.setup.auth._oidc_config import OidcConfig, OidcError
@@ -136,20 +142,27 @@ def test_shared_disk_caches_never_load_another_oidc_identity(
     evaluation = EvalResponse.model_validate({
         "features": {"feature-a": {"defaultValue": "a"}}
     })
+    catalog_config = build_test_vibe_config(experimental_enable_model_catalog=True)
+    first_catalog_key = ModelCatalogKey.current(catalog_config, None)
+    assert first_catalog_key is not None
     managed_config_cache.store_cached_managed_config(first_key, 'theme = "nord"')
-    model_cache.store_cached_model_catalog(config, catalog, fetched_for=first_key)
+    DiskModelCatalogStore().save(
+        first_catalog_key, Cached(catalog, stored_at=time.time())
+    )
     eval_cache.store_cached_eval_response(config, evaluation, fetched_for=first_key)
     assert (
         managed_config_cache.load_cached_managed_config(first_key) == 'theme = "nord"'
     )
-    assert model_cache.load_cached_model_catalog(config) == catalog
+    assert DiskModelCatalogStore().load(first_catalog_key) is not None
     assert eval_cache.load_cached_eval_response(config) == evaluation
 
     _switch(credentials, monkeypatch, field)
     second_key = mistral_credential_cache_key(config)
     assert second_key not in {None, first_key}
     assert managed_config_cache.load_cached_managed_config(second_key) is None
-    assert model_cache.load_cached_model_catalog(config) is None
+    second_catalog_key = ModelCatalogKey.current(catalog_config, None)
+    assert second_catalog_key is not None
+    assert DiskModelCatalogStore().load(second_catalog_key) is None
     assert eval_cache.load_cached_eval_response(config) is None
 
 
@@ -193,10 +206,14 @@ def test_unsafe_identity_bypasses_shared_caches_without_api_key_fallback(
     config = build_test_vibe_config(enable_telemetry=True)
     assert _oidc_runtime.stored_oidc_cache_key() is None
     assert mistral_credential_cache_key(config) is None
+    assert (
+        ModelCatalogKey.current(
+            build_test_vibe_config(experimental_enable_model_catalog=True), None
+        )
+        is None
+    )
     managed_config_cache.store_cached_managed_config(None, 'theme = "nord"')
-    model_cache.store_cached_model_catalog(config, ModelCatalogResponse(models=[]))
     eval_cache.store_cached_eval_response(config, EvalResponse())
-    assert model_cache.load_cached_model_catalog(config) is None
     assert eval_cache.load_cached_eval_response(config) is None
     assert list(tmp_path.iterdir()) == []
 
@@ -424,16 +441,19 @@ def test_disk_store_requires_the_fetching_oidc_identity(
 ):
     config = build_test_vibe_config(enable_telemetry=True)
     first_key = mistral_credential_cache_key(config)
-    catalog = ModelCatalogResponse(models=[])
+    catalog_key = ModelCatalogKey.current(
+        build_test_vibe_config(experimental_enable_model_catalog=True), None
+    )
+    assert catalog_key is not None
     # Without the key a fetch started under, an OIDC store cannot tell whose it is.
-    model_cache.store_cached_model_catalog(config, catalog)
     eval_cache.store_cached_eval_response(config, EvalResponse())
-    assert model_cache.load_cached_model_catalog(config) is None
     assert eval_cache.load_cached_eval_response(config) is None
     _switch(credentials, monkeypatch, field)
-    model_cache.store_cached_model_catalog(config, catalog, fetched_for=first_key)
+    DiskModelCatalogStore().save(
+        catalog_key, Cached(ModelCatalogResponse(models=[]), stored_at=time.time())
+    )
     eval_cache.store_cached_eval_response(config, EvalResponse(), fetched_for=first_key)
-    assert model_cache.load_cached_model_catalog(config) is None
+    assert DiskModelCatalogStore().load(catalog_key) is None
     assert eval_cache.load_cached_eval_response(config) is None
 
 
@@ -443,15 +463,21 @@ async def test_session_model_fetch_skips_cache_after_oidc_switch(
     credentials, monkeypatch, field
 ):
     config = build_test_vibe_config(experimental_enable_model_catalog=True)
-    response = ModelCatalogResponse(models=[])
+    key = await ModelCatalogKey.of(config, None)
+    assert key is not None
 
-    async def fetch(config, _credentials=None):
+    async def fetch(_api_base, _credentials):
         _switch(credentials, monkeypatch, field)
-        return response
+        return ModelCatalogResponse(models=[])
 
-    monkeypatch.setattr(model_session, "refresh_model_catalog", fetch)
-    assert await model_session.fetch_and_cache_model_catalog(config) == response
-    assert model_cache.load_cached_model_catalog(config) is None
+    service = ModelCatalogService(fetch=fetch)
+    try:
+        # Neither held for the account it started under, nor written to disk.
+        assert await service.ensure(key) is None
+        assert await service.load(key) is None
+    finally:
+        await service.close()
+    assert DiskModelCatalogStore().load(key) is None
 
 
 @pytest.mark.parametrize("field", ["subject", "organization", "workspace"])
@@ -480,7 +506,6 @@ async def test_session_experiment_fetch_skips_cache_after_oidc_switch(
         "_fetch_plan_attributes",
         AsyncMock(return_value=(attributes, "PRO")),
     )
-    sink = experiment_session.NullExperimentSink()
     launch = LaunchContext(
         agent_entrypoint="cli",
         agent_version="test",
@@ -491,22 +516,30 @@ async def test_session_experiment_fetch_skips_cache_after_oidc_switch(
         await experiment_session.initialize_experiments(
             config=config,
             manager=manager,
-            session_logger=sink,
             launch_context=launch,
             harness=ExperimentSurface.UNIFIED,
+            failures=FetchFailures(),
         )
     else:
+        from vibe.app_server import _experiments_service
+        from vibe.app_server._experiments_service import (
+            ExperimentsEvalFailedError,
+            ExperimentsKey,
+            ExperimentsService,
+        )
+
         monkeypatch.setattr(
-            experiment_session, "ExperimentManager", lambda **kwargs: manager
+            _experiments_service, "ExperimentManager", lambda **kwargs: manager
         )
-        monkeypatch.setattr(
-            experiment_session.RemoteEvalClient,
-            "from_settings",
-            lambda **kwargs: MagicMock(),
-        )
-        await experiment_session.fetch_and_cache_experiments(
-            config, launch, harness=ExperimentSurface.UNIFIED
-        )
+        key = await ExperimentsKey.of(config, launch)
+        assert key is not None
+        service = ExperimentsService(client_factory=lambda _url: MagicMock())
+        try:
+            # Nor is it held for the sessions of the account it started under.
+            with pytest.raises(ExperimentsEvalFailedError):
+                await service.evaluate(key)
+        finally:
+            await service.close()
     assert eval_cache.load_cached_eval_response(config) is None
 
 
@@ -520,8 +553,8 @@ async def test_disabled_remote_features_do_not_discover_oidc_tenant(
     )
     monkeypatch.setattr(_oidc_runtime, "oidc_headers", headers)
     assert (
-        await model_session.fetch_and_cache_model_catalog(
-            build_test_vibe_config(experimental_enable_model_catalog=False)
+        await ModelCatalogKey.of(
+            build_test_vibe_config(experimental_enable_model_catalog=False), None
         )
         is None
     )
@@ -535,9 +568,9 @@ async def test_disabled_remote_features_do_not_discover_oidc_tenant(
     await experiment_session.initialize_experiments(
         config=config,
         manager=MagicMock(),
-        session_logger=experiment_session.NullExperimentSink(),
         launch_context=None,
         harness=ExperimentSurface.UNIFIED,
+        failures=FetchFailures(),
     )
     headers.assert_not_awaited()
 

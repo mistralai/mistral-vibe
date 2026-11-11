@@ -13,7 +13,6 @@ handshake = {
     ]
 }
 
-capture_startup = False
 timeline: Timeline = ["/config\r", "\x12"]
 screen_contains = ("200000",)
 screen_excludes = ("64000",)

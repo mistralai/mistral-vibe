@@ -408,7 +408,13 @@ fn unstarted_program_results(
             _ => None,
         })
         .filter_map(|(operation_id, function, error)| {
-            let resolved = context.resolve_operation(&function.name, function.arguments.clone())?;
+            // A Runtime reads a call's arguments as an object; the error names the rejected value.
+            let arguments = if function.arguments.is_object() {
+                function.arguments.clone()
+            } else {
+                json!({})
+            };
+            let resolved = context.resolve_operation(&function.name, arguments)?;
             let call = ExternalToolCall {
                 action_id: effect_id_for_operation(ToolOrigin::Programmatic, operation_id),
                 call_id: operation_id.clone(),

@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from vibe.app_server._mcp_authorization_bridge import (
@@ -20,8 +21,6 @@ from vibe.app_server._mcp_authorization_bridge import (
 )
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from vibe.app_server._mcp_auth import MCPAuthenticationService
     from vibe.core.config.models import MCPServer
     from vibe.core.plugins import PluginMCPDiscovery, PluginMCPServerDefinition

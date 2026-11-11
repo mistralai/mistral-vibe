@@ -86,6 +86,16 @@ fn names_the_source_without_an_identity() {
 }
 
 #[test]
+fn names_the_cli_oidc_session_as_the_source() {
+    let view = auth(json!([{"kind": "cli_oidc", "state": "in_use"}]));
+    let text = whoami_text(&reads(json!({"status": "unavailable"})), Some(&view));
+    assert!(
+        text.ends_with("- **Credential source (MISTRAL\\_API\\_KEY)**: CLI OIDC session"),
+        "{text}"
+    );
+}
+
+#[test]
 fn omits_the_source_line_when_none_is_in_use() {
     let view = auth(json!([{"kind": "os_keyring", "state": "available"}]));
     let text = whoami_text(&AccountReads::default(), Some(&view));

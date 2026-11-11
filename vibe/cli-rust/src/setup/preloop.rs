@@ -93,10 +93,7 @@ pub async fn round(
         let (client, child, notifications, crash_rx) = match Client::spawn(launch.clone()).await {
             Ok(spawned) => spawned,
             Err(error) => {
-                // The Sentry bridge only carries ERROR records, so the
-                // startup window's own failure sites log their own fatal
-                // errors.
-                tracing::error!(vibe_boundary = "startup", fatal = true, "{error:#}");
+                crate::startup::failure::log_spawn(&error);
                 return BootAnswer::Spawn(error.context("spawn app-server"));
             }
         };

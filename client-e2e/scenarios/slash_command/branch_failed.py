@@ -15,7 +15,6 @@ handshake = {
 }
 request_methods = REQUEST_METHODS
 
-capture_startup = False
 screen_contains = (
     "Failed to branch session: Detached forks require session logging to be",
 )

@@ -12,7 +12,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import AppServerEvent, Timeline
+from e2e.app_server.scenario import AppServerEvent, Timeline, take_snapshot
 
 # The compacted replacement session a `session/compacted` handoff moves to.
 _COMPACTED = "00000000-0000-4000-8000-000000000002"
@@ -178,4 +178,5 @@ timeline: Timeline = [
         )
     ),
     _turn2(completed=True),
+    take_snapshot(),
 ]

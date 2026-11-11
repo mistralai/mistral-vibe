@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from e2e.app_server.scenario import Timeline
 
-capture_startup = False
 screen_contains = ("loop 5",)
 screen_excludes = ("[schedule]",)
 _LEFT = "\x1b[D"

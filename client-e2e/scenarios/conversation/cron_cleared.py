@@ -6,8 +6,6 @@ from e2e.app_server.effect_fixtures import effect_settled, effect_started
 from e2e.app_server.events import turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-capture_steps = {2, 3, 4}
-
 screen_contains = ["Cleared 2 scheduled loops"]
 screen_excludes = ["vibe.cron", "interval_seconds", "next_fire_at"]
 

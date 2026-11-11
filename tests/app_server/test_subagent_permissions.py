@@ -21,6 +21,7 @@ from vibe.permissions import RequiredPermission
 
 pytest.importorskip("mistralai_vibe_local_harness.vibe")
 
+from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._permissions import PermissionOutcome
 from vibe.app_server._subagent_permissions import SubagentPermissions, narrower
 from vibe.app_server._unified_permissions import UnifiedPermissionResolver
@@ -283,4 +284,55 @@ async def test_a_reloaded_allowlist_reaches_a_subagent_that_already_made_a_call(
     after = await resolve("file_system.bash", {"command": "curl example.com"})
 
     # Assert
+    assert after.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_profile_follows_its_session_into_another_directory(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A profile resolver that has already judged a call in the
+        session's checkout, and a session that then moves to a worktree.
+    *Do*: Write a file in the worktree through the profile.
+    *Assert*: The write is inside the workdir again, as for the session.
+    """
+    # Prepare
+    checkout = tmp_path / "checkout"
+    worktree = tmp_path / "worktree"
+    checkout.mkdir()
+    worktree.mkdir()
+    cwd = [checkout]
+    orchestrator = FakeConfigOrchestrator(
+        build_test_vibe_config(tools={"write_file": {"permission": "always"}})
+    )
+    store = PermissionStore()
+
+    def tools_for(config: Callable[[], VibeConfigSchema]) -> ToolManager:
+        tools = ToolManager(
+            config,
+            defer_mcp=True,
+            cwd=checkout,
+            harness_files=HarnessFilesManager().for_session(checkout),
+            permission_getter=store.get_tool_permission,
+        )
+        if cwd[0] != checkout:
+            tools.move_to(cwd[0], [cwd[0]])
+        return tools
+
+    session = UnifiedPermissionResolver(
+        tools_for(lambda: orchestrator.config), store, orchestrator
+    )
+    resolve = SubagentPermissions(
+        session, orchestrator, tools_for, cwd=lambda: cwd[0]
+    ).resolver_for(_profile(write_file={"permission": "always"}))
+    write: JsonObject = {"path": str(worktree / "notes.md"), "content": "x"}
+    before = await resolve("file_system.write_file", write)
+
+    # Do
+    cwd[0] = worktree
+    session.move_to(worktree, [worktree])
+    after = await resolve("file_system.write_file", write)
+
+    # Assert
+    assert before.decision == "ask"
     assert after.decision == "allow"

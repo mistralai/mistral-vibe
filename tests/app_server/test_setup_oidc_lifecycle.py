@@ -176,7 +176,11 @@ async def test_pending_login_is_cancelled_by_connection_teardown(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
         host_handler=HostRequestHandler(
-            HarnessFilesManager(sources=()), org_config=process_services.org_config
+            HarnessFilesManager(sources=()),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
         session_backend_host_factory=lambda _: cast(
             SessionBackendHost, FakeBackendHost()
@@ -215,7 +219,11 @@ async def test_shared_host_disconnect_does_not_cancel_other_connection_login(
     login, process_services: ProcessServices
 ):
     host = HostRequestHandler(
-        HarnessFilesManager(sources=()), org_config=process_services.org_config
+        HarnessFilesManager(sources=()),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
     clients = []
     servers = []
@@ -269,7 +277,11 @@ async def test_completed_login_credentials_survive_connection_teardown(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
         host_handler=HostRequestHandler(
-            HarnessFilesManager(sources=()), org_config=process_services.org_config
+            HarnessFilesManager(sources=()),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         ),
         session_backend_host_factory=lambda _: cast(
             SessionBackendHost, FakeBackendHost()

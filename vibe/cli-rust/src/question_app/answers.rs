@@ -240,10 +240,6 @@ fn respond(app: &mut App, client: &Arc<Client>, result: UserQuestionResult) {
     show_pending(app);
     let address = match source {
         Some(QuestionSource::Callback(address)) => address,
-        Some(QuestionSource::TeleportPush) => {
-            settle_loading(app);
-            return crate::teleport::answer_push(app, client, &result);
-        }
         None => return settle_loading(app),
     };
     let retry = (!result.cancelled).then(|| (address.clone(), request));

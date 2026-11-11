@@ -1,8 +1,6 @@
-"""Translate Runtime-owned MCP calls into generic Harness tool events."""
+"""The mcpServer variant of the Harness ProvidedToolExecutor contract."""
 
 from __future__ import annotations
-
-from collections.abc import Awaitable, Callable
 
 from mistralai_vibe_local_harness.protocol import (
     RustProvidedToolCallAction,
@@ -18,20 +16,18 @@ from mistralai_vibe_local_harness.vibe._provided_tool_actions import (
     execute_provided_tool_action,
 )
 
-type MCPActionExecutor = Callable[
-    [RustProvidedToolCallAction],
-    Awaitable[RustToolSucceededEvent | RustToolFailedEvent],
-]
 
+class McpToolExecutor:
+    def __init__(self, runtime: MCPRuntime) -> None:
+        self._runtime = runtime
 
-def build_mcp_action_executor(runtime: MCPRuntime) -> MCPActionExecutor:
-    async def execute(
-        action: RustProvidedToolCallAction,
+    async def __call__(
+        self, action: RustProvidedToolCallAction
     ) -> RustToolSucceededEvent | RustToolFailedEvent:
         async def call(
             group_name: str, tool_name: str, arguments: dict
         ) -> MCPNormalizedResult:
-            return await runtime.execute(
+            return await self._runtime.execute(
                 group_name=group_name, tool_name=tool_name, arguments=arguments
             )
 
@@ -44,7 +40,5 @@ def build_mcp_action_executor(runtime: MCPRuntime) -> MCPActionExecutor:
             tool_error_message="The MCP tool returned an error",
         )
 
-    return execute
 
-
-__all__ = ["MCPActionExecutor", "build_mcp_action_executor"]
+__all__ = ["McpToolExecutor"]

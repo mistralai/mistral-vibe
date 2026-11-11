@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
-
-capture_steps = {1, 2, 3}
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The first release stops before the reply: the prompt is queued while the turn
 # is still streaming, then the reply arrives and must slot in above the queue.
@@ -17,4 +15,5 @@ timeline: Timeline = [
     {"release": 3},
     "say ho\r",
     {"release": 1},
+    take_snapshot(),
 ]

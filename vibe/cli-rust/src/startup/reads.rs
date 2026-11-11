@@ -104,9 +104,24 @@ pub fn read_show_subagent_status_list(result: &Value) -> bool {
     config(result).show_subagent_status_list
 }
 
+/// Whether `/pr` is offered (config `enable_pr_monitoring`).
+pub fn read_pr_monitoring(result: &Value) -> bool {
+    config(result).enable_pr_monitoring
+}
+
+/// Whether the section's prompt pins over the transcript top (config `enable_sticky_prompt`).
+pub fn read_enable_sticky_prompt(result: &Value) -> bool {
+    config(result).enable_sticky_prompt
+}
+
 /// Whether Ctrl+D asks for a second press (config `ask_confirmation_on_exit`).
 pub fn read_ask_confirmation_on_exit(result: &Value) -> bool {
     config(result).ask_confirmation_on_exit
+}
+
+/// Whether the composer has vim Normal and Insert modes (config `vim_keybindings`).
+pub fn read_vim_keybindings(result: &Value) -> bool {
+    config(result).vim_keybindings
 }
 
 pub fn read_tokens(result: &Value) -> (u64, u64) {

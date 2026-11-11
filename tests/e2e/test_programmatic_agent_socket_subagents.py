@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterator
+import os
 from pathlib import Path
 import time
 
@@ -16,7 +17,7 @@ from tests.e2e.agent_loop_characterization.support import (
     assistant_text_chunks,
     single_tool_call_chunks,
 )
-from tests.e2e.common import read_export, run_rust_vibe
+from tests.e2e.common import read_export, run_rust_vibe, write_e2e_config
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 from tests.stubs.fake_agent_server import (
     FakeAgentServer,
@@ -281,3 +282,51 @@ def test_a_deadline_interrupts_the_subagents_the_run_waits_for(
     assert subagent.status == "interrupted"
     assert subagent.journal_dir == f"subagents/{subagent.session_id}"
     assert elapsed < time_limit_s + 30
+
+
+@pytest.mark.parametrize(
+    "streaming_mock_server", [_spawn_and_wait_for_a_child], indirect=True
+)
+@pytest.mark.parametrize(
+    ("budget_flag", "budget", "outcome"),
+    [("--max-tokens", "14", "token_limit"), ("--max-price", "14", "price_limit")],
+    ids=["tokens-exact", "price-exact"],
+)
+def test_root_and_subagent_share_the_headless_budget(
+    streaming_mock_server: StreamingMockServer,
+    e2e_workdir: Path,
+    socket_path: Path,
+    tmp_path: Path,
+    budget_flag: str,
+    budget: str,
+    outcome: str,
+) -> None:
+    """*Prepare*: Root and child calls each use seven tokens and $7 under a run
+    limit their two calls reach exactly.
+    *Do*: Let the root spawn and wait for the child through the agent socket.
+    *Assert*: The child's call is admitted, then the tree budget is spent and
+    neither session starts a follow-up.
+    """
+    # Prepare
+    write_e2e_config(
+        Path(os.environ["VIBE_HOME"]),
+        streaming_mock_server.api_base,
+        model_settings=["input_price = 1000000.0", "output_price = 1000000.0"],
+    )
+    output_dir = tmp_path / "out"
+    server = FakeAgentServer(socket_path, None, tools=[_LOOKUP])
+
+    # Do
+    with serving_in_background(server):
+        result = run_rust_vibe(
+            e2e_workdir, _args(socket_path, output_dir, budget_flag, budget)
+        )
+
+    # Assert
+    assert result.returncode == 3, result.stderr
+    export = read_export(output_dir)
+    assert export.outcome == outcome
+    assert len(streaming_mock_server.requests) == 2
+    assert export.subagents is not None
+    [subagent] = export.subagents
+    assert subagent.usage is not None and subagent.usage.total_tokens == 7

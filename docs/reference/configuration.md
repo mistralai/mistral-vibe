@@ -13,8 +13,29 @@ The effective order is:
 2. `ModelCatalogLayer`, materialized from the cached or fetched model catalog
    when `experimental_enable_model_catalog` is on; it contributes models, which
    every layer above can override field by field, and the aliases a pin can
-   name them by;
-3. `GrowthbookLayer`, materialized from remote or hydrated experiment assignments;
+   name them by. While it lists at least one model, the built-in default
+   models from layer 1 are not available anymore, so a catalog alias may take
+   a built-in's name;
+3. `GrowthbookLayer`, materialized from remote or hydrated experiment
+   assignments. The `vibe_cli_model_catalog` flag turns
+   `experimental_enable_model_catalog` on from here, below the TOML layers, so
+   a user's `false` keeps the catalog off. While that flag is on, this layer
+   leaves out the two older model flags: `vibe_cli_extra_models`, which adds
+   models, and `vibe_cli_default_routing_model`, which adds a model and makes
+   it the default (the "routed default"). The catalog lists its own models and
+   recommends its own default; when it supplies none, the built-in models
+   remain. The `vibe_cli_model_catalog_filter` flag filters the catalog's
+   data before the merge, as if the catalog itself had sent it filtered:
+   `hide` drops models, `order` lists ids first in the picker, `default`
+   picks the default, and `settings` sets per-model fields (request settings,
+   display name, thinking levels, image support and prices; never the
+   context window, `name`, `provider` or `alias`). A model is named by its
+   id or one of its catalog aliases; a name that matches no catalog model is
+   ignored with a warning, an unknown key silently, and a malformed key, item
+   or setting is dropped on its own with a warning. The filter reaches only
+   users GrowthBook reaches, and the client applies it, like an
+   `allowed_models` the org's admin config sets: neither is access control,
+   which only the server can enforce;
 4. the user TOML layer (`~/.vibe/config.toml`) when the `"user"` source is
    enabled, followed by the project TOML layer (a discovered trusted
    `.vibe/config.toml`) when the `"project"` source is enabled;
@@ -77,10 +98,13 @@ the session neither scopes nor records it.
 An `active_model` that names one of a catalog model's `aliases` is first
 resolved to that model's ID. An `active_model` absent from the merged model
 list is then normalized to the empty, unpinned sentinel. Default resolution
-then applies: the GrowthBook routed default, then the model catalog's
-recommendation, then the built-in default, each skipped when `allowed_models`
-excludes it. The invalid source value is left untouched and reported as a
-validation warning that names no cause.
+then applies: the GrowthBook routed default (absent while the
+`vibe_cli_model_catalog` flag is on), then the catalog filter's `default`, then
+the model catalog's recommendation, then the first available model (the
+built-in default only when no catalog model is available), each skipped when
+`allowed_models` excludes it. The
+invalid source value is left untouched and reported as a validation warning
+that names no cause.
 
 A model entry without `provider` only overrides a model another layer defines.
 When no layer defines that model, the entry is left out of the merged config and

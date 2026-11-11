@@ -204,7 +204,7 @@ def mistral_catalogue_entry(body: object) -> CatalogueEntry:
 def anthropic_catalogue_entry(
     model: str, body: object, known_models: Sequence[KnownModelRow] = KNOWN_MODELS
 ) -> CatalogueEntry:
-    """Map an Anthropic model: limits, image input and the supported effort levels.
+    """Map an Anthropic model: limits, image input, effort levels and structured outputs.
 
     The catalogue does not say whether thinking can be turned off, so that comes from
     the known-models row; a model the table lacks keeps thinking on.
@@ -216,6 +216,7 @@ def anthropic_catalogue_entry(
         max_output_tokens=_int_or_none(data.get("max_tokens")),
         input_modalities=_modalities(_supported(capabilities.get("image_input"))),
         reasoning=_anthropic_reasoning(model, capabilities, known_models),
+        structured_output=_supported(capabilities.get("structured_outputs")),
     )
 
 
@@ -381,6 +382,7 @@ def _checked_entry(
             max_output_tokens=max_output,
             input_modalities=raw.input_modalities,
             reasoning=raw.reasoning,
+            structured_output=raw.structured_output,
         ),
         warnings,
     )

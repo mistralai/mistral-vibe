@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 value = "connector_github.retrieve_pull_request_information"
 expected = "connector_githuXb.retrieve_pull_request_informationY"
@@ -25,7 +25,4 @@ handshake = {
     }
 }
 
-capture_startup = False
-capture_steps = {3}
-screen_contains = ("connector_githuXb.retrieve_pull_req", "informationY")
-timeline: Timeline = ["/config\r", "\r", "\x1b[AX", "\x1b[BY", "\x13"]
+timeline: Timeline = ["/config\r", "\r", "\x1b[AX", "\x1b[BY", take_snapshot(), "\x13"]

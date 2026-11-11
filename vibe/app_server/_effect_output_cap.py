@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import JsonValue
 
+from vibe.app_server._error_message_cap import bounded_error_message
 from vibe.app_server.models import (
     BlockedEffectState,
     CancelledEffectState,
@@ -41,6 +42,8 @@ def capped_effect_entry[HistoryEntryT: PublicHistoryEntry](
 
 
 def capped_effect_state(state: EffectState) -> EffectState:
+    if isinstance(state, FailedEffectState):
+        state = _bounded_failure(state)
     match state:
         case CompletedEffectState() | FailedEffectState():
             output_text = _capped_text(state.output_text)
@@ -57,6 +60,17 @@ def capped_effect_state(state: EffectState) -> EffectState:
             return state.model_copy(update={"output_text": output_text})
         case _:
             return state
+
+
+def _bounded_failure(state: FailedEffectState) -> FailedEffectState:
+    # The harness mirrors the error text into the display message.
+    message = bounded_error_message(state.error.message)
+    display_message = bounded_error_message(state.display.message)
+    if message == state.error.message and display_message == state.display.message:
+        return state
+    error = state.error.model_copy(update={"message": message})
+    display = state.display.model_copy(update={"message": display_message})
+    return state.model_copy(update={"error": error, "display": display})
 
 
 def capped_output_append(current: str, text: str) -> str:

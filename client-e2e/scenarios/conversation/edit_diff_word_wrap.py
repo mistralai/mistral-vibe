@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import edit_file, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "reword the paragraph"
 
@@ -29,4 +29,5 @@ timeline: Timeline = [
     turn_completed(),
     # Ctrl+O expands the lone folded edit so its wrapped diff rows render.
     "\x0f",
+    take_snapshot(),
 ]

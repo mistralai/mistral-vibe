@@ -406,8 +406,13 @@ def _authority_digest(
 
 def _route_authority(completion: DeclaredCompletionRoute) -> object:
     provider = completion.provider
+    model = asdict(completion.model)
+    # Pricing only meters a run's budget; it grants nothing. Leaving it out keeps
+    # a declared child's profile identity the same with or without a budget, and
+    # across a price edit.
+    model.pop("pricing", None)
     return {
-        "model": asdict(completion.model),
+        "model": model,
         "model_facts": None
         if completion.model_facts is None
         else completion.model_facts.model_dump(mode="json"),

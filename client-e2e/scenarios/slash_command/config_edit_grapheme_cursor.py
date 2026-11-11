@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 value = "👩‍💻x"
 handshake = {
@@ -24,5 +24,4 @@ handshake = {
     }
 }
 
-capture_startup = False
-timeline: Timeline = ["/config\r", "\r", "\x1b[H"]
+timeline: Timeline = ["/config\r", "\r", "\x1b[H", take_snapshot()]

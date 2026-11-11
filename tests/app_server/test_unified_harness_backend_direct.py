@@ -139,6 +139,9 @@ async def test_unified_adapter_tracks_open_callbacks_for_delivery_lifecycle(
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
 
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
+
         async def respond_to_callback(self, params: object) -> object:
             self.rejected = params
             return SimpleNamespace(
@@ -185,6 +188,60 @@ async def test_unified_adapter_tracks_open_callbacks_for_delivery_lifecycle(
     assert rejected.result.error.message == "not delivered"
 
 
+def test_unified_adapter_redelivers_an_approval_in_vibe_wording(tmp_path: Path) -> None:
+    """*Prepare*: The Harness host holds an open approval for an MCP tool,
+      whose runtime display says something else.
+    *Do*: Read the open callbacks, as a reattached client gets them.
+    *Assert*: The approval reads as Vibe words it, not as the runtime did.
+    """
+    from vibe.app_server.models import ApprovalCallbackDetail
+    from vibe.utils.tool_presentation import EffectCallDisplay
+
+    # Prepare
+    tool_name = "mcp_grafana.list_loki_label_values"
+    raw = {
+        "id": "approval-1",
+        "sessionId": "session-1",
+        "turnId": "turn-1",
+        "type": "callback",
+        "callbackId": "approval-1",
+        "title": f"Approve {tool_name}",
+        "createdAt": 1,
+        "updatedAt": 1,
+        "generationStatus": "in_progress",
+        "relatedEntryId": "effect-1",
+        "detail": {
+            "kind": "approval",
+            "effect": {
+                "kind": "tool",
+                "toolName": tool_name,
+                "input": {"labelName": "app"},
+                "display": {"summary": "runtime", "statusText": "runtime"},
+            },
+            "relatedEntryId": "effect-1",
+        },
+        "state": {"status": "open"},
+    }
+    host = SimpleNamespace(open_callbacks=lambda _session_id: (raw,))
+    adapter = _inert_adapter(
+        _session_stub(session_id="session-1"), str(tmp_path), str(tmp_path), host=host
+    )
+
+    # Do
+    [callback] = adapter.open_callbacks()
+
+    # Assert
+    assert isinstance(callback.detail, ApprovalCallbackDetail)
+    assert callback.detail.effect.display == EffectCallDisplay(
+        summary=tool_name,
+        verb="Run",
+        message=tool_name,
+        settled_verb="Ran",
+        settled_message=tool_name,
+        status_text=f"Waiting for approval to run {tool_name}",
+    )
+
+
 @pytest.mark.asyncio
 async def test_unified_adapter_adds_path_scope_choices_to_approval_callbacks(
     tmp_path: Path,
@@ -197,6 +254,9 @@ async def test_unified_adapter_adds_path_scope_choices_to_approval_callbacks(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
     adapter = _inert_adapter(FakeSession(), None, str(tmp_path))
     callback = _approval_callback(
@@ -259,6 +319,9 @@ async def test_unified_adapter_records_only_an_approval_that_outlives_the_call(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         async def respond_to_callback(self, _params: object) -> object:
             return SimpleNamespace(
@@ -324,6 +387,9 @@ async def test_unified_adapter_forwards_an_unoffered_path_scope_without_granting
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         async def respond_to_callback(self, params: object) -> object:
             self.received = params
@@ -980,8 +1046,11 @@ async def test_unified_abandoned_read_releases_its_watermark(
 
 
 class _CompactingSession(_RecordingSession):
-    def __init__(self) -> None:
+    def __init__(
+        self, also_buffered: tuple[harness_session_protocol.JsonObject, ...] = ()
+    ) -> None:
         super().__init__()
+        self.also_buffered = also_buffered
         self.watermark = 0
         self.completed: list[tuple[int, str]] = []
         self.events_started = asyncio.Event()
@@ -1029,14 +1098,25 @@ class _CompactingSession(_RecordingSession):
             "state": state,
             "eventId": watermark,
         }
+        buffered = [event]
+        for extra in self.also_buffered:
+            self.watermark += 1
+            buffered.append({**extra, "eventId": self.watermark})
+        self.also_buffered = ()
+        last_event_id = self.watermark
 
         def after_response() -> None:
             self.completed.append((watermark, "sent"))
-            self.events.put_nowait(event)
+            for buffered_event in buffered:
+                self.events.put_nowait(buffered_event)
 
         return _SessionBackendResult(
-            response={"summary": "summary", "state": state, "last_event_id": watermark},
-            buffered_events=(event,),
+            response={
+                "summary": "summary",
+                "state": state,
+                "last_event_id": last_event_id,
+            },
+            buffered_events=tuple(buffered),
             after_response=after_response,
             on_response_abandoned=lambda: self.completed.append((
                 watermark,
@@ -1131,6 +1211,69 @@ async def test_unified_abandonment_does_not_block_pending_compaction_response(
 
 
 @pytest.mark.asyncio
+async def test_unified_compaction_delivers_a_notice_buffered_with_its_updates(
+    tmp_path: Path,
+) -> None:
+    # Prepare
+    session = _CompactingSession(
+        also_buffered=(
+            {
+                "type": "notice",
+                "level": "warning",
+                "code": "compaction_summary_cut_off",
+                "message": "The summary was cut off.",
+            },
+        )
+    )
+    adapter = _stats_adapter(tmp_path, session)
+    params = SessionCompactParams(session_id=session.session_id)
+    subscription = await adapter.subscribe(
+        SessionReadParams(session_id=session.session_id)
+    )
+    warnings: list[str | None] = []
+
+    async def consume_events() -> None:
+        async for backend_event in subscription.events:
+            if isinstance(backend_event.event, ServerWarning):
+                warnings.append(backend_event.event.params.warning.code)
+
+    consumer = asyncio.create_task(consume_events())
+    await asyncio.wait_for(session.events_started.wait(), timeout=1)
+    try:
+        # Do
+        compaction = await adapter.compact(params)
+        assert compaction.after_response is not None
+        compaction.after_response()
+        await asyncio.wait_for(adapter.flush_events(), timeout=1)
+
+        # Assert
+        assert warnings == ["compaction_summary_cut_off"]
+        assert (await adapter.compact(params)).response.summary == "summary"
+    finally:
+        consumer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await consumer
+
+
+@pytest.mark.asyncio
+async def test_unified_compaction_failing_after_the_harness_compacted_releases_events(
+    tmp_path: Path,
+) -> None:
+    # Prepare
+    session = _CompactingSession(also_buffered=({"type": "session_state_updated"},))
+    adapter = _stats_adapter(tmp_path, session)
+    params = SessionCompactParams(session_id=session.session_id)
+
+    # Do
+    with pytest.raises(SessionBackendError):
+        await adapter.compact(params)
+
+    # Assert
+    assert session.completed == [(1, "sent")]
+    assert (await adapter.compact(params)).response.summary == "summary"
+
+
+@pytest.mark.asyncio
 async def test_unified_flush_events_does_not_wait_before_event_stream_starts(
     tmp_path: Path,
 ) -> None:
@@ -1151,6 +1294,9 @@ async def test_unified_flush_events_does_not_wait_before_event_stream_starts(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         def pin(self, _pin: SessionPin) -> str | None:
             return None
@@ -1217,6 +1363,9 @@ async def test_unified_flush_events_tracks_queue_event_watermarks(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         def __init__(self) -> None:
             self.events_started = asyncio.Event()
@@ -1328,6 +1477,9 @@ async def test_unified_adapter_preserves_canonical_queue_entries(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         def pin(self, pin: SessionPin) -> str | None:
             return self._pins.get(pin)
@@ -1814,6 +1966,9 @@ async def test_unified_root_subscription_translates_child_session_events(
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
 
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
+
         def pin(self, _pin: SessionPin) -> str | None:
             return None
 
@@ -2149,6 +2304,9 @@ async def test_unified_adapter_live_registration_overwrites_a_seeded_child(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         def pin(self, _pin: SessionPin) -> str | None:
             return None
@@ -2509,6 +2667,9 @@ async def test_unified_flush_events_returns_after_an_event_carrying_a_signal(
 
         def configure_turn_settlement(self, settle: object) -> None:
             """Unused: no queued turn is promoted here."""
+
+        def configure_waiting_turn_steer(self, steered: object) -> None:
+            """Unused: no queued input joins a waiting turn here."""
 
         def pin(self, _pin: SessionPin) -> str | None:
             return None

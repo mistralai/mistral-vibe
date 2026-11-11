@@ -13,12 +13,14 @@ static MOUSE_OFF: AtomicBool = AtomicBool::new(false);
 
 /// Stdout of `tmux <args>`; `None` when tmux is missing or fails.
 pub fn run(args: &[&str]) -> Option<String> {
-    let output = Command::new("tmux")
-        .args(args)
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let child = crate::job_control::spawn(
+        Command::new("tmux")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    );
+    let output = child.ok()?.wait_with_output().ok()?;
     output
         .status
         .success()

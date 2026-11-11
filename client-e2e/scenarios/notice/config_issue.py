@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # The config issue rides the startup runtime snapshot, not a server event.
 handshake = {
@@ -19,6 +19,6 @@ handshake = {
 }
 
 # A lone keystroke yields a settled frame.
-timeline: Timeline = ["a"]
+timeline: Timeline = ["a", take_snapshot()]
 
 screen_contains = ("Failed to load: bad frontmatter",)

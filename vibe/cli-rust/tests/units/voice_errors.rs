@@ -6,7 +6,7 @@ use futures::stream;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::{Error, Message};
-use vibe_rs::app::App;
+use vibe_rs::app::{App, Severity};
 use vibe_rs::voice::signal::RecordingSignal;
 use vibe_rs::voice::transcribe::read_events;
 use vibe_rs::voice::{TranscribeState, VoiceEvent};
@@ -95,10 +95,12 @@ fn transcription_errors_have_the_failure_prefix_and_settle_recording() {
     app.apply_voice_event(VoiceEvent::Error(NO_AUDIO.to_owned()));
 
     assert!(!app.recording_active());
+    let expected = format!("Voice transcription failed: {NO_AUDIO}");
     assert_eq!(
-        crate::feedback_support::errors(&app),
-        [format!("Voice transcription failed: {NO_AUDIO}")]
+        crate::feedback_support::notice(&app),
+        Some((Severity::Error, expected.as_str()))
     );
+    assert!(crate::feedback_support::errors(&app).is_empty());
 }
 
 #[tokio::test]

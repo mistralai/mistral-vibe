@@ -16,7 +16,7 @@ pub fn offset_at(app: &App, at: (u16, u16)) -> Option<usize> {
     let area = app.view.input_area;
     let top = area.y.saturating_add(1);
     let bottom = area.bottom().saturating_sub(1);
-    if at.0 < area.x.saturating_add(2) || at.0 >= area.right().saturating_sub(1) {
+    if at.0 < area.x.saturating_add(2) || at.0 >= area.right() {
         return None;
     }
     if at.1 < top || at.1 >= bottom {

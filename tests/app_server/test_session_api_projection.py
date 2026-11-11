@@ -404,6 +404,32 @@ def test_a_tool_result_changes_only_the_effect_it_settles() -> None:
     assert state["display"]["message"] == "1 line from src/app.py"
 
 
+def test_a_tool_result_with_a_status_a_newer_host_added_shows_completed() -> None:
+    """*Prepare*: A tool call and its result, whose generation status is one
+        this reader does not know.
+    *Do*: Project the call with its result.
+    *Assert*: The effect is completed, as a message with that status is.
+    """
+    # Prepare
+    result = ToolResultHistoryEntry.model_validate({
+        **_completed_result().model_dump(by_alias=True),
+        "generationStatus": "archived",
+    })
+    message = MessageHistoryEntry.model_validate({
+        **_skill_message().model_dump(by_alias=True),
+        "generationStatus": "archived",
+    })
+
+    # Do
+    effect = _session_api_projection._raw_entry(_tool_call(), SESSION_ID, result)
+    shown = _session_api_projection._raw_entry(message, SESSION_ID, None)
+
+    # Assert
+    assert str(result.generation_status) == "archived"
+    assert effect is not None and shown is not None
+    assert effect["generationStatus"] == shown["generationStatus"] == "completed"
+
+
 def test_a_skill_invocation_adds_its_message_and_skill_effect() -> None:
     """*Prepare*: An empty projection.
     *Do*: Apply the user message that invokes the lint skill.

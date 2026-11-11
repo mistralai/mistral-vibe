@@ -28,7 +28,6 @@ timeline: Timeline = [
     "\x1b[A",  # Up on Main: focus returns to the input
     "X",
 ]
-capture_steps = {2, 3, 4, 5}
 
 # A surviving selection would be replaced by the typed key: "draft X".
 screen_contains = ("draft Xtext",)

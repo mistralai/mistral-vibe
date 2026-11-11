@@ -7,22 +7,27 @@ use ratatui::text::{Line, Span};
 mod bordered;
 mod effect;
 mod effect_body;
+mod loop_prompt;
 mod message;
 mod notice;
+mod reasoning;
 mod startup;
 mod status;
 mod user;
+mod user_text;
 
 use super::super::markdown::{self, LinkedLines};
-use super::super::{pulse, theme};
-use crate::selection::{fold, Fold};
+use super::super::theme;
+use crate::selection::Fold;
 use crate::transcript::TranscriptEntry;
 use bordered::{inset_prefix, prefix_group_body, push_group_header, BORDER_WIDTH};
 use effect::{push_effect, EffectView};
 use message::message_text;
 use notice::push_notice;
+use reasoning::push_reasoning;
 use status::push_checkpoint;
 use user::push_queue_header;
+pub(super) use user_text::sticky;
 
 /// Per-frame queue state a queued prompt renders with.
 #[derive(Clone, Copy, Default)]
@@ -87,6 +92,12 @@ impl RenderedEntry {
             .map_or(self.lines.folds(), |prepared| prepared.linked().folds())
     }
 
+    /// Rows above the header a click toggles: an ungrouped entry's leading gaps.
+    pub fn header_offset(&self, grouped: bool) -> u16 {
+        let gaps = self.gaps().iter().enumerate();
+        (!grouped as usize * gaps.take_while(|(row, gap)| row == *gap).count()) as u16
+    }
+
     pub fn gaps(&self) -> &[usize] {
         self.prepared
             .as_ref()
@@ -134,7 +145,9 @@ pub(super) fn render(
 ) -> RenderedEntry {
     use crate::server::HistoryEntry as H;
     if let H::Message(value) = entry.entry {
-        let mut rendered = message::render(entry, value, width, queue, rewind, pulse_frame, cache);
+        let (selected, expanded) = (queue.selected || rewind, expansion.entry);
+        let mut rendered =
+            message::render(entry, value, width, selected, expanded, pulse_frame, cache);
         if entry.queue_header {
             let mut header = LinkedLines::default();
             push_queue_header(&mut header, width, queue.paused);
@@ -239,41 +252,6 @@ pub(super) fn diff_gutter(entry: &TranscriptEntry<'_>, expanded: bool) -> Option
 fn push_group_gap(lines: &mut LinkedLines, grouped: bool) {
     if !grouped {
         lines.push_gap();
-    }
-}
-
-fn push_reasoning(
-    lines: &mut LinkedLines,
-    text: &str,
-    in_progress: bool,
-    local: bool,
-    expanded: bool,
-    pulse_frame: usize,
-    width: u16,
-) {
-    let marker = if in_progress {
-        pulse::glyph(pulse_frame).to_string()
-    } else if local {
-        "■".to_string()
-    } else {
-        expand_marker(expanded).to_string()
-    };
-    let label = if in_progress { "Thinking" } else { "Thought" };
-    let style = theme::muted_style();
-    lines.push(Line::from(vec![
-        Span::styled(format!("{marker} "), style),
-        Span::styled(label, style),
-    ]));
-    if !expanded {
-        return;
-    }
-    // `.reasoning-message-content` pads two cells on each side.
-    let body_width = width.saturating_sub(4) as usize;
-    for line in text.lines() {
-        for (row, gap) in fold::wrap_hard(line, body_width) {
-            let row = Line::from(Span::styled(format!("  {row}"), style));
-            lines.push_folded(row, Fold::hung(gap, 2));
-        }
     }
 }
 

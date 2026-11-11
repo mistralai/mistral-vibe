@@ -96,14 +96,9 @@ pub async fn onboarding_round(run: EventLoop, provider: Option<String>) -> Resul
     let (client, child, notifications, crash_rx) = match Client::spawn(run.launch.clone()).await {
         Ok(spawned) => spawned,
         Err(error) => {
-            // The Sentry bridge only carries ERROR records, so the startup
-            // window's own failure sites log their own fatal errors.
-            tracing::error!(
-                vibe_boundary = "startup",
-                fatal = true,
-                "respawn app-server: {error:#}"
-            );
-            return Err(error.context("respawn app-server"));
+            let error = error.context("respawn app-server");
+            crate::startup::failure::log_spawn(&error);
+            return Err(error);
         }
     };
     let client = Arc::new(client);

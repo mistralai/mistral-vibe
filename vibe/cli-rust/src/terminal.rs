@@ -1,6 +1,8 @@
 //! Terminal mode lifecycle.
 
-use crossterm::cursor::{Hide, Show};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crossterm::cursor::{Hide, SetCursorStyle, Show};
 use crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -29,6 +31,7 @@ pub struct TerminalGuard {
 pub fn try_init() -> std::io::Result<Tui> {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        set_bar_cursor(false);
         ratatui::restore();
         hook(info);
     }));
@@ -112,8 +115,23 @@ pub fn hold_cell_reports(held: bool) {
     }
 }
 
+/// Whether the terminal cursor is bar-shaped, as vim Insert mode shows it.
+static BAR_CURSOR: AtomicBool = AtomicBool::new(false);
+
+fn set_bar_cursor(bar: bool) {
+    if BAR_CURSOR.swap(bar, Ordering::Relaxed) == bar {
+        return;
+    }
+    let style = match bar {
+        true => SetCursorStyle::SteadyBar,
+        false => SetCursorStyle::DefaultUserShape,
+    };
+    let _ = execute!(std::io::stdout(), style);
+}
+
 /// Draw `app`, then park the hidden cursor on its caret, else the static bottom-left cell.
 pub fn draw(terminal: &mut Tui, app: &mut crate::app::App) -> std::io::Result<()> {
+    set_bar_cursor(crate::vim::inserting(app));
     let area = terminal.draw(|frame| app.draw(frame))?.area;
     let bottom_left = ratatui::layout::Position::new(area.x, area.bottom().saturating_sub(1));
     let caret = app.view.cursor_position.take().unwrap_or(bottom_left);
@@ -200,6 +218,7 @@ impl TerminalGuard {
             let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
         }
         crate::pointer::emit(crate::pointer::Shape::Default);
+        set_bar_cursor(false);
         if crate::mouse::pixels::disable() {
             let _ = execute!(std::io::stdout(), Print(crate::mouse::pixels::DISABLE));
         }

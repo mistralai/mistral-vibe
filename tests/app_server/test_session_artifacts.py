@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import json
 import logging
 from pathlib import Path
@@ -76,10 +77,10 @@ GLAB_STDOUT = "https://gitlab.com/team/project/-/merge_requests/7\n"
 
 
 def _write_metadata(
-    session_dir: Path, *, artifacts: list | None = None
+    session_dir: Path, *, artifacts: list | None = None, session_id: str = SESSION_ID
 ) -> SessionMetadata:
     metadata = SessionMetadata(
-        session_id=SESSION_ID,
+        session_id=session_id,
         start_time="2026-10-13T10:00:00+00:00",
         end_time=None,
         git_commit=None,
@@ -162,13 +163,14 @@ class TestCreatesArtifact:
         # knows it.
         github.snapshot = _snapshot(title="feat: heredoc title")
         command = "gh pr create --title \"$(cat <<'EOF'\nfeat: heredoc title\nEOF\n)\""
-        artifact = await service.on_shell_effect(command, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(command, GH_STDOUT, "", "completed")
         assert to_public_artifact(artifact).display_title == "feat: heredoc title"
 
     @pytest.mark.asyncio
     async def test_github_pr(self, service: SessionArtifactService):
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         assert isinstance(artifact, GitHubPullRequestArtifact)
         assert artifact.provider == "github"
         assert artifact.session_id == SESSION_ID
@@ -185,23 +187,54 @@ class TestCreatesArtifact:
         assert artifact.details.state == "open"
 
     @pytest.mark.asyncio
+    async def test_loop_creating_two_prs_records_both(
+        self, service: SessionArtifactService
+    ):
+        artifacts = await service.on_shell_effect(
+            "for b in a b; do gh pr create --head $b; done",
+            "https://github.com/mistralai/vibe/pull/1\n"
+            "https://github.com/mistralai/vibe/pull/2\n",
+            "",
+            "completed",
+        )
+        assert [a.external_key for a in artifacts] == [
+            "github.com/mistralai/vibe/pull/1",
+            "github.com/mistralai/vibe/pull/2",
+        ]
+        assert len(service.list_artifacts()) == 2
+
+    @pytest.mark.asyncio
+    async def test_listed_prs_before_a_creation_are_not_recorded(
+        self, service: SessionArtifactService
+    ):
+        artifacts = await service.on_shell_effect(
+            "gh pr list --json url --jq '.[].url' && gh pr create --fill",
+            "https://github.com/mistralai/vibe/pull/1\n"
+            "https://github.com/mistralai/vibe/pull/2\n"
+            "https://github.com/mistralai/vibe/pull/3\n",
+            "",
+            "completed",
+        )
+        assert [a.external_key for a in artifacts] == [
+            "github.com/mistralai/vibe/pull/3"
+        ]
+
+    @pytest.mark.asyncio
     async def test_github_pr_draft(self, service: SessionArtifactService):
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             "gh pr create --draft", GH_STDOUT, "", "completed"
         )
-        assert artifact is not None
         assert artifact.details is not None
         assert artifact.details.state == "draft"
 
     @pytest.mark.asyncio
     async def test_github_enterprise_host(self, service: SessionArtifactService):
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             GH_COMMAND,
             "https://github.mycompany.com/org/repo/pull/9\n",
             "",
             "completed",
         )
-        assert artifact is not None
         assert artifact.external_key == "github.mycompany.com/org/repo/pull/9"
         assert artifact.details is not None
         assert artifact.details.repo_host == "github.mycompany.com"
@@ -215,7 +248,7 @@ class TestCreatesArtifact:
             "vibe.app_server._session_artifacts.resolve_gitlab_repo_id",
             AsyncMock(return_value=4242),
         )
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             GLAB_COMMAND, GLAB_STDOUT, "", "completed"
         )
         assert isinstance(artifact, GitLabMergeRequestArtifact)
@@ -238,7 +271,7 @@ class TestCreatesArtifact:
             "vibe.app_server._session_artifacts.resolve_gitlab_repo_id",
             AsyncMock(return_value=None),
         )
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             GLAB_COMMAND, GLAB_STDOUT, "", "completed"
         )
         assert isinstance(artifact, GitLabMergeRequestArtifact)
@@ -255,10 +288,9 @@ class TestCreatesArtifact:
             "vibe.app_server._session_artifacts.resolve_gitlab_repo_id",
             AsyncMock(return_value=None),
         )
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             'glab mr create -d "my description"', GLAB_STDOUT, "", "completed"
         )
-        assert artifact is not None
         assert artifact.details is not None
         assert artifact.details.state == "open"
 
@@ -266,37 +298,60 @@ class TestCreatesArtifact:
     async def test_github_enterprise_uppercase_host_lowercased(
         self, service: SessionArtifactService
     ):
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             GH_COMMAND, "https://GitHub.COM/Org/Repo/pull/5\n", "", "completed"
         )
-        assert artifact is not None
         assert artifact.external_key == "github.com/org/repo/pull/5"
 
     @pytest.mark.asyncio
     async def test_artifact_id_is_uuid(self, service: SessionArtifactService):
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
-        # Raises ValueError if not a valid UUID; v7 keeps ids time-ordered.
-        assert UUID(artifact.id).version == 7
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
+        assert UUID(artifact.id).version == 5
+
+    @pytest.mark.asyncio
+    async def test_two_services_give_the_same_pr_the_same_id(self, session_dir: Path):
+        first = SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
+        second = SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
+
+        [a] = await first.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
+        [b] = await second.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
+
+        assert a.id == b.id
+
+    @pytest.mark.asyncio
+    async def test_another_session_gets_another_id(self, tmp_path: Path):
+        ids = []
+        for session_id in (SESSION_ID, "01929a3b-7c4d-7e5f-8a9b-0c1d2e3f4a5c"):
+            session_dir = tmp_path / session_id
+            session_dir.mkdir()
+            service = SessionArtifactService(
+                session_id=session_id, session_dir=session_dir
+            )
+            [artifact] = await service.on_shell_effect(
+                GH_COMMAND, GH_STDOUT, "", "completed"
+            )
+            ids.append(artifact.id)
+
+        assert ids[0] != ids[1]
 
     @pytest.mark.asyncio
     async def test_url_in_stderr(self, service: SessionArtifactService):
         """gh prints the URL on stderr in some flows."""
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             GH_COMMAND,
             "",
             "remote: View the PR at https://github.com/org/repo/pull/3\n",
             "completed",
         )
-        assert artifact is not None
         assert artifact.external_key == "github.com/org/repo/pull/3"
 
     @pytest.mark.asyncio
     async def test_no_title_in_command(self, service: SessionArtifactService):
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             "gh pr create --fill", GH_STDOUT, "", "completed"
         )
-        assert artifact is not None
         assert artifact.display_title is None
 
 
@@ -307,14 +362,14 @@ class TestIgnoresNonArtifacts:
             await service.on_shell_effect(
                 "git push origin main", GH_STDOUT, "", "completed"
             )
-            is None
+            == []
         )
 
     @pytest.mark.asyncio
     async def test_pr_list_command(self, service: SessionArtifactService):
         assert (
             await service.on_shell_effect("gh pr list", GH_STDOUT, "", "completed")
-            is None
+            == []
         )
 
     @pytest.mark.asyncio
@@ -322,13 +377,12 @@ class TestIgnoresNonArtifacts:
     async def test_non_terminal_status(
         self, service: SessionArtifactService, status: str
     ):
-        assert await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", status) is None
+        assert await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", status) == []
 
     @pytest.mark.asyncio
     async def test_failed_status_still_detected(self, service: SessionArtifactService):
         """A non-zero exit can still carry the URL (e.g. wrapper post-hook failed)."""
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "failed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "failed")
 
     @pytest.mark.asyncio
     async def test_no_url_in_output(self, service: SessionArtifactService):
@@ -336,22 +390,36 @@ class TestIgnoresNonArtifacts:
             await service.on_shell_effect(
                 GH_COMMAND, "Creating pull request...", "", "completed"
             )
-            is None
+            == []
         )
 
     @pytest.mark.asyncio
     async def test_empty_command(self, service: SessionArtifactService):
-        assert await service.on_shell_effect("", GH_STDOUT, "", "completed") is None
+        assert await service.on_shell_effect("", GH_STDOUT, "", "completed") == []
 
 
 class TestDedup:
     @pytest.mark.asyncio
     async def test_duplicate_pr_not_recreated(self, service: SessionArtifactService):
-        first = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert first is not None
+        [first] = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
         second = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert second is None
+        assert second == []
         assert len(service.list_artifacts()) == 1
+
+    @pytest.mark.asyncio
+    async def test_pr_stored_under_another_key_form_not_recreated(
+        self, service: SessionArtifactService
+    ):
+        [first] = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
+        legacy = first.model_copy(
+            update={"external_key": "github.com/MistralAI/vibe/pull/123"}
+        )
+        service._artifacts = {legacy.external_key: legacy}
+
+        second = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
+
+        assert second == []
+        assert [a.id for a in service.list_artifacts()] == [first.id]
 
     @pytest.mark.asyncio
     async def test_same_pr_different_title_not_recreated(
@@ -361,18 +429,16 @@ class TestDedup:
         second = await service.on_shell_effect(
             "gh pr create --title 'Other'", GH_STDOUT, "", "completed"
         )
-        assert second is None
+        assert second == []
 
     @pytest.mark.asyncio
     async def test_two_different_prs_both_recorded(
         self, service: SessionArtifactService
     ):
-        first = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        second = await service.on_shell_effect(
+        await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
+        [_] = await service.on_shell_effect(
             GH_COMMAND, "https://github.com/mistralai/vibe/pull/124\n", "", "completed"
         )
-        assert first is not None
-        assert second is not None
         assert len(service.list_artifacts()) == 2
 
     @pytest.mark.asyncio
@@ -384,15 +450,14 @@ class TestDedup:
             "vibe.app_server._session_artifacts.resolve_gitlab_repo_id",
             AsyncMock(side_effect=[None, 4242]),
         )
-        first = await service.on_shell_effect(
+        [first] = await service.on_shell_effect(
             GLAB_COMMAND, GLAB_STDOUT, "", "completed"
         )
         second = await service.on_shell_effect(
             GLAB_COMMAND, GLAB_STDOUT, "", "completed"
         )
-        assert first is not None
         assert first.external_key == "gitlab.com/team/project/-/merge_requests/7"
-        assert second is None
+        assert second == []
         assert len(service.list_artifacts()) == 1
 
     @pytest.mark.asyncio
@@ -404,15 +469,14 @@ class TestDedup:
             "vibe.app_server._session_artifacts.resolve_gitlab_repo_id",
             AsyncMock(side_effect=[4242, None]),
         )
-        first = await service.on_shell_effect(
+        [first] = await service.on_shell_effect(
             GLAB_COMMAND, GLAB_STDOUT, "", "completed"
         )
         second = await service.on_shell_effect(
             GLAB_COMMAND, GLAB_STDOUT, "", "completed"
         )
-        assert first is not None
         assert first.external_key == "gitlab.com/4242/merge_requests/7"
-        assert second is None
+        assert second == []
         assert len(service.list_artifacts()) == 1
 
     @pytest.mark.asyncio
@@ -427,8 +491,9 @@ class TestDedup:
         recording — no persist, no created notification.
         """
         github.snapshot = _snapshot()
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         # The enrichment fetch succeeded, so the snapshot really applies.
         details = to_public_artifact(artifact).details
         assert details is not None
@@ -436,17 +501,16 @@ class TestDedup:
         assert len(service.list_artifacts()) == 1
         # A genuine duplicate is still deduplicated.
         second = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert second is None
+        assert second == []
         assert len(service.list_artifacts()) == 1
 
 
 class TestLoadAndList:
     @pytest.mark.asyncio
     async def test_load_from_metadata(self, session_dir: Path):
-        existing = await SessionArtifactService(
+        [existing] = await SessionArtifactService(
             session_id=SESSION_ID, session_dir=session_dir
         ).on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert existing is not None
 
         # Simulate a resume: fresh service seeded from the persisted metadata.
         metadata = SessionLoader.load_metadata(session_dir)
@@ -468,8 +532,7 @@ class TestLoadAndList:
         resumed.load(SessionLoader.load_metadata(session_dir))
 
         assert (
-            await resumed.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-            is None
+            await resumed.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed") == []
         )
         assert len(resumed.list_artifacts()) == 1
 
@@ -492,8 +555,9 @@ class TestPersistence:
         self, service: SessionArtifactService, session_dir: Path
     ):
         """Artifacts land in meta.json and re-parse through SessionMetadata."""
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
 
         metadata = SessionLoader.load_metadata(session_dir)
         assert len(metadata.artifacts) == 1
@@ -527,8 +591,9 @@ class TestPersistence:
         (session_dir / "meta.json").write_text("not json {{{", encoding="utf-8")
         service = SessionArtifactService(session_id=SESSION_ID, session_dir=session_dir)
 
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         # In-memory copy survives even though persistence failed.
         assert len(service.list_artifacts()) == 1
 
@@ -539,8 +604,9 @@ class TestPersistence:
         empty_dir.mkdir()
         service = SessionArtifactService(session_id=SESSION_ID, session_dir=empty_dir)
 
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         assert len(service.list_artifacts()) == 1
 
     @pytest.mark.asyncio
@@ -609,8 +675,9 @@ def _require_session(session_id: str) -> None:
 class TestToPublicArtifact:
     @pytest.mark.asyncio
     async def test_github(self, service: SessionArtifactService):
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         public = to_public_artifact(artifact)
         assert public.id == artifact.id
         assert public.session_id == SESSION_ID
@@ -633,10 +700,9 @@ class TestToPublicArtifact:
             "vibe.app_server._session_artifacts.resolve_gitlab_repo_id",
             AsyncMock(return_value=4242),
         )
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             GLAB_COMMAND, GLAB_STDOUT, "", "completed"
         )
-        assert artifact is not None
         public = to_public_artifact(artifact)
         assert public.provider == "gitlab"
         assert isinstance(public.details, PublicGitLabMergeRequestDetails)
@@ -647,8 +713,9 @@ class TestToPublicArtifact:
     @pytest.mark.asyncio
     async def test_wire_dump_is_camel_case(self, service: SessionArtifactService):
         """The serialized wire form uses the Code Web contract's camelCase keys."""
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         wire = to_public_artifact(artifact).model_dump(mode="json", by_alias=True)
         assert wire["sessionId"] == SESSION_ID
         assert wire["externalKey"] == "github.com/mistralai/vibe/pull/123"
@@ -675,11 +742,13 @@ class TestToPublicArtifact:
             merge_status="blocked",
             optional_checks_state="pass",
         )
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
 
         wire = to_public_artifact(artifact).model_dump(mode="json", by_alias=True)
         assert wire["details"]["prStatus"] == "action_needed"
+        assert wire["details"]["prStatusReason"] == "checks_failing"
         assert wire["details"]["checksStatus"] == "failing"
         assert wire["details"]["optionalChecksStatus"] == "passing"
         assert wire["details"]["reviewDecision"] == "approved"
@@ -692,8 +761,9 @@ class TestToPublicArtifact:
     @pytest.mark.asyncio
     async def test_details_none(self, service: SessionArtifactService):
         """An artifact stored without details projects without details."""
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         stripped = artifact.model_copy(update={"details": None})
         assert to_public_artifact(stripped).details is None
 
@@ -734,8 +804,9 @@ class TestArtifactRequestHandler:
     async def test_mark_viewed_marks_persists_and_emits(
         self, service: SessionArtifactService, session_dir: Path
     ):
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         emitted: list[SessionArtifact] = []
 
         async def emit_updated(updated: SessionArtifact) -> None:
@@ -762,8 +833,9 @@ class TestArtifactRequestHandler:
     async def test_mark_viewed_idempotent_keeps_original_viewed_at(
         self, service: SessionArtifactService
     ):
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         emitted: list[SessionArtifact] = []
 
         async def emit_updated(updated: SessionArtifact) -> None:
@@ -853,8 +925,9 @@ def _artifact_notification(method: str, artifact, sequence: int) -> Notification
 class TestArtifactEvents:
     @pytest.mark.asyncio
     async def test_parse_artifacts_created(self, service: SessionArtifactService):
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         notification = _artifact_notification(
             "artifacts/created", to_public_artifact(artifact), sequence=1
         )
@@ -865,8 +938,9 @@ class TestArtifactEvents:
     @pytest.mark.asyncio
     async def test_projection_consume_created(self, service: SessionArtifactService):
         """The sequenced event stream reduces artifacts/created to ArtifactCreated."""
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         projection = _projection()
         event = projection.consume(
             _artifact_notification(
@@ -879,8 +953,9 @@ class TestArtifactEvents:
 
     @pytest.mark.asyncio
     async def test_projection_consume_updated(self, service: SessionArtifactService):
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         public = to_public_artifact(artifact).model_copy(
             update={"viewed_at": "2026-10-13T11:00:00+00:00"}
         )
@@ -894,8 +969,9 @@ class TestArtifactEvents:
     @pytest.mark.asyncio
     async def test_projection_enforces_sequence(self, service: SessionArtifactService):
         """Artifact notifications participate in the session event sequence."""
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         projection = _projection()
         # A gap (sequence 2 with nothing at 1) is a sequence error, and the
         # client resyncs — same as any other sequenced event.
@@ -1047,10 +1123,10 @@ class _ArtifactSession:
     def configure_turn_settlement(self, settle: Any) -> None:
         self.settle_configuration = settle
 
-    def pin(self, _pin: Any) -> None:
-        return None
+    def configure_waiting_turn_steer(self, steered: Any) -> None:
+        """Unused: no queued input joins a waiting turn here."""
 
-    def publish_notice(self, _notice: Any) -> None:
+    def pin(self, _pin: Any) -> None:
         return None
 
     async def read(self, _params: Any) -> Any:
@@ -1093,7 +1169,7 @@ def _artifact_adapter(
     """A real UnifiedHarnessBackendAdapter over inert context doubles.
 
     Mirrors the inert adapter of test_unified_harness_backend_adapter with the
-    ``experimental_enable_pr_monitoring`` flag (gates both Phase 1 detection
+    ``enable_pr_monitoring`` setting (gates both Phase 1 detection
     and Phase 2 discovery) and the session cwd configurable; the artifact
     service under test is real.
     """
@@ -1107,7 +1183,7 @@ def _artifact_adapter(
     )
 
     orchestrator = FakeConfigOrchestrator(
-        build_test_vibe_config(experimental_enable_pr_monitoring=pr_monitoring)
+        build_test_vibe_config(enable_pr_monitoring=pr_monitoring)
     )
     context = UnifiedSessionContext(
         storage_root=str(tmp_path),
@@ -1127,14 +1203,18 @@ def _artifact_adapter(
         mcp_authorization_provider=MCPAuthenticationService(),
         plugin_mcp=PluginMCPCatalog(MCPRegistry(), MCPAuthenticationService()),
         mcp_cache_root=str(tmp_path / "mcp-descriptors"),
+        mcp_discovery_flights=fake_process_services().mcp_discovery.flights(),
         mcp_enable_system_trust_store=False,
         org_config_service=fake_process_services().org_config,
+        experiments_service=fake_process_services().experiments,
+        model_catalog_service=fake_process_services().model_catalog,
     )
     derivation = UnifiedRuntimeDerivation(
         runtime=cast(Any, object()),
         core_config=_core_config(SESSION_ID),
         adapter_config=LocalRuntimeAdapterConfig(),
         skill_payloads={},
+        registry_versions={},
     )
     return UnifiedHarnessBackendAdapter(
         cast(Any, _ArtifactSession(SESSION_ID, cwd=cwd, ephemeral=ephemeral)),
@@ -1350,6 +1430,19 @@ class TestCollectPendingShellEffects:
         assert adapter._processed_effect_ids == set()
 
     @pytest.mark.asyncio
+    async def test_sandboxed_session_collects_nothing(self, tmp_path: Path) -> None:
+        """Local only, like discovery: the provider reads would run on the host."""
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True)
+        adapter._adapter_config = cast(Any, SimpleNamespace(sandbox=object()))
+        adapter._collect_pending_shell_effects(
+            _state_with_entries(
+                _shell_effect_entry("e-1", GH_COMMAND, stdout=GH_STDOUT)
+            )
+        )
+        assert adapter._pending_shell_effects == []
+        assert adapter._processed_effect_ids == set()
+
+    @pytest.mark.asyncio
     async def test_collects_output_text_fallback(self, tmp_path: Path) -> None:
         """The state's combined transcript feeds detection when output is empty."""
         adapter = _artifact_adapter(tmp_path)
@@ -1395,6 +1488,72 @@ class TestDrainPendingShellEffects:
         await adapter._drain_pending_shell_effects()
         assert len(adapter._artifact_service.list_artifacts()) == 1
         assert [method for method, _ in services.notifications] == ["artifacts/created"]
+
+    @pytest.mark.asyncio
+    async def test_turning_monitoring_off_releases_the_watch(
+        self, tmp_path: Path, github: _GitHub
+    ) -> None:
+        """An org config or a reload that turns it off stops the polling of
+        the PRs the session already watches, at the next refresh.
+        """
+        from vibe.app_server._pull_request_cache import pull_request_cache
+
+        adapter = _artifact_adapter(tmp_path)
+        adapter._pending_shell_effects.append(
+            _pending_effect("e-1", GH_COMMAND, stdout=GH_STDOUT)
+        )
+        try:
+            await adapter._drain_pending_shell_effects()
+            assert adapter in pull_request_cache()._owners
+
+            await adapter._context.config_orchestrator.set_field(
+                "/enable_pr_monitoring", False, target_layer="overrides"
+            )
+            adapter.refresh_pull_requests(full=True)
+
+            assert adapter not in pull_request_cache()._owners
+            assert not adapter._watching_pull_requests
+            # The cache's passes only read PRs still in ``_details``.
+            watched = [key for key, _details in adapter._artifact_service.watched()]
+            assert watched
+            assert not any(key in pull_request_cache()._details for key in watched)
+        finally:
+            await _close_cache()
+
+    @pytest.mark.asyncio
+    async def test_turning_monitoring_back_on_restarts_the_watch(
+        self, tmp_path: Path, github: _GitHub
+    ) -> None:
+        """A turn end or ``artifacts/sync`` after it is back on watches the
+        session's PRs again, without waiting for a new PR or a resume.
+        """
+        from vibe.app_server._pull_request_cache import pull_request_cache
+
+        adapter = _artifact_adapter(tmp_path)
+        adapter._pending_shell_effects.append(
+            _pending_effect("e-1", GH_COMMAND, stdout=GH_STDOUT)
+        )
+        orchestrator = adapter._context.config_orchestrator
+        try:
+            await adapter._drain_pending_shell_effects()
+            await orchestrator.set_field(
+                "/enable_pr_monitoring", False, target_layer="overrides"
+            )
+            adapter.refresh_pull_requests(full=True)
+            assert adapter not in pull_request_cache()._owners
+
+            await orchestrator.set_field(
+                "/enable_pr_monitoring", True, target_layer="overrides"
+            )
+            adapter.refresh_pull_requests(full=False)
+
+            assert adapter._watching_pull_requests
+            assert adapter in pull_request_cache()._owners
+            watched = [key for key, _details in adapter._artifact_service.watched()]
+            assert watched
+            assert all(key in pull_request_cache()._details for key in watched)
+        finally:
+            await _close_cache()
 
     @pytest.mark.asyncio
     async def test_collect_then_drain_detects_gitlab_mr(
@@ -1713,12 +1872,15 @@ class TestAdapterDispatchArtifacts:
         assert listed.response.artifacts[0].viewed_at is not None
 
 
-def _artifact_host(tmp_path: Path, *, pr_monitoring: bool = False) -> Any:
+def _artifact_host(
+    tmp_path: Path, *, pr_monitoring: bool | Callable[[], bool] = False
+) -> Any:
     """A real host adapter over an inert harness, rooted at ``tmp_path``.
 
     The cold artifact path reads ``<storage_root>/unified/<session_id>/
     meta.json`` through the read context, so the only context field that
-    matters is the storage root.
+    matters is the storage root. ``pr_monitoring`` may be a callable, read at
+    each session read, to change the setting between reads.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from vibe.app_server._unified_harness_backend_adapter import (
@@ -1727,10 +1889,11 @@ def _artifact_host(tmp_path: Path, *, pr_monitoring: bool = False) -> Any:
     )
 
     async def build_read_context(options: Any) -> UnifiedReadContext:
+        enabled = pr_monitoring() if callable(pr_monitoring) else pr_monitoring
         return UnifiedReadContext(
             storage_root=str(tmp_path),
             config_orchestrator=FakeConfigOrchestrator(
-                build_test_vibe_config(experimental_enable_pr_monitoring=pr_monitoring)
+                build_test_vibe_config(enable_pr_monitoring=enabled)
             ),
             harness_files=HarnessFilesManager(
                 sources=(), trust_store=TrustedFoldersManager()
@@ -1914,7 +2077,7 @@ class TestHostArtifactsColdPath:
         session_dir.mkdir(parents=True)
         _write_metadata(session_dir, artifacts=[_github_artifact()])
         github.snapshot = _snapshot(state="merged")
-        host = _artifact_host(tmp_path)
+        host = _artifact_host(tmp_path, pr_monitoring=False)
         unsubscribe = host.subscribe_artifacts(lambda method, params: None)
 
         await host.list_artifacts(ArtifactsListParams(session_id=SESSION_ID))
@@ -1923,6 +2086,49 @@ class TestHostArtifactsColdPath:
         await _close_cache()
 
         assert github.reads == 0
+
+    @pytest.mark.asyncio
+    async def test_turning_monitoring_off_drops_every_listed_session_watch(
+        self, tmp_path: Path, github: _GitHub
+    ) -> None:
+        """The catalogue channel's watches end at the next listing once
+        monitoring is off, for every session it listed, instead of polling
+        until the client unsubscribes.
+        """
+        from vibe.app_server._pull_request_cache import pull_request_cache
+
+        other_session_id = "01929a3b-7c4d-7e5f-8a9b-0c1d2e3f4a5f"
+        first = _github_artifact()
+        second = first.model_copy(
+            update={
+                "id": "01929a3b-7c4d-7e5f-8a9b-0c1d2e3f4a60",
+                "session_id": other_session_id,
+                "external_key": "github.com/mistralai/vibe/pull/124",
+            }
+        )
+        for session_id, artifact in ((SESSION_ID, first), (other_session_id, second)):
+            session_dir = tmp_path / "unified" / session_id
+            session_dir.mkdir(parents=True)
+            _write_metadata(session_dir, artifacts=[artifact], session_id=session_id)
+        monitoring = {"on": True}
+        host = _artifact_host(tmp_path, pr_monitoring=lambda: monitoring["on"])
+        unsubscribe = host.subscribe_artifacts(lambda method, params: None)
+        try:
+            await host.list_artifacts(ArtifactsListParams(session_id=SESSION_ID))
+            await host.list_artifacts(ArtifactsListParams(session_id=other_session_id))
+            assert {first.external_key, second.external_key} <= (
+                pull_request_cache()._watched_keys()
+            )
+
+            monitoring["on"] = False
+            await host.list_artifacts(ArtifactsListParams(session_id=SESSION_ID))
+
+            watched = pull_request_cache()._watched_keys()
+            assert first.external_key not in watched
+            assert second.external_key not in watched
+        finally:
+            unsubscribe()
+            await _close_cache()
 
     @pytest.mark.asyncio
     async def test_attached_session_delegates_to_the_live_service(
@@ -2020,10 +2226,9 @@ class TestServiceTelemetry:
         )
         service = _telemetry_service(session_dir)
 
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             GH_COMMAND, GH_STDOUT, "", "completed", message_id="msg-1"
         )
-        assert artifact is not None
 
         (detected,) = _artifact_events(telemetry_events, "vibe.artifact_detected")
         props = detected["properties"]
@@ -2053,7 +2258,7 @@ class TestServiceTelemetry:
         artifact = await service.on_shell_effect(
             GH_COMMAND, "no url here", "", "completed"
         )
-        assert artifact is None
+        assert artifact == []
         (detected,) = _artifact_events(telemetry_events, "vibe.artifact_detected")
         assert detected["properties"]["provider"] == "github"
         assert _artifact_events(telemetry_events, "vibe.artifact_created") == []
@@ -2100,8 +2305,9 @@ class TestServiceTelemetry:
         requested ids and how many were already viewed.
         """
         service = _telemetry_service(session_dir)
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
 
         await service.mark_viewed([artifact.id, "unknown-id"])
         (viewed,) = _artifact_events(telemetry_events, "vibe.artifact_mark_viewed")
@@ -2132,13 +2338,12 @@ class TestServiceTelemetry:
         )
         service = _telemetry_service(session_dir)
 
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             "glab mr create --draft -t 'Add feature'",
             "https://gitlab.mycompany.com/team/project/-/merge_requests/7\n",
             "",
             "completed",
         )
-        assert artifact is not None
 
         (detected,) = _artifact_events(telemetry_events, "vibe.artifact_detected")
         assert detected["properties"]["provider"] == "gitlab"
@@ -2205,11 +2410,17 @@ class TestServiceTelemetry:
         telemetry_events: list[dict[str, Any]],
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        def boom(_stdout: str, _stderr: str, provider: str | None = None) -> None:
+        def boom(
+            _stdout: str,
+            _stderr: str,
+            provider: str | None = None,
+            limit: int | None = None,
+            from_start: bool = False,
+        ) -> None:
             raise ValueError("output exploded")
 
         monkeypatch.setattr(
-            "vibe.app_server._session_artifacts.extract_pr_from_output", boom
+            "vibe.app_server._session_artifacts.extract_prs_from_output", boom
         )
         service = _telemetry_service(session_dir)
 
@@ -2256,9 +2467,9 @@ class TestServiceTelemetry:
         (session_dir / "meta.json").write_text("not json {{{", encoding="utf-8")
         service = _telemetry_service(session_dir)
 
-        artifact = await service.on_shell_effect(GH_COMMAND, GH_STDOUT, "", "completed")
-
-        assert artifact is not None
+        [artifact] = await service.on_shell_effect(
+            GH_COMMAND, GH_STDOUT, "", "completed"
+        )
         assert len(service.list_artifacts()) == 1
         assert len(_artifact_events(telemetry_events, "vibe.artifact_created")) == 1
         (failed,) = _artifact_events(telemetry_events, "vibe.artifact_detection_failed")
@@ -2507,7 +2718,7 @@ class TestDiscoverAndCreate:
             GLAB_COMMAND, GLAB_STDOUT, "", "completed"
         )
 
-        assert artifact is None
+        assert artifact == []
         assert [a.external_key for a in service.list_artifacts()] == [
             "gitlab.com/team/project/-/merge_requests/7"
         ]
@@ -2821,6 +3032,129 @@ class TestAdapterPrDiscovery:
         assert isinstance(params, ArtifactCreatedParams)
         assert params.artifact.external_key == "github.com/mistralai/vibe/pull/123"
         assert params.artifact.display_title == "Fix login"
+
+    @pytest.mark.asyncio
+    async def test_discovery_covers_every_worktree_the_session_entered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """*Prepare*: A session now in worktree ``current`` that entered ``first``
+        and ``broken`` before, and recorded a worktree since deleted.
+        *Do*: Run PR discovery.
+        *Assert*: The current worktree is queried first, then the earlier live
+        ones; the deleted one is not; a failing query does not stop the rest,
+        and a PR found on an earlier worktree becomes an artifact.
+        """
+        current, first, broken, gone = (
+            tmp_path / name for name in ("current", "first", "broken", "gone")
+        )
+        for path in (current, first, broken):
+            path.mkdir()
+        queried: list[Path] = []
+
+        def discover(path: Path, **_kwargs: Any) -> list[DiscoveredPullRequest]:
+            queried.append(path)
+            if path == broken:
+                raise RuntimeError("gh crashed")
+            return [_discovered_github(1)] if path == first else []
+
+        _patch_discovery(monkeypatch, [])
+        monkeypatch.setattr(
+            "vibe.app_server._session_artifacts.discover_pull_requests", discover
+        )
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd=str(current))
+        for path in (broken, first, current, gone):
+            await adapter._artifact_service.record_worktree(
+                path=path, branch=f"vibe/{path.name}", repo_root=tmp_path / "repo"
+            )
+
+        adapter.schedule_pr_discovery()
+        assert adapter._pr_discovery_task is not None
+        await adapter._pr_discovery_task
+
+        assert queried == [current, broken, first]
+        assert [a.external_key for a in adapter._artifact_service.list_artifacts()] == [
+            "github.com/mistralai/vibe/pull/1"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_turn_end_discovery_queries_the_current_worktree_only(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """*Prepare*: A session in ``current`` that entered ``first`` before.
+        *Do*: Run the discovery a turn that ran commands schedules.
+        *Assert*: Only the current worktree, where the commands ran, is queried.
+        """
+        current, first = tmp_path / "current", tmp_path / "first"
+        current.mkdir()
+        first.mkdir()
+        queried: list[Path] = []
+
+        def discover(path: Path, **_kwargs: Any) -> list[DiscoveredPullRequest]:
+            queried.append(path)
+            return []
+
+        _patch_discovery(monkeypatch, [])
+        monkeypatch.setattr(
+            "vibe.app_server._session_artifacts.discover_pull_requests", discover
+        )
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd=str(current))
+        for path in (first, current):
+            await adapter._artifact_service.record_worktree(
+                path=path, branch=f"vibe/{path.name}", repo_root=tmp_path / "repo"
+            )
+
+        adapter._run_turn_end_pr_discovery()
+        assert adapter._pr_discovery_task is not None
+        await adapter._pr_discovery_task
+
+        assert queried == [current]
+
+    @pytest.mark.asyncio
+    async def test_a_full_pass_asked_during_a_turn_end_pass_covers_every_worktree(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """*Prepare*: A session in ``current`` that entered ``first`` before, and a
+        turn-end discovery pass held while it queries ``current``.
+        *Do*: Ask for a full pass (as a move does), then for another turn-end
+        pass, then release the held one.
+        *Assert*: The rerun covers both worktrees.
+        """
+        current, first = tmp_path / "current", tmp_path / "first"
+        current.mkdir()
+        first.mkdir()
+        release = __import__("threading").Event()
+        queried: list[Path] = []
+
+        def discover(path: Path, **_kwargs: Any) -> list[DiscoveredPullRequest]:
+            queried.append(path)
+            release.wait(timeout=10)
+            return []
+
+        _patch_discovery(monkeypatch, [])
+        monkeypatch.setattr(
+            "vibe.app_server._session_artifacts.discover_pull_requests", discover
+        )
+        adapter = _artifact_adapter(tmp_path, pr_monitoring=True, cwd=str(current))
+        for path in (first, current):
+            await adapter._artifact_service.record_worktree(
+                path=path, branch=f"vibe/{path.name}", repo_root=tmp_path / "repo"
+            )
+
+        adapter._run_turn_end_pr_discovery()
+        task = adapter._pr_discovery_task
+        assert task is not None
+
+        async def started() -> None:
+            while not queried:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(started(), timeout=5)
+        adapter.schedule_pr_discovery()
+        adapter._run_turn_end_pr_discovery()
+        release.set()
+        await task
+
+        assert queried == [current, current, first]
 
     @pytest.mark.asyncio
     async def test_discovery_is_non_blocking(
@@ -3430,15 +3764,13 @@ class TestReopenDetection:
             MagicMock(open=MagicMock(return_value=fake_repo)),
         )
 
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             "gh pr reopen 67176",
             "✓ Reopened pull request mistralai/dashboard#67176 (Fix bug)\n",
             "",
             "completed",
             cwd="/repo",
         )
-
-        assert artifact is not None
         assert artifact.external_url == (
             "https://github.com/mistralai/dashboard/pull/67176"
         )
@@ -3462,11 +3794,9 @@ class TestReopenDetection:
             MagicMock(open=MagicMock(return_value=fake_repo)),
         )
 
-        artifact = await service.on_shell_effect(
+        [artifact] = await service.on_shell_effect(
             "gh pr reopen 67176", "reopened #67176\n", "", "completed", cwd="/repo"
         )
-
-        assert artifact is not None
         assert artifact.external_url == (
             "https://github.com/mistralai/dashboard/pull/67176"
         )
@@ -3482,7 +3812,7 @@ class TestReopenDetection:
             "completed",
             cwd=None,
         )
-        assert artifact is None
+        assert artifact == []
 
 
 class TestWireProjection:

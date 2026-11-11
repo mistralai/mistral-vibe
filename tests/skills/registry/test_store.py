@@ -1,15 +1,23 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
+import os
 from pathlib import Path
 import stat
+import threading
+import time
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
-from tests.skills.registry.conftest import make_item
+from tests.skills.registry.conftest import held_by_another_process, make_item
 from vibe.core.skills.models import SkillMetadata
 from vibe.core.skills.parser import parse_skill_markdown
 from vibe.core.skills.registry import _store
+from vibe.core.utils import file_lock
 
 
 @pytest.mark.asyncio
@@ -104,7 +112,7 @@ async def test_latest_materialized_returns_highest() -> None:
 async def test_export_local_strips_registry_frontmatter(tmp_path: Path) -> None:
     await _store.materialize(make_item(skill_id="e", name="exported"), "exported")
     target = tmp_path / "exported"
-    await _store.export_local("e", 1, target)
+    await _store.export_local("e", 1, target, "exported")
 
     frontmatter, _ = parse_skill_markdown((target / "SKILL.md").read_text())
     assert frontmatter["name"] == "exported"
@@ -122,7 +130,7 @@ async def test_export_local_preserves_model_invocation_policy(tmp_path: Path) ->
     )
     target = tmp_path / "exported"
 
-    await _store.export_local("explicit-export", 1, target)
+    await _store.export_local("explicit-export", 1, target, "exported")
 
     frontmatter, _ = parse_skill_markdown((target / "SKILL.md").read_text())
     assert frontmatter["disable-model-invocation"] is True
@@ -162,73 +170,278 @@ async def test_asset_dot_path_skipped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rematerialize_drops_stale_assets() -> None:
+async def test_a_version_on_disk_is_never_rewritten() -> None:
     dest = await _store.materialize(
         make_item(
             skill_id="r",
-            assets={
-                "keep.md": {"textContent": "k", "isExecutable": False},
-                "old.md": {"textContent": "o", "isExecutable": False},
-            },
+            assets={"notes.md": {"textContent": "n", "isExecutable": False}},
         ),
         "r",
     )
-    assert dest is not None and (dest / "old.md").exists()
+    assert dest is not None
+    written = (dest / "SKILL.md").stat().st_mtime_ns
 
-    await _store.materialize(
-        make_item(
-            skill_id="r",
-            assets={"keep.md": {"textContent": "k", "isExecutable": False}},
-        ),
-        "r",
-    )
-    assert (dest / "keep.md").exists()
-    assert not (dest / "old.md").exists()
+    again = await _store.materialize(make_item(skill_id="r", body="# other"), "r")
+
+    assert again == dest
+    assert (dest / "SKILL.md").stat().st_mtime_ns == written
+    assert (dest / "notes.md").exists()
 
 
 @pytest.mark.asyncio
-async def test_empty_body_drops_existing_cache() -> None:
-    await _store.materialize(make_item(skill_id="c", version=1), "c")
+async def test_an_empty_body_leaves_the_version_on_disk() -> None:
+    dest = await _store.materialize(make_item(skill_id="c", version=1), "c")
+
+    again = await _store.materialize(make_item(skill_id="c", version=1, body="  "), "c")
+
+    assert again == dest
     assert await _store.is_materialized("c", 1)
 
-    assert (
-        await _store.materialize(make_item(skill_id="c", version=1, body="  "), "c")
-        is None
-    )
-    assert not await _store.is_materialized("c", 1)
+
+def test_an_empty_body_never_writes_a_version_evicted_meanwhile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = iter([True, False])
+    monkeypatch.setattr(_store, "_is_materialized", lambda *_args: next(stored))
+
+    assert _store._materialize(make_item(skill_id="e", body="  "), "e") is None
+    assert not _store.skill_dir("e", 1).exists()
 
 
 @pytest.mark.asyncio
-async def test_materialize_failure_preserves_previous_cache(
+async def test_a_version_a_broken_write_left_behind_is_written_again() -> None:
+    leftover = _store.skill_dir("j", 1)
+    leftover.mkdir(parents=True)
+    (leftover / "stray.txt").write_text("half a write", encoding="utf-8")
+
+    dest = await _store.materialize(make_item(skill_id="j", version=1), "j")
+
+    assert dest == leftover
+    assert await _store.is_materialized("j", 1)
+    assert not (leftover / "stray.txt").exists()
+    assert sorted(entry.name for entry in leftover.parent.iterdir()) == [
+        ".1.lock",
+        ".1.used",
+        "1",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_leftover_that_cannot_be_deleted_is_moved_out_of_the_way_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leftover = _store.skill_dir("j", 1)
+    leftover.mkdir(parents=True)
+    (leftover / "stray.txt").write_text("half a write", encoding="utf-8")
+    monkeypatch.setattr(
+        _store, "shutil", SimpleNamespace(rmtree=lambda *_args, **_kwargs: None)
+    )
+
+    dest = await _store.materialize(make_item(skill_id="j", version=1), "j")
+
+    assert dest == leftover
+    assert await _store.is_materialized("j", 1)
+    assert not (leftover / "stray.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_write_leaves_nothing_behind(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     await _store.materialize(make_item(skill_id="p", version=1, body="# good"), "p")
-    assert await _store.is_materialized("p", 1)
 
     def boom(*_args: object, **_kwargs: object) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(_store, "_write_assets", boom)
     with pytest.raises(OSError):
-        await _store.materialize(make_item(skill_id="p", version=1, body="# new"), "p")
+        await _store.materialize(make_item(skill_id="p", version=2, body="# new"), "p")
 
-    # Prior cache survives the failed re-materialize.
-    assert await _store.is_materialized("p", 1)
+    assert not await _store.is_materialized("p", 2)
+    assert sorted(
+        entry.name for entry in _store.skill_dir("p", 1).parent.iterdir()
+    ) == [".1.lock", ".1.used", ".2.lock", "1"]
     _, md = parse_skill_markdown((_store.skill_dir("p", 1) / "SKILL.md").read_text())
     assert "# good" in md
 
 
-@pytest.mark.asyncio
-async def test_prune_keeps_active_drops_others() -> None:
-    await _store.materialize(make_item(skill_id="a", version=1), "a")
-    await _store.materialize(make_item(skill_id="a", version=2), "a")
-    await _store.materialize(make_item(skill_id="b", version=1), "b")
+def test_two_writers_of_one_version_both_succeed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acquire = file_lock.acquire_file_lock
+    second_waits = threading.Event()
+    attempts: list[object] = []
 
-    await _store.prune({("a", 2)})
+    def acquire_counting(file: Any, *, blocking: bool = False) -> None:
+        attempts.append(file)
+        if len(attempts) == 2:
+            second_waits.set()
+        acquire(file, blocking=blocking)
 
-    # Extra versions of the active skill are trimmed...
-    assert await _store.is_materialized("a", 2)
-    assert not await _store.is_materialized("a", 1)
-    # ...but a skill absent from the active set (e.g. another project's pin) is
-    # left untouched, since the global store is shared across projects.
-    assert await _store.is_materialized("b", 1)
+    write_assets = _store._write_assets
+    writing = threading.Event()
+    writes: list[Path] = []
+
+    def write_while_the_second_waits(dest: Path, item: Any) -> None:
+        write_assets(dest, item)
+        writes.append(dest)
+        writing.set()
+        assert second_waits.wait(timeout=10)
+
+    monkeypatch.setattr(file_lock, "acquire_file_lock", acquire_counting)
+    monkeypatch.setattr(_store, "_write_assets", write_while_the_second_waits)
+    item = make_item(skill_id="race", version=3, body="# shared")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(_store._materialize, item, "race")
+        assert writing.wait(timeout=10)
+        second = pool.submit(_store._materialize, item, "race")
+        written = [first.result(timeout=10), second.result(timeout=10)]
+
+    dest = _store.skill_dir("race", 3)
+    assert written == [dest, dest]
+    assert len(writes) == 1
+    assert sorted(entry.name for entry in dest.parent.iterdir()) == [
+        ".3.lock",
+        ".3.used",
+        "3",
+    ]
+    _, md = parse_skill_markdown((dest / "SKILL.md").read_text())
+    assert "# shared" in md
+
+
+def test_a_writer_gives_up_on_a_version_another_process_keeps_locked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_store, "STORE_LOCK_WAIT", timedelta(milliseconds=200))
+    lock = _store.skill_dir("cid", 1).parent / ".1.lock"
+    lock.parent.mkdir(parents=True)
+
+    with lock.open("a+b") as holder:
+        file_lock.acquire_file_lock(holder)
+        with pytest.raises(BlockingIOError, match="could not lock version 1 of cid"):
+            _store._materialize(make_item(skill_id="cid", version=1), "cid")
+
+    assert not _store.is_materialized_sync("cid", 1)
+
+
+def test_storing_a_version_again_marks_it_used_under_its_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = make_item(skill_id="cid", version=1)
+    _store._materialize(item, "cid")
+    marker = _store.used_marker("cid", 1)
+    long_ago = time.time() - 40 * 24 * 3600
+    os.utime(marker, (long_ago, long_ago))
+    lock = _store.skill_dir("cid", 1).parent / ".1.lock"
+    held: list[bool] = []
+    mark_used = _store.mark_used
+
+    def mark_noting_the_lock(skill_id: str, version: int) -> None:
+        with lock.open("a+b") as other:
+            try:
+                file_lock.acquire_file_lock(other)
+            except BlockingIOError:
+                held.append(True)
+            else:
+                file_lock.release_file_lock(other)
+                held.append(False)
+        mark_used(skill_id, version)
+
+    monkeypatch.setattr(_store, "mark_used", mark_noting_the_lock)
+
+    _store._materialize(item, "cid")
+
+    assert held == [True]
+    assert marker.stat().st_mtime > time.time() - 60
+
+
+def test_a_held_lock_refuses_another_handle_until_it_is_released(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "held.lock"
+
+    with _store.locked(path), path.open("a+b") as other:
+        with pytest.raises(BlockingIOError):
+            file_lock.acquire_file_lock(other)
+
+    with path.open("a+b") as other:
+        file_lock.acquire_file_lock(other)
+        file_lock.release_file_lock(other)
+    assert path.exists()
+
+
+@pytest.mark.parametrize(
+    ("description", "named"),
+    [(None, "{path}"), ("version 3 of cid", "version 3 of cid")],
+)
+def test_a_wait_that_gives_up_names_what_it_locks(
+    tmp_path: Path, description: str | None, named: str
+) -> None:
+    path = tmp_path / "busy.lock"
+
+    with (
+        held_by_another_process(path),
+        pytest.raises(BlockingIOError) as raised,
+        _store.locked(path, wait=timedelta(0), description=description),
+    ):
+        pass
+
+    assert str(raised.value) == f"could not lock {named.format(path=path)}"
+
+
+def test_a_bounded_wait_gives_up_once_its_time_has_passed(tmp_path: Path) -> None:
+    path = tmp_path / "held.lock"
+
+    with path.open("a+b") as holder:
+        file_lock.acquire_file_lock(holder)
+        started = time.monotonic()
+        with (
+            pytest.raises(BlockingIOError),
+            _store.locked(path, wait=timedelta(milliseconds=200)),
+        ):
+            pass
+        waited = time.monotonic() - started
+        file_lock.release_file_lock(holder)
+
+    assert waited >= 0.2
+
+
+def test_a_bounded_wait_takes_the_lock_once_its_holder_lets_go(tmp_path: Path) -> None:
+    path = tmp_path / "held.lock"
+    holder = path.open("a+b")
+    file_lock.acquire_file_lock(holder)
+
+    def let_go() -> None:
+        file_lock.release_file_lock(holder)
+        holder.close()
+
+    timer = threading.Timer(0.2, let_go)
+    timer.start()
+    try:
+        with _store.locked(path, wait=timedelta(seconds=5)):
+            taken = True
+    finally:
+        timer.join()
+
+    assert taken
+
+
+def test_a_zero_wait_tries_the_lock_once(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    tries: list[object] = []
+
+    def refused(file: object, **_kwargs: object) -> None:
+        tries.append(file)
+        raise BlockingIOError
+
+    monkeypatch.setattr(file_lock, "acquire_file_lock", refused)
+
+    with (
+        pytest.raises(BlockingIOError),
+        _store.locked(tmp_path / "busy.lock", wait=timedelta(0)),
+    ):
+        pass
+
+    assert len(tries) == 1

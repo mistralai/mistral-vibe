@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _SHIFT_ENTER = "\x1b[13;2u"
 
-timeline: Timeline = ["lala", _SHIFT_ENTER, _SHIFT_ENTER, "lala"]
+timeline: Timeline = ["lala", _SHIFT_ENTER, _SHIFT_ENTER, "lala", take_snapshot()]

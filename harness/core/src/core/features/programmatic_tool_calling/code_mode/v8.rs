@@ -41,7 +41,7 @@ use crate::core::features::programmatic_tool_calling::model::ToolState;
 use crate::core::features::programmatic_tool_calling::model::{ToolFunction, ToolKind};
 #[cfg(test)]
 use crate::core::step_protocol::DeterminismContext;
-use crate::core::tools::arguments::{ArgumentsRejection, validate_arguments, validate_json_schema};
+use crate::core::tools::arguments::{ArgumentsRejection, validate_arguments};
 
 static INITIALIZE_V8: Once = Once::new();
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -278,10 +278,6 @@ fn reject_invalid_pending_tools(
 /// A program's tool call goes through the same argument check as a direct call
 /// (`validate_arguments`), worded for the program. A schema that does not
 /// compile leaves the call to the tool, as before.
-///
-/// A program can pass any JavaScript value, and the Runtime reads every tool's
-/// arguments as a JSON object, so a non-object value is rejected first, even
-/// when the tool's schema does not say `"type": "object"`.
 fn validate_tool_arguments(tool: &TypeScriptTool, arguments: &Value) -> Option<Value> {
     let invalid = |summary: String| {
         // Recorded like any other tool failure: `name` holds the error code.
@@ -293,15 +289,9 @@ fn validate_tool_arguments(tool: &TypeScriptTool, arguments: &Value) -> Option<V
             ),
         })
     };
-    let object = json!({"type": "object"});
-    let (schema, rejection) = match validate_json_schema(&object, arguments) {
-        Err(rejection) => (&object, rejection),
-        Ok(()) => (
-            &tool.input_schema,
-            validate_arguments(tool.runtime_builtin, &tool.input_schema, arguments).err()?,
-        ),
-    };
-    let summary = rejection.detail(schema);
+    let rejection =
+        validate_arguments(tool.runtime_builtin, &tool.input_schema, arguments).err()?;
+    let summary = rejection.detail(&tool.input_schema);
     match rejection {
         ArgumentsRejection::InvalidSchema(_) => None,
         ArgumentsRejection::Domain(_) => Some(invalid(summary)),
@@ -1046,7 +1036,7 @@ const RUNTIME_TEMPLATE: &str = r#"
     const current = __previous[__index];
     if (!current) return { type: "new" };
     if (current.type === "pending_tool") return { type: "mismatch" };
-    if (current.function.name === name && __equal(current.function.arguments || {}, args)) {
+    if (current.function.name === name && __equal(current.function.arguments ?? {}, args)) {
       return { type: "replay", state: current };
     }
     return { type: "mismatch" };
@@ -3441,6 +3431,10 @@ async function main() {
             "tools.test.lookup({ value: 1n })",
             "tools.test.search({})",
             "step(() => tools.test.lookup({}))",
+            "tools.test.lookup(\"x\")",
+            "tools.test.lookup(\"\")",
+            "tools.test.lookup(0)",
+            "tools.test.lookup(false)",
         ] {
             let source = format!(
                 r#"

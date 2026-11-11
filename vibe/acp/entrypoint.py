@@ -52,6 +52,19 @@ def _run_setup() -> None:
 
 
 def main() -> None:
+    from vibe.app_server._background_worker_process import (
+        FLAG as BACKGROUND_WORKER_FLAG,
+    )
+
+    # A frozen bundle runs itself as the background worker of its in-process
+    # app server: it has no interpreter to start one with.
+    if sys.argv[1:2] == [BACKGROUND_WORKER_FLAG]:
+        from vibe.app_server._background_worker_process import (
+            main as background_worker_main,
+        )
+
+        background_worker_main(sys.argv[1:])
+        return
     if sys.argv[1:2] == [SETUP_APP_SERVER_FLAG]:
         from vibe.app_server.stdio import main as app_server_main
 

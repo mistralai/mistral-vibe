@@ -46,6 +46,8 @@ from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.types import ConcurrencyConflictError
 from vibe.setup.auth.whoami import WhoAmICache
 
+pytestmark = pytest.mark.usefixtures("connectors_enabled")
+
 
 def _connector(
     connector_id: str,

@@ -17,6 +17,13 @@ def sanitize_skill_name(raw: str) -> str | None:
     return collapsed or None
 
 
+def pinned_name(pinned: str, stored: str) -> str:
+    """Its manifest entry's name, which ``/skills`` manages it by, unless that is not a
+    valid skill name; then the stored file's.
+    """
+    return pinned if sanitize_skill_name(pinned) == pinned else stored
+
+
 class RegistryAssetContent(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 

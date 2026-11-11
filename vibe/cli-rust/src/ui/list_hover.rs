@@ -1,5 +1,8 @@
-//! Textual's `option-list--option-hover`: a faint background under the option the mouse is over.
+//! Textual's `option-list--option-hover`: a faint background under the option or button the mouse is over.
 
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use ratatui::Frame;
 
 use super::theme;
@@ -38,6 +41,26 @@ pub(super) fn paint(app: &mut App, f: &mut Frame) {
                 cell.set_bg(hover);
             }
         }
+    }
+}
+
+/// Tint a hovered button and bold its text; a gauge track keeps its background, or takes the button's when it matches the tint.
+pub(super) fn paint_button(buffer: &mut Buffer, area: Rect) {
+    let area = area.intersection(buffer.area);
+    if area.is_empty() {
+        return;
+    }
+    let base = buffer[(area.x, area.y)].bg;
+    let hover = theme::block_hover_bg(base);
+    for position in area.positions() {
+        let cell = &mut buffer[position];
+        if cell.bg == base {
+            cell.set_bg(hover);
+        } else if cell.bg == hover {
+            cell.set_bg(base);
+        }
+        cell.modifier.insert(Modifier::BOLD);
+        cell.modifier.remove(Modifier::DIM);
     }
 }
 

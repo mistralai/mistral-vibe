@@ -204,30 +204,3 @@ async fn a_saved_session_resumes_on_the_second_click() {
     click(&mut app, 1);
     assert!(app.resume_picker.resuming);
 }
-
-#[test]
-fn a_remote_project_click_on_the_highlight_while_searching_confirms_it() {
-    let mut app = app_on(MouseTarget::RemoteProject);
-    let state = &mut app.vibe_code_project;
-    state.view = Some(
-        serde_json::from_value(json!({
-            "context": {"repoUrl": "https://github.com/org/repo.git", "repoName": "repo"},
-            "state": {"nextCursor": null, "projects": []},
-            "git": {"defaultBranch": "main", "branch": "feature"}
-        }))
-        .unwrap(),
-    );
-    state.show_picker();
-    state.query.text = "missing".into();
-    state.refresh(None);
-    let lines: Vec<_> = (0..state.items.len())
-        .map(|index| state.items[index].selectable().then_some(index))
-        .collect();
-    state.list.layout(&lines, AREA);
-    let row = state.list.selected() as u16;
-    state.search_focused = true;
-
-    click(&mut app, row);
-    assert!(!app.vibe_code_project.search_focused);
-    assert!(app.vibe_code_project.create.is_some());
-}

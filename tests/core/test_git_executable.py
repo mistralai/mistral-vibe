@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 import git as git_module
 import pytest
 
 import vibe.core.git.repo as repo_module
+import vibe.utils.platform as platform_module
 from vibe.utils.platform import (
     configure_git_python_executable,
     is_windows,
@@ -32,6 +34,7 @@ def _clear_git_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ProgramFiles", raising=False)
     monkeypatch.delenv("ProgramFiles(x86)", raising=False)
     monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setattr(platform_module, "_pinned_git_executable", None)
 
 
 def test_automatic_resolution_skips_project_and_relative_path_entries(
@@ -101,7 +104,52 @@ def test_gitpython_is_pinned_to_resolved_absolute_path(
     monkeypatch.setenv("PATH", str(trusted_git.parent))
 
     assert configure_git_python_executable(cwd=project) == str(trusted_git.resolve())
-    assert os.environ["GIT_PYTHON_GIT_EXECUTABLE"] == str(trusted_git.resolve())
+    assert "GIT_PYTHON_GIT_EXECUTABLE" not in os.environ
+
+
+def test_pinned_executable_survives_a_later_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted_git = _make_executable(tmp_path / "trusted-bin" / _git_name())
+    monkeypatch.setenv("PATH", str(trusted_git.parent))
+    configure_git_python_executable(cwd=tmp_path / "project")
+    monkeypatch.setenv("PATH", "")
+
+    assert configure_git_python_executable(cwd=tmp_path) == str(trusted_git.resolve())
+
+
+def _env_after_git_python(env: dict[str, str]) -> str:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys\n"
+            "import vibe.core.git.repo as repo\n"
+            "repo._git_python()\n"
+            "assert 'git' in sys.modules\n"
+            "print(os.environ.get('GIT_PYTHON_GIT_EXECUTABLE', ''))",
+        ],
+        capture_output=True,
+        env=env,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def test_git_executable_is_not_left_in_the_environment_after_import() -> None:
+    env = {k: v for k, v in os.environ.items() if k != "GIT_PYTHON_GIT_EXECUTABLE"}
+
+    assert _env_after_git_python(env) == ""
+
+
+def test_user_git_executable_override_is_left_untouched_after_import() -> None:
+    user_git = resolve_git_executable()
+    assert user_git is not None
+    env = {**os.environ, "GIT_PYTHON_GIT_EXECUTABLE": user_git}
+
+    assert _env_after_git_python(env) == user_git
 
 
 def test_gitpython_cache_is_refreshed_after_early_import(

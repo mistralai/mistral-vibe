@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from enum import StrEnum, auto
@@ -12,6 +12,19 @@ from pydantic import JsonValue, TypeAdapter, ValidationError
 
 from vibe import __version__
 from vibe.app_server._account import AccountGateway
+from vibe.app_server._client_provided_tools import (
+    ClientToolCall,
+    ClientToolError,
+    ClientToolResult,
+    ClientToolRunner,
+)
+from vibe.app_server._connection_protocol import (
+    AgentPlugin,
+    ClientToolCallerParams,
+    ClientToolCallParams,
+    ClientToolCallResponse,
+    ClientToolDefinitionParams,
+)
 from vibe.app_server._credential_selection import (
     ConnectionCredentialSelection,
     select_platform_credentials,
@@ -36,10 +49,12 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHostArchive,
     SessionBackendHostArtifacts,
     SessionBackendHostBackgroundTasks,
+    SessionBackendHostClientLoss,
     SessionBackendHostConfigRead,
     SessionBackendHostDelete,
     SessionBackendHostHistoryList,
     SessionBackendHostLeaseWatch,
+    SessionBackendHostMove,
     SessionBackendHostPin,
     SessionBackendHostRelocate,
     SessionBackendHostSeenState,
@@ -70,6 +85,7 @@ from vibe.app_server.protocol import (
     SERVER_METHODS,
     SESSION_PEER_ARCHIVE_METHOD,
     SESSION_PEER_LIST_METHOD,
+    SESSION_PEER_MARK_SEEN_METHOD,
     SESSION_PEER_READ_METHOD,
     SESSION_PEER_RESTORE_METHOD,
     SESSION_PEER_SEND_METHOD,
@@ -127,10 +143,13 @@ from vibe.app_server.protocol import (
     SessionHistoryListParams,
     SessionListParams,
     SessionMarkAsSeenParams,
+    SessionMoveParams,
     SessionPeerArchiveParams,
     SessionPeerArchiveResponse,
     SessionPeerListParams,
     SessionPeerListResponse,
+    SessionPeerMarkSeenParams,
+    SessionPeerMarkSeenResponse,
     SessionPeerReadParams,
     SessionPeerReadResponse,
     SessionPeerRestoreParams,
@@ -170,9 +189,15 @@ from vibe.app_server.protocol import (
     validate_callback_acknowledgement,
     validate_json_rpc_envelope,
 )
-from vibe.app_server.transport import JsonRpcTransport
+from vibe.app_server.transport import ClientLossAwareTransport, JsonRpcTransport
 from vibe.core.platform_auth import PlatformCredentialProvider
 from vibe.observability.logging import logger
+from vibe.observability.sentry import (
+    capture_sentry_exception,
+    cli_crash_reporting_available,
+    init_cli_sentry,
+    report_unhandled_asyncio_errors,
+)
 from vibe.setup.auth._oidc_tenant import OidcTenantResolver
 
 if TYPE_CHECKING:
@@ -284,6 +309,11 @@ class AppServer:
         connector_catalog_service: ConnectorCatalogService | None = None,
         plugin_catalog_service: PluginCatalogService | None = None,
         imports_service: ImportsService | None = None,
+        configure_agent_plugins: Callable[
+            [list[AgentPlugin], list[ClientToolDefinitionParams], ClientToolRunner],
+            None,
+        ]
+        | None = None,
     ) -> None:
         self._root: SessionBackend | None = None
         self._host_handler = host_handler
@@ -303,6 +333,8 @@ class AppServer:
         # Given up on our side; the client may still answer.
         self._unanswered_client_requests: dict[int, str] = {}
         self._request_tasks: set[asyncio.Task[None]] = set()
+        self._crash_reporting_task: asyncio.Task[None] | None = None
+        self._crash_reporting_tasks: set[asyncio.Task[None]] = set()
         self._leases = SessionLeaseSubscription(self._send_notification)
         # The connection's artifacts/subscribe, until it ends.
         self._unsubscribe_artifacts: Callable[[], None] | None = None
@@ -331,6 +363,7 @@ class AppServer:
         self._plugin_catalog_service = plugin_catalog_service
         self._imports_service = imports_service
         self._oidc_tenants = oidc_tenants
+        self._configure_agent_plugins = configure_agent_plugins
         self._session_backend_host = session_backend_host_factory(self)
         if self._session_backend_host is None:
             raise TypeError(
@@ -349,6 +382,57 @@ class AppServer:
             )
         return self._imports_service
 
+    def _crash_reporting_client(self) -> ClientInfo | None:
+        # Only the terminal UI hands a DSN: Desktop, run servers and vibe-acp never do.
+        return self._client_info if cli_crash_reporting_available() else None
+
+    def _gate_crash_reporting(self, read_gate: Callable[[], Awaitable[bool]]) -> None:
+        """Applies the telemetry gate off the request path, in the order asked."""
+        client = self._crash_reporting_client()
+        if client is None:
+            return
+        previous = self._crash_reporting_task
+
+        async def gate() -> None:
+            if previous is not None:
+                await asyncio.wait({previous})
+            try:
+                enabled = await read_gate()
+                await asyncio.to_thread(_init_crash_reporting, client, enabled=enabled)
+                if enabled:
+                    report_unhandled_asyncio_errors(asyncio.get_running_loop())
+            except Exception:
+                logger.warning("Could not configure crash reporting", exc_info=True)
+
+        task = asyncio.create_task(gate())
+        self._crash_reporting_task = task
+        # Every gate, not only the last: shutdown must stop an earlier opt-in too.
+        self._crash_reporting_tasks.add(task)
+        task.add_done_callback(self._crash_reporting_tasks.discard)
+
+    def _configure_crash_reporting(self, backend: SessionBackend) -> None:
+        """The attached session's config gates reporting, as the TUI's at Ready."""
+        if not isinstance(backend, SessionBackendRuntimeView):
+            return
+        try:
+            enabled = backend.runtime_updated_params().runtime.config.enable_telemetry
+        except Exception:
+            logger.warning("Could not read the telemetry gate", exc_info=True)
+            return
+        self._gate_crash_reporting(lambda: _resolved(enabled))
+
+    def _report_dispatch_error(self, method: str, exc: Exception) -> None:
+        # vibe-acp reports its own failures, including the ones it gets from here.
+        if self._crash_reporting_client() is None:
+            return
+        tags = {"vibe_boundary": "app_server_dispatch", "app_server_method": method}
+        fingerprint = None
+        if isinstance(exc, SessionBackendError) and (code := _harness_code(exc)):
+            tags["harness_code"] = code
+            # One harness code is one bug, whatever session or path its message names.
+            fingerprint = ["app-server-harness-error", method, code]
+        capture_sentry_exception(exc, fatal=False, tags=tags, fingerprint=fingerprint)
+
     async def _activate_backend(
         self,
         backend: SessionBackend,
@@ -364,6 +448,7 @@ class AppServer:
         subscription = await backend.subscribe(params)
         previous = self._root
         self._root = backend
+        self._configure_crash_reporting(backend)
         # The client treats a turn as running only after `turn/started`. Queue
         # that announcement before the forwarder, so recovered history updates
         # and token deltas cannot reach the client first and be discarded.
@@ -546,6 +631,19 @@ class AppServer:
                     task = asyncio.create_task(self._handle_response(message))
                     self._request_tasks.add(task)
                     task.add_done_callback(self._request_finished)
+                # The stream ended without a session/stop: the client is gone.
+                if (
+                    close_on_disconnect
+                    and not self._closed
+                    and (
+                        not isinstance(transport, ClientLossAwareTransport)
+                        or transport.client_lost
+                    )
+                    and isinstance(
+                        self._session_backend_host, SessionBackendHostClientLoss
+                    )
+                ):
+                    self._session_backend_host.mark_client_disconnected()
             except asyncio.CancelledError:
                 if self._request_error is not None:
                     raise self._request_error
@@ -654,6 +752,7 @@ class AppServer:
         self._backend_event_backend = None
         if backend_events is not None and backend_events is not current:
             tasks.append(backend_events)
+        tasks.extend(self._crash_reporting_tasks)
         errors = await cancel_tasks(tasks, label="app-server background")
         if isinstance(self._session_backend_host, SessionBackendHostBackgroundTasks):
             errors.extend(
@@ -765,6 +864,8 @@ class AppServer:
                 self._validate_open_callback_capabilities()
             return dispatched
         except (RequestFailure, SessionBackendError) as exc:
+            if isinstance(exc, SessionBackendError) and _is_unexpected(exc):
+                self._report_dispatch_error(request.method, exc)
             return _ErrorDispatch(
                 ProtocolError(code=exc.code, message=str(exc), data=exc.data),
                 after_response=(
@@ -798,6 +899,7 @@ class AppServer:
             )
         except Exception as exc:
             logger.exception("Unhandled error dispatching %s", request.method)
+            self._report_dispatch_error(request.method, exc)
             return _ErrorDispatch(
                 ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR, message=str(exc))
             )
@@ -884,6 +986,8 @@ class AppServer:
             )
         if method in {
             "config/schema",
+            "plugins/local/list",
+            "plugins/local/setEnabled",
             "projects/create",
             "projects/list",
             "projects/remove",
@@ -1097,7 +1201,7 @@ class AppServer:
                     validate_wire(ArtifactsSyncParams, raw_params)
                 )
             )
-        if method in {"session/rename", "session/relocate"}:
+        if method in {"session/rename", "session/relocate", "session/move"}:
             result = await self._dispatch_backend_host_session_update(
                 method, raw_params
             )
@@ -1137,18 +1241,26 @@ class AppServer:
             if self._root is not None and self._root.session_id == params.session_id:
                 await self._flush_backend_events(self._root)
             return DispatchResult(response)
-        if not isinstance(self._session_backend_host, SessionBackendHostRelocate):
-            return None
-        params = validate_wire(SessionRelocateParams, raw_params)
-        attached = (
-            self._root
-            if self._root is not None and self._root.session_id == params.session_id
-            else None
-        )
-        response = await self._session_backend_host.relocate(params, attached)
+        if method == "session/move":
+            if not isinstance(self._session_backend_host, SessionBackendHostMove):
+                return None
+            params = validate_wire(SessionMoveParams, raw_params)
+            attached = self._attached_root(params.session_id)
+            response = await self._session_backend_host.move(params, attached)
+        else:
+            if not isinstance(self._session_backend_host, SessionBackendHostRelocate):
+                return None
+            params = validate_wire(SessionRelocateParams, raw_params)
+            attached = self._attached_root(params.session_id)
+            response = await self._session_backend_host.relocate(params, attached)
         if attached is not None:
             await self._flush_backend_events(attached)
         return DispatchResult(response)
+
+    def _attached_root(self, session_id: str) -> SessionBackend | None:
+        if self._root is not None and self._root.session_id == session_id:
+            return self._root
+        return None
 
     async def _read_stored_session_config(
         self, raw_params: dict[str, Any]
@@ -1228,7 +1340,12 @@ class AppServer:
         params = validate_wire(SessionHistoryClearParams, raw_params)
         async with self._lifecycle_transition():
             result = await self._session_backend_host.clear_history(root, params)
-            await self._activate_backend(result.backend, 200)
+            try:
+                await self._activate_backend(result.backend, 200)
+            except BaseException:
+                if result.on_failure is not None:
+                    result.on_failure()
+                raise
         return DispatchResult(
             SessionHistoryClearResponse(
                 state=result.state, session_log=result.session_log
@@ -1618,6 +1735,27 @@ class AppServer:
                 ProtocolErrorCode.INVALID_REQUEST, "initialize may only be called once"
             )
         params = validate_wire(InitializeParams, raw_params)
+        plugins = params.capabilities.agent_plugins
+        definitions = params.capabilities.client_tool_definitions
+        if (
+            plugins or definitions
+        ) and "tools/call" not in params.capabilities.client_tools:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS, "Client plugins require tools/call"
+            )
+        if (plugins or definitions) and self._configure_agent_plugins is None:
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_IMPLEMENTED, "Client tools are unavailable"
+            )
+        if self._configure_agent_plugins is not None:
+            try:
+                self._configure_agent_plugins(
+                    plugins, definitions, _ConnectionClientToolRunner(self)
+                )
+            except ValueError as exc:
+                raise RequestFailure(
+                    ProtocolErrorCode.INVALID_PARAMS, str(exc)
+                ) from exc
         self._client_info = params.client_info
         self._client_capabilities = params.capabilities
         if params.capabilities.platform_credentials is not None:
@@ -1648,6 +1786,7 @@ class AppServer:
             and self._initialization is InitializationState.INITIALIZE_RECEIVED
         ):
             self._initialization = InitializationState.INITIALIZED
+            self._gate_crash_reporting(self._host_handler.telemetry_enabled)
             return
         if (
             notification.method == "platformCredentials/invalidated"
@@ -1965,6 +2104,21 @@ class AppServer:
             ),
         )
 
+    async def mark_peer_sessions_seen(
+        self, params: SessionPeerMarkSeenParams
+    ) -> SessionPeerMarkSeenResponse:
+        if not self._client_capabilities.session_peer_mark_seen:
+            raise SessionPeerError("The attached client cannot mark sessions as seen")
+        return await self._request_peers(
+            SESSION_PEER_MARK_SEEN_METHOD,
+            params,
+            SessionPeerMarkSeenResponse,
+            lost=(
+                "before confirming, so some sessions may have been marked seen. "
+                "List them before marking them again."
+            ),
+        )
+
     async def _request_peers[ResponseT: ProtocolModel](
         self,
         method: str,
@@ -2108,6 +2262,32 @@ class AppServer:
         return self._event_watermarks.get(session_id, 0)
 
 
+def _init_crash_reporting(client: ClientInfo, *, enabled: bool) -> None:
+    init_cli_sentry(
+        enabled=enabled,
+        headless=client.entrypoint == "programmatic",
+        tags={
+            "entrypoint": client.entrypoint,
+            "client_name": client.name,
+            "client_version": client.version,
+        },
+    )
+
+
+async def _resolved(value: bool) -> bool:
+    return value
+
+
+def _harness_code(exc: SessionBackendError) -> str | None:
+    code = exc.data.get("harnessCode") if isinstance(exc.data, dict) else None
+    return code if isinstance(code, str) else None
+
+
+def _is_unexpected(exc: SessionBackendError) -> bool:
+    """Only internal errors are bugs; other codes are refusals the client explains."""
+    return exc.code is ProtocolErrorCode.INTERNAL_ERROR and not exc.expected
+
+
 def _in_order(*callbacks: Callable[[], None] | None) -> Callable[[], None] | None:
     present = [callback for callback in callbacks if callback is not None]
     if not present:
@@ -2179,3 +2359,57 @@ def _omits_session_id(method: str, raw_params: dict[str, Any]) -> bool:
 
 def _notification_session_id(params: EventNotificationParams) -> str:
     return params.session_id
+
+
+class _ConnectionClientToolRunner:
+    def __init__(self, server: AppServer) -> None:
+        self._server = server
+
+    async def call_tool(self, call: ClientToolCall) -> ClientToolResult:
+        caller = call.caller
+        if caller is None:
+            return ClientToolResult(
+                error=ClientToolError("Client tool caller is unavailable")
+            )
+        params = ClientToolCallParams(
+            call_id=call.call_id,
+            name=call.name,
+            input=call.input,
+            tool_call_id=call.tool_call_id,
+            caller=ClientToolCallerParams(
+                session_id=caller.session_id,
+                root_session_id=caller.root_session_id,
+                parent_session_id=caller.parent_session_id,
+                name=caller.name,
+                agent_type=caller.agent_type,
+            ),
+        )
+        try:
+            result = await self._server._request_client(
+                "tools/call", params, ClientToolCallResponse
+            )
+        except asyncio.CancelledError:
+            transport = self._server._transport
+            if transport is not None and self._server._connection_attached:
+                try:
+                    await transport.send({
+                        "jsonrpc": "2.0",
+                        "method": "tools/cancel",
+                        "params": {"callId": call.call_id},
+                    })
+                except Exception:
+                    pass
+            raise
+        except _ClientRequestFailed as exc:
+            return ClientToolResult(
+                error=ClientToolError(str(exc), code="client_tool_unavailable")
+            )
+        return ClientToolResult(
+            output=result.output,
+            annotations=result.annotations,
+            error=ClientToolError(
+                result.error.message, result.error.code, result.error.details
+            )
+            if result.error is not None
+            else None,
+        )

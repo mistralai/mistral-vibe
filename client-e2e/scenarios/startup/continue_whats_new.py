@@ -9,7 +9,7 @@ import shutil
 import tempfile
 
 from e2e.app_server.config import MINIMAL_HOME_CONFIG, WHATS_NEW_FIXTURE
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # A stale seen-version would trip the what's-new gate on a fresh session; see startup/whats_new.py.
 _home = tempfile.mkdtemp(prefix="e2e_whatsnew_continue_")
@@ -26,5 +26,4 @@ client_args = ("--continue",)
 screen_contains = ("> Continue the implementation", "Saved session restored.")
 screen_excludes = ("Release notes",)
 
-capture_startup = False
-timeline: Timeline = ["x"]
+timeline: Timeline = ["x", take_snapshot()]

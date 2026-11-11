@@ -176,3 +176,63 @@ async def test_a_hook_ended_turn_keeps_its_reason_in_the_latest_turn(
     assert (turn.skip_reason, turn.reject_reason) == (skip_reason, reject_reason)
     await transport.close()
     await host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "public_stop_reason"),
+    [("iteration_limit", "limit"), ("output_limit", "length")],
+)
+async def test_a_turn_ended_at_a_limit_keeps_the_public_stop_reason(
+    tmp_path: Path,
+    stop_reason: Literal["iteration_limit", "output_limit"],
+    public_stop_reason: str,
+) -> None:
+    """*Prepare*: A Session read through the Session API.
+    *Do*: Apply a batch where a Turn ends at its iteration limit or at the output
+        limit, with no Vibe turn details.
+    *Assert*: The latest Turn's stop reason is ``limit`` or ``length``, as the
+        Runtime's own public Turn says.
+    """
+    # Prepare
+    host = UnifiedHarnessSessionBackendHost(tmp_path)
+    host.configure_runtime(
+        _core_config("runtime-template"),
+        LocalRuntimeAdapterConfig.at(cwd=tmp_path, session_api=True),
+    )
+    session = await host.start(SessionStartParams(history_limit=50))
+    transport = LocalSessionApiTransport(session, session_api_view_of(session))
+    await transport.open()
+    read, extensions = await transport.read_with_extensions(
+        SessionReadParams(session_id=session.session_id, history=_ALL)
+    )
+    state = ApiSessionState(session.session_id, (tmp_path,))
+    state.reset(read, extensions)
+    batches = StreamBatches(session.session_id)
+
+    # Do
+    state.apply(
+        batches.batch(
+            TurnStartedEvent(
+                turn=TurnState(id="turn-1", status="running", started_at=1)
+            ),
+            TurnTerminatedEvent(
+                turn=TurnState(
+                    id="turn-1",
+                    status="terminated",
+                    started_at=1,
+                    completed_at=2,
+                    termination=CompletedTermination(
+                        stop_reason=stop_reason, output="The rep"
+                    ),
+                )
+            ),
+        )
+    )
+
+    # Assert
+    turn = state.runtime_state().latest_turn
+    assert isinstance(turn, CompletedPublicTurn)
+    assert turn.stop_reason == public_stop_reason
+    await transport.close()
+    await host.shutdown()

@@ -111,3 +111,101 @@ fn merged_follow_up_is_not_duplicated_when_snapshot_has_merged_head() {
         ]
     );
 }
+
+#[test]
+fn a_huge_compaction_error_settles_capped() {
+    use crate::utils::text::{MESSAGE_MAX_CHARS, MESSAGE_TRUNCATION_MARKER};
+    let mut transcript = Transcript::default();
+    super::add_compact_status(&mut transcript, "compact");
+
+    super::settle_compact_status(&mut transcript, "compact", Some(&"A".repeat(1_200_000)));
+
+    assert_eq!(
+        shown(&transcript),
+        vec![(
+            "compact".to_owned(),
+            format!(
+                "Error: {}{MESSAGE_TRUNCATION_MARKER}",
+                "A".repeat(MESSAGE_MAX_CHARS)
+            )
+        )]
+    );
+}
+
+#[test]
+fn a_huge_error_row_is_capped_whatever_its_caller() {
+    use crate::utils::text::{MESSAGE_TRUNCATION_MARKER, ROW_MAX_CHARS};
+    let mut transcript = Transcript::default();
+
+    super::add_command_error(&mut transcript, "error", &"A".repeat(1_200_000));
+
+    assert_eq!(
+        shown(&transcript),
+        vec![(
+            "error".to_owned(),
+            format!("{}{MESSAGE_TRUNCATION_MARKER}", "A".repeat(ROW_MAX_CHARS))
+        )]
+    );
+}
+
+#[test]
+fn interrupt_marker_stays_above_the_next_prompt_when_a_snapshot_drops_rows() {
+    let mut transcript = Transcript::default();
+    for id in ["old", "older-page", "cut-off"] {
+        transcript.add(&server(id, "assistant"));
+    }
+    super::add_interrupt(&mut transcript, "marker");
+    transcript.add(&server("next", "user"));
+    transcript.add(&server("tool", "assistant"));
+
+    transcript.load_live_snapshot(&state(vec![
+        server("older-page", "assistant"),
+        server("next", "user"),
+        server("tool", "assistant"),
+    ]));
+
+    let ids: Vec<&str> = transcript.lines().map(|entry| entry.id).collect();
+    assert_eq!(ids, ["older-page", "marker", "next", "tool"]);
+}
+
+#[test]
+fn a_row_whose_next_anchor_is_gone_goes_right_below_the_server_row_above_it() {
+    let mut transcript = Transcript::default();
+    transcript.add(&server("a", "user"));
+    super::add_interrupt(&mut transcript, "marker");
+    transcript.add(&server("b", "user"));
+    super::add_command_status(&mut transcript, "status", "Done");
+    transcript.add(&server("streaming", "assistant"));
+
+    transcript.load_live_snapshot(&state(vec![
+        server("y", "user"),
+        server("z", "assistant"),
+        server("a", "user"),
+        server("b", "user"),
+    ]));
+
+    let ids: Vec<&str> = transcript.lines().map(|entry| entry.id).collect();
+    assert_eq!(ids, ["y", "z", "a", "marker", "b", "status"]);
+}
+
+#[test]
+fn a_row_without_both_anchors_stays_below_the_rows_restored_before_it() {
+    let mut transcript = Transcript::default();
+    transcript.add(&server("a", "user"));
+    super::add_interrupt(&mut transcript, "marker");
+    transcript.add(&server("b", "user"));
+    transcript.add(&server("b2", "assistant"));
+    super::add_command_status(&mut transcript, "status", "Done");
+    transcript.add(&server("streaming", "assistant"));
+
+    transcript.load_live_snapshot(&state(vec![
+        server("p1", "user"),
+        server("p2", "assistant"),
+        server("p3", "user"),
+        server("p4", "assistant"),
+        server("b", "user"),
+    ]));
+
+    let ids: Vec<&str> = transcript.lines().map(|entry| entry.id).collect();
+    assert_eq!(ids, ["p1", "p2", "p3", "p4", "marker", "b", "status"]);
+}

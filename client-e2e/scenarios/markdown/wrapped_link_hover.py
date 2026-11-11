@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Action, Timeline
+from e2e.app_server.scenario import Action, Timeline, take_snapshot
 
 _PROMPT = "link the tokio docs"
 _URL = "https://docs.rs/tokio/latest/tokio/macro.select.html"
@@ -25,6 +25,9 @@ timeline: Timeline = [
     user_msg(_PROMPT),
     assistant_msg(_ANSWER),
     turn_completed(),
+    take_snapshot(),
     _HOVER_TAIL,
+    take_snapshot(),
     _CLICK_TAIL,
+    take_snapshot(),
 ]

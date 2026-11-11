@@ -172,8 +172,7 @@ pub(super) fn render(
             } else {
                 entry_y
             };
-            // An ungrouped entry opens with a gap row above its header.
-            let header = content_top + i32::from(value.group.is_none());
+            let header = content_top + i32::from(rendered.header_offset(value.group.is_some()));
             let header = (viewport_top..viewport_bottom)
                 .contains(&header)
                 .then_some(header as u16);

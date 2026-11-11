@@ -10,11 +10,12 @@ pub enum Focus {
     Approval,
     Question,
     VoiceApp,
+    BranchApp,
     ProxySetup,
-    VibeCodeProject,
     ResumePicker,
     Mcp,
     Plugins,
+    Skills,
     ContextApp,
     McpOAuth,
     ConnectorAuth,
@@ -38,11 +39,12 @@ impl App {
             (self.approval.open, Focus::Approval),
             (self.question_app.open, Focus::Question),
             (self.voice_app.open, Focus::VoiceApp),
+            (self.branch_app.open, Focus::BranchApp),
             (self.proxy_setup.open, Focus::ProxySetup),
-            (self.vibe_code_project.open, Focus::VibeCodeProject),
             (self.resume_picker.open, Focus::ResumePicker),
             (self.mcp.open, Focus::Mcp),
             (self.plugins.open, Focus::Plugins),
+            (self.skills_browser.open, Focus::Skills),
             (self.context_app.open, Focus::ContextApp),
             (self.mcp_oauth.open, Focus::McpOAuth),
             (self.connector_auth.open, Focus::ConnectorAuth),
@@ -61,10 +63,9 @@ impl App {
 
     /// Whether a picker the user opened, or is opening, owns Esc and Ctrl+C over the turn.
     pub fn picker_focused(&self) -> bool {
-        match self.focus() {
-            Focus::Approval | Focus::Question => false,
-            Focus::Composer | Focus::SubagentList => self.vibe_code_project.pending,
-            _ => true,
-        }
+        !matches!(
+            self.focus(),
+            Focus::Approval | Focus::Question | Focus::Composer | Focus::SubagentList
+        )
     }
 }

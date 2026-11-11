@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 # Up wraps to the last entry, then climbs back above the bottom viewport.
-timeline: Timeline = ["@at_popup_scroll/", "\x1b[A", "\x1b[A" * 10]
+timeline: Timeline = ["@at_popup_scroll/", "\x1b[A", "\x1b[A" * 10, take_snapshot()]

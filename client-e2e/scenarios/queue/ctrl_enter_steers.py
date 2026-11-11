@@ -28,7 +28,6 @@ handshake = {
 }
 on_request = {"session/turn/queue/steer": [_STEERED]}
 
-capture_steps = {1, 2}
 screen_contains = ("> second", "Esc/Ctrl+C to interrupt")
 screen_excludes = ("Queued", "Enter to steer")
 

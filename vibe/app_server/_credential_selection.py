@@ -19,17 +19,15 @@ from vibe.core.platform_auth import (
     PlatformCredentialProvider,
 )
 from vibe.setup.auth._oidc_tenant import OidcTenantResolver
-from vibe.utils.oidc_marker import oidc_enabled
+from vibe.utils.api_keys import uses_cli_oidc_credential
 
 _CLI_ENTRYPOINTS = frozenset({"cli", "programmatic", "acp"})
 MISTRAL_API_KEY_ENV = "MISTRAL_API_KEY"
 
 
 def uses_cli_oidc(client: ClientInfo | None, api_key_env_var: str) -> bool:
-    return (
-        oidc_enabled()
-        and (api_key_env_var or MISTRAL_API_KEY_ENV) == MISTRAL_API_KEY_ENV
-        and _is_cli(client)
+    return uses_cli_oidc_credential(api_key_env_var or MISTRAL_API_KEY_ENV) and _is_cli(
+        client
     )
 
 

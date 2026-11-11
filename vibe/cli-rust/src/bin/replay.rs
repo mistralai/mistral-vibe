@@ -178,8 +178,12 @@ fn agent_update_response(handshake: &Map<String, Value>, params: Option<&Value>)
     Some(json!({ "runtime": runtime }))
 }
 
-/// Rewrite the first user message entry's id to the turn's client id.
-fn stamp_user_message_id(batch: &mut [Value], client_message_id: &str) {
+/// Rewrite the first user message entry's id to the turn's client id, remembering the rename.
+fn stamp_user_message_id(
+    batch: &mut [Value],
+    client_message_id: &str,
+    renamed: &mut HashMap<String, String>,
+) {
     for event in batch.iter_mut() {
         if event.get("method").and_then(Value::as_str) != Some("history/entryAdded") {
             continue;
@@ -190,22 +194,41 @@ fn stamp_user_message_id(batch: &mut [Value], client_message_id: &str) {
         let is_user = entry.get("type").and_then(Value::as_str) == Some("message")
             && entry.get("role").and_then(Value::as_str) == Some("user");
         if is_user {
+            if let Some(scripted) = entry.get("id").and_then(Value::as_str) {
+                renamed.insert(scripted.to_owned(), client_message_id.to_owned());
+            }
             entry["id"] = json!(client_message_id);
             return;
         }
     }
 }
 
-/// Bind `$operationId` placeholders (shell entry ids, teleport events) to the request's id.
+/// Give snapshot history the client ids the live user messages were renamed to.
+fn stamp_snapshot_ids(batch: &mut [Value], renamed: &HashMap<String, String>) {
+    for event in batch.iter_mut() {
+        let Some(history) = event
+            .pointer_mut("/params/state/history")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        for entry in history.iter_mut() {
+            let client_id = entry["id"].as_str().and_then(|id| renamed.get(id));
+            if let Some(client_id) = client_id {
+                entry["id"] = json!(client_id);
+            }
+        }
+    }
+}
+
+/// Bind `$operationId` shell entry id placeholders to the request's id.
 fn stamp_operation_id(events: &mut [Value], operation_id: &str) {
     for event in events {
-        for pointer in ["/params/entry/id", "/params/event/operationId"] {
-            if let Some(slot) = event
-                .pointer_mut(pointer)
-                .filter(|slot| slot.as_str() == Some("$operationId"))
-            {
-                *slot = json!(operation_id);
-            }
+        if let Some(slot) = event
+            .pointer_mut("/params/entry/id")
+            .filter(|slot| slot.as_str() == Some("$operationId"))
+        {
+            *slot = json!(operation_id);
         }
     }
 }
@@ -340,6 +363,7 @@ fn send_event(writer: &Writer, event_id: &AtomicU64, event: &Value) {
 fn run_emitter(rx: std::sync::mpsc::Receiver<Emit>, writer: Writer, event_id: Arc<AtomicU64>) {
     let mut step = std::env::var_os(STEP_FIFO_ENV)
         .and_then(|path| OpenOptions::new().read(true).write(true).open(path).ok());
+    let mut renamed = HashMap::new();
     while let Ok(emit) = rx.recv() {
         let (client_message_id, queue_item_id, mut batch) = match emit {
             Emit::Batch(batch) => batch,
@@ -349,8 +373,9 @@ fn run_emitter(rx: std::sync::mpsc::Receiver<Emit>, writer: Writer, event_id: Ar
             }
         };
         if let Some(id) = client_message_id.as_deref() {
-            stamp_user_message_id(&mut batch, id);
+            stamp_user_message_id(&mut batch, id, &mut renamed);
         }
+        stamp_snapshot_ids(&mut batch, &renamed);
         if let Some(id) = queue_item_id.as_deref() {
             stamp_queue_item_id(&mut batch, id);
         }

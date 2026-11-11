@@ -11,6 +11,7 @@ from vibe.core.session.artifacts import (
     GitLabMergeRequestArtifact,
     GitLabMergeRequestDetails,
     SessionArtifact,
+    sanitize_artifacts_in_raw_metadata,
 )
 from vibe.core.types import SessionMetadata
 
@@ -266,3 +267,31 @@ class TestSessionMetadataArtifacts:
         )
         meta = SessionMetadata.model_validate_json(old_json)
         assert meta.artifacts == []
+
+    def test_a_malformed_worktree_is_dropped_not_the_metadata(self):
+        """*Prepare*: Stored metadata with one valid and one malformed worktree.
+        *Do*: Sanitize it, then validate it.
+        *Assert*: Only the valid worktree loads.
+        """
+        valid = {
+            "id": "w1",
+            "session_id": "s1",
+            "path": "/wt/a",
+            "branch": "vibe/a",
+            "repo_root": "/repo",
+            "discovered_at": "2026-01-01T00:00:00+00:00",
+        }
+        raw: dict[str, object] = {
+            "session_id": "s1",
+            "start_time": "2026-01-01T00:00:00+00:00",
+            "end_time": None,
+            "git_commit": None,
+            "git_branch": None,
+            "environment": {},
+            "username": "test",
+            "worktrees": [valid, {"path": "/wt/b"}],
+        }
+
+        meta = SessionMetadata.model_validate(sanitize_artifacts_in_raw_metadata(raw))
+
+        assert [w.path for w in meta.worktrees] == ["/wt/a"]

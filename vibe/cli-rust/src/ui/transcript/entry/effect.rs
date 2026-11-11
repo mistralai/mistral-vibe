@@ -300,6 +300,8 @@ fn header_message(
     indent: usize,
 ) -> Vec<(String, Option<u16>)> {
     let available = (width as usize).saturating_sub(indent);
+    let bounded = text::bounded_message(message);
+    let message = bounded.as_ref();
     if settled && !expanded {
         return vec![(
             text::ellipsize(&text::single_line(message), available),

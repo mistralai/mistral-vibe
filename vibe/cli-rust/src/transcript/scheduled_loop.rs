@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::StoredEntry;
+use super::{StoredEntry, Transcript};
 use crate::server::HistoryEntry;
 
 /// The loop that sent a user prompt, and when it fired (epoch milliseconds).
@@ -48,6 +48,14 @@ pub(super) fn from_display(raw: &Value) -> Option<FiredLoop> {
     })
 }
 
+/// A loop prompt's title (its first line) and the instructions below it.
+pub fn split_prompt(prompt: &str) -> (&str, &str) {
+    let prompt = prompt.trim();
+    prompt
+        .split_once('\n')
+        .map_or((prompt, ""), |(title, body)| (title.trim(), body.trim()))
+}
+
 /// Position of the user prompt the fired loop started in the same turn.
 pub(super) fn prompt_index(prior: &[StoredEntry], notice: &Value) -> Option<usize> {
     let turn = notice.get("turnId").and_then(Value::as_str)?;
@@ -56,4 +64,18 @@ pub(super) fn prompt_index(prior: &[StoredEntry], notice: &Value) -> Option<usiz
             && stored.raw.get("turnId").and_then(Value::as_str) == Some(turn)
             && matches!(&stored.typed, HistoryEntry::Message(message) if message.role == "user")
     })
+}
+
+impl Transcript {
+    /// The loop prompt `id` names, or the one the fired notice `id` annotated.
+    pub fn loop_prompt_of(&self, id: &str) -> Option<&str> {
+        let &index = self.indices.get(id)?;
+        let stored = &self.entries[index];
+        let prompt = match is_fired(&stored.typed) {
+            true => prompt_index(&self.entries[..index], &stored.raw)?,
+            false => index,
+        };
+        let prompt = &self.entries[prompt];
+        prompt.fired_loop.is_some().then_some(prompt.id.as_str())
+    }
 }

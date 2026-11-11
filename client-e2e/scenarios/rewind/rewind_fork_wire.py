@@ -50,5 +50,4 @@ handshake = {
 }
 request_methods = {"session/rewind"}
 
-capture_steps = {3, 4}
-screen_contains = ("session: 00000000 (before rewind) → 22222222 (after rewind)",)
+screen_contains = ("session: 00000001 (before rewind) → 00000002 (after rewind)",)

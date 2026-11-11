@@ -103,10 +103,14 @@ fn a_plain_click_on_the_model_opens_the_picker_and_records_the_composer_entry() 
 
     assert!(app.model_picker.open);
     let events: Vec<TelemetryEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].name, event::SLASH_COMMAND_USED);
-    assert_eq!(events[0].properties["command"], "model");
-    assert_eq!(events[0].properties["entry_point"], "composer");
+    let names: Vec<_> = events.iter().map(|event| event.name).collect();
+    assert_eq!(
+        names,
+        [event::MODEL_SELECTION_OPENED, event::SLASH_COMMAND_USED]
+    );
+    assert_eq!(events[0].properties["picker"], "model");
+    assert_eq!(events[1].properties["command"], "model");
+    assert_eq!(events[1].properties["entry_point"], "composer");
 }
 
 #[test]

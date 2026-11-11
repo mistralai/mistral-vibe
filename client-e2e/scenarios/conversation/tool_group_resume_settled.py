@@ -31,7 +31,6 @@ handshake = {
 }
 
 client_args = ("--continue",)
-capture_startup = False
 
 screen_contains = ("⏵ Ran 2 commands",)
 screen_excludes = ("Running 2 commands",)

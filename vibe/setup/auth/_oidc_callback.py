@@ -4,6 +4,11 @@ import asyncio
 import hmac
 from urllib.parse import parse_qs, urlsplit
 
+from vibe.setup.auth._oidc_callback_page import (
+    CALLBACK_PAGE_HEADERS,
+    CallbackPage,
+    render_callback_page,
+)
 from vibe.setup.auth._oidc_config import OidcError
 
 _MAX_CONNECTIONS = 8
@@ -50,7 +55,7 @@ class OidcCallback:
             writer.close()
             return
         self._connections.add(task)
-        status, text = "400 Bad Request", "Invalid sign-in callback."
+        status, page = "400 Bad Request", CallbackPage.FAILED
         try:
             request = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 5)
             line = request.split(b"\r\n", 1)[0].decode("ascii")
@@ -74,15 +79,19 @@ class OidcCallback:
                     self.result.set_exception(
                         OidcError("OIDC authorization was declined")
                     )
-                    status, text = "200 OK", "Sign-in declined. Return to Vibe."
+                    cancelled = query["error"] == ["access_denied"]
+                    status = "200 OK"
+                    page = CallbackPage.CANCELLED if cancelled else CallbackPage.FAILED
                 elif len(query.get("code", [])) == 1:
                     self.result.set_result(f"{self.redirect_uri}?{parsed.query}")
-                    status, text = "200 OK", "Sign-in received. Return to Vibe."
-            body = text.encode()
+                    status, page = "200 OK", CallbackPage.COMPLETE
+            body = render_callback_page(page)
+            headers = "".join(
+                f"{name}: {value}\r\n" for name, value in CALLBACK_PAGE_HEADERS
+            )
             writer.write(
-                f"HTTP/1.1 {status}\r\nContent-Type: text/plain\r\n"
-                f"Content-Length: {len(body)}\r\nCache-Control: no-store\r\n"
-                "Connection: close\r\n\r\n".encode()
+                f"HTTP/1.1 {status}\r\n{headers}"
+                f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
                 + body
             )
             await asyncio.wait_for(writer.drain(), 5)

@@ -70,6 +70,9 @@ pub struct ConfigView {
     pub autocopy_to_clipboard: bool,
     #[serde(default = "yes")]
     pub enable_mouse_capture: bool,
+    /// Absent on an older server: the prompt stays pinned, per ADR 0014.
+    #[serde(default = "yes")]
+    pub enable_sticky_prompt: bool,
     /// Absent on an older server: completion stays on, per ADR 0014.
     #[serde(default = "yes")]
     pub enable_file_autocomplete: bool,
@@ -77,6 +80,8 @@ pub struct ConfigView {
     pub file_watcher_for_autocomplete: bool,
     #[serde(default = "yes")]
     pub ask_confirmation_on_exit: bool,
+    #[serde(default)]
+    pub vim_keybindings: bool,
     pub voice_mode_enabled: Option<bool>,
     #[serde(default)]
     pub narrator_enabled: bool,
@@ -92,6 +97,8 @@ pub struct ConfigView {
     pub enable_system_trust_store: bool,
     #[serde(default = "yes")]
     pub experimental_enable_tab_status: bool,
+    #[serde(default)]
+    pub enable_pr_monitoring: bool,
     /// Absent on an older server: stay silent rather than assume consent.
     #[serde(default)]
     pub enable_telemetry: bool,

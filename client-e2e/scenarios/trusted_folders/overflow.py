@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 handshake = {
     "workspace/trust/status": {
@@ -20,4 +20,4 @@ handshake = {
 # Twelve files overflow the 10-row scroll region: it grows a scrollbar and the
 # text re-wraps one column narrower. Down scrolls that region by one row, and
 # holding it reaches the last file, which the clipped region cannot show.
-timeline: Timeline = ["\x1b[B", "\x1b[B" * 11]
+timeline: Timeline = ["\x1b[B", "\x1b[B" * 11, take_snapshot()]

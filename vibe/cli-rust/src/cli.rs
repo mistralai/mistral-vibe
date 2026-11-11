@@ -76,11 +76,18 @@ pub struct Cli {
     #[arg(long = "max-turns", overrides_with = "max_turns")]
     pub max_turns: Option<u32>,
 
-    /// Maximum cost in dollars (headless mode only).
-    #[arg(long = "max-price", overrides_with = "max_price")]
+    /// Maximum cumulative cost in dollars of the run's root session and
+    /// subagents (headless mode only). A model priced at 0 is free; a limit of 0
+    /// stops the run before the next call once any call has cost money.
+    #[arg(
+        long = "max-price",
+        overrides_with = "max_price",
+        allow_negative_numbers = true
+    )]
     pub max_price: Option<f64>,
 
-    /// Maximum total prompt + completion tokens (headless mode only).
+    /// Maximum cumulative prompt + completion tokens of the run's root session
+    /// and subagents (headless mode only).
     #[arg(long = "max-tokens", overrides_with = "max_tokens")]
     pub max_tokens: Option<u64>,
 
@@ -128,7 +135,8 @@ pub struct Cli {
     #[arg(long = "model", value_name = "ALIAS", overrides_with = "model")]
     pub model: Option<String>,
 
-    /// Approves all tool calls without prompting for the selected agent.
+    /// Approves all tool calls without prompting: a new session on a built-in
+    /// mode starts the auto-approve agent instead.
     #[arg(long = "auto-approve", visible_alias = "yolo", action = ArgAction::SetTrue, overrides_with = "auto_approve")]
     pub auto_approve: bool,
 
@@ -160,10 +168,6 @@ pub struct Cli {
     /// Additional working directory for file access. Repeat the flag.
     #[arg(long = "add-dir")]
     pub add_dir: Vec<PathBuf>,
-
-    /// Feature flag for teleport (hidden).
-    #[arg(long = "teleport", action = ArgAction::SetTrue, hide = true, conflicts_with = "prompt", overrides_with = "teleport")]
-    pub teleport: bool,
 
     /// Run the session's tools through the agent server on this Unix socket (experimental, hidden).
     #[arg(long = "agent-socket", value_name = "PATH", hide = true)]
@@ -378,8 +382,8 @@ pub struct HeadlessOptions {
 }
 
 /// The execution-control config resolved from the CLI flags, sent to the
-/// app-server in `agentConfig`. `--auto-approve`/`--yolo` is a session-wide
-/// bypass and never swaps the agent.
+/// app-server in `agentConfig`. The server resolves `--auto-approve`/`--yolo`
+/// against the session's agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExecutionControl {
     /// Resolved agent name; `None` lets the server use `default_agent`.

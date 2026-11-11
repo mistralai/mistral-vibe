@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from e2e.app_server.mcp import handshake as mcp_handshake, sample_sources
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _SOURCES = sample_sources()
 _TOGGLED = [
@@ -15,4 +15,4 @@ _TOGGLED = [
 
 handshake = mcp_handshake(_SOURCES, toggled=_TOGGLED)
 
-timeline: Timeline = ["/mcp filesystem\r", "d"]
+timeline: Timeline = ["/mcp filesystem\r", "d", take_snapshot()]

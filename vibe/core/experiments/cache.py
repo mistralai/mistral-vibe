@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from vibe.core.experiments._constants import EVAL_CACHE_TTL_SECONDS
 from vibe.core.experiments.models import EvalResponse
-from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
+from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE, EXPERIMENT_HELD_EVAL_CACHE_FILE
 from vibe.core.utils.keyed_json_cache import load_keyed_entry, store_keyed_entry
 from vibe.observability.logging import logger
 
@@ -59,10 +59,16 @@ def store_cached_eval_response(
 
 
 def clear_cached_eval_responses() -> None:
-    try:
-        EXPERIMENT_EVAL_CACHE_FILE.path.unlink(missing_ok=True)
-    except OSError:
-        logger.debug("Failed to delete experiment eval cache file", exc_info=True)
+    """Drop every eval Vibe keeps on disk: the variants session builds apply,
+    and the evals the app server serves sessions from.
+    """
+    for path in (EXPERIMENT_EVAL_CACHE_FILE.path, EXPERIMENT_HELD_EVAL_CACHE_FILE.path):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.debug(
+                "Failed to delete experiment eval cache %s", path, exc_info=True
+            )
 
 
 def _parse_eval_payload(payload: Any) -> EvalResponse | None:

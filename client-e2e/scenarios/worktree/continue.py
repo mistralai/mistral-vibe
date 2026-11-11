@@ -34,8 +34,6 @@ on_request = {
     ]
 }
 screen_contains = ("Resumed session",)
-capture_startup = False
-capture_steps = set()
 exit_after_last_step = True
 timeline: Timeline = [
     "hi\r",

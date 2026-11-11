@@ -8,6 +8,5 @@ from scenarios.slash_command._branch_fixtures import REQUEST_METHODS
 handshake = {"session/fork": {"state": {"unexpected": True}}}
 request_methods = REQUEST_METHODS
 
-capture_startup = False
 screen_contains = ("Failed to branch session: missing field",)
 timeline: Timeline = ["/branch\r"]

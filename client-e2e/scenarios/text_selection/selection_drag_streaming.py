@@ -6,8 +6,6 @@ from e2e.app_server.events import assistant_delta, assistant_msg, turn_started, 
 from e2e.app_server.scenario import Timeline
 
 env = {"SSH_TTY": "/dev/pts/0"}
-capture_startup = False
-capture_steps = {2, 3, 4, 5, 6}
 
 _ASSISTANT_ID = "streaming-assistant"
 _LINE = "The quick brown fox jumps over the lazy dog on line {:02d}."

@@ -47,6 +47,7 @@ fn fenced_app(code: &str) -> App {
             prewrapped: true,
         }],
         None,
+        Vec::new(),
     );
     app.view.selection_region.area = Rect::new(0, 0, WIDTH, 40);
     app.view.selection_region.document = true;

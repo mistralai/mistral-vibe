@@ -12,6 +12,7 @@ import inspect
 import logging
 import math
 from pathlib import Path
+import time
 from typing import Literal
 
 from mistralai_vibe_local_harness.vibe._mcp_cache import MCPDescriptorCache
@@ -44,6 +45,10 @@ from mistralai_vibe_local_harness.vibe._mcp_naming import (
     build_route_snapshot,
 )
 from mistralai_vibe_local_harness.vibe._mcp_pool import MCPStdioPool, MCPStdioPoolLease
+from mistralai_vibe_local_harness.vibe._tool_schemas import (
+    ToolsLeftOutSignal,
+    type_is_not_object,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +79,18 @@ class _Flight:
     waiters: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _Failure:
+    count: int
+    retry_at: float
+    code: str
+    message: str
+
+
+# Past any useful cap, and far below where a float delay would overflow.
+_MAX_DOUBLINGS = 32
+
+
 def _never_closed() -> bool:
     return False
 
@@ -95,13 +112,55 @@ class MCPDiscoveryFlights:
     that would authenticate differently, one with a token another has just
     refreshed say, never share a result, so a rejection of one credential is
     never taken for a rejection of the other.
+
+    With ``retry_after_s``, a discovery that fails is not started again under
+    the same key until a delay has passed, doubling with each failure up to
+    ``max_retry_after_s``: its failure is raised again instead, so an
+    unreachable server is not contacted by every session that opens. A
+    rejected credential, which a login replaces, does not back off, nor does
+    a failure of a runtime closing under its discovery. An ``explicit``
+    discovery (`/mcp refresh`, a login) ignores the backoff.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        retry_after_s: float | None = None,
+        max_retry_after_s: float = 300.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if retry_after_s is not None and not (
+            retry_after_s >= 0 and math.isfinite(max_retry_after_s)
+        ):
+            raise ValueError("MCP discovery backoff needs a finite maximum retry delay")
         self._flights: dict[_FlightKey, _Flight] = {}
+        self._retry_after_s = retry_after_s
+        self._max_retry_after_s = max_retry_after_s
+        self._clock = clock
+        # Dropped once their backoff has long ended, so rotated credentials
+        # leave none behind.
+        self._failures: dict[_FlightKey, _Failure] = {}
+
+    @property
+    def backing_off(self) -> int:
+        self._drop_ended_backoffs()
+        return len(self._failures)
+
+    async def aclose(self) -> None:
+        tasks = [flight.task for flight in self._flights.values()]
+        self._flights.clear()
+        self._failures.clear()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def join(
-        self, key: _FlightKey, discover: _Discovery, *, closed: Callable[[], bool]
+        self,
+        key: _FlightKey,
+        discover: _Discovery,
+        *,
+        closed: Callable[[], bool],
+        explicit: bool = False,
     ) -> tuple[MCPRemoteToolDescriptor, ...]:
         while True:
             flight = self._flights.get(key)
@@ -113,6 +172,8 @@ class MCPDiscoveryFlights:
                 or flight.task.get_loop() is not asyncio.get_running_loop()
             )
             if flight is None or not joined:
+                if not explicit:
+                    self._raise_backing_off(key)
                 flight = self._start(key, discover, closed)
             flight.waiters += 1
             try:
@@ -129,11 +190,65 @@ class MCPDiscoveryFlights:
     def _start(
         self, key: _FlightKey, discover: _Discovery, closed: Callable[[], bool]
     ) -> _Flight:
-        task = asyncio.create_task(discover())
+        task = asyncio.create_task(self._run(key, discover, closed))
         flight = _Flight(task=task, closed=closed)
         self._flights[key] = flight
         task.add_done_callback(lambda done: self._forget(key, done))
         return flight
+
+    async def _run(
+        self, key: _FlightKey, discover: _Discovery, closed: Callable[[], bool]
+    ) -> tuple[MCPRemoteToolDescriptor, ...]:
+        try:
+            descriptors = await discover()
+        except MCPAuthorizationRejected:
+            raise
+        except Exception as error:
+            if not closed():
+                self._back_off(key, error)
+            raise
+        self._failures.pop(key, None)
+        return descriptors
+
+    def _raise_backing_off(self, key: _FlightKey) -> None:
+        self._drop_ended_backoffs()
+        failure = self._failures.get(key)
+        if failure is None or self._clock() >= failure.retry_at:
+            return
+        logger.debug(
+            "MCP discovery failed %d time(s); not retried for %.0f s",
+            failure.count,
+            failure.retry_at - self._clock(),
+        )
+        raise MCPRuntimeFailure(failure.code, failure.message)
+
+    def _back_off(self, key: _FlightKey, error: Exception) -> None:
+        if self._retry_after_s is None:
+            return
+        # Kept past its end until the next failure, so the delay keeps
+        # doubling while the server stays down.
+        previous = self._failures.get(key)
+        count = 1 if previous is None else previous.count + 1
+        delay = self._retry_after_s * 2 ** min(count - 1, _MAX_DOUBLINGS)
+        self._failures[key] = _Failure(
+            count=count,
+            retry_at=self._clock() + min(delay, self._max_retry_after_s),
+            code=(
+                error.code
+                if isinstance(error, MCPRuntimeFailure)
+                else "mcp_transport_failed"
+            ),
+            message=str(error) or type(error).__name__,
+        )
+
+    def _drop_ended_backoffs(self) -> None:
+        now = self._clock()
+        for key in [
+            key
+            for key, failure in self._failures.items()
+            if now >= failure.retry_at + self._max_retry_after_s
+        ]:
+            del self._failures[key]
 
     @staticmethod
     def _lost_for_its_starter(flight: _Flight, closed: Callable[[], bool]) -> bool:
@@ -363,9 +478,10 @@ class MCPRuntime:
             resolution = await self._resolve_isolated(
                 server,
                 semaphore,
-                # A refresh skips the cache it is refreshing.
+                # A refresh skips the copy it is refreshing.
                 forced=refresh,
                 cached_only=False,
+                explicit=False,
             )
             async with self._lock:
                 self._guard_open()
@@ -603,6 +719,7 @@ class MCPRuntime:
                     semaphore,
                     forced=server.name in forced_names,
                     cached_only=cached_only,
+                    explicit=server.name in forced_names,
                 )
                 for server in configuration.servers
             )
@@ -621,6 +738,7 @@ class MCPRuntime:
         *,
         forced: bool,
         cached_only: bool,
+        explicit: bool,
     ) -> _ServerResolution:
         if server.disabled and not forced:
             descriptors = self._accepted_descriptors.get(server.name)
@@ -638,7 +756,10 @@ class MCPRuntime:
         async with semaphore:
             try:
                 result = await self._resolve_server(
-                    server, force_remote_discovery=forced, cached_only=cached_only
+                    server,
+                    force_remote_discovery=forced,
+                    cached_only=cached_only,
+                    explicit=explicit,
                 )
             except Exception as exc:
                 # A single source must never abort reconfiguration of the others:
@@ -771,7 +892,10 @@ class MCPRuntime:
             if server.name == name:
                 resolutions.append(
                     await self._resolve_server(
-                        server, force_remote_discovery=True, authorization=authorization
+                        server,
+                        force_remote_discovery=True,
+                        authorization=authorization,
+                        explicit=True,
                     )
                 )
                 continue
@@ -803,6 +927,13 @@ class MCPRuntime:
         )
         if push_to_core:
             await self._accept(candidate)
+        left_out: list[ToolsLeftOutSignal] = []
+        for server, descriptors in callable_descriptors:
+            # Named once per listing, not on every rebuild that keeps it.
+            if descriptors != self._accepted_descriptors.get(server.name):
+                dropped = _warn_dropped_tools(server.name, descriptors)
+                if dropped:
+                    left_out.append(ToolsLeftOutSignal(server.name, dropped))
         self._configuration = configuration
         self._accepted_descriptors = {
             server.name: descriptors
@@ -813,6 +944,9 @@ class MCPRuntime:
         # Set with the snapshot, not after the awaits below: one failing or
         # cancelled must not leave routes Core has not seen unflagged.
         self._snapshot_deferred = not push_to_core
+        # Published after the state above, as the authorization signals are.
+        for signal in left_out:
+            await self._publish(signal)
         for server, _, _, required in resolutions:
             if required is not None:
                 await self._authorization_required(server, required)
@@ -833,6 +967,7 @@ class MCPRuntime:
         force_remote_discovery: bool,
         authorization: MCPAuthorizationSnapshot | None = None,
         cached_only: bool = False,
+        explicit: bool = True,
     ) -> _ServerResolution:
         if cached_only:
             return await self._resolve_from_cache(server)
@@ -853,22 +988,27 @@ class MCPRuntime:
                 "MCP authorization descriptor revision is stale",
             )
         key = _cache_key(server)
-        if not force_remote_discovery:
-            cached = await self._read_descriptor(key, server.name)
-            if cached is not None:
-                return (
-                    server,
-                    cached.descriptors,
-                    MCPSourceState(
-                        name=server.name,
-                        status=_available_status(server),
-                        descriptors=cached.descriptors,
-                        descriptor_revision=authorization.descriptor_revision,
-                    ),
-                    None,
-                )
+        cached = (
+            None
+            if force_remote_discovery
+            else await self._read_descriptor(key, server.name)
+        )
+        if cached is not None:
+            return (
+                server,
+                cached.descriptors,
+                MCPSourceState(
+                    name=server.name,
+                    status=_available_status(server),
+                    descriptors=cached.descriptors,
+                    descriptor_revision=authorization.descriptor_revision,
+                ),
+                None,
+            )
         try:
-            descriptors = await self._discover_once(server, authorization, key)
+            descriptors = await self._discover_once(
+                server, authorization, key, explicit=explicit
+            )
             discovery_authorization = authorization
         except MCPAuthorizationRejected as rejected:
             retried = await self._retry_rejected_discovery(
@@ -889,20 +1029,7 @@ class MCPRuntime:
                 ),
                 None,
             )
-        _validate_descriptors(descriptors, self._cache_policy)
-        key = _cache_key(server)
-        now = _utc_now()
-        record = MCPDescriptorCacheRecordV1(
-            key=key,
-            source_name=server.name,
-            discovered_at=now,
-            last_used_at=now,
-            descriptors=descriptors,
-        )
-        self._memory_cache[key] = record
-        await self._cache.write(
-            key, source_name=server.name, descriptors=descriptors, now=now
-        )
+        await self._hold_discovered(key, server.name, descriptors)
         return (
             server,
             descriptors,
@@ -937,11 +1064,7 @@ class MCPRuntime:
                 ),
                 None,
             )
-        refresh_after_s = self._cache_policy.refresh_after_s
-        if (
-            refresh_after_s is not None
-            and (_utc_now() - cached.discovered_at).total_seconds() >= refresh_after_s
-        ):
+        if self._refresh_due_for(cached):
             self._refresh_due.add(server.name)
         return (
             server,
@@ -953,6 +1076,36 @@ class MCPRuntime:
                 descriptor_revision=revision,
             ),
             None,
+        )
+
+    async def _hold_discovered(
+        self,
+        key: MCPDescriptorCacheKey,
+        source_name: str,
+        descriptors: tuple[MCPRemoteToolDescriptor, ...],
+    ) -> None:
+        """Hold the copy the discovery wrote, as written, so marking it used
+        later finds the one on disk.
+        """
+        now = _utc_now()
+        record = await self._cache.read(key, source_name=source_name, now=now)
+        if record is None or record.descriptors != descriptors:
+            # Not written (the cache is off or full, say): held for this
+            # session only.
+            record = MCPDescriptorCacheRecordV1(
+                key=key,
+                source_name=source_name,
+                discovered_at=now,
+                last_used_at=now,
+                descriptors=descriptors,
+            )
+        self._memory_cache[key] = record
+
+    def _refresh_due_for(self, record: MCPDescriptorCacheRecordV1) -> bool:
+        refresh_after_s = self._cache_policy.refresh_after_s
+        return (
+            refresh_after_s is not None
+            and (_utc_now() - record.discovered_at).total_seconds() >= refresh_after_s
         )
 
     async def _read_descriptor(
@@ -986,15 +1139,51 @@ class MCPRuntime:
         server: ResolvedMCPServerConfig,
         authorization: MCPAuthorizationSnapshot,
         key: MCPDescriptorCacheKey,
+        *,
+        explicit: bool,
     ) -> tuple[MCPRemoteToolDescriptor, ...]:
         flights = self._discovery_flights
+        take_fresh = not explicit
         if flights is None:
-            return await self._discover(server, authorization)
+            return await self._discover_and_keep(
+                server, authorization, key, take_fresh=take_fresh
+            )
         return await flights.join(
             (key, _credential_fingerprint(authorization)),
-            lambda: self._discover(server, authorization),
+            lambda: self._discover_and_keep(
+                server, authorization, key, take_fresh=take_fresh
+            ),
             closed=self._is_closed if server.transport == "stdio" else _never_closed,
+            explicit=explicit,
         )
+
+    async def _discover_and_keep(
+        self,
+        server: ResolvedMCPServerConfig,
+        authorization: MCPAuthorizationSnapshot,
+        key: MCPDescriptorCacheKey,
+        *,
+        take_fresh: bool,
+    ) -> tuple[MCPRemoteToolDescriptor, ...]:
+        """Discover a server and write its descriptors to the shared cache.
+
+        Both happen inside the shared discovery, so a session that starts one
+        after it ends finds the copy on disk. With ``take_fresh``, a copy
+        another session or process has written that is not due a refresh is
+        taken instead: one refresh per server, not one per session.
+        """
+        if take_fresh:
+            record = await self._cache.read(
+                key, source_name=server.name, now=_utc_now()
+            )
+            if record is not None and not self._refresh_due_for(record):
+                return record.descriptors
+        descriptors = await self._discover(server, authorization)
+        _validate_descriptors(descriptors, self._cache_policy)
+        await self._cache.write(
+            key, source_name=server.name, descriptors=descriptors, now=_utc_now()
+        )
+        return descriptors
 
     def _is_closed(self) -> bool:
         return self._closed
@@ -1058,9 +1247,7 @@ class MCPRuntime:
     async def _authorization_required(
         self, server: ResolvedMCPServerConfig, required: MCPAuthorizationRequired
     ) -> None:
-        if self._event_sink is None:
-            return
-        result = self._event_sink(
+        await self._publish(
             MCPAuthorizationRequiredSignal(
                 server_name=server.name,
                 reason=required.reason,
@@ -1068,6 +1255,13 @@ class MCPRuntime:
                 observed_connection_revision=required.observed_connection_revision,
             )
         )
+
+    async def _publish(
+        self, signal: MCPAuthorizationRequiredSignal | ToolsLeftOutSignal
+    ) -> None:
+        if self._event_sink is None:
+            return
+        result = self._event_sink(signal)
         if inspect.isawaitable(result):
             await result
 
@@ -1103,7 +1297,9 @@ class MCPRuntime:
             and replacement.connection_revision != authorization.connection_revision
         ):
             try:
-                return await self._discover(server, replacement), replacement
+                return await self._discover_and_keep(
+                    server, replacement, _cache_key(server), take_fresh=False
+                ), replacement
             except MCPAuthorizationRejected as retry_rejected:
                 replacement = await self._authorization_provider.reject(
                     server.authorization,
@@ -1260,6 +1456,24 @@ class MCPRuntime:
         # previous one.
         if self._accept_snapshot is not None:
             await self._accept_snapshot(snapshot)
+
+
+def _warn_dropped_tools(
+    server_name: str, descriptors: tuple[MCPRemoteToolDescriptor, ...]
+) -> tuple[str, ...]:
+    """Name each listed tool the route snapshot leaves out for its schema."""
+    dropped = tuple(
+        descriptor.remote_name
+        for descriptor in descriptors
+        if type_is_not_object(descriptor.input_schema)
+    )
+    for name in dropped:
+        logger.warning(
+            'MCP server %r, tool %r: input schema type is not "object"; tool unavailable',
+            server_name,
+            name,
+        )
+    return dropped
 
 
 def _is_discovery_pending(source: MCPSourceState | None) -> bool:

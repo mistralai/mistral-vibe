@@ -23,12 +23,15 @@ import pytest
 import pytest_asyncio
 import tomli_w
 
-from tests.stubs.process_services import FakeOrgConfigServer, fake_process_services
+from tests.stubs.process_services import (
+    FakeModelCatalogServer,
+    FakeOrgConfigServer,
+    fake_process_services,
+)
 from vibe.app_server._admin_config import OrgConfigSource
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import DispatchResult, RequestFailure
 from vibe.app_server._host import HostRequestHandler
-import vibe.app_server._missing_layers as missing_layers
 from vibe.app_server._org_config_service import ORG_CONFIG_POLICY
 from vibe.app_server._process_services import ProcessServices
 import vibe.app_server._runtime as runtime_module
@@ -48,20 +51,13 @@ from vibe.core.config import VibeConfigSchema
 from vibe.core.config.admin_config import ManagedConfig, ManagedConfigResult
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.experiments.active import ExperimentName
-from vibe.core.experiments.cache import (
-    clear_cached_eval_responses,
-    store_cached_eval_response,
-)
-from vibe.core.experiments.models import EvalResponse
-from vibe.core.experiments.wait import (
-    experiments_eval_failed,
-    mark_experiments_eval_failed,
-)
+from vibe.core.experiments.cache import clear_cached_eval_responses
+from vibe.core.experiments.manager import ExperimentManager
+from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
+from vibe.core.identity import IdentityResult
+from vibe.core.identity_cache import IdentityCache
 from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
-from vibe.core.model_catalog.cache import store_cached_model_catalog
-from vibe.core.model_catalog.wait import mark_model_catalog_failed, model_catalog_failed
-from vibe.core.telemetry.send import resolve_credential_cache_key
-from vibe.core.telemetry.types import LaunchContext
+from vibe.core.platform_auth import PlatformCredentialProvider
 from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.setup.auth import _oidc_runtime
 from vibe.setup.auth._oidc_config import OidcConfig
@@ -70,6 +66,7 @@ from vibe.setup.auth._oidc_credentials import (
     OidcTenant,
     OidcTokens,
 )
+from vibe.setup.auth.whoami import WhoAmICache
 
 
 @pytest.fixture
@@ -157,17 +154,41 @@ class _Remote:
         hang: bool = False,
         delays: dict[str, float] | None = None,
         org_toml: str = _ORG_TOML,
+        eval_response: EvalResponse | None = None,
     ):
         self.hang = hang
+        self.eval_response = eval_response or _smart_approve_eval()
         self.delays = delays or {}
         self.org_toml = org_toml
         self.release = asyncio.Event()
         self.calls = {"org": 0, "eval": 0, "catalog": 0}
         self.client_names: list[str | None] = []
         org_server.respond = self._org
-        monkeypatch.setattr(missing_layers, "fetch_and_cache_experiments", self._eval)
+        remote = self
+
+        async def initialize(
+            manager: ExperimentManager, attributes: ExperimentAttributes
+        ) -> None:
+            await remote._initialize(manager, attributes)
+
+        monkeypatch.setattr(ExperimentManager, "initialize", initialize)
         monkeypatch.setattr(
-            missing_layers, "fetch_and_cache_model_catalog", self._catalog
+            IdentityCache,
+            "resolve",
+            AsyncMock(
+                return_value=IdentityResult(
+                    id="user-1", organization=None, workspace=None
+                )
+            ),
+        )
+        monkeypatch.setattr(WhoAmICache, "resolve", AsyncMock(return_value=None))
+        # Every model catalog server of the test answers here.
+        monkeypatch.setattr(
+            FakeModelCatalogServer,
+            "fetch",
+            lambda _server, api_base, credentials: remote._catalog(
+                api_base, credentials
+            ),
         )
 
     async def _block(self, source: str) -> bool:
@@ -183,25 +204,19 @@ class _Remote:
             config=ManagedConfig(state="enabled", toml=self.org_toml)
         )
 
-    async def _eval(
-        self, config: VibeConfigSchema, launch_context: LaunchContext, **_: Any
+    async def _initialize(
+        self, manager: ExperimentManager, attributes: ExperimentAttributes
     ) -> None:
-        self.client_names.append(launch_context.client_name)
+        # The eval request itself; identity and /whoami answer from the stubs.
+        self.client_names.append(attributes.client_name)
         if await self._block("eval"):
-            store_cached_eval_response(
-                config,
-                _smart_approve_eval(),
-                fetched_for=await resolve_credential_cache_key(config),
-            )
+            manager.hydrate(self.eval_response, attributes=attributes)
 
     async def _catalog(
-        self, config: Any, _credentials: Any = None
+        self, _api_base: str, _credentials: PlatformCredentialProvider
     ) -> ModelCatalogResponse | None:
         if not await self._block("catalog"):
             return None
-        store_cached_model_catalog(
-            config, _catalog(), fetched_for=await resolve_credential_cache_key(config)
-        )
         return _catalog()
 
 
@@ -210,6 +225,14 @@ def _set_local_config(config_dir: Path, **values: object) -> None:
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
     config.update(values)
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+def _model_catalog_eval(enabled: bool) -> EvalResponse:
+    return EvalResponse.model_validate({
+        "features": {
+            ExperimentName.MODEL_CATALOG.value: {"defaultValue": enabled, "rules": []}
+        }
+    })
 
 
 @pytest.fixture
@@ -239,12 +262,15 @@ def org_limit() -> float:
 
 @pytest_asyncio.fixture
 async def process_services(
-    org_server: FakeOrgConfigServer, org_limit: float
+    org_server: FakeOrgConfigServer,
+    org_limit: float,
+    model_catalog_server: FakeModelCatalogServer,
 ) -> AsyncIterator[ProcessServices]:
     services = fake_process_services(
         org_server,
         policy=replace(ORG_CONFIG_POLICY, fetch_timeout_s=org_limit),
         first_wait_s=org_limit,
+        model_catalog_server=model_catalog_server,
     )
     yield services
     await services.close()
@@ -252,7 +278,11 @@ async def process_services(
 
 def _handler(*, process_services: ProcessServices) -> HostRequestHandler:
     return HostRequestHandler(
-        HarnessFilesManager(sources=("user",)), org_config=process_services.org_config
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
     )
 
 
@@ -306,7 +336,7 @@ async def test_shared_cache_application_resolves_session_tenant(
         harness_files=HarnessFilesManager(sources=("user",))
     )
     assert mistral_credential_cache_key(orchestrator.config) is None
-    key, _, _ = await apply_cached_layers(orchestrator, None)
+    key, _, _ = await apply_cached_layers(orchestrator, None, model_catalog=None)
     assert key is not None
     assert key.cache_key == mistral_credential_cache_key(orchestrator.config)
     resolve.assert_awaited_once()
@@ -362,7 +392,9 @@ async def test_tenant_timeout_does_not_wait_for_discovery_worker(
     orchestrator = await build_default_orchestrator(
         harness_files=HarnessFilesManager(sources=("user",))
     )
-    pending = asyncio.create_task(apply_cached_layers(orchestrator, None))
+    pending = asyncio.create_task(
+        apply_cached_layers(orchestrator, None, model_catalog=None)
+    )
     try:
         await asyncio.wait_for(started.wait(), 1)
         assert await asyncio.wait_for(pending, 0.2) == (None, None, None)
@@ -379,9 +411,9 @@ async def test_tenant_timeout_does_not_wait_for_discovery_worker(
 async def test_account_switch_during_picker_fetch_never_caches_previous_response(
     monkeypatch, oidc_credentials, source, process_services, org_server
 ):
+    from vibe.app_server._model_catalog_service import ModelCatalogKey
     from vibe.core.config.managed_config_cache import load_cached_managed_config
     from vibe.core.experiments.cache import load_cached_eval_response
-    from vibe.core.model_catalog.cache import load_cached_model_catalog
     from vibe.core.telemetry.send import mistral_credential_cache_key
 
     current, resolve = oidc_credentials
@@ -411,7 +443,10 @@ async def test_account_switch_during_picker_fetch_never_caches_previous_response
     config = VibeConfigSchema()
     assert load_cached_managed_config(mistral_credential_cache_key(config)) is None
     assert load_cached_eval_response(config) is None
-    assert load_cached_model_catalog(config) is None
+    catalog_key = ModelCatalogKey.current(
+        VibeConfigSchema(experimental_enable_model_catalog=True), None
+    )
+    assert await process_services.model_catalog.load(catalog_key) is None
 
 
 @pytest.mark.asyncio
@@ -469,6 +504,42 @@ async def test_hanging_endpoints_answer_local_defaults_and_are_not_waited_for_ag
     assert second_duration < 2.5
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
     assert second.default_agent == first.default_agent
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_the_eval_turns_on_is_fetched_for_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+    config_dir: Path,
+) -> None:
+    _set_local_config(config_dir, enable_telemetry=True)
+    remote = _Remote(
+        monkeypatch, org_server, eval_response=_model_catalog_eval(enabled=True)
+    )
+
+    view = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" in {model.alias for model in view.models}
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+
+
+@pytest.mark.asyncio
+async def test_a_catalog_the_eval_leaves_off_is_not_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+    config_dir: Path,
+) -> None:
+    _set_local_config(config_dir, enable_telemetry=True)
+    remote = _Remote(
+        monkeypatch, org_server, eval_response=_model_catalog_eval(enabled=False)
+    )
+
+    view = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" not in {model.alias for model in view.models}
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 0}
 
 
 @pytest.mark.asyncio
@@ -605,8 +676,8 @@ async def test_a_slow_org_config_is_not_counted_against_the_other_fetches(
     second = (await _read_config(handler)).config
 
     assert "catalog-model" not in {model.alias for model in first.models}
-    assert not experiments_eval_failed()
-    assert not model_catalog_failed()
+    assert not process_services.experiments.failures.failed
+    assert not process_services.model_catalog.failures.failed
     assert "catalog-model" in {model.alias for model in second.models}
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
 
@@ -668,9 +739,34 @@ async def test_only_the_source_without_a_cache_is_fetched(
     await _read_config(handler)
     clear_cached_eval_responses()
 
-    await _read_config(handler)
+    agents = await _list_agents(handler)
 
-    assert remote.calls == {"org": 1, "eval": 2, "catalog": 1}
+    # The eval the process holds answers again, unfetched.
+    assert "smart-approve" in {agent.name for agent in agents.agents}
+    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("remote_config_enabled")
+async def test_the_picker_fetches_the_catalog_through_the_process_service(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # The catalog the picker fetched is the one every session is served: a
+    # session opened next asks nothing.
+    from vibe.app_server._model_catalog_service import ModelCatalogKey
+
+    remote = _Remote(monkeypatch, org_server)
+    config = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" in {model.alias for model in config.models}
+    key = await ModelCatalogKey.of(
+        VibeConfigSchema(experimental_enable_model_catalog=True), None
+    )
+    assert key is not None
+    assert await process_services.model_catalog.ensure(key) == _catalog()
+    assert remote.calls["catalog"] == 1
 
 
 @pytest.mark.asyncio
@@ -682,8 +778,8 @@ async def test_a_source_that_already_failed_is_not_fetched(
 ) -> None:
     # The session path recorded these failures; the read shares them.
     remote = _Remote(monkeypatch, org_server)
-    mark_experiments_eval_failed()
-    mark_model_catalog_failed()
+    process_services.experiments.failures.mark()
+    process_services.model_catalog.failures.mark()
 
     await _read_config(_handler(process_services=process_services))
 
@@ -695,6 +791,9 @@ class _RecordingHost(HostRequestHandler):
         super().__init__(
             HarnessFilesManager(sources=("user",)),
             org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
         )
         self.dispatched: list[tuple[str, str | None, ClientInfo | None]] = []
 

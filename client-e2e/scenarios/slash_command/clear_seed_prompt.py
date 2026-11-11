@@ -36,6 +36,5 @@ timeline: Timeline = [
     turn_completed(session_id=CLEARED_SESSION_ID),
 ]
 
-capture_startup = False
 screen_contains = ("> fix the tests", "Fixing them.")
 screen_excludes = ("Hi. What do you need?",)

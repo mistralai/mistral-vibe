@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 from tests.conftest import ConfigBuilder, OrchestratorLoader
-from vibe.core.agents.manager import AgentManager
+from vibe.core.agents.manager import AgentManager, AgentSelectionError
 from vibe.core.agents.models import (
     BUILTIN_AGENTS,
     EXPLORE,
@@ -468,12 +468,14 @@ class TestAgentManager:
         assert "plan" not in manager.available_agents
         assert "default_agent 'plan' is no longer a builtin agent" in caplog.text
 
-    def test_explicit_plan_agent_is_rejected_like_any_unknown_agent(
+    def test_explicit_plan_agent_is_rejected_with_its_replacement(
         self,
         build_config: ConfigBuilder,
         load_orchestrator: OrchestratorLoader[VibeConfigSchema],
     ) -> None:
-        with pytest.raises(ValueError, match="Agent 'plan' not found"):
+        with pytest.raises(
+            AgentSelectionError, match="Agent 'plan' was removed in Vibe 3.0. Use 'ask'"
+        ):
             AgentManager(load_orchestrator(build_config()), initial_agent="plan")
 
     def test_custom_plan_agent_keeps_serving_as_default_agent(

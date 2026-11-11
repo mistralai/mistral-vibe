@@ -5,6 +5,7 @@ import base64
 from collections.abc import Callable
 from dataclasses import dataclass, field
 import hashlib
+import logging
 import os
 from pathlib import Path
 from threading import Event
@@ -26,7 +27,11 @@ from vibe.setup.auth import _oidc_client, _oidc_runtime, _oidc_service
 from vibe.setup.auth._oidc_callback import OidcCallback
 from vibe.setup.auth._oidc_client import OidcClient, TokenResponse
 from vibe.setup.auth._oidc_config import OidcConfig, OidcError
-from vibe.setup.auth._oidc_credentials import OidcCredentialStore, OidcTokens
+from vibe.setup.auth._oidc_credentials import (
+    OidcCredentialStore,
+    OidcStorageError,
+    OidcTokens,
+)
 from vibe.setup.auth._oidc_service import OidcAttempt, OidcService
 
 ISSUER = "https://issuer.example"
@@ -88,10 +93,13 @@ class FakeIssuer:
             "token_endpoint": f"{ISSUER}/token",
             "jwks_uri": f"{ISSUER}/jwks",
             "userinfo_endpoint": f"{ISSUER}/userinfo",
+            "revocation_endpoint": f"{ISSUER}/revoke",
             "id_token_signing_alg_values_supported": ["RS256"],
         }
     )
     requests: list[httpx2.Request] = field(default_factory=list)
+    revocations: list[dict[str, list[str]]] = field(default_factory=list)
+    revocation_status: int = 200
     authorization: dict[str, list[str]] = field(default_factory=dict)
     initial_response: dict[str, Any] | None = None
     refresh_response: dict[str, Any] = field(
@@ -171,6 +179,11 @@ class FakeIssuer:
             return httpx2.Response(self.refresh_status, json=self.refresh_response)
         if request.url.path == "/userinfo":
             return httpx2.Response(self.userinfo_status, json=self.userinfo)
+        if request.url.path == "/revoke":
+            assert request.method == "POST"
+            assert "authorization" not in request.headers
+            self.revocations.append(parse_qs(request.content.decode()))
+            return httpx2.Response(self.revocation_status)
         raise AssertionError(f"Unexpected issuer endpoint: {request.url.path}")
 
     def count(self, path: str) -> int:
@@ -1199,7 +1212,7 @@ async def test_clear_waits_for_inflight_refresh_and_prevents_resave(
     operations = []
     original_reply = flow.issuer.reply
     original_save = flow.store._save
-    original_clear = flow.store.clear
+    original_clear = flow.store._clear
     original_service_clear = flow.service.clear
 
     async def blocked_reply(request: httpx2.Request) -> httpx2.Response:
@@ -1212,9 +1225,9 @@ async def test_clear_waits_for_inflight_refresh_and_prevents_resave(
         operations.append("save")
         original_save(tokens)
 
-    async def record_clear() -> None:
+    def record_clear() -> None:
         operations.append("clear")
-        await original_clear()
+        original_clear()
 
     async def record_service_clear() -> None:
         clearing.set()
@@ -1222,7 +1235,7 @@ async def test_clear_waits_for_inflight_refresh_and_prevents_resave(
 
     monkeypatch.setattr(flow.issuer, "reply", blocked_reply)
     monkeypatch.setattr(flow.store, "_save", record_save)
-    monkeypatch.setattr(flow.store, "clear", record_clear)
+    monkeypatch.setattr(flow.store, "_clear", record_clear)
     monkeypatch.setattr(flow.service, "clear", record_service_clear)
     refresh_task = asyncio.create_task(flow.service.access_tokens())
     clear_task = None
@@ -1359,3 +1372,218 @@ async def test_concurrent_start_and_clear_follow_lock_order(
     assert all(session.is_closed for session in flow.sessions)
     assert all(callback.closed for callback in flow.callbacks)
     assert flow.store.saved == []
+
+
+@pytest.mark.asyncio
+async def test_clear_revokes_refresh_token_after_local_deletion(
+    flow: Flow, monkeypatch
+) -> None:
+    assert (await flow.login()).status == "completed"
+    revoked_after_clear = []
+    original_reply = flow.issuer.reply
+
+    def record_order(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/revoke":
+            revoked_after_clear.append(flow.store.clears == 1)
+        return original_reply(request)
+
+    monkeypatch.setattr(flow.issuer, "reply", record_order)
+    await flow.service.clear()
+    assert await flow.store.load() is None
+    assert revoked_after_clear == [True]
+    assert flow.issuer.revocations == [
+        {
+            "token": [REFRESH_TOKEN],
+            "token_type_hint": ["refresh_token"],
+            "client_id": [CLIENT_ID],
+        }
+    ]
+    assert all(session.is_closed for session in flow.sessions)
+
+
+@pytest.mark.asyncio
+async def test_clear_revokes_the_rotated_refresh_token_from_keyring(flow: Flow) -> None:
+    assert (await flow.login()).status == "completed"
+    await flow.store.load()
+    rotated = OidcTokens.model_validate_json(cast(str, flow.store.raw)).model_copy(
+        update={"refresh_token": SecretStr("rotated-by-other-process")}
+    )
+    # Another process rotated the token behind this process's cached copy.
+    flow.store.raw = rotated.model_dump_json()
+    await flow.service.clear()
+    assert [form["token"] for form in flow.issuer.revocations] == [
+        ["rotated-by-other-process"]
+    ]
+
+
+def _fail_requests_to(path: str) -> Callable[[Flow, pytest.MonkeyPatch], None]:
+    def arrange(flow: Flow, monkeypatch: pytest.MonkeyPatch) -> None:
+        original_reply = flow.issuer.reply
+
+        def failing_reply(request: httpx2.Request) -> httpx2.Response:
+            if request.url.path == path:
+                raise httpx2.ConnectError(f"boom {REFRESH_TOKEN}", request=request)
+            return original_reply(request)
+
+        monkeypatch.setattr(flow.issuer, "reply", failing_reply)
+
+    return arrange
+
+
+def _advertise_revocation_endpoint(
+    url: str | None,
+) -> Callable[[Flow, pytest.MonkeyPatch], None]:
+    def arrange(flow: Flow, monkeypatch: pytest.MonkeyPatch) -> None:
+        if url is None:
+            monkeypatch.delitem(flow.issuer.metadata, "revocation_endpoint")
+        else:
+            monkeypatch.setitem(flow.issuer.metadata, "revocation_endpoint", url)
+
+    return arrange
+
+
+def _reply_with_revocation_status(
+    status: int,
+) -> Callable[[Flow, pytest.MonkeyPatch], None]:
+    def arrange(flow: Flow, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(flow.issuer, "revocation_status", status)
+
+    return arrange
+
+
+@pytest.mark.parametrize(
+    "arrange,reason",
+    [
+        pytest.param(
+            _reply_with_revocation_status(503), "HTTPStatusError 503", id="http"
+        ),
+        pytest.param(_fail_requests_to("/revoke"), "ConnectError", id="network"),
+        pytest.param(
+            _fail_requests_to("/.well-known/openid-configuration"),
+            "ConnectError",
+            id="discovery",
+        ),
+        pytest.param(_advertise_revocation_endpoint(None), "OidcError", id="absent"),
+        pytest.param(
+            _advertise_revocation_endpoint("http://issuer.example/revoke"),
+            "OidcError",
+            id="insecure",
+        ),
+        pytest.param(
+            _advertise_revocation_endpoint("https://other.example/revoke"),
+            "OidcError",
+            id="off-origin",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_revocation_failure_still_signs_out_and_logs_no_token(
+    flow: Flow,
+    monkeypatch,
+    caplog,
+    arrange: Callable[[Flow, pytest.MonkeyPatch], None],
+    reason: str,
+) -> None:
+    assert (await flow.login()).status == "completed"
+    arrange(flow, monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="vibe"):
+        await flow.service.clear()
+    assert await flow.store.load() is None
+    assert flow.store.clears == 1
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == [
+        f"OIDC refresh token revocation failed ({reason}); signed out locally"
+    ]
+    for secret in (REFRESH_TOKEN, ACCESS_TOKEN):
+        assert secret not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "url", ["http://insecure.example/revoke", "https://other.example/revoke"]
+)
+@pytest.mark.asyncio
+async def test_bad_revocation_endpoint_does_not_affect_sign_in_or_refresh(
+    flow: Flow, url: str
+) -> None:
+    flow.issuer.metadata["revocation_endpoint"] = url
+    assert (await flow.login()).status == "completed"
+    await flow.store.expire()
+    refreshed = await flow.service.access_tokens()
+    assert refreshed.access_token == SecretStr("refreshed-access-secret")
+
+
+@pytest.mark.asyncio
+async def test_revocation_timeout_does_not_block_sign_out(
+    flow: Flow, monkeypatch, caplog
+) -> None:
+    assert (await flow.login()).status == "completed"
+    original_reply = flow.issuer.reply
+    never = asyncio.Event()
+
+    async def hanging_reply(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/revoke":
+            await never.wait()
+        return original_reply(request)
+
+    monkeypatch.setattr(flow.issuer, "reply", hanging_reply)
+    monkeypatch.setattr(_oidc_service, "REVOCATION_TIMEOUT_SECONDS", 0.05)
+    with caplog.at_level(logging.WARNING, logger="vibe"):
+        await asyncio.wait_for(flow.service.clear(), 1)
+    assert await flow.store.load() is None
+    assert "TimeoutError" in caplog.text
+    assert all(session.is_closed for session in flow.sessions)
+
+
+@pytest.mark.asyncio
+async def test_clear_without_oidc_session_does_not_contact_issuer(flow: Flow) -> None:
+    await flow.service.clear()
+    assert flow.store.clears == 1
+    assert flow.issuer.requests == []
+    assert flow.sessions == []
+
+
+@pytest.mark.parametrize(
+    "update,reason",
+    [
+        pytest.param({"refresh_token": None}, "no refresh token", id="no-refresh"),
+        pytest.param(
+            {"issuer": "https://other.example"},
+            "issuer or client changed",
+            id="other-issuer",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_clear_skips_revocation_it_cannot_send_to_this_issuer(
+    flow: Flow, caplog, update: dict[str, Any], reason: str
+) -> None:
+    assert (await flow.login()).status == "completed"
+    tokens = OidcTokens.model_validate_json(cast(str, flow.store.raw))
+    flow.store.raw = tokens.model_copy(update=update).model_dump_json()
+    requests = len(flow.issuer.requests)
+    with caplog.at_level(logging.INFO, logger="vibe"):
+        await flow.service.clear()
+    assert await flow.store.load() is None
+    assert len(flow.issuer.requests) == requests
+    assert f"OIDC sign-out skipped revocation: {reason}" in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_clear_skips_revocation_when_stored_session_is_unreadable(
+    flow: Flow, monkeypatch, caplog
+) -> None:
+    assert (await flow.login()).status == "completed"
+
+    def unreadable() -> OidcTokens | None:
+        raise OidcStorageError("Stored OIDC credentials are invalid")
+
+    monkeypatch.setattr(flow.store, "_load", unreadable)
+    requests = len(flow.issuer.requests)
+    with caplog.at_level(logging.INFO, logger="vibe"):
+        await flow.service.clear()
+    assert flow.store.clears == 1
+    assert len(flow.issuer.requests) == requests
+    assert (
+        "OIDC sign-out skipped revocation: no readable stored session"
+        in caplog.messages
+    )

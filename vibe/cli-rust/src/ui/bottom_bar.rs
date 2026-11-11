@@ -1,5 +1,5 @@
-//! Bottom bar: cwd with its copy icon and PR/MR link on the left; usage and context gauges on the right.
-//! One artifact paints its link; several paint a count that opens the modal.
+//! Bottom bar: cwd (with a copy icon once shortened) and PR/MR link on the left; usage and context gauges on the right.
+//! The PR/MR link (one active artifact, or a count) opens the artifacts modal.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -19,9 +19,7 @@ use unicode_width::UnicodeWidthStr;
 /// What a click on a painted bar link does.
 #[derive(Clone)]
 pub enum BarLinkAction {
-    /// Open this artifact's URL (the single-artifact case).
-    OpenUrl(String),
-    /// Open the artifacts modal (several artifacts).
+    /// Open the artifacts modal.
     ListArtifacts,
     /// Copy the whole working directory.
     CopyPath(String),
@@ -58,7 +56,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     });
     // The history search line takes the quit hint's slot.
     let quit = quit.or_else(|| super::reverse_search::line(app));
-    let (link, action) = link_input(app).unzip();
+    let link = link_input(app);
     let path = app.session.cwd.clone().map(crate::replay::footer_cwd);
     let fitted = footer_fit::fit(footer_fit::Inputs {
         width: area.width as usize,
@@ -87,7 +85,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         }
         let start = left.len();
         left.extend(spans(fitted.link));
-        links.extend(action.map(|action| (start, left.len(), action)));
+        links.push((start, left.len(), BarLinkAction::ListArtifacts));
     }
     let mut right = Vec::new();
     let context_width = fitted
@@ -154,35 +152,46 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         }
     };
     if app.view.mouse_position.is_some_and(|at| tokens_at(app, at)) {
-        f.buffer_mut()
-            .set_style(app.view.footer_tokens_area, theme::link_hover_style());
+        super::list_hover::paint_button(f.buffer_mut(), app.view.footer_tokens_area);
     }
     // The copy icon keeps its look under the pointer; only the hand says it is clickable.
     let hovered = app.view.mouse_position.and_then(|at| link_at(app, at));
     if let Some(link) = hovered.filter(|link| !matches!(link.action, BarLinkAction::CopyPath(_))) {
-        f.buffer_mut()
-            .set_style(link.area, theme::link_hover_style());
+        super::list_hover::paint_button(f.buffer_mut(), link.area);
     }
     super::reverse_search::draw_caret(app, f, area);
     paint_selection(app, f, area);
 }
 
-/// Whether `at` is on the footer's context gauge; a click there opens `/context`, a side-channel read that also runs while a turn generates.
+/// Whether `at` is on the footer's context gauge; a click there toggles `/context`, a side-channel read that also runs while a turn generates.
 pub fn tokens_at(app: &App, at: (u16, u16)) -> bool {
-    app.focus() == crate::focus::Focus::Composer
+    use crate::focus::Focus;
+    matches!(app.focus(), Focus::Composer | Focus::ContextApp)
         && !app.view.footer_tokens_area.is_empty()
         && app.view.footer_tokens_area.contains(at.into())
+}
+
+/// Whether a click at `at` acts on the footer (the context gauge or a painted link) instead of selecting text.
+pub fn clickable_at(app: &App, at: (u16, u16)) -> bool {
+    tokens_at(app, at) || link_at(app, at).is_some()
 }
 
 /// The painted link at `at` (the cwd's copy icon or the PR/MR link), unless an overlay drawn over the footer blocks it.
 pub fn link_at(app: &App, at: (u16, u16)) -> Option<&BarLink> {
     use crate::focus::Focus;
-    if matches!(app.focus(), Focus::Config | Focus::ReleaseNotes) {
+    let focus = app.focus();
+    if matches!(focus, Focus::Config | Focus::ReleaseNotes) {
         return None;
     }
+    // The PR list would open under any panel that has focus over it.
+    let lists = matches!(
+        focus,
+        Focus::ArtifactsModal | Focus::SubagentList | Focus::Composer
+    );
     app.view
         .bottom_bar_links
         .iter()
+        .filter(|link| lists || !matches!(link.action, BarLinkAction::ListArtifacts))
         .find(|link| link.area.contains(at.into()))
 }
 

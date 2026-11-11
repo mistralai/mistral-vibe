@@ -37,6 +37,7 @@ from vibe.core.session.artifacts import (
     CheckStatus,
     GitLabMergeRequestDetails,
     PrStatus,
+    PrStatusReason,
     PullRequestLifecycleState,
 )
 from vibe.observability.logging import logger
@@ -208,33 +209,34 @@ def derive_pr_status(
     checks_status: ChecksWireStatus | None,
     review_decision: ReviewWireDecision | None,
     merge_status: MergeWireStatus | None,
-) -> PrStatus | None:
-    """The CLI's actionability status, from the wire's raw statuses.
+) -> tuple[PrStatus | None, PrStatusReason | None]:
+    """The CLI's actionability status and its reason, from the wire's raw statuses.
 
     Mirrors ``getPullRequestStatus`` in le-chat-web
     (``code/_domain/artifacts/pull-request-status.ts``), collapsed to the
     CLI's three labels. Both sides run the same cases
     (``vibe/tests/core/git/pull_request_status_cases.json``). ``None`` for draft, merged and
     closed PRs, whose lifecycle state is their label, and for an open PR
-    whose statuses are not known.
+    whose statuses are not known. The reason is ``None`` unless the status
+    is ``action_needed`` or ``waiting``.
     """
     if state != "open":
-        return None
-    if (
-        checks_status == "failing"
-        or review_decision == "changes_requested"
-        or merge_status == "conflicting"
-    ):
-        return "action_needed"
-    if (
-        checks_status == "pending"
-        or review_decision == "review_required"
-        or merge_status == "blocked"
-    ):
-        return "waiting"
+        return None, None
+    # In precedence order: the first match is the status and its reason.
+    rules: list[tuple[bool, PrStatus, PrStatusReason]] = [
+        (review_decision == "changes_requested", "action_needed", "changes_requested"),
+        (checks_status == "failing", "action_needed", "checks_failing"),
+        (merge_status == "conflicting", "action_needed", "conflicts"),
+        (checks_status == "pending", "waiting", "checks_pending"),
+        (review_decision == "review_required", "waiting", "review_required"),
+        (merge_status == "blocked", "waiting", "merge_blocked"),
+    ]
+    for matches, status, reason in rules:
+        if matches:
+            return status, reason
     if merge_status == "mergeable":
-        return "mergeable"
-    return None
+        return "mergeable", None
+    return None, None
 
 
 # --- GitHub parsers (pure) ---
@@ -779,6 +781,9 @@ def _run_process(
             timeout=_FETCH_TIMEOUT_SECONDS,
             check=False,
             env=env,
+            # Never inherit stdin: on the stdio transport it is the RPC pipe.
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired as exc:
         raise ForgeSyncError(

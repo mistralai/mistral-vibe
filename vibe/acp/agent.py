@@ -99,11 +99,7 @@ from vibe.acp.models import (
     ConnectorsListResponse,
     ConnectorsRefreshRequest,
     ConnectorsToggleRequest,
-    ProjectLinksCreateRequest,
-    ProjectLinksLinkRequest,
     ProjectLinksListRequest,
-    ProjectLinksPickerLoadMoreRequest,
-    ProjectLinksPickerLoadRequest,
     ProjectLinksResolveRootRequest,
     ProjectLinksUnlinkRequest,
 )
@@ -125,9 +121,7 @@ from vibe.acp.utils import (
 from vibe.acp.voice import VoiceController
 from vibe.app_server._integration_resources import MCPResource
 from vibe.app_server._project_links import (
-    ProjectLinksAuthError,
     ProjectLinksController,
-    ProjectLinksInternalError,
     ProjectLinksInvalidRequest,
 )
 from vibe.app_server.config import ConfigView
@@ -411,6 +405,16 @@ class TelemetryNotification(BaseModel):
 # prefix here would emit `__session/retrying` and the retry would never arrive.
 RETRYING_EXT_METHOD = "session/retrying"
 
+# Same bare-name convention: the wire method is `_config/changed`.
+CONFIG_CHANGED_EXT_METHOD = "config/changed"
+
+
+async def _send_config_changed(client: Client) -> None:
+    try:
+        await client.ext_notification(CONFIG_CHANGED_EXT_METHOD, {})
+    except Exception:
+        logger.debug("config/changed notification failed", exc_info=True)
+
 
 class SessionRetryingNotification(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -441,6 +445,13 @@ class VibeAcpAgent(AcpAgent):
         self._start_session = session_starter or self._harness_host.start
         self._passive_host: AppServerHost | None = None
         self._passive_host_lock = asyncio.Lock()
+        # The loop holds only weak references to tasks.
+        self._config_changed_tasks: set[asyncio.Task[None]] = set()
+        # Headsup ahead of the change: sessions load an org-config change at
+        # their next turn boundary, the process sees it sooner.
+        self._harness_host.services.org_config.on_changed(
+            lambda _key: self._notify_config_changed()
+        )
         auth_kwargs: dict[str, Any] = {
             "context_loader": onboarding_context_loader,
             "service_factory": browser_sign_in_service_factory,
@@ -1021,6 +1032,19 @@ class VibeAcpAgent(AcpAgent):
         await self._harness_host.close()
         await self._voice.close()
 
+    def _notify_config_changed(self) -> None:
+        """Tell the client the org config changed. Runs as a task so a slow
+        client never holds the cache refresh up.
+        """
+        client = getattr(self, "client", None)
+        if client is None:
+            return
+        task = asyncio.create_task(
+            _send_config_changed(client), name="vibe-config-changed-notify"
+        )
+        self._config_changed_tasks.add(task)
+        task.add_done_callback(self._config_changed_tasks.discard)
+
     @override
     async def list_sessions(
         self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
@@ -1064,12 +1088,11 @@ class VibeAcpAgent(AcpAgent):
             match config_id, value:
                 case "mode", str(mode) if self._is_primary_mode(session, mode):
                     await session.app_server.resources.agents.switch(mode)
-                case "model", str(model) if any(
-                    candidate.alias == model
-                    for candidate in session.app_server.resources.config.current.models
-                ):
-                    await session.app_server.resources.config.update(
-                        {"active_model": model}, reload_runtime=True
+                case "model", str(model) if model.strip():
+                    # The app-server resolves the name, a catalog alias included,
+                    # and refuses a model it does not offer.
+                    await session.app_server.resources.config.write_model(
+                        model_alias=model
                     )
                 case "thinking", str(level) if level.strip():
                     await session.app_server.resources.config.set_thinking(level)
@@ -1317,9 +1340,7 @@ class VibeAcpAgent(AcpAgent):
     async def _project_links_extension(
         self, method: str, params: dict
     ) -> dict[str, Any]:
-        from vibe.app_server._credential_selection import cli_process_credentials
-
-        controller = ProjectLinksController(cli_process_credentials)
+        controller = ProjectLinksController()
         try:
             match method:
                 case "projectLinks/list":
@@ -1330,30 +1351,6 @@ class VibeAcpAgent(AcpAgent):
                         ProjectLinksResolveRootRequest, params
                     )
                     result = await controller.resolve_root(resolve.root_path)
-                case "projectLinks/picker/load":
-                    load = self._project_links_request(
-                        ProjectLinksPickerLoadRequest, params
-                    )
-                    result = await controller.picker_load(load.root_path)
-                case "projectLinks/picker/loadMore":
-                    load_more = self._project_links_request(
-                        ProjectLinksPickerLoadMoreRequest, params
-                    )
-                    result = await controller.picker_load_more(
-                        load_more.root_path, load_more.cursor
-                    )
-                case "projectLinks/create":
-                    create = self._project_links_request(
-                        ProjectLinksCreateRequest, params
-                    )
-                    result = await controller.create(
-                        create.root_path, create.name, create.default_branch
-                    )
-                case "projectLinks/link":
-                    link = self._project_links_request(ProjectLinksLinkRequest, params)
-                    result = await controller.link(
-                        link.root_path, link.project_id, link.project_name
-                    )
                 case "projectLinks/unlink":
                     unlink = self._project_links_request(
                         ProjectLinksUnlinkRequest, params
@@ -1361,12 +1358,8 @@ class VibeAcpAgent(AcpAgent):
                     result = await controller.unlink(unlink.root_path)
                 case _:
                     raise NotImplementedMethodError(method)
-        except ProjectLinksAuthError as exc:
-            raise UnauthenticatedError(str(exc)) from exc
         except ProjectLinksInvalidRequest as exc:
             raise InvalidRequestError(str(exc)) from exc
-        except ProjectLinksInternalError as exc:
-            raise InternalError(str(exc)) from exc
         return result
 
     # -- whoami (identity + account) ----------------------------------------

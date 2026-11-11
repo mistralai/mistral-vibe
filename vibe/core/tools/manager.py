@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 import importlib
 import inspect
 from pathlib import Path
@@ -12,7 +13,7 @@ from vibe.core.config.harness_files import (
     HarnessFilesManager,
     get_harness_files_manager,
 )
-from vibe.core.paths import DEFAULT_TOOL_DIR
+from vibe.core.paths import DEFAULT_TOOL_DIR, dedup_paths
 from vibe.core.tools.base import BaseTool, BaseToolConfig, ToolPermission
 from vibe.core.tools.remote import MCPTool
 from vibe.core.utils import is_windows, name_matches, run_sync
@@ -451,6 +452,25 @@ class ToolManager:
         if permission_override is not None:
             merged_dict["permission"] = permission_override.value
         return config_class.model_validate(merged_dict)
+
+    def move_to(self, cwd: Path, workspace_roots: Sequence[Path]) -> None:
+        """Rebuild tools for a session that moved to ``cwd``.
+
+        Each tool resolves paths and the outside-workdir boundary from the
+        directory it was built in, so cached instances are dropped.
+        ``workspace_roots`` become writable but are not opened as projects: a
+        worktree on someone else's branch must not run its hooks or skills.
+        """
+        here = cwd.resolve()
+        with self._lock:
+            self._cwd = here
+            self._harness_files = replace(
+                self._harness_files.for_session(here),
+                writable_roots=tuple(
+                    dedup_paths(r.resolve() for r in workspace_roots if r != here)
+                ),
+            )
+            self._instances.clear()
 
     def get(self, tool_name: str) -> BaseTool:
         """Get a tool instance, creating it lazily on first call.

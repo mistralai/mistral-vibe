@@ -17,6 +17,7 @@ pub enum Kind {
     Approval,
     Question,
     Voice,
+    Branch,
     ProxySetup,
     Theme,
     Model,
@@ -27,10 +28,10 @@ pub enum Kind {
     Rewind,
     Mcp,
     Plugins,
+    Skills,
     Context,
     McpOAuth,
     ConnectorAuth,
-    RemoteProject,
 }
 
 impl Kind {
@@ -39,7 +40,6 @@ impl Kind {
         match self {
             Kind::Approval => MouseTarget::Approval,
             Kind::Question => MouseTarget::Question,
-            Kind::RemoteProject => MouseTarget::RemoteProject,
             Kind::ProxySetup => MouseTarget::ProxySetup,
             _ => MouseTarget::BottomApp,
         }
@@ -72,6 +72,7 @@ pub(crate) fn draw(
     let content = content(box_area);
     app.view.bottom_app_selection_region = selection::frame_region(content);
     app.view.bottom_app_selection_chrome.clear();
+    app.view.bottom_app_selection_halves = None;
     app.view.bottom_app_selection_folds = crate::selection::Folds::default();
     draw_box(app, f, box_area);
     for track in mouse::scrollbar_tracks(app, content) {

@@ -136,7 +136,6 @@ impl EventLoop {
                     let active = self.app.view.command_loading
                         || self.app.compacting
                         || subagent_loading
-                        || crate::teleport::busy(&self.app)
                         || crate::commands::stress::running(&self.app)
                         || matches!(self.app.session.status, Status::Starting | Status::Generating { .. });
                     if active {

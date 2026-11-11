@@ -21,6 +21,14 @@ pub fn thousands(value: u64) -> String {
     grouped
 }
 
+/// The first letter upper-cased, the rest as it is.
+pub fn capitalize(value: &str) -> String {
+    let mut chars = value.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
 const COUNT_SUFFIXES: [&str; 5] = ["", "k", "M", "B", "T"];
 const SIGNIFICANT_DIGITS: u32 = 3;
 
@@ -75,6 +83,15 @@ pub fn multi_line(text: &str) -> String {
         .chars()
         .filter(|c| matches!(c, '\n' | '\t') || !is_control(*c))
         .collect()
+}
+
+/// The first line of pasted text, splitting on any line boundary.
+pub fn first_line(text: &str) -> &str {
+    const BREAKS: [char; 10] = [
+        '\n', '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}',
+        '\u{2029}',
+    ];
+    text.find(BREAKS).map_or(text, |end| &text[..end])
 }
 
 /// Strip terminal control sequences and collapse carriage-return redraws.
@@ -142,6 +159,30 @@ fn strip_string_sequence(chars: &mut std::iter::Peekable<impl Iterator<Item = ch
         if character == '\u{1b}' && chars.next_if_eq(&'\\').is_some() {
             break;
         }
+    }
+}
+
+/// Characters of a server error or warning the transcript keeps: a few dozen rows at most.
+pub const MESSAGE_MAX_CHARS: usize = 4_000;
+pub const MESSAGE_TRUNCATION_MARKER: &str = "… [truncated]";
+
+/// Characters an error row keeps: a bounded message plus room for a short hint after it.
+pub const ROW_MAX_CHARS: usize = MESSAGE_MAX_CHARS + 1_000;
+
+/// Cut a server-provided message to `MESSAGE_MAX_CHARS`, marking the cut.
+pub fn bounded_message(text: &str) -> std::borrow::Cow<'_, str> {
+    bounded(text, MESSAGE_MAX_CHARS)
+}
+
+/// Cut a whole error row to `ROW_MAX_CHARS`, marking the cut.
+pub fn bounded_row(text: &str) -> std::borrow::Cow<'_, str> {
+    bounded(text, ROW_MAX_CHARS)
+}
+
+fn bounded(text: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    match text.char_indices().nth(max) {
+        Some((end, _)) => format!("{}{MESSAGE_TRUNCATION_MARKER}", &text[..end]).into(),
+        None => text.into(),
     }
 }
 

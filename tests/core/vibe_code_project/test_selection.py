@@ -1,33 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-from vibe.core.vibe_code_project import (
-    ProjectPickerContext,
-    RemoteProjectLink,
-    suggested_project_name,
-)
 from vibe.utils.repository import normalize_repo_url, repo_url_label
 
 CURRENT_REPO_URL = "https://github.com/mistralai/mistral-vibe.git"
-
-
-def _context(saved_link: RemoteProjectLink | None = None) -> ProjectPickerContext:
-    return ProjectPickerContext(
-        repo_root=Path("/repo/mistral-vibe"),
-        repo_url=CURRENT_REPO_URL,
-        repo_name="mistral-vibe",
-        saved_link=saved_link,
-    )
-
-
-def _link(project_id: str, repo_url: str = CURRENT_REPO_URL) -> RemoteProjectLink:
-    return RemoteProjectLink(
-        repo_root=Path("/repo/mistral-vibe"),
-        repo_url=repo_url,
-        project_id=project_id,
-        project_name="Mistral Vibe",
-    )
 
 
 def test_normalize_repo_url_matches_common_github_forms() -> None:
@@ -52,7 +27,3 @@ def test_repo_url_label_strips_transport_without_assuming_provider() -> None:
     assert repo_url_label("ssh://git@gitlab.com/mistralai/mistral-vibe.git") == (
         "gitlab.com/mistralai/mistral-vibe"
     )
-
-
-def test_suggested_project_name_prefers_repo_name() -> None:
-    assert suggested_project_name(_context()) == "mistral-vibe"

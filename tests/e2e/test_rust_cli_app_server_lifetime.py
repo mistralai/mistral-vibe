@@ -110,6 +110,8 @@ def _environment(log: Path, *, wrapped: bool) -> dict[str, str]:
     if wrapped:
         exits = shlex.quote(str(log / "exits"))
         script = f'echo $$ >> {pids}; {app_server} "$@"; echo $? >> {exits}'
+        # Past _wait: a loaded machine's Python teardown can outlast the 2 s grace.
+        env["VIBE_TEST_SHUTDOWN_GRACE_MS"] = str(int(_EXIT_BUDGET_S + 60) * 1000)
     else:
         script = f'echo $$ >> {pids}; exec {app_server} "$@"'
     env["VIBE_APP_SERVER_CMD"] = shlex.join(["sh", "-c", script, "sh"])

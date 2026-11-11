@@ -11,13 +11,12 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "tail the log"
 _EFFECT_ID = "streaming-bash"
 
 # The lone running call stays ungrouped, so its stream line shows unfolded.
-capture_steps = {1, 2, 3}
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -41,4 +40,5 @@ timeline: Timeline = [
     {"release": 1},
     # The remaining three settle the effect.
     {"release": 3},
+    take_snapshot(),
 ]

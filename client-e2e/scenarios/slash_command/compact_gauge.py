@@ -43,6 +43,5 @@ timeline: Timeline = [
     "/compact\r",
 ]
 
-capture_startup = False
 screen_contains = ("ctx        0/200k",)
 screen_excludes = ("12.5k/200k",)

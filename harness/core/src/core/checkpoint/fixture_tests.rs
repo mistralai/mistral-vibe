@@ -56,7 +56,7 @@ fn checkpoint_v1_fixtures_match_live_semantic_state() {
         let decoded = decode_checkpoint(&expected)
             .unwrap_or_else(|error| panic!("fixture {} did not decode: {error}", case.file_name));
         let restored = decoded
-            .restore(case.state.config.clone())
+            .restore(case.state.config().clone())
             .unwrap_or_else(|error| panic!("fixture {} did not restore: {error}", case.file_name));
         assert_eq!(
             Checkpoint::capture(&restored).unwrap(),
@@ -90,7 +90,7 @@ fn checkpoint_estimate_correction_defaults_to_none_and_is_validated() {
     root.remove("estimate_correction");
     let older = serde_json::to_string(&value).unwrap();
     let restored = decode_checkpoint(&older)
-        .and_then(|checkpoint| checkpoint.restore(case.state.config.clone()))
+        .and_then(|checkpoint| checkpoint.restore(case.state.config().clone()))
         .expect("a checkpoint without a correction restores");
     assert_eq!(
         restored.estimate_correction,
@@ -100,7 +100,7 @@ fn checkpoint_estimate_correction_defaults_to_none_and_is_validated() {
     value["estimate_correction"] = serde_json::json!(0.5);
     let invalid = serde_json::to_string(&value).unwrap();
     let error = decode_checkpoint(&invalid)
-        .and_then(|checkpoint| checkpoint.restore(case.state.config.clone()))
+        .and_then(|checkpoint| checkpoint.restore(case.state.config().clone()))
         .expect_err("a correction below 1 is refused");
     assert!(error.contains("estimate correction"), "{error}");
 }
@@ -122,7 +122,7 @@ fn checkpoint_compaction_phase_accepts_the_earlier_shape_and_is_validated() {
         let mut value: Value = serde_json::from_str(&stored).unwrap();
         edit(&mut value["turn"]["phase"]["projection"]);
         decode_checkpoint(&serde_json::to_string(&value).unwrap())
-            .and_then(|checkpoint| checkpoint.restore(case.state.config.clone()))
+            .and_then(|checkpoint| checkpoint.restore(case.state.config().clone()))
     };
 
     let standalone = restore(

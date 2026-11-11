@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from e2e.app_server.events import edit_file, turn_completed, turn_started, user_msg
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "rename the marker everywhere"
 
@@ -21,4 +21,5 @@ timeline: Timeline = [
     # No start line: the gutter drops its line numbers.
     edit_file("unanchored.txt", [(None, "left\n", "right\n")]),
     turn_completed(),
+    take_snapshot(),
 ]

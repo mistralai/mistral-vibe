@@ -121,6 +121,9 @@ def _run_gh_pr_list(
             timeout=_LIST_TIMEOUT_SECONDS,
             check=False,
             env=env,
+            # Never inherit stdin: on the stdio transport it is the RPC pipe.
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired as exc:
         raise ForgeError(
@@ -210,6 +213,9 @@ def _run_glab_mr_list(
             timeout=_LIST_TIMEOUT_SECONDS,
             check=False,
             env=env,
+            # Never inherit stdin: on the stdio transport it is the RPC pipe.
+            stdin=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired as exc:
         raise ForgeError(

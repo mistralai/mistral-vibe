@@ -9,7 +9,7 @@ from e2e.app_server.events import (
     turn_started,
     user_msg,
 )
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "run a quiet command"
 _CLICK = "\x1b[<0;1;11M\x1b[<0;1;11m"
@@ -22,4 +22,5 @@ timeline: Timeline = [
     assistant_msg("Done."),
     turn_completed(),
     _CLICK,
+    take_snapshot(),
 ]

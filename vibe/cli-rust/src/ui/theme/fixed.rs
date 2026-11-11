@@ -8,6 +8,8 @@ pub const ORANGE: Color = Color::Rgb(0xFF, 0x82, 0x04);
 pub const ORANGE_LIGHT: Color = Color::Rgb(0xFF, 0xAF, 0x01);
 /// Brand Orange Strong.
 pub const ORANGE_DARK: Color = Color::Rgb(0xFA, 0x50, 0x0F);
+/// GitHub's merged purple, for merged PRs/MRs.
+pub const MERGED: Color = Color::Rgb(0xA3, 0x71, 0xF7);
 
 /// The brand orange ramp the loading label ping-pongs through.
 pub const LOADING_GRADIENT: [Color; 3] = [ORANGE_LIGHT, ORANGE, ORANGE_DARK];
@@ -37,41 +39,29 @@ pub mod sgr {
 pub mod monokai {
     use ratatui::style::Color;
 
-    pub const RED: Color = Color::Rgb(244, 0, 95);
     pub const GREEN: Color = Color::Rgb(0x98, 0xE0, 0x24);
-    pub const CYAN: Color = Color::Rgb(88, 209, 235);
 }
 
 /// Terminal palette that resolves ANSI colors under light themes.
 pub mod alabaster {
     use ratatui::style::Color;
 
-    pub const RED: Color = Color::Rgb(170, 55, 49);
     pub const GREEN: Color = Color::Rgb(0x44, 0x8C, 0x27);
-    pub const CYAN: Color = Color::Rgb(0, 131, 178);
 }
 
 /// A Rich named color.
 #[derive(Clone, Copy)]
 pub enum Named {
-    Red,
     Green,
-    Cyan,
 }
 
 /// A Rich named color as rendered: the raw terminal color under an
 /// ANSI theme, else mapped through Monokai (dark) or Alabaster (light).
 pub fn named(color: Named) -> Color {
     match (super::is_ansi(), super::is_dark(), color) {
-        (true, _, Named::Red) => Color::Red,
         (true, _, Named::Green) => Color::Green,
-        (true, _, Named::Cyan) => Color::Cyan,
-        (false, true, Named::Red) => monokai::RED,
         (false, true, Named::Green) => monokai::GREEN,
-        (false, true, Named::Cyan) => monokai::CYAN,
-        (false, false, Named::Red) => alabaster::RED,
         (false, false, Named::Green) => alabaster::GREEN,
-        (false, false, Named::Cyan) => alabaster::CYAN,
     }
 }
 

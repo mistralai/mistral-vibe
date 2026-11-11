@@ -20,7 +20,6 @@ _promoted["params"]["turn"]["queueItemId"] = queued_turn(2)["id"]
 
 on_request = {_REPLACE: [_promoted, turn_queue_updated()]}
 screen_contains = ("second edited",)
-capture_steps = {7}
 
 timeline: Timeline = [
     "first\r",

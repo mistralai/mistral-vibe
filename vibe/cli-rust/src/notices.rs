@@ -1,4 +1,4 @@
-//! Warnings and user-action feedback: a startup box, then `⚠`/`✕` rows, echoed when hidden.
+//! Warnings and user-action feedback: a startup box until the first turn, then `⚠`/`✕` rows, echoed when hidden.
 
 use std::collections::HashSet;
 
@@ -10,9 +10,14 @@ use crate::focus::Focus;
 use crate::transcript::local;
 use crate::ui::notice::Notice;
 use crate::utils::clean;
+use crate::utils::text::bounded_message;
 
 /// The startup box's title, drawn in its frame.
 pub const TITLE: &str = "Warnings";
+
+/// The `warning` code of a hook's `system_message` outside a turn
+/// (`session_start`): not a warning, the hook's own line.
+pub const HOOK_MESSAGE_CODE: &str = "hook_message";
 
 /// Warnings collected before the first turn; once one starts, warnings mount as rows.
 #[derive(Default)]
@@ -67,7 +72,7 @@ fn show_validation_warnings(app: &mut App, runtime: &Value) {
 
 /// A server or config warning: into the startup box, or a warning row once a turn ran.
 pub fn warn(app: &mut App, message: &str) {
-    let message = clean::clean_output(message.trim());
+    let message = clean::clean_output(&bounded_message(message.trim()));
     if message.is_empty() {
         return;
     }
@@ -84,14 +89,20 @@ pub fn warn(app: &mut App, message: &str) {
     sync(app);
 }
 
-/// Mount or refresh the startup box, remounting it when a restored transcript dropped it.
+/// Mount or refresh the startup box, remounting it when a restored transcript dropped it; a closed box is removed.
 pub fn sync(app: &mut App) {
     let notices = &mut app.startup_notices;
-    if notices.closed || notices.items.is_empty() {
+    let transcript = &mut app.view.transcript;
+    if notices.closed {
+        if let Some(id) = &notices.id {
+            transcript.remove(id);
+        }
+        return;
+    }
+    if notices.items.is_empty() {
         return;
     }
     let text = body(&notices.items);
-    let transcript = &mut app.view.transcript;
     match notices.id.as_deref().filter(|id| transcript.contains(id)) {
         Some(id) => local::set_text(transcript, id, &text),
         None => {
@@ -102,9 +113,20 @@ pub fn sync(app: &mut App) {
     }
 }
 
+/// A hook's `system_message` (`[name] message`): a `✓` row in the conversation,
+/// like the line a turn hook shows, never filed among the startup warnings.
+pub fn hook_message(app: &mut App, message: &str) {
+    let message = clean::clean_output(message.trim());
+    if !message.is_empty() {
+        // Escaped like the box's bullets: the hook's text is not markdown.
+        let text = escape(&message.replace('\n', " "));
+        local::add_command_status(&mut app.view.transcript, &new_message_id(), &text);
+    }
+}
+
 /// A server error: always its own row, so it is never filed among the startup warnings.
 pub fn error(app: &mut App, message: &str) {
-    let message = clean::clean_output(message.trim());
+    let message = clean::clean_output(&bounded_message(message.trim()));
     if !message.is_empty() {
         let id = new_message_id();
         local::add_message(&mut app.view.transcript, &id, "notice_error", &message);
@@ -116,10 +138,23 @@ pub fn clear(app: &mut App) {
     app.startup_notices = StartupNotices::default();
 }
 
+/// A key in an app or picker that failed or was refused: the inline notice, never a row; `/config` keeps its row.
+pub fn inline(app: &mut App, severity: Severity, message: &str) {
+    if app.focus() == Focus::Config {
+        return match severity {
+            Severity::Warning => refused(app, message),
+            _ => failed(app, message),
+        };
+    }
+    let message = clean::clean_output(message.trim()).replace('\n', " ");
+    crate::ui::notice::show_failure(app, severity, &message);
+}
+
 /// A user action that failed: a `✕` row in the conversation, kept for the record.
 pub fn failed(app: &mut App, message: &str) {
-    local::add_command_error(&mut app.view.transcript, &new_message_id(), message);
-    echo_if_hidden(app, Severity::Error, message);
+    let message = bounded_message(message);
+    local::add_command_error(&mut app.view.transcript, &new_message_id(), &message);
+    echo_if_hidden(app, Severity::Error, &message);
 }
 
 /// A user action refused for an expected reason: a `⚠` row in the conversation.
@@ -150,9 +185,10 @@ fn echo_if_hidden(app: &mut App, severity: Severity, message: &str) {
     }
 }
 
-/// The first turn closes the startup box: later warnings belong to the conversation.
+/// The first turn or a picker resume drops the startup box: later warnings belong to the conversation.
 pub fn close_startup(app: &mut App) {
     app.startup_notices.closed = true;
+    sync(app);
 }
 
 /// The box body: one bullet per warning, its text escaped so markdown never rewrites it.

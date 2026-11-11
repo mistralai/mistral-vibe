@@ -52,7 +52,7 @@ pub(super) fn push_group_header(
         Span::styled(format!("{marker} "), marker_style),
         // One row, so hit-testing and cached heights never depend on the label.
         Span::styled(
-            text::ellipsize(&group.label(running), usize::from(width).saturating_sub(2)),
+            text::ellipsize(&group.label(), usize::from(width).saturating_sub(2)),
             label_style,
         ),
     ]));

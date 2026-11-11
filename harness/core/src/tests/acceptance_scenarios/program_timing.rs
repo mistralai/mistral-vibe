@@ -1264,3 +1264,64 @@ fn program_sleep_rejects_requests_above_the_resolved_maximum() {
         ],
     );
 }
+
+/// *Prepare*: A program reads a file.
+/// *Do*: It passes a string instead of an object, and catches the error.
+/// *Assert*: Nothing is dispatched, and the call is committed with empty arguments, the object a
+/// Runtime reads, and an error that names the string.
+#[test]
+fn a_program_call_with_non_object_arguments_is_committed_with_empty_arguments() {
+    let turn_id = "non-object-arguments";
+    let call_id = "program";
+    let source = r#"async function main() {
+      try { await tools.file_system.read_file("notes.txt"); }
+      catch (error) { return error.code; }
+    }"#;
+    let mut runtime = SynchronousRuntime::new(config());
+    let completion = runtime.start_turn(turn_id, "read the notes");
+    let resumed = runtime
+        .apply(
+            run_typescript_completion(action_id(&completion), call_id, source),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(core_tool_execution_started(turn_id, call_id))
+                .observe(never_started_commit(
+                    turn_id,
+                    "typescript:3:program:0:tool:0",
+                    json!({
+                        "type": "runtime_builtin",
+                        "name": "file_system.read_file",
+                        "arguments": {},
+                    }),
+                    json!({
+                        "code": "invalid_arguments",
+                        "message": "Invalid arguments for tools.file_system.read_file: \"notes.txt\" is not of type \"object\"",
+                        "retryable": false,
+                        "details": {
+                            "type": "jsonSchemaArgumentValidationError",
+                            "functionName": "read_file",
+                            "argumentsValidationErrors": [{
+                                "instancePath": "",
+                                "schemaPath": "#/type",
+                                "keyword": "type",
+                                "params": {"type": "object"},
+                                "message": "must be object",
+                            }],
+                        },
+                    }),
+                ))
+                .observe_tool_execution_finished(
+                    call_id,
+                    run_typescript_success(json!("invalid_arguments")),
+                ),
+        )
+        .only_action();
+    runtime.assert_last_model_message_update(
+        &resumed,
+        "append",
+        &[
+            model_assistant_typescript(call_id, source),
+            model_tool_text(call_id, "run_typescript", "\"invalid_arguments\""),
+        ],
+    );
+}
