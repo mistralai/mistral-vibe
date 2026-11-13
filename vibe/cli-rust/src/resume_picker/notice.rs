@@ -18,10 +18,7 @@ pub fn rebase(app: &mut App, state: &PublicSessionState) {
 /// Settle an in-flight resume exactly once; false means it was cancelled and its
 /// answer must be dropped.
 pub(super) fn finish_resume(app: &mut App) -> bool {
-    if !std::mem::take(&mut app.resume_picker.resuming) {
-        return false;
-    }
-    true
+    std::mem::take(&mut app.resume_picker.resuming)
 }
 
 pub(super) fn scroll_to_bottom(app: &mut App) {
