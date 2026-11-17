@@ -101,7 +101,7 @@ from vibe.core.utils.remote_cache import (
     RemoteFetchFailedError,
 )
 from vibe.observability.logging import logger
-from vibe.setup.auth.whoami import WhoAmICache, load_cached_whoami
+from vibe.setup.auth.whoami import WhoAmICache, WhoAmIResult, load_cached_whoami
 from vibe.utils.file_lock import exclusive_file_lock
 from vibe.utils.http import (
     VibeAsyncHTTPClient,
@@ -2012,13 +2012,18 @@ async def _manage_connectors_url(
     )
 
 
-async def _private_connectors_hidden(
+async def _resolve_account_whoami(
     config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
-) -> bool:
+) -> WhoAmIResult | None:
+    """The account's /whoami (or /account-context) result, under the shared cooldown.
+
+    Returns None when there is no principal to key the lookup on, or the
+    console could not be reached: callers fail open on None.
+    """
     provider = _resolve_provider(config, credentials)
     if provider is None or provider.fingerprint is None:
         # No principal yet: no cooldown key, and nothing cached to read.
-        return False
+        return None
     # The cooldown is per account and tenant, never per token.
     key = (config.console_base_url, provider.fingerprint)
     failed_at = _WHOAMI_FAILED_AT.get(key)
@@ -2042,9 +2047,29 @@ async def _private_connectors_hidden(
     if whoami is None:
         if not cooling_down:
             _WHOAMI_FAILED_AT[key] = time.monotonic()
-        return False
+        return None
     _WHOAMI_FAILED_AT.pop(key, None)
-    return whoami.can_access_private_resources is False
+    return whoami
+
+
+async def _private_connectors_hidden(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> bool:
+    whoami = await _resolve_account_whoami(config, credentials)
+    return whoami is not None and whoami.can_access_private_resources is False
+
+
+async def mcp_apps_disabled(
+    config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
+) -> bool:
+    """Whether the organization's ``mcp_apps`` feature flag hides MCP Apps.
+
+    Read from /whoami or /account-context like the other account gates.
+    Fail-open: without a Mistral principal, a failed lookup, or a payload that
+    carries no boolean ``mcp_apps`` flag, MCP Apps stay enabled.
+    """
+    whoami = await _resolve_account_whoami(config, credentials)
+    return whoami is not None and not whoami.mcp_apps_enabled
 
 
 def _resolve_catalog(

@@ -20,7 +20,7 @@ from typing import Any, Final, Protocol
 from urllib.parse import urlparse
 
 import httpx2
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, field_validator
 
 from vibe.app_server.models import AccountPlanKind
 from vibe.core.config import ProviderConfig
@@ -69,6 +69,21 @@ class WhoAmIResult(BaseModel):
     vibe_base: str | None = None
     has_paid_vibe_entitlement: bool = False
     can_access_private_resources: bool | None = None
+    # Organization feature flags, when the console includes them. Absent means
+    # the console predates the field: every flag read from it fails open.
+    feature_flags: dict[str, JsonValue] | None = None
+
+    @property
+    def mcp_apps_enabled(self) -> bool:
+        """The organization's ``mcp_apps`` feature flag.
+
+        Fail-open: no flags in the payload, or a non-boolean ``mcp_apps``
+        value, leaves MCP Apps enabled.
+        """
+        if self.feature_flags is None:
+            return True
+        value = self.feature_flags.get("mcp_apps")
+        return value if isinstance(value, bool) else True
 
     @field_validator("plan_type", mode="before")
     @classmethod
@@ -172,7 +187,7 @@ async def fetch_whoami(
 
 _WHOAMI_CACHE_TTL_SECONDS: Final = 6 * 60 * 60
 # Bump when WhoAmIResult gains a field that older entries would silently default.
-_WHOAMI_CACHE_FORMAT: Final = 3
+_WHOAMI_CACHE_FORMAT: Final = 4
 
 
 def load_cached_whoami(principal: str) -> WhoAmIResult | None:

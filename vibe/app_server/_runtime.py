@@ -88,7 +88,7 @@ from vibe.app_server._surface_instructions import (
 from vibe.app_server._worktree_session import session_harness_files
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.client_tools import ClientToolHandler
-from vibe.app_server.connector_catalog import ConnectorCatalogService
+from vibe.app_server.connector_catalog import ConnectorCatalogService, mcp_apps_disabled
 from vibe.app_server.models import (
     AgentStatsSnapshot,
     ConfigIssue,
@@ -1872,6 +1872,9 @@ class HarnessProcess:
                 get_server_url_from_api_base(connector_provider.api_base)
                 or connector_base_url
             )
+        # The organization's mcp_apps feature flag, from the same /whoami the
+        # connector catalog reads; fail-open keeps MCP Apps when it is absent.
+        mcp_apps_enabled = not await mcp_apps_disabled(config, self.credentials)
 
         def derive_config(  # noqa: PLR0914 - one cohesive config derivation
             config: VibeConfigSchema,
@@ -2381,6 +2384,7 @@ class HarnessProcess:
             connector_selection=connector_selection,
             connector_catalog_service=self.connector_catalog,
             connector_base_url=connector_base_url,
+            mcp_apps_enabled=mcp_apps_enabled,
             # The gateway resolves the connection's credential per call.
             platform_credentials=self.credentials,
             provider_credentials=credentials_for,

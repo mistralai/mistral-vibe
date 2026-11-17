@@ -124,3 +124,41 @@ def test_a_call_keeps_the_app_it_was_shown_with() -> None:
     assert (first, second) == (_APP, None)
     assert (_app_of(apps, "effect-1"), _app_of(apps, "effect-2")) == (_APP, None)
     assert _app_of(apps, "effect-3") == _APP
+
+
+def test_disabled_session_never_attaches_an_app() -> None:
+    """*Prepare*: A session with the ``mcp_apps`` feature flag off, whose
+    connector tool still advertises a UI resource.
+    *Do*: Publish the routes and show calls.
+    *Assert*: No call carries an app, across catalog refreshes.
+    """
+    # Prepare
+    apps = SessionMcpApps(enabled=False)
+    _routes(apps, _catalog("ui://charts/chart"))
+
+    # Do / Assert
+    assert _app_of(apps, "effect-1") is None
+    _routes(apps, _catalog("ui://charts/chart"))
+    assert _app_of(apps, "effect-2") is None
+
+
+def test_disabled_session_strips_an_app_already_on_the_entry() -> None:
+    """*Prepare*: A disabled session and a call whose entry already carries an
+    app (e.g. attached before the flag was read).
+    *Do*: Project the history.
+    *Assert*: The app is stripped so the client has nothing to render.
+    """
+    # Prepare
+    apps = SessionMcpApps(enabled=False)
+    call = _call("effect-1")
+    with_app = call.model_copy(
+        update={"detail": call.detail.model_copy(update={"mcp_app": _APP})}
+    )
+
+    # Do
+    [entry] = apps.apply([with_app])
+
+    # Assert
+    assert isinstance(entry, PublicEffectEntry)
+    assert isinstance(entry.detail, GenericEffectDetail)
+    assert entry.detail.mcp_app is None

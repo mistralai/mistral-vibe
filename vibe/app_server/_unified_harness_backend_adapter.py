@@ -1182,6 +1182,9 @@ class UnifiedSessionContext:
     connector_selection: ResolvedConnectorSelection | None = None
     connector_catalog_service: ConnectorCatalogService | None = None
     connector_base_url: str = "https://api.mistral.ai"
+    # The organization's ``mcp_apps`` feature flag, resolved at context build;
+    # False hides MCP Apps from the session's history.
+    mcp_apps_enabled: bool = True
     preflight: UnifiedConfigPreflight | None = None
     # Compiled user hooks for this session: Core bindings + Runtime handlers. The
     # Host registers the handlers on every lifecycle op (so a hook's command is
@@ -7468,7 +7471,7 @@ class UnifiedHarnessBackendAdapter(  # noqa: PLR0904 - implements app-server ses
                 disabled_tools=(),
             )
         )
-        self._mcp_apps = SessionMcpApps()
+        self._mcp_apps = SessionMcpApps(enabled=context.mcp_apps_enabled)
         self._event_id = 0
         self._open_callbacks: dict[tuple[str, str], PublicCallbackEntry] = {}
         self._events_condition = asyncio.Condition()

@@ -188,3 +188,50 @@ def test_account_context_cache_invalidates_legacy_format():
         entry["format"] = 2
     WHOAMI_CACHE_FILE.path.write_text(json.dumps(entries))
     assert load_cached_whoami("principal") is None
+
+
+@pytest.mark.parametrize(
+    ("feature_flags", "expected"),
+    [
+        ({"mcp_apps": False}, False),
+        ({"mcp_apps": True}, True),
+        (None, True),
+        ({}, True),
+        ({"mcp_apps": "yes"}, True),
+        ({"other_flag": False}, True),
+    ],
+)
+def test_account_context_feature_flags_gate_mcp_apps(feature_flags, expected):
+    result = WhoAmIResult.model_validate({**_CONTEXT, "feature_flags": feature_flags})
+    assert result.mcp_apps_enabled is expected
+
+
+def test_whoami_feature_flags_gate_mcp_apps():
+    payload = {
+        "plan_type": "API",
+        "plan_name": "PAY_AS_YOU_GO",
+        "primitive_access_scope": "personal_and_shared",
+        "feature_flags": {"mcp_apps": False},
+    }
+    result = WhoAmIResult.from_whoami(payload)
+    assert result.mcp_apps_enabled is False
+
+
+def test_whoami_without_feature_flags_keeps_mcp_apps_enabled():
+    result = WhoAmIResult.from_whoami({
+        "plan_type": "API",
+        "plan_name": "PAY_AS_YOU_GO",
+        "primitive_access_scope": "personal_and_shared",
+    })
+    assert result.mcp_apps_enabled is True
+
+
+def test_whoami_cache_round_trips_feature_flags():
+    result = WhoAmIResult.model_validate({
+        **_CONTEXT,
+        "feature_flags": {"mcp_apps": False},
+    })
+    store_cached_whoami("principal-flags", result)
+    cached = load_cached_whoami("principal-flags")
+    assert cached is not None
+    assert cached.mcp_apps_enabled is False

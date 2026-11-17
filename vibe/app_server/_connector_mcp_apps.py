@@ -57,15 +57,23 @@ class SessionMcpApps:
     An entry's app is decided once, when the session first shows the entry,
     and kept: a completed entry is immutable for clients, so a later catalog
     must not add or remove the app of a call it already showed.
+
+    ``enabled=False`` is the organization's ``mcp_apps`` feature flag being
+    off: no app is ever attached, and one already on an entry is stripped, so
+    clients have nothing to render.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, enabled: bool = True) -> None:
+        self._enabled = enabled
         self._by_route: dict[str, McpAppReference] = {}
         self._by_entry: dict[str, McpAppReference | None] = {}
 
     def update_routes(
         self, snapshot: ConnectorRouteSnapshot, catalog: ResolvedConnectorCatalog
     ) -> None:
+        if not self._enabled:
+            self._by_route = {}
+            return
         uris = {
             (connector.raw_id, tool.raw_name): tool.ui_resource_uri
             for connector in catalog.connectors
@@ -93,6 +101,12 @@ class SessionMcpApps:
             entry.detail, GenericEffectDetail
         ):
             return entry
+        if not self._enabled:
+            if entry.detail.mcp_app is None:
+                return entry
+            return entry.model_copy(
+                update={"detail": entry.detail.model_copy(update={"mcp_app": None})}
+            )
         if entry.id not in self._by_entry:
             self._by_entry[entry.id] = self._by_route.get(entry.detail.tool_name)
         app = self._by_entry[entry.id]

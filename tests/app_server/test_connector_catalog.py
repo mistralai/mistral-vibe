@@ -277,6 +277,79 @@ async def test_private_connectors_hidden_false_without_mistral_provider(
     assert await connector_catalog._private_connectors_hidden(config) is False
 
 
+def _provider_with_key(monkeypatch) -> connector_catalog._ConnectorProvider:
+    provider = connector_catalog._ConnectorProvider(
+        fingerprint="fp", base_url="https://api.mistral.ai", credentials=_key("k")
+    )
+    monkeypatch.setattr(
+        connector_catalog,
+        "_resolve_provider",
+        lambda _config, _credentials=None: provider,
+    )
+    monkeypatch.setattr(connector_catalog, "_WHOAMI_FAILED_AT", {})
+    return provider
+
+
+def _whoami_with_flags(flags: object) -> WhoAmIResult:
+    return WhoAmIResult(
+        plan_type=AccountPlanKind.CHAT,
+        plan_name="FREE",
+        feature_flags=flags,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        ({"mcp_apps": False}, True),
+        ({"mcp_apps": True}, False),
+        (None, False),
+        ({}, False),
+        ({"mcp_apps": "yes"}, False),
+        ({"other_flag": False}, False),
+    ],
+)
+async def test_mcp_apps_disabled_reads_the_org_flag(
+    monkeypatch, flags: object, expected: bool
+) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    _provider_with_key(monkeypatch)
+    resolve = AsyncMock(return_value=_whoami_with_flags(flags))
+    monkeypatch.setattr(connector_catalog._WHOAMI_CACHE, "resolve", resolve)
+
+    assert await connector_catalog.mcp_apps_disabled(config) is expected
+    assert resolve.await_args is not None
+    assert resolve.await_args.kwargs["base_url"] == config.console_base_url
+
+
+@pytest.mark.asyncio
+async def test_mcp_apps_disabled_fails_open_on_lookup_failure(monkeypatch) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    _provider_with_key(monkeypatch)
+    resolve = AsyncMock(return_value=None)
+    monkeypatch.setattr(connector_catalog._WHOAMI_CACHE, "resolve", resolve)
+    failed_at: dict[tuple[str, str], float] = connector_catalog._WHOAMI_FAILED_AT
+
+    assert await connector_catalog.mcp_apps_disabled(config) is False
+    assert (config.console_base_url, "fp") in failed_at
+
+    # During the cooldown the network is skipped but a cached entry still reads.
+    resolve.return_value = _whoami_with_flags({"mcp_apps": False})
+    assert await connector_catalog.mcp_apps_disabled(config) is False
+    assert resolve.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_apps_disabled_false_without_mistral_provider(monkeypatch) -> None:
+    config = build_test_vibe_config(enable_connectors=True)
+    monkeypatch.setattr(
+        connector_catalog, "_resolve_provider", lambda _config, _credentials=None: None
+    )
+
+    assert await connector_catalog.mcp_apps_disabled(config) is False
+
+
 def test_resolve_provider_gates_document_library_connector(monkeypatch) -> None:
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
 
