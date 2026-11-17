@@ -85,13 +85,17 @@ pub fn handle_key(
         return;
     };
     let choices = choices(&edit.field);
-    if choices.is_empty() && key.code != KeyCode::Tab {
+    if choices.is_empty() && !matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
         input::handle_key(edit, key);
         return;
     }
     match key.code {
         KeyCode::Tab if !app.config_screen.targets.is_empty() => {
             edit.target = (edit.target + 1) % app.config_screen.targets.len()
+        }
+        KeyCode::BackTab if !app.config_screen.targets.is_empty() => {
+            let len = app.config_screen.targets.len();
+            edit.target = (edit.target + len - 1) % len
         }
         KeyCode::Up | KeyCode::Char('k') | KeyCode::Down | KeyCode::Char('j')
             if !choices.is_empty() =>

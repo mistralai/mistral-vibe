@@ -1,13 +1,5 @@
 [
  {
-  "method": "workspace/prompt/prepare",
-  "params": {
-   "message": "/loop",
-   "sessionId": "00000000-0000-4000-8000-000000000001",
-   "titleContent": null
-  }
- },
- {
   "method": "telemetry/record",
   "params": {
    "correlateLastRequest": false,
@@ -16,33 +8,6 @@
     "command": "loop",
     "command_type": "builtin"
    },
-   "sessionId": "00000000-0000-4000-8000-000000000001"
-  }
- },
- {
-  "method": "session/turn/enqueue",
-  "params": {
-   "entries": [
-    {
-     "annotations": {},
-     "content": [
-      {
-       "text": "/loop",
-       "type": "text"
-      }
-     ],
-     "entryId": "<client-message-id>",
-     "role": "user"
-    }
-   ],
-   "idempotencyKey": "<client-message-id>",
-   "sessionId": "00000000-0000-4000-8000-000000000001"
-  }
- },
- {
-  "method": "feedback/shouldShow",
-  "params": {
-   "pendingUserMessages": 1,
    "sessionId": "00000000-0000-4000-8000-000000000001"
   }
  },

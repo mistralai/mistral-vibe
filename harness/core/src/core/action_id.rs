@@ -1,6 +1,17 @@
+use std::borrow::Cow;
+
 use uuid::Uuid;
 
 const ACTION_ID_DOMAIN: &str = "mistral.ai/harness-core/action-id/v1";
+
+/// The task identity that completion and compaction IDs derive from: the task
+/// itself, or with a namespace, an identity derived from both.
+pub(crate) fn task_scope<'a>(task_id: &'a str, namespace: Option<&str>) -> Cow<'a, str> {
+    match namespace {
+        None => Cow::Borrowed(task_id),
+        Some(namespace) => Cow::Owned(derive("task_scope", &[task_id, namespace])),
+    }
+}
 
 pub(crate) fn approval(subject_tool_action_id: &str) -> String {
     derive("approval", &[subject_tool_action_id])

@@ -5,10 +5,10 @@ use std::sync::Arc;
 use serde_json::json;
 
 use crate::collapsed_pastes::{CollapsedPastes, DISPLAY_ANNOTATION};
-use crate::image_placeholders;
 use crate::server::{
     method, Client, ImageAttachment, PreparedPrompt, RequestFailure, TurnInputEntry,
 };
+use crate::{image_placeholders, paste_path};
 
 /// Expand mentions and snapshot attachments before a prompt enters the queue.
 /// `[Image #N]` placeholders of `images` are prepared as the image mentions
@@ -22,7 +22,7 @@ pub(super) async fn prepare(
     let expanded = image_placeholders::expand(text, images);
     let mut prepared = prepare_text(client, session_id, &expanded).await?;
     if expanded != text {
-        image_placeholders::collapse(&mut prepared, text, images);
+        image_placeholders::collapse(&mut prepared, text, images)?;
     }
     Ok(prepared)
 }
@@ -43,10 +43,11 @@ async fn prepare_text(
     {
         Ok(response) => Ok(PreparedPrompt::from_response(&response, text)),
         Err(error) => {
-            if error
+            let rejected = error
                 .downcast_ref::<RequestFailure>()
-                .is_some_and(RequestFailure::is_invalid_params)
-            {
+                .is_some_and(RequestFailure::is_invalid_params);
+            // Raw text carries no image snapshot, so an image would be lost or sent unreadable.
+            if rejected || !paste_path::image_mentions_in(text).is_empty() {
                 return Err(format!("{error:#}"));
             }
             tracing::warn!(%error, "prompt preparation unavailable; using raw text");

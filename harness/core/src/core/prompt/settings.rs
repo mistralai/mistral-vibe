@@ -37,6 +37,8 @@ pub(crate) struct PromptSettings {
     pub compaction: compaction::Prompts,
     pub wait_description: String,
     pub discovery_description: String,
+    /// Stands in the model context for a Turn's input whose request the provider rejected.
+    pub rejected_input_note: String,
 }
 
 /// Generic guidance at the start of the system prompt. Empty text omits that section.
@@ -76,6 +78,10 @@ impl PromptSettings {
             (
                 &self.discovery_description,
                 "settings.prompts.discovery_description",
+            ),
+            (
+                &self.rejected_input_note,
+                "settings.prompts.rejected_input_note",
             ),
         ] {
             if text.trim().is_empty() {

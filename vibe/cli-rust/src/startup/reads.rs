@@ -11,10 +11,9 @@ use crate::voice::TranscriptionConfig;
 /// What the UI needs from the one startup `config/read`.
 pub struct ConfigRead {
     pub voice_mode_enabled: bool,
-    pub show_greeting: bool,
     pub transcription: Option<TranscriptionConfig>,
     pub log_level: Option<String>,
-    pub enable_telemetry: bool,
+    pub crash_reports_enabled: bool,
     pub enable_update_checks: bool,
     pub enable_system_trust_store: bool,
 }
@@ -23,11 +22,10 @@ impl Default for ConfigRead {
     fn default() -> Self {
         Self {
             voice_mode_enabled: false,
-            show_greeting: true,
             transcription: None,
             log_level: None,
             // Absent on an older server: stay silent rather than assume consent.
-            enable_telemetry: false,
+            crash_reports_enabled: false,
             // Absent on an older server: keep checking, the config default.
             enable_update_checks: true,
             // Absent on an older server: the bundled roots, the config default.
@@ -36,7 +34,7 @@ impl Default for ConfigRead {
     }
 }
 
-/// Read voice mode, the greeting flag, and transcription once at startup.
+/// Read voice mode, transcription and the startup flags once at startup.
 pub(super) async fn read_config(client: &Arc<Client>, cwd: Option<String>) -> ConfigRead {
     let params = json!({ "cwd": cwd });
     let result = match client.request(method::CONFIG_READ, params).await {
@@ -55,10 +53,9 @@ pub(super) async fn read_config(client: &Arc<Client>, cwd: Option<String>) -> Co
     };
     ConfigRead {
         voice_mode_enabled: config.voice_mode_enabled.unwrap_or(false),
-        show_greeting: config.show_greeting,
         transcription: config.transcription.map(transcription),
         log_level: config.log_level,
-        enable_telemetry: config.enable_telemetry,
+        crash_reports_enabled: config.crash_reports_enabled,
         enable_update_checks: config.enable_update_checks,
         enable_system_trust_store: config.enable_system_trust_store,
     }

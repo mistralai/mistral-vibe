@@ -629,6 +629,29 @@ async def test_a_permanent_grant_keeps_allowlist_entries_another_session_saved(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows refuses to delete the process cwd"
+)
+async def test_a_permanent_grant_persists_after_the_process_cwd_is_deleted(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Prepare
+    resolver, _ = _resolver(tmp_path, bash={"allowlist": ["ls"]})
+    outcome = await resolver.resolve("file_system.bash", {"command": "npm test"})
+    deleted = tmp_path / "deleted"
+    deleted.mkdir()
+    monkeypatch.chdir(deleted)
+    deleted.rmdir()
+
+    # Do
+    await resolver.grant("file_system.bash", _granted(outcome), permanent=True)
+
+    # Assert
+    persisted = tomllib.loads((config_dir / "config.toml").read_text())
+    assert "npm test" in persisted["tools"]["bash"]["allowlist"]
+
+
+@pytest.mark.asyncio
 async def test_a_permanent_grant_rewrites_a_pattern_removed_from_the_file(
     tmp_path: Path, config_dir: Path
 ) -> None:

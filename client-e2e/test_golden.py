@@ -572,11 +572,11 @@ def test_matches_golden(name: str) -> None:
     _assert_scenario_expectations(captured, scenario)
 
     if normalize_requests(captured.requests) != golden_requests:
-        _save_live_svgs(name, captured.snapshots)
+        _save_live_svgs(name, captured.snapshots, scenario.keep_braille)
         pytest.fail(f"{name}: app-server request mismatch", pytrace=False)
 
     if len(captured.snapshots) != len(golden_svgs):
-        _save_live_svgs(name, captured.snapshots)
+        _save_live_svgs(name, captured.snapshots, scenario.keep_braille)
         pytest.fail(
             f"{name}: {len(captured.snapshots)} snapshots vs "
             f"{len(golden_svgs)} goldens",
@@ -586,10 +586,10 @@ def test_matches_golden(name: str) -> None:
     for i, (snap, golden_svg) in enumerate(
         zip(captured.snapshots, golden_svgs, strict=True)
     ):
-        norm = normalize_snapshot(snap)
+        norm = normalize_snapshot(snap, scenario.keep_braille)
         live = to_svg(norm, f"{name} [{snap.label}]")
         if live != golden_svg:
-            _save_live_svgs(name, captured.snapshots)
+            _save_live_svgs(name, captured.snapshots, scenario.keep_braille)
             diff = next(
                 difflib.unified_diff(
                     golden_svg.splitlines(keepends=True),
@@ -607,7 +607,7 @@ def test_matches_golden(name: str) -> None:
             )
 
 
-def _save_live_svgs(name: str, snapshots: list) -> None:
+def _save_live_svgs(name: str, snapshots: list, keep_braille: bool = False) -> None:
     """Write live SVGs for a failing scenario under goldens/_live/<scenario>/.
 
     The committed goldens stay untouched. The live captures land next to them
@@ -618,6 +618,6 @@ def _save_live_svgs(name: str, snapshots: list) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for i, snap in enumerate(snapshots):
         slug = "".join(ch if ch.isalnum() or ch in "_-" else "_" for ch in snap.label)
-        norm = normalize_snapshot(snap)
+        norm = normalize_snapshot(snap, keep_braille)
         svg = to_svg(norm, f"{name} [{snap.label}]")
         (out_dir / f"snapshot_{i:02d}_{slug}.svg").write_text(svg)

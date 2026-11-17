@@ -20,4 +20,4 @@ request_methods = {"session/resume"}
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "\r"]
 
 screen_contains = ("Resumed session",)
-screen_excludes = ("open in another Vibe process",)
+screen_excludes = ("open in another Vibe process", "Resuming…")

@@ -39,6 +39,7 @@ from vibe.app_server.models import (
     CompletedEffectState,
     IdleSessionStatus,
     PublicCallbackEntry,
+    PublicChildModel,
     PublicEffectEntry,
     PublicMessageEntry,
     PublicRetryCategory,
@@ -582,6 +583,64 @@ async def test_subagent_classification_is_forwarded_not_applied_as_child_state(
     assert len(telemetry.sent) == 1
     assert telemetry.sent[0][0] == "vibe.tool_classification"
     assert telemetry.sent[0][1]["tool_name"] == "file_system.bash"
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_approval_wait_is_not_charged_to_the_goal(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A clocked goal turn, and a subagent that asks for approval.
+    *Do*: Leave the approval open for 600 s, then answer it, with only the
+    subagent's callback events arriving meanwhile.
+    *Assert*: The turn's goal time leaves the wait out.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.vibe._session import _approval_callback
+    from vibe.app_server._unified_goal import GoalTurnClock
+
+    # Prepare
+    now = [100.0]
+    adapter = _inert_adapter(_RecordingSession(), str(tmp_path), str(tmp_path))
+    adapter._goal_clock = GoalTurnClock(lambda: now[0])
+    adapter._goal_clock.start("t-1", 0)
+    callback = _approval_callback(
+        session_id="child-1",
+        callback_id="approval-call-1",
+        action=_approval_action("child-turn-1"),
+        related_entry_id="effect-action-1",
+        created_at=1,
+        input_entry_id=None,
+        required_permissions=(),
+    )
+    root_state = PublicSessionState(
+        event_id=0,
+        session=PublicSession(
+            id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+        ),
+    )
+
+    def wrapped(event_type: str, event_id: int) -> dict[str, object]:
+        return {
+            "type": "child_session_event",
+            "sessionId": "child-1",
+            "eventId": event_id,
+            "event": {"type": event_type, "sessionId": "child-1", "callback": callback},
+        }
+
+    # Do
+    now[0] += 2
+    await adapter._translate_child_event(
+        wrapped("callback_requested", 1), 50, root_state
+    )
+    now[0] += 600
+    await adapter._translate_child_event(
+        wrapped("callback_resolved", 2), 50, root_state
+    )
+    now[0] += 3
+    _tokens, time_ms = adapter._goal_clock.progress("t-1", 0)
+
+    # Assert
+    assert time_ms == 5_000
 
 
 @pytest.mark.asyncio
@@ -1910,7 +1969,8 @@ async def test_unified_root_subscription_translates_child_session_events(
 ) -> None:
     """*Prepare*: A root Harness subscription registers a child before its first update.
     *Do*: Consume the child update through the root adapter event stream.
-    *Assert*: Root-owned summary events retain child identity and lifecycle state.
+    *Assert*: The child's own update comes on its own sequence, and root-owned
+    summary events retain child identity and lifecycle state.
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
@@ -2008,13 +2068,27 @@ async def test_unified_root_subscription_translates_child_session_events(
         SessionReadParams(session_id=root_id, history=PageRequest(limit=20))
     )
     registration = await anext(subscription.events)
+    child_events = []
     event = await anext(subscription.events)
+    while not isinstance(event.event, ChildSessionUpdated):
+        child_events.append(event)
+        event = await anext(subscription.events)
 
     # Assert
     assert isinstance(registration.event, ChildSessionUpdated)
     assert registration.event.child_session.id == child_id
     assert registration.session_id == root_id
     assert registration.event_id == 1
+    # The child's own events come on the child's own sequence, for the clients
+    # that keep a replica of it.
+    assert child_events
+    assert [child_event.event_id for child_event in child_events] == list(
+        range(1, len(child_events) + 1)
+    )
+    assert all(
+        child_event.child_session and child_event.session_id == child_id
+        for child_event in child_events
+    )
     assert isinstance(event.event, ChildSessionUpdated)
     assert event.event.child_session.id == child_id
     assert event.event.child_session.status.type == "running"
@@ -2146,8 +2220,51 @@ async def test_unified_adapter_seeds_persisted_children_into_the_resume_state(
     seeded = read.state.child_sessions[0]
     assert seeded.name == "test-audit"
     assert seeded.agent_type == "explore"
+    assert seeded.agent_path == "/root/test-audit"
     assert seeded.status.type == "idle"
     assert adapter.references_child("session-child")
+
+
+@pytest.mark.asyncio
+async def test_unified_adapter_names_the_model_a_child_s_agent_type_selects(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    child = _RecordingSession()
+    child.session_id = "session-child"
+    child.sent.append(SimpleNamespace(message=[TextContentBlock(text="child")]))
+    idle = _persisted_child_states()["idle"]
+    model = PublicChildModel(display_name="DeepSeek V4", thinking="high")
+
+    class FakeHost:
+        def child_session_records(self, root_session_id: str) -> tuple[Any, ...]:
+            return (
+                _persisted_child_record(
+                    "worker", "session-child", idle, agent_type="worker"
+                ),
+            )
+
+        def references_child(self, root_session_id: str, child_session_id: str) -> bool:
+            return child_session_id == "session-child"
+
+        async def read(self, params: Any) -> object:
+            result = await child.read(params)
+            return SimpleNamespace(snapshot=result.snapshot, cwd=str(tmp_path))
+
+    adapter = _inert_adapter(
+        _RecordingSession(),
+        str(tmp_path),
+        str(tmp_path),
+        host=FakeHost(),
+        child_models={"worker": model},
+    )
+
+    await adapter.seed_persisted_child_states()
+    read = await adapter.read(
+        SessionReadParams(session_id="session-1", history=PageRequest(limit=20))
+    )
+
+    assert [summary.model for summary in read.state.child_sessions] == [model]
 
 
 @pytest.mark.asyncio
@@ -2264,7 +2381,8 @@ async def test_unified_adapter_live_registration_overwrites_a_seeded_child(
 ) -> None:
     """*Prepare*: A root adapter seeded with a persisted idle child.
     *Do*: Subscribe, then let the Host register the live child again.
-    *Assert*: The registration overwrites the seeded row with the live state.
+    *Assert*: The registration overwrites the seeded row with the live state,
+    and replaces a client's replica of the child with a snapshot.
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
@@ -2366,9 +2484,14 @@ async def test_unified_adapter_live_registration_overwrites_a_seeded_child(
     subscription = await adapter.subscribe(
         SessionReadParams(session_id=root_id, history=PageRequest(limit=20))
     )
+    snapshot = await anext(subscription.events)
     registration = await anext(subscription.events)
 
     # Assert
+    assert snapshot.method == "session/snapshot"
+    assert snapshot.session_id == child_id
+    assert snapshot.event_id == 1
+    assert snapshot.child_session
     assert isinstance(registration.event, ChildSessionUpdated)
     assert registration.event.child_session.id == child_id
     assert adapter._child_states[child_id].session.updated_at == 2
@@ -2563,6 +2686,59 @@ async def test_model_calls_count_only_the_sessions_own_agent_calls(
 
     # Assert
     assert adapter._runtime.stats.model_calls == 2
+
+
+def test_a_child_update_leaves_the_roots_context_gauge_alone(tmp_path: Path) -> None:
+    """*Prepare*: The root's last context size, then a child update that reads its own.
+    *Do*: Reconcile the child update.
+    *Assert*: The root keeps its size, which its next compaction reports.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.session_protocol import (
+        IdleSessionStatus,
+        LatestPublicHistoryPage,
+        PublicSession as HarnessPublicSession,
+        PublicSessionState as HarnessPublicSessionState,
+        TokenUsage as HarnessTokenUsage,
+        TurnQueue as HarnessTurnQueue,
+    )
+
+    child = HarnessPublicSessionState(
+        session=HarnessPublicSession(
+            id="session-child",
+            status=IdleSessionStatus(),
+            created_at=1,
+            updated_at=1,
+            context_usage=HarnessTokenUsage(
+                input_tokens=900, output_tokens=0, total_tokens=900
+            ),
+        ),
+        history=LatestPublicHistoryPage(entries=[]),
+        turn_queue=HarnessTurnQueue(items=[], paused=False, max_items=32),
+    )
+    adapter = _inert_adapter(
+        _session_stub(session_id="session-root", cwd=None), str(tmp_path), str(tmp_path)
+    )
+    from vibe.app_server._unified_harness_backend_adapter import _HistoryProjections
+
+    adapter._context_tokens_before = 4321
+
+    adapter._updated_state(
+        {
+            "type": "session_state_updated",
+            "sessionId": "session-child",
+            "eventId": 1,
+            "state": child.model_dump(mode="json", by_alias=True),
+        },
+        20,
+        cwd=str(tmp_path),
+        metadata=None,
+        projections=_HistoryProjections(),
+        record_root_telemetry=False,
+        started_by_session_id=None,
+    )
+
+    assert adapter._context_tokens_before == 4321
 
 
 def test_context_gauge_retained_across_a_usageless_snapshot(
@@ -2937,7 +3113,8 @@ async def test_unified_child_retry_state_emits_compatibility_notification(
 ) -> None:
     """*Prepare*: A registered child session before, during, and after a provider retry.
     *Do*: Translate the child's retry start and clear state updates.
-    *Assert*: Retry start emits a child notification without exposing child snapshots.
+    *Assert*: Retry start emits a child notification, and the child's snapshots
+    come only on its own sequence, for the clients that keep a replica of it.
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
@@ -2982,8 +3159,14 @@ async def test_unified_child_retry_state_emits_compatibility_notification(
     assert notices[0].session_id == child_id
     assert notices[0].event.params.category is PublicRetryCategory.RATE_LIMITED
     assert notices[0].event_id is None
-    assert not any(isinstance(event.event, SessionSnapshot) for event in started)
-    assert cleared == []
+    for events in (started, cleared):
+        snapshots = [
+            event for event in events if isinstance(event.event, SessionSnapshot)
+        ]
+        assert len(snapshots) == 1
+        assert snapshots[0].child_session
+        assert snapshots[0].session_id == child_id
+    assert all(event.child_session for event in cleared)
     assert adapter._child_states[child_id].retrying is None
 
 

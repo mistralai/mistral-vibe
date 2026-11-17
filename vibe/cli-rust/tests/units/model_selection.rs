@@ -57,18 +57,27 @@ fn a_model_other_than_the_default_is_not_a_default_pick() {
         &crate::support::stub(),
         vibe_rs::config_write::Scope::Saved,
     );
-    let picks = model_selection::picks(&app, Some("devstral"), Some("medium"));
+    let pick = app.thinking_picker.model_pick.clone().unwrap();
+    let picks = model_selection::picks(&app, Some(&pick), Some("medium"));
     assert_eq!(picks.len(), 1);
     assert_eq!(field(&picks[0], "model"), "devstral");
     assert_eq!(field(&picks[0], "previous_model"), "default");
     assert_eq!(field(&picks[0], "default_model"), "medium");
     assert_eq!(field(&picks[0], "is_default_model"), false);
+    assert_eq!(field(&picks[0], "has_search_query"), false);
 }
 
 #[test]
 fn picking_the_active_model_again_still_records_it() {
     let app = app(Some("devstral"));
-    let pick = &model_selection::picks(&app, Some("devstral"), None)[0];
+    let pick = thinking_picker::ModelPick {
+        alias: "devstral".into(),
+        target: "devstral".into(),
+        scope: vibe_rs::config_write::Scope::Saved,
+        searched: true,
+    };
+    let pick = &model_selection::picks(&app, Some(&pick), None)[0];
     assert_eq!(field(pick, "model"), "devstral");
     assert_eq!(field(pick, "previous_model"), "devstral");
+    assert_eq!(field(pick, "has_search_query"), true);
 }

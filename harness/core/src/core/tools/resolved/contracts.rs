@@ -9,7 +9,7 @@ use crate::core::tools::arguments::{
 use crate::core::tools::external::{
     ExternalTool, ExternalToolCall, RuntimeBuiltinToolName, ToolTarget,
 };
-use crate::core::tools::resolved::assembly;
+use crate::core::tools::resolved::{EffectiveCall, assembly};
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct ToolContracts {
@@ -71,6 +71,15 @@ impl ToolContracts {
                 }
             }),
         );
+        runtime.extend(
+            crate::core::features::sign_in::runtime_contracts()
+                .into_iter()
+                .map(|contract| RuntimeContract {
+                    name: contract.name,
+                    input_schema: contract.input_schema,
+                    output_schema: Some(contract.output_schema),
+                }),
+        );
         // These contracts only settle persisted Actions. They install no executable routes,
         // and current catalog schemas must not reinterpret a previously accepted result.
         runtime.extend(
@@ -117,39 +126,41 @@ impl ToolContracts {
         &self,
         original: &ExternalToolCall,
         arguments: Value,
-    ) -> Result<ExternalToolCall, CoreError> {
+    ) -> Result<EffectiveCall, CoreError> {
         let tool = match &original.call {
             ExternalTool::RuntimeBuiltin { name, .. } => Some(*name),
             ExternalTool::Provided { .. } => None,
         };
         let schema = self.input_schema(&original.call)?;
-        validate_arguments(tool, schema, &arguments).map_err(|rejection| {
-            CoreError::invalid_command(format!(
-                "pre-tool hook arguments do not satisfy the original tool schema: {}",
-                rejection.detail(schema)
-            ))
-        })?;
+        if let Err(rejection) = validate_arguments(tool, schema, &arguments) {
+            return Ok(EffectiveCall::Invalid {
+                detail: rejection.detail_without_values(schema),
+            });
+        }
         let arguments = match &original.call {
             ExternalTool::RuntimeBuiltin {
                 name: RuntimeBuiltinToolName::SelfWait,
                 arguments: original_arguments,
                 ..
-            } => crate::core::features::model_wait::clamp_hook_arguments(
+            } => match crate::core::features::model_wait::clamp_hook_arguments(
                 original_arguments,
                 arguments,
-            )?,
+            )? {
+                Ok(arguments) => arguments,
+                Err(detail) => return Ok(EffectiveCall::Invalid { detail }),
+            },
             ExternalTool::RuntimeBuiltin {
                 name: RuntimeBuiltinToolName::FileSystemBash,
                 ..
             } => file_system::bash_runtime_arguments(arguments, self.bash_timeout),
             _ => arguments,
         };
-        Ok(ExternalToolCall {
+        Ok(EffectiveCall::Valid(ExternalToolCall {
             action_id: original.action_id.clone(),
             call_id: original.call_id.clone(),
             origin: original.origin,
             call: original.call.with_arguments(arguments),
-        })
+        }))
     }
 
     pub(super) fn validate_input(
@@ -385,24 +396,24 @@ mod tests {
             .resolve_effective_call(&hook_spawn_call(arguments.clone()), arguments.clone())
             .unwrap();
 
+        let EffectiveCall::Valid(resolved) = resolved else {
+            panic!("expected a valid call, got {resolved:?}");
+        };
         assert_eq!(resolved.call.arguments(), &arguments);
     }
 
     #[test]
-    fn a_hook_result_with_a_context_is_rejected_when_forking_is_off() {
+    fn a_hook_result_with_a_context_is_invalid_when_forking_is_off() {
         let contracts = ToolContracts::compile(&crate::core::testing::config());
         let arguments = json!({"name": "a", "message": "hi", "context": "fresh"});
 
-        let error = contracts
+        let resolved = contracts
             .resolve_effective_call(&hook_spawn_call(arguments.clone()), arguments)
-            .unwrap_err();
+            .unwrap();
 
         assert!(
-            error
-                .detail()
-                .starts_with("pre-tool hook arguments do not satisfy the original tool schema: "),
-            "{}",
-            error.detail()
+            matches!(resolved, EffectiveCall::Invalid { .. }),
+            "{resolved:?}"
         );
     }
 }

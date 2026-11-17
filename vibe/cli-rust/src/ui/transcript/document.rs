@@ -16,6 +16,8 @@ pub(crate) struct SelectionSlice {
     pub buffer: Buffer,
     pub area: Rect,
     pub gutters: Vec<(u16, u16, u16)>,
+    /// `[top, bottom)` rows of `/raw` agent messages.
+    pub raw: Vec<(u16, u16)>,
     pub folds: Folds,
     /// Sorted spacing rows (block margins) a copy skips.
     pub margins: Vec<u16>,
@@ -39,8 +41,7 @@ pub(crate) fn selection_slice(app: &App) -> Option<SelectionSlice> {
     // The child view's selection must extract the child's document: the
     // render swap is over by the time the overlay runs.
     let (transcript, cache) = crate::subagents::active_transcript(app);
-    let config = view.banner.view(&app.session.startup_config, width);
-    let banner = super::banner(app, config, width, transcript.is_empty());
+    let banner = super::banner(app, width, transcript.is_empty());
     let layout = cache.layout(transcript.revision(), width)?;
     let spacer = view.queue_spacer;
     let total = document_height(banner.lines(), layout, width).saturating_add(spacer.height);
@@ -62,6 +63,7 @@ pub(crate) fn selection_slice(app: &App) -> Option<SelectionSlice> {
     );
     let mut buffer = Buffer::empty(area);
     let mut gutters = Vec::new();
+    let mut raw = Vec::new();
     let mut folds = Folds {
         x: area.x,
         rows: Vec::new(),
@@ -110,9 +112,12 @@ pub(crate) fn selection_slice(app: &App) -> Option<SelectionSlice> {
                 gutters.push((y, y.saturating_add(positioned.height), gutter));
             }
         }
+        if entry::is_raw(&value, view.raw) {
+            raw.push((y, y.saturating_add(positioned.height)));
+        }
         let queue = entry::QueueView {
             selected: app.queue.selected.as_deref() == Some(value.id),
-            paused: app.queue.paused,
+            paused: app.queue.header_shortcuts(),
         };
         let rendered = entry::render(
             &value,
@@ -120,6 +125,7 @@ pub(crate) fn selection_slice(app: &App) -> Option<SelectionSlice> {
             entry::ExpansionView {
                 entry: entry_expanded,
                 group: group_expanded,
+                raw: view.raw,
             },
             view.pulse_frame,
             queue,
@@ -150,6 +156,7 @@ pub(crate) fn selection_slice(app: &App) -> Option<SelectionSlice> {
         buffer,
         area,
         gutters,
+        raw,
         folds,
         margins,
     })

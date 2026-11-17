@@ -11,7 +11,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import (
+    BaseModel,
+    Field,
+    JsonValue,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 
 from vibe.observability.logging import logger
 
@@ -27,6 +34,7 @@ class ModelCatalogParameters(BaseModel):
 
     temperature: float | None = None
     reasoning: list[str] | None = None
+    auto_compact_threshold: int | None = None
 
 
 class ModelCatalogEntry(BaseModel):
@@ -47,6 +55,30 @@ class ModelCatalogEntry(BaseModel):
     capabilities: ModelCatalogCapabilities = Field(
         default_factory=ModelCatalogCapabilities
     )
+    # Kept as sent, whatever their shape, so a catalog read back from the cache
+    # hides the same entries (see ``_hide_reasons`` in the catalog config layer).
+    requires: JsonValue = None
+    provider: JsonValue = None
+
+    @field_validator("parameters", mode="before")
+    @classmethod
+    def _drop_invalid_threshold(cls, parameters: Any, info: ValidationInfo) -> Any:
+        """Drop a threshold that is not a positive integer, keeping the entry."""
+        if not isinstance(parameters, dict):
+            return parameters
+        threshold = parameters.get("auto_compact_threshold")
+        if threshold is None or (
+            isinstance(threshold, int)
+            and not isinstance(threshold, bool)
+            and threshold > 0
+        ):
+            return parameters
+        logger.warning(
+            "Model catalog entry '%s': auto_compact_threshold %r ignored, not a positive integer",
+            info.data.get("id"),
+            threshold,
+        )
+        return {**parameters, "auto_compact_threshold": None}
 
 
 class ModelCatalogResponse(BaseModel):

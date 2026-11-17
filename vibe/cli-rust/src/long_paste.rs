@@ -1,4 +1,4 @@
-//! Long pastes collapse into an atomic `[Pasted n characters]` placeholder.
+//! Long pastes collapse into `[Pasted n characters]`; pasting again undoes that or a path paste.
 
 use std::sync::Arc;
 
@@ -10,7 +10,24 @@ pub const MAX_INLINE_CHARS: usize = 1000;
 pub const MAX_INLINE_LINES: usize = 10;
 /// Shown in the inline notice slot when a paste collapses.
 pub const HINT: &str = "Paste the same text again to show it in full";
+/// Shown in the inline notice slot when pasted paths become placeholders or mentions.
+pub const LITERAL_HINT: &str = "Paste the same path again to keep it as text";
 const HINT_SECS: u64 = 4;
+
+/// What pasting the same text again undoes, until the next edit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Offer {
+    /// A long paste collapsed into its placeholder.
+    Collapsed(Arc<str>),
+    /// Pasted paths turned into the `tokens` inserted at byte `start`, boundary spaces included.
+    Paths {
+        paste: String,
+        start: usize,
+        tokens: String,
+    },
+    /// A path list pasted at byte `start`, awaiting its probe: pasting again adds a copy.
+    Probing { paste: String, start: usize },
+}
 
 pub fn is_long(text: &str) -> bool {
     text.chars().count() > MAX_INLINE_CHARS || text.lines().count() > MAX_INLINE_LINES
@@ -66,27 +83,96 @@ pub fn collapse_range(input: &mut ChatInput, start: usize, end: usize, chars: us
     label.len()
 }
 
-/// Show in full the paste just collapsed when `text` pastes it again before
-/// any other edit; true when it did.
+/// Undo the paste `text` just collapsed or turned into mentions; true when it did.
 pub fn expand(app: &mut App, text: &str) -> bool {
     app.chat_input.sync_mentions();
-    let expandable = app.chat_input.expandable_paste.take();
-    let span = expandable
-        .filter(|paste| **paste == *text)
-        .and_then(|paste| app.chat_input.mentions.span_of(&paste));
-    let Some((start, end)) = span else {
-        dismiss(app);
+    let input = &mut app.chat_input;
+    let expanded = match input.expandable_paste.take() {
+        Some(Offer::Collapsed(paste)) if *paste == *text => show_in_full(input, &paste),
+        Some(Offer::Paths {
+            paste,
+            start,
+            tokens,
+        }) if paste == text => restore_literal(input, &paste, start, &tokens),
+        _ => false,
+    };
+    dismiss(app);
+    expanded
+}
+
+fn show_in_full(input: &mut ChatInput, paste: &Arc<str>) -> bool {
+    let Some((start, end)) = input.mentions.span_of(paste) else {
         return false;
     };
-    app.chat_input.input.replace_range(start..end, text);
-    app.chat_input.cursor = start + text.len();
-    app.chat_input.anchor = None;
-    app.chat_input.sync_mentions_at(start);
-    if !app.chat_input.mentions.holds_paste(text) {
-        app.chat_input.collapsed_pastes.forget(text);
+    input.input.replace_range(start..end, paste);
+    input.cursor = start + paste.len();
+    input.anchor = None;
+    input.sync_mentions_at(start);
+    if !input.mentions.holds_paste(paste) {
+        input.collapsed_pastes.forget(paste);
     }
-    dismiss(app);
     true
+}
+
+/// Swap the placeholders back for the pasted `literal`, as plain text.
+fn restore_literal(input: &mut ChatInput, literal: &str, start: usize, tokens: &str) -> bool {
+    let end = start + tokens.len();
+    if input.input.get(start..end) != Some(tokens) {
+        return false;
+    }
+    input.input.replace_range(start..end, literal);
+    if input.cursor > start {
+        input.cursor = input.cursor.max(end) - end + start + literal.len();
+    }
+    input.anchor = None;
+    input.sync_mentions_at(start);
+    true
+}
+
+/// Offer to keep as text the paths `text` pasted as the mentions at `start..end`.
+pub fn offer_literal(app: &mut App, text: &str, (start, end): (usize, usize)) {
+    let tokens = app.chat_input.input[start..end].to_owned();
+    app.chat_input.expandable_paste = Some(Offer::Paths {
+        paste: text.to_owned(),
+        start,
+        tokens,
+    });
+    crate::ui::notice::show(app, Severity::Information, LITERAL_HINT, HINT_SECS);
+}
+
+/// Mark the path list `raw` pasted at `start` as awaiting its probe.
+pub fn await_probe(app: &mut App, raw: &str, start: usize) {
+    app.chat_input.expandable_paste = Some(Offer::Probing {
+        paste: raw.to_owned(),
+        start,
+    });
+}
+
+/// End the probe wait for `raw` at `start`; true when no edit came first.
+pub fn end_probe(app: &mut App, raw: &str, start: usize) -> bool {
+    let waiting = matches!(
+        &app.chat_input.expandable_paste,
+        Some(Offer::Probing { paste, start: at }) if *at == start && paste == raw
+    );
+    if waiting {
+        app.chat_input.expandable_paste = None;
+    }
+    waiting
+}
+
+/// Follow `start..end` of the input becoming `len` bytes: a path offer after it moves, one it touches ends.
+pub fn shift_offer(app: &mut App, (start, end, len): (usize, usize, usize)) {
+    let input = &mut app.chat_input;
+    if let Some(Offer::Paths {
+        start: at, tokens, ..
+    }) = &mut input.expandable_paste
+    {
+        if end <= *at {
+            *at = *at - (end - start) + len;
+        } else if start < *at + tokens.len() {
+            input.expandable_paste = None;
+        }
+    }
 }
 
 /// End the paste-again offer: an edit makes the next paste a paste of its own.
@@ -96,7 +182,7 @@ pub fn dismiss(app: &mut App) {
         .overlays
         .notice
         .as_ref()
-        .is_some_and(|notice| notice.text == HINT)
+        .is_some_and(|notice| notice.text == HINT || notice.text == LITERAL_HINT)
     {
         app.overlays.notice = None;
     }
@@ -111,7 +197,7 @@ pub fn insert_collapsed(app: &mut App, text: &str) {
     input.sync_mentions_at(start);
     let paste: Arc<str> = Arc::from(text);
     input.collapsed_pastes.remember(paste.clone());
-    input.expandable_paste = Some(paste.clone());
+    input.expandable_paste = Some(Offer::Collapsed(paste.clone()));
     input
         .mentions
         .add(&input.input, start, start + label.len(), Some(paste));

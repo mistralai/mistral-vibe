@@ -104,6 +104,19 @@ impl PreparedMarkdown {
         }
     }
 
+    /// Rows already wrapped to `width`, painted and measured one row each.
+    pub(crate) fn from_wrapped(lines: LinkedLines, width: u16) -> Self {
+        let prewrapped = width > 0
+            && lines
+                .lines()
+                .iter()
+                .all(|line| line.width() <= width as usize);
+        Self {
+            prewrapped,
+            ..Self::from_lines(lines)
+        }
+    }
+
     pub fn lines(&self) -> &[Line<'static>] {
         self.lines.lines()
     }

@@ -13,6 +13,7 @@ import respx
 from tests.conftest import build_test_vibe_config
 from tests.skills.registry.conftest import make_item
 from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
+from vibe.core.skills.models import ManifestEntry
 from vibe.core.skills.registry import (
     _manifest,
     _resolved,
@@ -20,7 +21,7 @@ from vibe.core.skills.registry import (
     _store,
     refresh_registry_skills,
 )
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import SkillManifest
 from vibe.core.skills.registry._service import RegistrySyncStatus
 from vibe.core.utils import file_lock
 

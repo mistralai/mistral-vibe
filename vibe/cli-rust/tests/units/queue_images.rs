@@ -1,7 +1,7 @@
 //! Queue snapshots retain images and adopt in-flight prompts by message identity.
 
-use vibe_rs::app::App;
-use vibe_rs::message_queue::{self, QueueItem, ReplacementOutcome};
+use vibe_rs::app::{App, Severity};
+use vibe_rs::message_queue::{self, QueueEvent, QueueItem, ReplacementOutcome};
 use vibe_rs::server::{ImageAttachment, ImageSource, PreparedPrompt};
 
 use crate::support::{queued, stub};
@@ -181,7 +181,7 @@ fn a_failed_replacement_allows_the_prompt_to_be_edited_again() {
             revision: 1,
             covered: Vec::new(),
             delivered: vec!["message-1".to_owned()],
-            outcome: ReplacementOutcome::Failed,
+            outcome: ReplacementOutcome::Failed(None),
         },
     );
     message_queue::edit_selected(&mut app);
@@ -255,4 +255,32 @@ fn replacement_drops_a_file_image_when_its_mention_is_removed() {
     message_queue::merge_edit_images(&mut prepared, &[image], "inspect");
 
     assert!(prepared.images.is_empty());
+}
+
+#[test]
+fn a_queued_image_that_fails_preparation_says_why() {
+    let mut app = App::default();
+    app.queue.items.push(queued("message-1", "see [Image #1]"));
+
+    message_queue::apply_event(
+        &mut app,
+        &stub(),
+        QueueEvent::GroupReplaced {
+            server_message_id: "message-1".to_owned(),
+            revision: 1,
+            covered: Vec::new(),
+            delivered: Vec::new(),
+            outcome: ReplacementOutcome::Failed(Some(
+                "Couldn't attach [Image #1]: /tmp/a.png is missing or unreadable".into(),
+            )),
+        },
+    );
+
+    assert_eq!(
+        crate::feedback_support::notice(&app),
+        Some((
+            Severity::Error,
+            "Failed to update queued message: Couldn't attach [Image #1]: /tmp/a.png is missing or unreadable"
+        ))
+    );
 }

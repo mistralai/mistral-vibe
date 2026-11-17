@@ -1662,9 +1662,11 @@ async def test_an_unnamed_worktree_is_named_after_the_turns_message(
 ) -> None:
     _init_repo(tmp_path)
     asked: list[str | None] = []
+    credentials: list[object] = []
 
-    async def suggest(prompt: str | None, **_kwargs: object) -> str:
+    async def suggest(prompt: str | None, **kwargs: object) -> str:
         asked.append(prompt)
+        credentials.append(kwargs.get("credentials"))
         return "repair-oauth-redirect"
 
     monkeypatch.setattr(worktree_lifecycle_module, "suggest_worktree_name", suggest)
@@ -1691,6 +1693,8 @@ async def test_an_unnamed_worktree_is_named_after_the_turns_message(
         _ = [event async for event in session.act("fix the oauth redirect")]
 
         assert asked == ["fix the oauth redirect"]
+        # Named with the connection's credentials, so a sign-in needs no key.
+        assert credentials and callable(credentials[0])
         assert Repo(_cwd(session)).active_branch.name == "vibe/repair-oauth-redirect"
     finally:
         await connection.host.close()

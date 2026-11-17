@@ -19,6 +19,7 @@ from vibe.app_server.events import (
 from vibe.app_server.models import (
     ContentBlock,
     PreparedPrompt,
+    PublicGoal,
     PublicHistoryEntry,
     PublicSession,
     PublicSessionState,
@@ -28,6 +29,12 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     EmptyResponse,
+    GoalClearParams,
+    GoalClearResponse,
+    GoalGetParams,
+    GoalGetResponse,
+    GoalSetParams,
+    GoalSetResponse,
     LoopsClearParams,
     LoopsClearResponse,
     LoopsCreateParams,
@@ -585,14 +592,19 @@ class LoopsResource:
         )
         return list(response.loops)
 
-    async def create(self, interval: str, prompt: str) -> ScheduledLoop:
+    async def create(
+        self, interval: str | None, prompt: str, *, cron: str | None = None
+    ) -> ScheduledLoop:
         client = await self._connection.connect()
         response = validate_wire(
             LoopsCreateResponse,
             await client.request(
                 "loops/create",
                 LoopsCreateParams(
-                    session_id=self._state.session_id, interval=interval, prompt=prompt
+                    session_id=self._state.session_id,
+                    interval=interval,
+                    cron=cron,
+                    prompt=prompt,
                 ),
             ),
         )
@@ -618,3 +630,54 @@ class LoopsResource:
             ),
         )
         return response.count
+
+
+class GoalResource:
+    def __init__(
+        self, connection: AppServerResourceConnection, state: ClientSessionState
+    ) -> None:
+        self._connection = connection
+        self._state = state
+
+    async def get(self) -> PublicGoal | None:
+        client = await self._connection.connect()
+        response = validate_wire(
+            GoalGetResponse,
+            await client.request(
+                "goal/get", GoalGetParams(session_id=self._state.session_id)
+            ),
+        )
+        return response.goal
+
+    async def set(self, **fields: object) -> PublicGoal:
+        """Send ``goal/set`` with only the given fields.
+
+        An omitted ``token_budget`` keeps the budget, so the request carries only
+        what the caller set: a full dump would send ``null`` and remove it.
+        """
+        params = GoalSetParams.model_validate({
+            "session_id": self._state.session_id,
+            **fields,
+        })
+        client = await self._connection.connect()
+        response = validate_wire(
+            GoalSetResponse,
+            await client.request(
+                "goal/set",
+                params.model_dump(mode="json", by_alias=True, exclude_unset=True),
+            ),
+        )
+        return response.goal
+
+    async def clear(self, expected_goal_id: str) -> bool:
+        client = await self._connection.connect()
+        response = validate_wire(
+            GoalClearResponse,
+            await client.request(
+                "goal/clear",
+                GoalClearParams(
+                    session_id=self._state.session_id, expected_goal_id=expected_goal_id
+                ),
+            ),
+        )
+        return response.cleared

@@ -22,7 +22,10 @@ from hashlib import sha256
 from types import MappingProxyType
 from typing import Literal, Protocol
 
-type ProviderAuthReason = Literal["missing", "expired", "rejected"]
+# ``unavailable``: the Host could not check the credential right now, as when
+# its owner does not answer while the computer sleeps. Unlike the others, it
+# may pass on its own, so a model call waits a while for it.
+type ProviderAuthReason = Literal["missing", "expired", "rejected", "unavailable"]
 type ProviderRejectionReason = Literal["http_unauthorized", "http_forbidden"]
 
 
@@ -54,7 +57,8 @@ class ProviderCredentialSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class ProviderAuthRequired:
-    """No usable credential exists; interactive sign-in is needed.
+    """No usable credential exists: interactive sign-in is needed, or, for the
+    ``unavailable`` reason, the credential could not be checked yet.
 
     Not an error — a state. The Harness turns it into a typed completion
     failure rather than letting it escape as an exception.

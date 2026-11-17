@@ -14,8 +14,9 @@ use crate::server::request_error::SESSION_BUSY_MESSAGE;
 use crate::server::{Client, PublicSessionState};
 use crate::session_exit;
 
-pub(crate) use notice::load_history;
 pub use notice::rebase;
+pub(crate) use notice::{frozen, load_history, spinning};
+pub(crate) use request::delete_session;
 pub use request::{held, lease_locked};
 
 /// One `session/list` item (app-server `PublicSession`).
@@ -147,6 +148,10 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     if app.resume_picker.deleting.is_some() {
         return;
     }
+    // A resume in flight only lets Esc cancel it.
+    if app.resume_picker.resuming && key.code != KeyCode::Esc {
+        return;
+    }
     let chorded = key
         .modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
@@ -254,10 +259,12 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             // expansion state resets to the fold flag.
             app.view.expanded.clear();
             app.todo_tracker.seed_from_history(state.history.as_ref());
+            crate::goal::adopt(app, state.session.goal.clone(), true);
             crate::startup::banners::dismiss_whats_new(app);
             load_history(app, &state);
             crate::worktree::adopt_state(app, &state);
             crate::background_work::adopt_state(app, &state);
+            crate::loops::adopt_state(app, &state);
             crate::event_handler::adopt_active_turn(app, &state);
             let resumed = format!("Resumed session `{}`", short_id(&state.session.id));
             notice::result(app, &resumed);
@@ -371,9 +378,8 @@ fn resume(app: &mut App, client: &Arc<Client>) {
         return;
     }
     let id = session.id.clone();
-    // Busy without a spinner: the
-    // status stays as it is, so Esc can still cancel and notifications flow.
-    app.resume_picker.resuming = true;
+    // `session.status` is untouched: Esc still cancels and notifications still flow.
+    notice::start_resume(app);
     // A picker resume resends the session's agent config too.
     let params = crate::startup::resume_params(&id, &app.session.agent_config);
     request::resume(app, client, id, params);

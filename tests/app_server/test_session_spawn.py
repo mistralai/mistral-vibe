@@ -119,6 +119,30 @@ async def test_a_spawn_asks_the_client_and_returns_its_answer(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attached", "sent"), [(True, {}), (False, {"attached": False})]
+)
+async def test_only_a_detached_spawn_tells_the_client_its_link(
+    process_services: ProcessServices, attached: bool, sent: dict[str, bool]
+) -> None:
+    """A client that predates ``attached`` reads a missing one as attached."""
+    server, messages = _attached_server(process_services=process_services)
+
+    spawning = asyncio.create_task(
+        server.spawn_session(_PARAMS.model_copy(update={"attached": attached}))
+    )
+    request = await _next(messages)
+
+    assert {
+        key: value for key, value in request["params"].items() if key == "attached"
+    } == sent
+    assert request["params"]["parentSessionId"] == "parent-session"
+    spawning.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await spawning
+
+
+@pytest.mark.asyncio
 async def test_a_client_refusal_fails_the_spawn_with_its_message(
     process_services: ProcessServices,
 ) -> None:

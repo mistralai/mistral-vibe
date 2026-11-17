@@ -206,6 +206,12 @@ def session_config_from_agent_config(
     local = replace(
         current_local,
         active_model=route,
+        # The alias named the previous model: kept only while the model is the same.
+        active_model_alias=(
+            current_local.active_model_alias
+            if route.model == current_local.active_model.model
+            else None
+        ),
         compaction_model=route if follows else current_local.compaction_model,
     )
     context = current_core.settings.context.model_copy(
@@ -282,10 +288,12 @@ def _refused_fields(current: AgentConfig, written: AgentConfig) -> list[str]:
     written_rest = written.model_dump(
         mode="json", exclude={"completion", "auto_compact_threshold"}
     )
+    # Both sides' keys: a field one dump leaves out, such as a stream idle limit left
+    # to the Runtime's default, still differs from a value the other side states.
     refused.extend(
         name
-        for name in sorted(written_rest)
-        if written_rest[name] != current_rest.get(name)
+        for name in sorted(set(written_rest) | set(current_rest))
+        if written_rest.get(name) != current_rest.get(name)
     )
     return refused
 

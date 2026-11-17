@@ -248,6 +248,10 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
         }
         MouseTarget::Approval => app.approval.detail_scroll = position,
         MouseTarget::SkillsBody => crate::skills_browser::scroll_body_to(app, position),
+        MouseTarget::LoopsDetails => {
+            let details = &mut app.loops.details;
+            details.scroll = position.min(details.lines.saturating_sub(details.visible));
+        }
         MouseTarget::Trust => app.trust.scroll = position,
         MouseTarget::ReleaseNotes => app.release_notes.scroll = position,
         MouseTarget::ProxySetup => {

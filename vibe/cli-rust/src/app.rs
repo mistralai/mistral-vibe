@@ -146,13 +146,16 @@ pub struct ChatInput {
     pub pasted_images: crate::image_placeholders::PastedImages,
     /// Long pastes collapsed in the input, so sent prompts can keep them collapsed.
     pub collapsed_pastes: crate::collapsed_pastes::CollapsedPastes,
-    /// The paste just collapsed, which pasting it again shows in full until the next edit.
-    pub expandable_paste: Option<std::sync::Arc<str>>,
+    /// The paste just collapsed or turned into mentions, which pasting it again
+    /// undoes until the next edit.
+    pub expandable_paste: Option<crate::long_paste::Offer>,
     /// Text removed by the last kill (Ctrl+K, Ctrl+U, Ctrl+W...), which Ctrl+Y yanks back.
     pub kill_buffer: String,
     /// The composer as history recall found it, mentions and mode included,
     /// given back whole when Down leaves the recalled entries.
     pub recall_draft: Option<crate::edit_history::Snapshot>,
+    /// The draft Ctrl+S set aside, given back after the next submit.
+    pub stash: Option<crate::composer_stash::Stash>,
     /// When the last key reached the chat input, so a bottom-app that wants to
     /// replace it can wait for a pause first.
     pub last_keystroke: Option<UiInstant>,
@@ -238,6 +241,8 @@ pub struct Session {
     pub running_processes: usize,
     /// What a running `wait` waits for, when the subagents and tasks name it.
     pub wait_target: Option<String>,
+    /// The session's scheduled loops, soonest first, from its latest state and updates.
+    pub loops: Vec<crate::server::ScheduledLoop>,
 }
 
 /// Transcript rendering state: content, scroll, per-entry caches, and chrome.
@@ -259,6 +264,8 @@ pub struct View {
     /// The Ctrl+O bulk fold state applied to every group and collapsible
     /// result body at once.
     pub tools_collapsed: bool,
+    /// `/raw`: agent messages show their Markdown source instead of rendered Markdown.
+    pub raw: bool,
     /// Per-frame hit map `(top, bottom, header, id)` in screen rows, used to route a click to its entry.
     pub entry_hitmap: Vec<(u16, u16, Option<u16>, String)>,
     /// Markdown links painted in the current frame, used for hover and click routing.
@@ -266,8 +273,12 @@ pub struct View {
     /// Per-frame `(top, bottom, gutter_width)` of every edit-diff view on screen.
     /// Its gutter is chrome, so selection and copy start after it.
     pub diff_hitmap: Vec<(u16, u16, u16)>,
+    /// Per-frame `[top, bottom)` screen rows of `/raw` agent messages: no chrome, selected from the first column.
+    pub raw_hitmap: Vec<(u16, u16)>,
     /// Markdown table cells from the current layout, in document coordinates.
     pub table_hitmap: Vec<TableCellHit>,
+    /// Banner cat area painted in the current frame; a click on it replays its round.
+    pub banner_cat_area: Option<Rect>,
     /// Latest terminal mouse position, used to paint markdown-link hover state.
     pub mouse_position: Option<(u16, u16)>,
     /// Pointer shape last sent to the terminal, so hover only writes on change.
@@ -281,6 +292,8 @@ pub struct View {
     /// The loading-area row a drag can select, published by whichever screen
     /// paints it.
     pub loading_selection_region: Region,
+    /// The goal row a drag can select, published by whichever screen paints it.
+    pub goal_selection_region: Region,
     /// The box content a drag can select while a bottom app replaces the input box.
     pub bottom_app_selection_region: Region,
     /// Bottom-app box `(y, x0, x1)` cells painted as chrome (question option
@@ -355,16 +368,20 @@ impl Default for View {
             markdown_cache: ui::markdown::MarkdownCache::default(),
             expanded: HashSet::new(),
             tools_collapsed: true,
+            raw: false,
             entry_hitmap: Vec::new(),
             link_hitmap: Vec::new(),
             diff_hitmap: Vec::new(),
+            raw_hitmap: Vec::new(),
             table_hitmap: Vec::new(),
+            banner_cat_area: None,
             mouse_position: None,
             pointer_shape: crate::pointer::Shape::default(),
             selection_region: Region::default(),
             model_area: Rect::default(),
             footer_tokens_area: Rect::default(),
             loading_selection_region: Region::default(),
+            goal_selection_region: Region::default(),
             bottom_app_selection_region: Region::default(),
             bottom_app_selection_chrome: Vec::new(),
             bottom_app_selection_halves: None,
@@ -525,8 +542,10 @@ pub struct ModelOption {
 pub struct ModelPicker {
     /// While set the picker replaces the input box: title, option list, hint.
     pub open: bool,
-    /// Highlighted option (0 = Default row, then one per model) and the viewport.
+    /// Highlighted visible row and the viewport.
     pub list: crate::option_list::OptionList<crate::option_list::MultiAction>,
+    /// The `/` fuzzy filter over the rows; empty shows every model.
+    pub search: crate::search_field::Search,
     /// Model snapshot from `runtime/read`, refreshed on `runtime/updated`.
     pub models: Vec<ModelOption>,
     /// The active model's alias (`activeModel.alias`).
@@ -602,7 +621,7 @@ pub struct ResumePicker {
     /// session reloads it.
     pub previewing: bool,
     pub preview_request: u64,
-    /// A `session/resume` is in flight; the app is busy but shows no spinner.
+    /// A `session/resume` is in flight; only Esc acts on the picker until it answers.
     pub resuming: bool,
     /// Sessions whose lease another process holds, drawn with a lock.
     pub locked: std::collections::HashSet<String>,
@@ -660,6 +679,8 @@ pub struct QuestionApp {
     pub other_cursor: usize,
     /// First visible wrapped row of the free-text field once it overflows.
     pub other_scroll: usize,
+    /// `e` unlocked the submitted free-text answer, until the cursor leaves the row.
+    pub other_unlocked: bool,
     /// Per-frame screen geometry of the free-text field, to map a click to the caret.
     pub other_field: Option<crate::question_app::OtherField>,
     /// When the app opened, so buffered keys cannot answer it instantly.
@@ -836,15 +857,22 @@ pub struct App {
     pub log_level_picker: LogLevelPicker,
     pub thinking_picker: ThinkingPicker,
     pub artifacts_modal: ArtifactsModal,
+    pub loops: crate::loops::LoopsApp,
     pub resume_picker: ResumePicker,
+    /// The `/storage` panel.
+    pub storage: crate::storage_panel::State,
     /// The latest written todo list, never seeded from history.
     pub todo_tracker: crate::todo_tracker::TodoTracker,
     pub todo_sidebar: crate::todo_tracker::TodoSidebar,
+    /// The session goal, its panels and the resume choice.
+    pub goal: crate::goal::State,
     pub rewind: Rewind,
     pub approval: crate::approval::State,
     pub question_app: QuestionApp,
     pub mcp: MCPApp,
     pub plugins: crate::plugins::State,
+    /// The `/trusted-folders` bottom app.
+    pub trusted_folders: crate::trusted_folders::State,
     pub skills_browser: crate::skills_browser::State,
     /// The `/context` bottom app.
     pub context_app: crate::context_app::State,
@@ -915,6 +943,8 @@ impl App {
             // The old session's background work is not the new one's.
             self.session.running_processes = 0;
             self.session.wait_target = None;
+            self.session.loops.clear();
+            crate::loops::close(self);
         }
         // The console's poll task reads the current id on every tick.
         if let Some(session_tx) = &self.debug_console.session_tx {

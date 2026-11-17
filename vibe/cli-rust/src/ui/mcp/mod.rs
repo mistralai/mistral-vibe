@@ -85,7 +85,16 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
 
     let header = header_height(app);
     if header > 1 {
-        draw_search(app, f, area);
+        let placeholder = "Search servers and connectors";
+        let target = crate::mouse::MouseTarget::Mcp;
+        search_field::draw_under_title(
+            app,
+            f,
+            area,
+            |app| &mut app.mcp.search,
+            placeholder,
+            target,
+        );
     }
     let visible = area.height.saturating_sub(header + 3) as usize;
     let top = area.y + 1 + header;
@@ -138,22 +147,4 @@ fn draw_line(f: &mut Frame, area: Rect, y: u16, line: &VisualLine, overflows: bo
         f.buffer_mut().set_string(x, y, &span.content, span.style);
         x += span.content.chars().count() as u16;
     }
-}
-
-/// The search row under the title; the field owns its mouse like Python's `Input`.
-fn draw_search(app: &mut App, f: &mut Frame, area: Rect) {
-    let row = Rect::new(area.x + 3, area.y + 2, area.width.saturating_sub(6), 1);
-    let input = search_field::draw_row(
-        f,
-        row,
-        &app.mcp.search,
-        "Search servers and connectors",
-        app.view.cursor_on,
-        theme::background(),
-    );
-    app.mcp.search.area = input;
-    crate::mouse::register_region(app, input, crate::mouse::MouseTarget::Mcp);
-    // A box drag never selects the field.
-    let field = (input.y, input.x, input.right().saturating_sub(1));
-    app.view.bottom_app_selection_chrome.push(field);
 }

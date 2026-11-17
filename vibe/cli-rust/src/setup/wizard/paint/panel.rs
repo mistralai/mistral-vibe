@@ -136,46 +136,106 @@ pub(super) fn render(
     let panel_x = area.x + (area.width.saturating_sub(panel_w)) / 2;
     let x = panel_x + 2;
     let width = panel_w.saturating_sub(2);
-    let content_height = CHROME_ROWS + rows.iter().map(|row| row.height(width)).sum::<u16>();
     let bottom = area.y + area.height;
+    // A panel taller than the screen sheds the blank rows, the cat and the
+    // subtitle so its full content fits, then the hint and the title only
+    // while even its smallest content does not.
+    let mut chrome = CHROME_ROWS;
+    let mut body: Vec<&Row> = rows.iter().collect();
+    // At its smallest, the steps stack clamps to the rows it has left, and
+    // the rows after the last card go: the walk clips or drops them and pins
+    // the hint.
+    let fits = |chrome: u16, body: &[&Row], smallest: bool| {
+        let last_card = body.iter().rposition(|row| {
+            matches!(
+                row,
+                Row::InputCard { .. } | Row::OptionCards { .. } | Row::Steps { .. }
+            )
+        });
+        chrome
+            + body
+                .iter()
+                .enumerate()
+                .map(|(index, row)| match row {
+                    Row::Steps { step_idx, state } if smallest => {
+                        sign_in::steps_height(state, *step_idx, width, 0)
+                    }
+                    Row::Hint(_) => 1,
+                    _ if smallest && last_card.is_some_and(|last| index > last) => 0,
+                    _ => row.height(width),
+                })
+                .sum::<u16>()
+            <= area.height
+    };
+    while !fits(chrome, &body, false) {
+        if body.iter().any(|row| matches!(row, Row::Blank(_))) {
+            body.retain(|row| !matches!(row, Row::Blank(_)));
+        } else if chrome == CHROME_ROWS {
+            chrome = 2;
+        } else if chrome == 2 {
+            chrome = 1;
+        } else if fits(chrome, &body, true) {
+            break;
+        } else if body.iter().any(|row| matches!(row, Row::Hint(_))) {
+            body.retain(|row| !matches!(row, Row::Hint(_)));
+        } else if chrome == 1 {
+            chrome = 0;
+        } else {
+            break;
+        }
+    }
+    // Even shed, the panel can overflow (the option cards alone are 11 rows):
+    // a wrapped notice keeps a tiny terminal from going blank.
+    if !fits(chrome, &body, true) {
+        wizard.input_rows.clear();
+        super::draw_too_small(f, area);
+        return;
+    }
+    let content_height = chrome + body.iter().map(|row| row.height(width)).sum::<u16>();
     let y = area.y + area.height.saturating_sub(content_height) / 2;
+    let cat = if chrome == CHROME_ROWS { 3 } else { 0 };
     // A short terminal shows the panel's top slice, never a panic: a
     // cell at row r is inside only while r < bottom, and every painter
     // below assumes the full height it was handed.
-    if y + 3 <= bottom {
+    if cat > 0 && y + cat <= bottom {
         draw_petit_chat(f, x, y, chat_frame);
     }
-    if y + 4 <= bottom {
-        orange_title(f, x, y + 3, title);
+    if chrome >= 1 && y + cat < bottom {
+        orange_title(f, x, y + cat, title);
     }
-    let (text, style) = match subtitle {
-        Subtitle::Text(text) => (
-            text,
-            Style::default()
-                .fg(theme::foreground())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Subtitle::Muted(text) => (text, theme::muted_style()),
-    };
-    if y + 5 <= bottom {
-        f.buffer_mut().set_string(x, y + 4, text, style);
+    if chrome >= 2 {
+        let (text, style) = match subtitle {
+            Subtitle::Text(text) => (
+                text,
+                Style::default()
+                    .fg(theme::foreground())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Subtitle::Muted(text) => (text, theme::muted_style()),
+        };
+        if y + cat + 2 <= bottom {
+            f.buffer_mut().set_string(x, y + cat + 1, text, style);
+        }
     }
     let mut input_rows = Vec::new();
     // The hint row carries the screen's keys, so the body fits above the
     // frame's last line and the hint is pinned there instead of dropped when
     // a tall body (a wrapped error, a revealed URL) overflows the frame.
-    let body_bottom = if rows.iter().any(|row| matches!(row, Row::Hint(_))) {
+    let body_bottom = if body.iter().any(|row| matches!(row, Row::Hint(_))) {
         bottom.saturating_sub(1)
     } else {
         bottom
     };
-    let mut row_y = y + CHROME_ROWS;
-    for (index, row) in rows.iter().enumerate() {
-        // The steps stack clamps itself to the rows it has left, so a long
-        // wrapped error shrinks instead of dropping every card.
+    let mut row_y = y + chrome;
+    for (index, row) in body.iter().enumerate() {
+        let row = *row;
+        // The steps stack and the messages clamp to the rows left, so a long
+        // wrapped error shrinks instead of dropping its row.
+        let left = body_bottom.saturating_sub(row_y);
         let height = match row {
-            Row::Steps { step_idx, state } => {
-                sign_in::steps_height(state, *step_idx, width, body_bottom.saturating_sub(row_y))
+            Row::Steps { step_idx, state } => sign_in::steps_height(state, *step_idx, width, left),
+            Row::Feedback(_) | Row::Text(_) | Row::Warning(_) | Row::UrlLines(_) => {
+                row.height(width).min(left)
             }
             _ => row.height(width),
         };
@@ -183,7 +243,7 @@ pub(super) fn render(
         // screen: ratatui panics on a y outside the buffer. A hint not yet
         // drawn is pinned on the body's last row instead of dropped.
         if row_y.saturating_add(height) > body_bottom {
-            if let Some(hint) = pinned_hint(rows, index) {
+            if let Some(hint) = pinned_hint(&body, index) {
                 draw_hint_row(f, x, width, body_bottom, hint);
             }
             break;
@@ -208,11 +268,12 @@ pub(super) fn render(
                 input::draw_input_card(f, rect, input, *focused, card_title, placeholder, *secure);
             }
             Row::Feedback(validation) => {
-                input::draw_validation_feedback(f, x, row_y, width, validation);
+                input::draw_validation_feedback(f, rect, validation);
             }
             Row::Text(text) => {
                 for (offset, line) in crate::utils::text::wrap_hard(text, width as usize)
                     .iter()
+                    .take(height as usize)
                     .enumerate()
                 {
                     f.buffer_mut()
@@ -227,10 +288,12 @@ pub(super) fn render(
                 let budget = body_bottom.saturating_sub(rect.y);
                 browser_sign_in::draw_step_cards(f, rect, panel_x, *step_idx, budget, state);
             }
-            Row::Warning(lines) => options::draw_warning(f, x, row_y, lines),
+            Row::Warning(lines) => {
+                options::draw_warning(f, x, row_y, &lines[..height as usize]);
+            }
             Row::UrlHelp => browser_sign_in::draw_url_help(f, x, row_y),
             Row::UrlLines(lines) => {
-                for (offset, line) in lines.iter().enumerate() {
+                for (offset, line) in lines.iter().take(height as usize).enumerate() {
                     f.buffer_mut()
                         .set_string(x, row_y + offset as u16, line, theme::muted_style());
                 }
@@ -248,7 +311,7 @@ pub(super) fn render(
 
 /// The hint a body overflow would drop: the first not-yet-drawn one at or
 /// after `index`, pinned on the body's last row instead.
-fn pinned_hint(rows: &[Row], index: usize) -> Option<&Hint> {
+fn pinned_hint<'a>(rows: &'a [&'a Row], index: usize) -> Option<&'a Hint> {
     rows[index..].iter().find_map(|row| match row {
         Row::Hint(hint) => Some(hint),
         _ => None,

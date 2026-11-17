@@ -18,6 +18,7 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Enter if key.modifiers.is_empty() => save(app, client),
         KeyCode::Up | KeyCode::Down => app.proxy_setup.move_focus(key.code == KeyCode::Down),
         KeyCode::Tab => app.proxy_setup.move_focus(true),
+        KeyCode::BackTab => app.proxy_setup.move_focus(false),
         KeyCode::Char('x') if control => {
             copy_selection(app, true);
         }

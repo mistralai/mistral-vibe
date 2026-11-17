@@ -7,6 +7,7 @@ use crate::core::config::{HarnessConfig, ImageDeliveryMode};
 use crate::core::features::background_processes;
 use crate::core::features::file_system;
 use crate::core::features::programmatic_tool_calling::{ProgrammaticName, TypeScriptTool};
+use crate::core::features::sign_in;
 use crate::core::features::skills;
 use crate::core::features::subagents;
 use crate::core::hooks::{HookToolKey, HookToolTarget};
@@ -53,6 +54,14 @@ pub(crate) fn direct_routes(config: &HarnessConfig) -> Vec<(String, ToolTarget)>
             },
         ));
     }
+    routes.extend(sign_in::offered(config).into_iter().map(|name| {
+        (
+            name.direct_name().to_string(),
+            ToolTarget::RuntimeBuiltin {
+                name: name.runtime_tool(),
+            },
+        )
+    }));
     routes.extend(config.tool_groups().flat_map(|group| {
         group
             .tools
@@ -236,11 +245,13 @@ pub(crate) fn builtin_direct_tools(config: &HarnessConfig) -> Vec<ToolDefinition
             parameters: spec.input_schema,
         });
     }
+    tools.extend(sign_in::direct_tools(config));
     tools
 }
 
-pub(crate) const RESERVED_TOOL_NAMESPACES: [&str; 5] = [
+pub(crate) const RESERVED_TOOL_NAMESPACES: [&str; 6] = [
     SELF_NAMESPACE,
+    sign_in::RESERVED_GROUP_NAME,
     file_system::NAMESPACE,
     skills::NAMESPACE,
     background_processes::NAMESPACE,
@@ -257,6 +268,7 @@ pub(crate) fn is_reserved_direct_name(
     file_system::is_direct_name(environment, name)
         || background_processes::is_sandbox_name(name)
         || (!skill_mode.is_disabled() && skills::is_direct_name(name))
+        || sign_in::is_direct_name(name)
         || name == "sleep"
         || name == "wait"
 }
@@ -296,6 +308,12 @@ pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<HookToolKey> {
             .hook_tool_key(),
         );
     }
+    keys.extend(sign_in::offered(config).into_iter().map(|name| {
+        ToolTarget::RuntimeBuiltin {
+            name: name.runtime_tool(),
+        }
+        .hook_tool_key()
+    }));
     keys.extend(config.tool_groups().flat_map(|group| {
         group.tools.iter().map(|tool| HookToolKey {
             target: HookToolTarget::Provided,
@@ -512,6 +530,11 @@ Example:
             namespaces.insert(stable_id.split('.').next().unwrap().to_string());
             namespaces.insert(binding.descriptor.programmatic_name.namespace.clone());
         }
+        for name in sign_in::ToolName::ALL {
+            let stable_id = name.runtime_tool().as_str();
+            assert!(stable_ids.insert(stable_id.to_string()));
+            namespaces.insert(stable_id.split('.').next().unwrap().to_string());
+        }
 
         assert_eq!(
             namespaces,
@@ -669,6 +692,48 @@ Example:
         assert_eq!(round_tripped, names);
     }
 
+    ///
+    /// *Prepare*: An agent that can create children, and a child that can only send messages.
+    /// *Do*: Search for "agents" in best_match mode in each.
+    /// *Assert*: The parent's `tools.agents` guidance gives the `spawn` fields; the child's keeps
+    /// the short description, without operations it cannot call.
+    ///
+    #[test]
+    fn agents_guidance_describes_spawn_only_to_an_agent_that_can_spawn() {
+        // Prepare
+        let mut parent = config();
+        parent.settings.tools.subagents = SubagentMode::enabled();
+        let mut child = config();
+        child.settings.tools.subagents =
+            serde_json::from_value(json!({"mode": "enabled", "operations": ["send_message"]}))
+                .unwrap();
+
+        // Do
+        let [parent, child] = [&parent, &child].map(|config| {
+            search(
+                config,
+                SearchRequest {
+                    mode: SearchMode::BestMatch,
+                    query: Some("agents".to_string()),
+                    ..SearchRequest::default()
+                },
+            )
+        });
+
+        // Assert
+        assert!(
+            parent.contains("<guidance>Start child agents and coordinate their work.\n- spawn: start a child. `name` is one path segment"),
+            "{parent}"
+        );
+        assert!(
+            child.contains(
+                "<guidance>Tools to create and coordinate independent agents.</guidance>"
+            ),
+            "{child}"
+        );
+        assert!(!child.contains("spawn:"), "{child}");
+    }
+
     #[test]
     fn details_return_exact_filesystem_declarations() {
         let config = config();
@@ -693,5 +758,110 @@ Example:
         assert!(!result.contains("old_str: string"));
         assert!(result.contains("type ReadFileReturned = {"));
         assert!(result.contains("Promise<ReadFileReturned>"));
+    }
+
+    ///
+    /// *Prepare*: A configuration without the sign-in, one whose capabilities offer it, and one
+    /// that also offers the list of the sources the user has not signed in to.
+    /// *Do*: Build the top-level tools, direct routes and hook catalog of each.
+    /// *Assert*: The second has `request_sign_in`, the third `list_unauthenticated_sources` as
+    /// well, routed to the Runtime built-ins `builtin.auth.*`; their names stay reserved in all.
+    ///
+    #[test]
+    fn sign_in_tools_follow_the_capability_set() {
+        // Prepare
+        let without = config();
+        let mut with = config();
+        with.capabilities.sign_in = true;
+        let mut with_list = with.clone();
+        with_list.capabilities.list_unauthenticated_sources = true;
+        let mut list_only = config();
+        list_only.capabilities.list_unauthenticated_sources = true;
+
+        // Do
+        let names = |config: &HarnessConfig| {
+            builtin_direct_tools(config)
+                .into_iter()
+                .map(|tool| tool.name)
+                .filter(|name| name.contains("sign_in") || name.contains("unauthenticated"))
+                .collect::<Vec<_>>()
+        };
+        let routes = direct_routes(&with);
+        let hooks = hook_tool_catalog(&with);
+
+        // Assert
+        assert!(names(&without).is_empty());
+        assert_eq!(names(&with), ["request_sign_in"]);
+        assert_eq!(
+            names(&with_list),
+            ["list_unauthenticated_sources", "request_sign_in"]
+        );
+        assert!(names(&list_only).is_empty());
+        assert!(
+            hook_tool_catalog(&with_list)
+                .iter()
+                .any(|key| key.qualified_name == "builtin.auth.list_unauthenticated_sources")
+        );
+        assert!(
+            !hook_tool_catalog(&with)
+                .iter()
+                .any(|key| key.qualified_name == "builtin.auth.list_unauthenticated_sources")
+        );
+        assert!(routes.contains(&(
+            "request_sign_in".to_string(),
+            ToolTarget::RuntimeBuiltin {
+                name: RuntimeBuiltinToolName::SignInRequest,
+            },
+        )));
+        assert!(
+            hooks
+                .iter()
+                .any(|key| key.qualified_name == "builtin.auth.request_sign_in")
+        );
+        assert!(
+            !hook_tool_catalog(&without)
+                .iter()
+                .any(|key| key.qualified_name.starts_with("builtin."))
+        );
+        for config in [&without, &with, &with_list] {
+            assert!(is_reserved_direct_name(
+                config.settings.tools.command_environment,
+                config.settings.tools.skills,
+                "request_sign_in",
+            ));
+        }
+    }
+
+    ///
+    /// *Prepare*: A configuration that offers the sign-in, and one that also offers the list
+    /// of the sources the user has not signed in to.
+    /// *Do*: Build the top-level tools of each.
+    /// *Assert*: `request_sign_in` names `list_unauthenticated_sources` as a place to find ids
+    /// only when the model has that tool.
+    ///
+    #[test]
+    fn request_sign_in_names_the_list_only_when_it_is_offered() {
+        // Prepare
+        let mut with = config();
+        with.capabilities.sign_in = true;
+        let mut with_list = with.clone();
+        with_list.capabilities.list_unauthenticated_sources = true;
+
+        // Do
+        let description = |config: &HarnessConfig| {
+            builtin_direct_tools(config)
+                .into_iter()
+                .find(|tool| tool.name == "request_sign_in")
+                .expect("request_sign_in is offered")
+                .description
+        };
+
+        // Assert
+        assert!(!description(&with).contains("list_unauthenticated_sources"));
+        assert!(description(&with).contains("as a notice gives them"));
+        assert!(
+            description(&with_list)
+                .contains("as list_unauthenticated_sources or a notice gives them")
+        );
     }
 }

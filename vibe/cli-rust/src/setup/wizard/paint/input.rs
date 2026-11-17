@@ -21,44 +21,29 @@ pub(super) fn validation_border(validation: &ValidationState) -> Color {
 
 /// The feedback row under an input: the `Enter submit` hint when valid, the message
 /// when the state carries one.
-pub(super) fn draw_validation_feedback(
-    f: &mut Frame,
-    x: u16,
-    y: u16,
-    width: u16,
-    validation: &ValidationState,
-) {
+pub(super) fn draw_validation_feedback(f: &mut Frame, area: Rect, validation: &ValidationState) {
     match validation {
-        ValidationState::Valid => {
+        ValidationState::Valid if area.height > 0 => {
             let submit = [(crate::hints::key::ENTER, crate::hints::action::SUBMIT)];
-            crate::ui::hint_line::draw(f, x, y, &submit);
+            crate::ui::hint_line::draw(f, area.x, area.y, &submit);
         }
-        ValidationState::Invalid(msg) => {
-            draw_wrapped(f, x, y, width, msg, theme::error());
-        }
-        ValidationState::Warning(msg) => {
-            draw_wrapped(f, x, y, width, msg, theme::warning());
-        }
-        ValidationState::None => {}
+        ValidationState::Invalid(msg) => draw_wrapped(f, area, msg, theme::error()),
+        ValidationState::Warning(msg) => draw_wrapped(f, area, msg, theme::warning()),
+        _ => {}
     }
 }
 
-/// A feedback message wraps to the panel's content width; the panel row
-/// grew to the wrapped line count for it.
-fn draw_wrapped(
-    f: &mut Frame,
-    x: u16,
-    y: u16,
-    width: u16,
-    msg: &str,
-    color: ratatui::style::Color,
-) {
+/// A feedback message wraps to the panel's content width, clipped to the
+/// rows the panel left it.
+fn draw_wrapped(f: &mut Frame, area: Rect, msg: &str, color: ratatui::style::Color) {
     let style = Style::default().fg(color);
-    for (offset, line) in crate::utils::text::wrap_hard(msg, width as usize)
+    for (offset, line) in crate::utils::text::wrap_hard(msg, area.width as usize)
         .iter()
+        .take(area.height as usize)
         .enumerate()
     {
-        f.buffer_mut().set_string(x, y + offset as u16, line, style);
+        f.buffer_mut()
+            .set_string(area.x, area.y + offset as u16, line, style);
     }
 }
 

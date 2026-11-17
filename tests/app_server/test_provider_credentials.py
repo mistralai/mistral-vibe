@@ -38,6 +38,7 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._vertex import (
 )
 from mistralai_vibe_local_harness.vibe.completion_profile import ANTHROPIC_VERSION
 from vibe.app_server._provider_credentials import ProviderCredentialService
+from vibe.core.platform_auth import UNAUTHORIZED_AFTER_REFRESH_MESSAGE
 from vibe.core.platform_auth._mistral import api_key_credentials
 
 
@@ -366,6 +367,58 @@ async def test_a_vertex_rejection_drops_the_shared_google_credential() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_refused_request_keeps_the_credential() -> None:
+    """*Prepare*: A resolved API key the provider then refuses with a 403.
+    *Do*: Report the refusal and resolve again.
+    *Assert*: The same key is offered again: a 403 refuses the account or the
+      request, so another model or request may pass with it.
+    """
+    # Prepare
+    service = ProviderCredentialService(_orchestrator(_config(_provider("primary"))))
+    sent = await service.resolve()
+    assert isinstance(sent, ProviderCredentialSnapshot)
+
+    # Do
+    await service.reject(observed_revision=sent.revision, reason="http_forbidden")
+    result = await service.resolve()
+
+    # Assert
+    assert isinstance(result, ProviderCredentialSnapshot)
+    assert result.revision == sent.revision
+
+
+@pytest.mark.asyncio
+async def test_a_refused_request_keeps_the_vertex_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Prepare*: A Vertex provider whose process-wide credential is minted.
+    *Do*: Report a 403 for the minted token.
+    *Assert*: The shared credential is kept: a new token cannot lift a refusal
+      of the project or the request.
+    """
+    # Prepare
+    service = ProviderCredentialService(_orchestrator(_config(_vertex_provider())))
+    minted = object()
+    with patch.object(
+        VertexCredentials,
+        "access_token",
+        new_callable=PropertyMock,
+        return_value="adc-token",
+    ):
+        resolved = await service.resolve()
+        assert isinstance(resolved, ProviderCredentialSnapshot)
+        monkeypatch.setattr(VERTEX_CREDENTIALS, "_credentials", minted)
+
+        # Do
+        await service.reject(
+            observed_revision=resolved.revision, reason="http_forbidden"
+        )
+
+    # Assert
+    assert VERTEX_CREDENTIALS._credentials is minted
+
+
+@pytest.mark.asyncio
 async def test_resolution_never_raises() -> None:
     """*Prepare*: A provider whose credential lookup raises.
     *Do*: Resolve.
@@ -679,7 +732,7 @@ async def test_a_signed_out_connection_never_falls_back_to_an_api_key(
         ("rejected", "rejected", "Sign in again"),
         ("invalid", "missing", "Sign in again"),
         ("missing", "missing", "Sign in"),
-        ("transient", "missing", "Retry"),
+        ("transient", "unavailable", "retry in a moment"),
     ],
 )
 @pytest.mark.asyncio
@@ -703,6 +756,69 @@ async def test_a_connection_without_a_token_asks_to_sign_in_not_for_a_key(
     assert hint in resolved.message
     assert "API_KEY" not in resolved.message
     assert "API key" not in resolved.message
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected_reason", "expected_message"),
+    [
+        (
+            "transient",
+            "unavailable",
+            "Your Mistral sign-in couldn't be checked right now (the computer may "
+            "be asleep or offline). Nothing was sent to the model; retry in a "
+            "moment.",
+        ),
+        (
+            "reauthentication_required",
+            "expired",
+            "Your Mistral sign-in has expired. Sign in again and retry.",
+        ),
+        (
+            "expired",
+            "expired",
+            "Your Mistral sign-in has expired. Sign in again and retry.",
+        ),
+        (
+            "rejected",
+            "rejected",
+            "Your Mistral sign-in was rejected. Sign in again and retry.",
+        ),
+        (
+            "invalid",
+            "missing",
+            "Your Mistral sign-in cannot be used for https://api.mistral.ai/v1. "
+            "Sign in again and retry.",
+        ),
+        ("missing", "missing", "You are not signed in to Mistral. Sign in and retry."),
+        ("unauthorized_after_refresh", "rejected", UNAUTHORIZED_AFTER_REFRESH_MESSAGE),
+    ],
+)
+@pytest.mark.asyncio
+async def test_only_an_unchecked_sign_in_reads_as_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    reason: str,
+    expected_reason: str,
+    expected_message: str,
+) -> None:
+    """*Prepare*: A signed-in connection whose token cannot be used, for each
+      reason the credential reports.
+    *Do*: Resolve the model credential.
+    *Assert*: Only a sign-in that could not be checked reads as ``unavailable``,
+      which the Harness waits for; every other reason keeps its reason and
+      message.
+    """
+    # Prepare
+    service = _service(monkeypatch, _ConnectionToken(signed_in=False, reason=reason))
+
+    # Do
+    resolved = await service.resolve()
+
+    # Assert
+    assert resolved == ProviderAuthRequired(
+        reason=expected_reason,  # type: ignore[arg-type]
+        provider="mistral",
+        message=expected_message,
+    )
 
 
 @pytest.mark.asyncio
@@ -821,6 +937,31 @@ async def test_a_rejected_connection_token_is_reported_to_its_owner(
     ]
     assert isinstance(result, ProviderCredentialSnapshot)
     assert result.revision != sent.revision
+
+
+@pytest.mark.asyncio
+async def test_a_refused_request_keeps_the_connection_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Prepare*: A signed-in connection whose token the provider refuses
+      with a 403.
+    *Do*: Report the refusal and resolve again.
+    *Assert*: Desktop is not told, and the same token is offered again.
+    """
+    # Prepare
+    connection = _ConnectionToken(rotates=True)
+    service = _service(monkeypatch, connection)
+    sent = await service.resolve()
+    assert isinstance(sent, ProviderCredentialSnapshot)
+
+    # Do
+    await service.reject(observed_revision=sent.revision, reason="http_forbidden")
+    result = await service.resolve()
+
+    # Assert
+    assert connection.rejected == []
+    assert isinstance(result, ProviderCredentialSnapshot)
+    assert result.revision == sent.revision
 
 
 @pytest.mark.asyncio

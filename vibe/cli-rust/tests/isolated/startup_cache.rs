@@ -204,6 +204,16 @@ fn file_autocomplete_defaults_to_enabled_when_the_runtime_omits_it() {
 }
 
 #[test]
+fn dangerous_directory_warning_follows_the_runtime() {
+    let mut runtime = runtime("safe");
+    let shown = StartupConfig::from_runtime("1.0.0", &runtime).unwrap();
+    assert!(shown.show_dangerous_directory_warning);
+    runtime["runtime"]["config"]["showDangerousDirectoryWarning"] = false.into();
+    let hidden = StartupConfig::from_runtime("1.0.0", &runtime).unwrap();
+    assert!(!hidden.show_dangerous_directory_warning);
+}
+
+#[test]
 fn runtime_flags_project_into_the_startup_config() {
     let mut runtime = runtime("safe");
     let config = &mut runtime["runtime"]["config"];

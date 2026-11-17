@@ -31,6 +31,19 @@ pub fn restore(app: &mut App, action: &Action) {
     completion_manager::input_changed(app);
 }
 
+/// Clear the draft as one undoable edit, outside any open vim Insert group.
+pub fn clear(app: &mut App) {
+    crate::long_paste::dismiss(app);
+    let input = &mut app.chat_input;
+    input.edit_history.end_group();
+    input.normalize_positions();
+    let before = Snapshot::capture(input);
+    let history = std::mem::take(&mut input.edit_history);
+    input.clear();
+    input.edit_history = history;
+    input.record_edit(before, true, crate::clock::now());
+}
+
 pub fn finish(input: &mut ChatInput, before: Option<(Snapshot, bool)>) {
     if let Some((snapshot, isolated)) = before {
         input.record_edit(snapshot, isolated, crate::clock::now());

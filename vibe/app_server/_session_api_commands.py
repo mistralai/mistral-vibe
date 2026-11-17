@@ -237,10 +237,31 @@ class SessionApiCommands(SessionCommands):
             except SessionConfigRejectedError:
                 logger.info("config/write refused a model switch; pushing directly")
             else:
+                await self._apply_model_alias(config.local.active_model_alias)
                 return
         await self._session.apply_config(
             config, allow_reserved_turn=allow_reserved_turn
         )
+
+    async def _apply_model_alias(self, alias: str | None) -> None:
+        """Give the Runtime the alias of the model ``config/write`` switched to.
+
+        ``completion`` carries no alias, so the write leaves the Runtime without
+        one; pre_llm hooks report it. Best effort: the switch has landed, and a
+        Turn or a compaction started since the write refuses this push, so
+        hooks then report the model by its name until the next configuration.
+        """
+        core, local = self._session.core_config, self._session.adapter_config
+        if core is None or local is None or local.active_model_alias == alias:
+            return
+        try:
+            await self._session.apply_config(
+                SessionConfig(core=core, local=replace(local, active_model_alias=alias))
+            )
+        except HarnessSessionError:
+            logger.info(
+                "the model alias waits for the next configuration", exc_info=True
+            )
 
     async def _write_model(self, config: SessionConfig) -> None:
         """Write the model, its settings and its resolved limits to ``completion``."""
@@ -335,6 +356,8 @@ def _is_model_switch(
     moved = replace(
         local,
         active_model=config.local.active_model,
+        # The alias names the model, so it follows it (pre_llm hooks report it).
+        active_model_alias=config.local.active_model_alias,
         compaction_model=(
             config.local.active_model if follows else local.compaction_model
         ),

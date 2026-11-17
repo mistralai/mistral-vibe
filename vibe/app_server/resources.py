@@ -21,6 +21,7 @@ from vibe.app_server._service_resources import (
     TelemetryResource,
 )
 from vibe.app_server._session_resources import (
+    GoalResource,
     LoopsResource,
     ReviewResource,
     SessionResource,
@@ -53,6 +54,7 @@ class AppServerResources:
         self.review = ReviewResource(connection, state)
         self.workspace = WorkspaceResource(connection, state)
         self.loops = LoopsResource(connection, state)
+        self.goal = GoalResource(connection, state)
         self.telemetry = TelemetryResource(connection, state)
         self.narration = NarrationResource(connection, state)
         self.feedback = FeedbackResource(connection, state)

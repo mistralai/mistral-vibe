@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -14,8 +15,15 @@ from vibe.app_server._config_introspect import (
     classify_annotation,
     collect_layer_values,
     effective_config_response,
+    locking_layers,
+    shadowed_writes,
 )
-from vibe.app_server.protocol import ConfigFieldKind, ConfigLayerValueWire
+from vibe.app_server.protocol import (
+    ConfigFieldKind,
+    ConfigFieldWire,
+    ConfigLayerValueWire,
+    ConfigShadowedWrite,
+)
 from vibe.core.config.layers.default import DefaultConfigLayer
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.overrides import OverridesLayer
@@ -121,9 +129,11 @@ def test_build_field_wires_resolves_layers(
     assert by_name["theme"].layer_values[-1].layer == DEFAULT_ORIGIN
 
 
-def test_build_field_wires_keeps_admin_lock_for_global_compaction_threshold(
-    make_config: Callable[..., VibeConfigSchema],
+@pytest.mark.parametrize("global_layer", ["user-toml", "admin"])
+def test_build_field_wires_edits_the_model_own_compaction_threshold(
+    make_config: Callable[..., VibeConfigSchema], global_layer: str
 ) -> None:
+    # The model's own threshold wins over a global one from any layer.
     config = make_config(
         active_model="custom",
         auto_compact_threshold=50_000,
@@ -140,46 +150,7 @@ def test_build_field_wires_keeps_admin_lock_for_global_compaction_threshold(
         config,
         {
             "auto_compact_threshold": [
-                ConfigLayerValueWire(layer="admin", value=50_000)
-            ],
-            "/models/custom/auto_compact_threshold": [
-                ConfigLayerValueWire(layer="user-toml", value=200_000),
-                ConfigLayerValueWire(layer=DEFAULT_ORIGIN, value=200_000),
-            ],
-        },
-    )
-
-    threshold = next(wire for wire in wires if wire.name == "auto_compact_threshold")
-    assert threshold.value == 50_000
-    assert threshold.path == "/auto_compact_threshold"
-    assert threshold.origin == "admin"
-    # An unset threshold is not a value a layer set; it must never surface as
-    # the row's default origin.
-    assert [(entry.layer, entry.value) for entry in threshold.layer_values] == [
-        ("admin", 50_000)
-    ]
-
-
-def test_build_field_wires_edits_the_user_model_own_compaction_threshold(
-    make_config: Callable[..., VibeConfigSchema],
-) -> None:
-    config = make_config(
-        active_model="custom",
-        auto_compact_threshold=50_000,
-        models=[
-            ModelConfig(
-                name="custom",
-                provider="mistral",
-                alias="custom",
-                auto_compact_threshold=200_000,
-            )
-        ],
-    )
-    wires = build_field_wires(
-        config,
-        {
-            "auto_compact_threshold": [
-                ConfigLayerValueWire(layer="user-toml", value=50_000)
+                ConfigLayerValueWire(layer=global_layer, value=50_000)
             ],
             "/models/custom/auto_compact_threshold": [
                 ConfigLayerValueWire(layer="user-toml", value=200_000)
@@ -223,7 +194,10 @@ async def test_collect_layer_values_hides_the_unset_threshold(
     values = await collect_layer_values([defaults], make_config())
 
     assert "auto_compact_threshold" not in values
-    assert not [path for path in values if path.endswith("/auto_compact_threshold")]
+    assert [path for path in values if path.endswith("/auto_compact_threshold")] == [
+        "/models/mistral-large-4-0/auto_compact_threshold"
+    ]
+    assert "/models/mistral-medium-3.5/auto_compact_threshold" not in values
 
 
 @pytest.mark.asyncio
@@ -518,3 +492,120 @@ async def test_build_field_wires_edits_the_catalog_filter_model_threshold() -> N
     assert threshold.value == 50_000
     assert threshold.path == "/models/large/auto_compact_threshold"
     assert "model_catalog_filter" not in values
+
+
+async def _orchestrator_with_admin(toml_text: str) -> Any:
+    from vibe.core.config import build_default_orchestrator
+    from vibe.core.config.layers.admin import admin_layer
+
+    orchestrator = await build_default_orchestrator()
+    layer = admin_layer(orchestrator)
+    assert layer is not None
+    layer.load_managed_toml(toml_text)
+    await orchestrator.reload()
+    return orchestrator
+
+
+def test_field_wire_serializes_origin_and_locked() -> None:
+    wire = ConfigFieldWire(
+        name="enable_telemetry",
+        kind=ConfigFieldKind.BOOL,
+        description="",
+        path="/enable_telemetry",
+        layer_values=[ConfigLayerValueWire(layer="admin", value=True)],
+    )
+
+    payload = wire.model_dump(mode="json", by_alias=True)
+
+    assert payload["origin"] == "admin"
+    assert payload["locked"] is False
+    # An older server sends neither: the client reads the field as writable.
+    older = ConfigFieldWire.model_validate({
+        "name": "theme",
+        "kind": "str",
+        "description": "",
+        "path": "/theme",
+        "layerValues": [{"layer": "user-toml", "value": "dark"}],
+    })
+    assert (older.origin, older.locked) == ("user-toml", False)
+
+
+@pytest.mark.asyncio
+async def test_locking_layers_are_the_environment_and_admin_above_the_target(
+    config_dir: Path,
+) -> None:
+    from vibe.core.config import build_default_orchestrator
+
+    orchestrator = await build_default_orchestrator()
+
+    assert locking_layers(orchestrator) == {"environment", "admin"}
+    # The session override sits above the environment.
+    assert locking_layers(orchestrator, OverridesLayer.NAME) == {"admin"}
+
+
+@pytest.mark.asyncio
+async def test_build_field_wires_locks_what_the_org_or_environment_sets(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VIBE_ENABLE_NOTIFICATIONS", "false")
+    orchestrator = await _orchestrator_with_admin("enable_telemetry = true\n")
+    values = await collect_layer_values(orchestrator.layers, orchestrator.config)
+
+    by_name = {
+        wire.name: wire
+        for wire in build_field_wires(
+            orchestrator.config, values, locking_layers=locking_layers(orchestrator)
+        )
+    }
+
+    assert (by_name["enable_telemetry"].origin, by_name["enable_telemetry"].locked) == (
+        "admin",
+        True,
+    )
+    notifications = by_name["enable_notifications"]
+    assert (notifications.origin, notifications.locked) == ("environment", True)
+    assert by_name["theme"].locked is False
+
+
+@pytest.mark.asyncio
+async def test_shadowed_writes_name_the_fields_a_locking_layer_keeps(
+    config_dir: Path,
+) -> None:
+    orchestrator = await _orchestrator_with_admin("enable_telemetry = true\n")
+
+    shadowed = shadowed_writes(
+        orchestrator,
+        [("/enable_telemetry", None), ("/theme", None), ("/models/x/thinking", None)],
+    )
+
+    assert shadowed == [ConfigShadowedWrite(path="/enable_telemetry", origin="admin")]
+
+
+@pytest.mark.asyncio
+async def test_a_project_telemetry_opt_in_is_not_listed_as_a_source(
+    config_dir: Path, tmp_working_directory: Path
+) -> None:
+    from vibe.core.config import build_default_orchestrator
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    (config_dir / "config.toml").write_text("enable_telemetry = false\n")
+    project_config = tmp_working_directory / ".vibe" / "config.toml"
+    project_config.parent.mkdir(parents=True, exist_ok=True)
+    project_config.write_text("enable_telemetry = true\n")
+    trusted_folders_manager.add_trusted(project_config.parent)
+    orchestrator = await build_default_orchestrator()
+
+    values = await collect_layer_values(orchestrator.layers, orchestrator.config)
+    telemetry = {
+        wire.name: wire
+        for wire in build_field_wires(
+            orchestrator.config, values, locking_layers=locking_layers(orchestrator)
+        )
+    }["enable_telemetry"]
+
+    assert (telemetry.value, telemetry.origin, telemetry.locked) == (
+        False,
+        "user-toml",
+        False,
+    )
+    assert [entry.layer for entry in telemetry.layer_values] == ["user-toml", "default"]

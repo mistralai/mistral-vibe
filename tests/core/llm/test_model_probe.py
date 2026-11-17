@@ -10,11 +10,18 @@ from typing import Any
 import httpx2
 import pytest
 
+from tests.stubs.fake_sign_in import (
+    SIGNED_IN_HEADERS,
+    FakeSignIn,
+    signed_in_credentials,
+)
 from tests.stubs.fake_utility_completion import FakeUtilityCompletion
 from vibe.core.config import ModelConfig, ProviderConfig
 from vibe.core.llm import model_probe
 from vibe.core.llm.model_probe import CompletionProbeSource, ModelAvailabilityCache
+from vibe.core.llm.utility_credentials import UtilityCredentials
 from vibe.core.paths import UTILITY_MODEL_CACHE_FILE
+from vibe.core.platform_auth._mistral import api_key_credentials
 from vibe.core.types import Backend
 from vibe.utils import http
 
@@ -40,7 +47,9 @@ def _stub_probe(
     """Replace the network step with a scripted sequence; records each call."""
     calls: list[str] = []
 
-    async def fake_probe(*, provider: Any, model: Any, timeout_seconds: float):
+    async def fake_probe(
+        *, provider: Any, model: Any, timeout_seconds: float, credentials: Any = None
+    ):
         calls.append(model.name)
         return verdicts.pop(0)
 
@@ -55,7 +64,14 @@ class _RecordingSource:
         self.verdicts = verdicts
         self.asked: list[list[str]] = []
 
-    async def check(self, *, provider: Any, models: Any, timeout_seconds: float):
+    async def check(
+        self,
+        *,
+        provider: Any,
+        models: Any,
+        timeout_seconds: float,
+        credentials: Any = None,
+    ):
         self.asked.append([model.name for model in models])
         return {name: v for name, v in self.verdicts.items() if name in self.asked[-1]}
 
@@ -340,7 +356,13 @@ class TestBudget:
         # Losing the early refusal would let the resolver treat that model as usable.
         given: list[float] = []
 
-        async def slow_refusal(*, provider: Any, model: Any, timeout_seconds: float):
+        async def slow_refusal(
+            *,
+            provider: Any,
+            model: Any,
+            timeout_seconds: float,
+            credentials: Any = None,
+        ):
             given.append(timeout_seconds)
             await asyncio.sleep(0.2)
             return False
@@ -426,3 +448,206 @@ def _provider_error(status: int | None) -> Exception:
     return httpx2.HTTPStatusError(
         "failed", request=request, response=httpx2.Response(status, request=request)
     )
+
+
+class TestSignedInConnection:
+    """A Desktop connection signed in through OIDC, with no API key."""
+
+    @pytest.mark.asyncio
+    async def test_asks_with_the_sign_in_when_there_is_no_key(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        source = _RecordingSource({_MODEL.name: True})
+        cache = ModelAvailabilityCache(source)
+        credentials = signed_in_credentials()
+
+        await cache.ensure_first_available(
+            provider=_provider(), models=[_MODEL], credentials=credentials
+        )
+
+        assert source.asked == [[_MODEL.name]]
+        assert (
+            cache.peek(provider=_provider(), model=_MODEL, credentials=credentials)
+            is True
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_probe_request_sends_the_sign_in(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        completion = FakeUtilityCompletion("pong").install(monkeypatch)
+
+        available = await _REAL_PROBE(
+            provider=_provider(),
+            model=_MODEL,
+            timeout_seconds=1.0,
+            credentials=signed_in_credentials(),
+        )
+
+        assert available is True
+        [request] = completion.requests
+        assert dict(request.credential.headers) == SIGNED_IN_HEADERS
+        assert request.credential.follow_redirects is False
+
+    @pytest.mark.asyncio
+    async def test_a_refused_sign_in_is_asked_again_at_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An expired token says nothing about the model: the account keeps
+        its principal across the refresh, so neither a refusal nor a back-off
+        may be kept under it. The next session asks with the replacement.
+        """
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        monkeypatch.setattr(model_probe, "_probe", _REAL_PROBE)
+        completion = FakeUtilityCompletion(error=_provider_error(401)).install(
+            monkeypatch
+        )
+        cache = ModelAvailabilityCache(CompletionProbeSource())
+        credentials = signed_in_credentials()
+
+        for _ in range(2):
+            await cache.ensure_first_available(
+                provider=_provider(),
+                models=[_PREFERRED, _MODEL],
+                timeout_seconds=1.0,
+                credentials=credentials,
+            )
+
+        # Stopped at the first refusal each time, and asked again.
+        assert len(completion.requests) == 2
+        assert (
+            cache.peek(provider=_provider(), model=_PREFERRED, credentials=credentials)
+            is None
+        )
+        assert not UTILITY_MODEL_CACHE_FILE.path.exists()
+
+    @pytest.mark.asyncio
+    async def test_a_refused_api_key_is_still_a_refusal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MISTRAL_API_KEY", "bad-key")
+        FakeUtilityCompletion(error=_provider_error(401)).install(monkeypatch)
+        credentials = signed_in_credentials()
+        key_connection = UtilityCredentials(
+            platform=api_key_credentials, for_provider=credentials.for_provider
+        )
+
+        available = await _REAL_PROBE(
+            provider=_provider(),
+            model=_MODEL,
+            timeout_seconds=1.0,
+            credentials=key_connection,
+        )
+
+        assert available is False
+
+    @pytest.mark.asyncio
+    async def test_resolving_the_account_spends_the_probe_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        given: list[float] = []
+
+        class _SlowSignIn(FakeSignIn):
+            """Desktop: the account is known once a resolution found it."""
+
+            def cached_principal(self) -> str | None:
+                return self.principal if self.resolved else None
+
+            async def resolve(self, target: Any) -> Any:
+                await asyncio.sleep(0.2)
+                return await super().resolve(target)
+
+        class _BudgetSource(_RecordingSource):
+            async def check(self, **kwargs: Any):
+                given.append(kwargs["timeout_seconds"])
+                return await super().check(**kwargs)
+
+        cache = ModelAvailabilityCache(_BudgetSource({_MODEL.name: True}))
+
+        await cache.ensure_first_available(
+            provider=_provider(),
+            models=[_MODEL],
+            timeout_seconds=0.5,
+            credentials=signed_in_credentials(_SlowSignIn()),
+        )
+
+        [budget] = given
+        assert budget < 0.35
+
+    @pytest.mark.asyncio
+    async def test_a_signed_out_connection_asks_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MISTRAL_API_KEY", "process-key")
+        source = _RecordingSource({_MODEL.name: True})
+        cache = ModelAvailabilityCache(source)
+
+        await cache.ensure_first_available(
+            provider=_provider(),
+            models=[_MODEL],
+            credentials=signed_in_credentials(FakeSignIn(signed_in=False)),
+        )
+
+        assert source.asked == []
+
+    @pytest.mark.asyncio
+    async def test_verdicts_are_kept_per_account(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MISTRAL_API_KEY", "process-key")
+        cache = ModelAvailabilityCache(_RecordingSource({_MODEL.name: True}))
+
+        await cache.ensure_first_available(
+            provider=_provider(), models=[_MODEL], credentials=signed_in_credentials()
+        )
+
+        other = signed_in_credentials(FakeSignIn(principal="oidc:v1:another-user"))
+        assert cache.peek(provider=_provider(), model=_MODEL, credentials=other) is None
+        # Nor is it the API key's verdict.
+        assert cache.peek(provider=_provider(), model=_MODEL) is None
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_account_resolves_before_asking(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        sign_in = FakeSignIn(principal=None)
+        cache = ModelAvailabilityCache(_RecordingSource({_MODEL.name: True}))
+
+        await cache.ensure_first_available(
+            provider=_provider(),
+            models=[_MODEL],
+            credentials=signed_in_credentials(sign_in),
+        )
+
+        # The tenant was discovered once, then nothing is cached under nobody.
+        assert sign_in.resolved == 1
+        assert not UTILITY_MODEL_CACHE_FILE.path.exists()
+
+    @pytest.mark.asyncio
+    async def test_a_verdict_reached_before_an_account_switch_is_dropped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        sign_in = FakeSignIn()
+        credentials = signed_in_credentials(sign_in)
+
+        class _SwitchingSource(_RecordingSource):
+            async def check(self, **kwargs: Any):
+                sign_in.principal = "oidc:v1:another-user"
+                return await super().check(**kwargs)
+
+        cache = ModelAvailabilityCache(_SwitchingSource({_MODEL.name: True}))
+
+        await cache.ensure_first_available(
+            provider=_provider(), models=[_MODEL], credentials=credentials
+        )
+
+        assert (
+            cache.peek(provider=_provider(), model=_MODEL, credentials=credentials)
+            is None
+        )
+        assert not UTILITY_MODEL_CACHE_FILE.path.exists()

@@ -147,7 +147,6 @@ CONNECTOR_CATALOG_POLICY: Final = RefreshPolicy(
     fetch_timeout_s=CONNECTOR_CATALOG_FETCH_TIMEOUT_S,
 )
 _MAX_CONNECTORS = 256
-_MAX_TOOLS_PER_CONNECTOR = 128
 _MAX_INPUT_SCHEMA_BYTES = 64 * 1024
 _MAX_DIAGNOSTICS_PER_CONNECTOR = 3
 _MAX_DIAGNOSTIC_CHARACTERS = 512
@@ -2186,11 +2185,6 @@ def _resolve_connector_tools(
     raw_connector: _BootstrapConnector, *, raw_id: str
 ) -> tuple[ResolvedConnectorTool, ...]:
     """Resolve one connector's tools, raising on per-connector contract breaches."""
-    if len(raw_connector.tools) > _MAX_TOOLS_PER_CONNECTOR:
-        raise ConnectorCatalogValidationError(
-            f"Connector {raw_id!r} exceeds {_MAX_TOOLS_PER_CONNECTOR} tools",
-            reason="too_many_tools",
-        )
     # Drop a single unusable tool (malformed wire, oversized schema, missing name)
     # on its own so the connector keeps its remaining tools.
     resolved: list[ResolvedConnectorTool] = []

@@ -709,18 +709,22 @@ def _turn_record(turn: PublicTurn) -> TurnRecord:
                     if turn.stop_reason == "limit"
                     else "output_limit"
                     if turn.stop_reason == "length"
+                    else "repeated_tool_failure"
+                    if turn.repeated_tool_failure is not None
                     else "skipped"
                     if turn.skip_reason is not None
                     else "rejected"
                     if turn.reject_reason is not None
                     else None
                 ),
-                # A skipped or rejected Turn has no answer: the hook's reason is
-                # its output, never an earlier assistant entry.
+                # A skipped, rejected or stopped Turn has no answer: the reason is its
+                # output, never an earlier assistant entry.
                 output=(
                     turn.skip_reason
                     if turn.skip_reason is not None
                     else turn.reject_reason
+                    if turn.reject_reason is not None
+                    else turn.repeated_tool_failure
                 ),
             )
         case FailedPublicTurn():

@@ -15,6 +15,7 @@ use super::{
     finish_compaction, is_context_overflow, plan_compaction, refit_refused_compaction,
     start_compaction,
 };
+use crate::core::action_id;
 use crate::core::config::HarnessConfig;
 use crate::core::error::CoreError;
 use crate::core::prompt::build_system_prompt;
@@ -44,7 +45,9 @@ fn start(
     state: &mut HarnessState,
     request: CompactionRequest<'_>,
 ) -> Result<CompactionStartResolution, CoreError> {
-    let task_id = state.config().task_id.clone();
+    let config = state.config();
+    let task_id =
+        action_id::task_scope(&config.task_id, config.action_id_namespace.as_deref()).into_owned();
     let generated_system = state.generated_system_message();
     start_compaction(
         &mut state.context,

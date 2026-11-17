@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
@@ -165,7 +165,10 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
     SessionConfig,
     SessionWorkspace,
 )
-from mistralai_vibe_local_harness.vibe._session import UnifiedHarnessSessionBackend
+from mistralai_vibe_local_harness.vibe._session import (
+    UnifiedHarnessSessionBackend,
+    turn_start_response,
+)
 from mistralai_vibe_local_harness.vibe._session_catalog import (
     LiveStoredSession,
     SessionCatalogCache,
@@ -657,6 +660,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         factory: ProvidedToolExecutorFactory,
         *,
         mode: ProvidedToolApproval | None = None,
+        root_only: Collection[str] = (),
     ) -> None:
         """Route an embedder's own provided-tool groups to its own executor.
 
@@ -665,10 +669,15 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         session; registering a name twice replaces the earlier entry. ``mode`` pins
         these groups' approval bar, overriding ``config.provided_tool_mode``; pass a
         mapping keyed by tool name when one group's tools do not share a bar.
+        ``root_only`` names tools of these groups that root Sessions advertise and
+        subagents never see.
         """
-        group = _ProvidedToolGroup(factory=factory, mode=mode)
+        group = _ProvidedToolGroup(
+            factory=factory, mode=mode, root_only=frozenset(root_only)
+        )
         for name in group_names:
             self._provided_tool_groups[name] = group
+        self._refresh_subagent_configuration()
 
     def configure_mcp(
         self,
@@ -758,6 +767,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             connector_selection=self._connector_selection,
             connector_gateway_authority_digest=self._connector_gateway_authority_digest,
             connector_policy_digest=self._connector_policy_digest,
+            root_only_tools=_root_only_tool_routes(self._provided_tool_groups),
         )
 
     def _refresh_subagent_configuration(self) -> None:
@@ -1887,14 +1897,22 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         """The model facts a live session's Core runs with, or None.
 
         A subagent can run on another model than its root, with its own context
-        window and compaction threshold. None for a session that is not open or
-        has not been promoted yet.
+        window and compaction threshold. One that is not loaded reports those of
+        the binding it opens under. None for a session that is not open or has
+        not been promoted yet.
         """
         session = self._live_session(session_id)
         runtime = session._runtime if session is not None else None
-        if runtime is None:
-            return None
-        return runtime.config.settings.context.model_facts
+        if runtime is not None:
+            return runtime.config.settings.context.model_facts
+        for entry in tuple(self._sessions.values()):
+            controller = self._subagent_controller(entry.session.session_id)
+            binding = (
+                None if controller is None else controller.child_binding(session_id)
+            )
+            if isinstance(binding, LocalChildSessionBinding):
+                return binding.core_config.settings.context.model_facts
+        return None
 
     async def wait_for_children_settled(self, root_session_id: str) -> None:
         """Wait until none of a live root's children has a Turn running.
@@ -2241,11 +2259,15 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         )
         return ChildCommandAdmission(target=target, turn_id=target.command.turn_id)
 
-    async def wait_for_child_restore(self, child_session_id: str) -> None:
-        """Wait until a loaded child has recovered the Turn restore found cut."""
+    async def wait_until_child_takes_messages(self, child_session_id: str) -> None:
+        """Wait until a loaded child is recovered and past its pre_agent hooks."""
         session = self._live_session(child_session_id)
         if session is not None:
-            await session._wait_for_restored_turn()
+            await session._wait_until_takes_messages()
+
+    async def child_runs_pre_agent_hooks(self, child_session_id: str) -> bool:
+        session = self._live_session(child_session_id)
+        return session is not None and await session._runs_pre_agent_hooks()
 
     async def interrupt_child(
         self,
@@ -2273,9 +2295,10 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         session = self._require_live_child(child)
         turn_id = f"{child.session_id}:turn:{generation}"
         state = session._state_for_host()
-        if state.latest_turn is None or state.latest_turn.id != turn_id:
+        phase = session._parent_turn_phase(state, turn_id)
+        if phase == "gone":
             raise RuntimeError("child Session does not retain the requested generation")
-        if state.latest_turn.status == "in_progress":
+        if phase == "running":
             if timeout_ms <= 0:
                 raise TimeoutError
             state = await asyncio.wait_for(
@@ -3062,6 +3085,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                     else None
                 ),
                 facts=session.facts,
+                turn_start_response=turn_start_response,
             )
             runtime_holder.append(runtime)
             if mcp_runtime is not None:
@@ -3100,8 +3124,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
                 connector_runtime.bind_snapshot_acceptor(accept_connector_snapshot)
             if action_adapter is not None:
                 runtime.configure_action_executor(action_adapter.execute)
+                runtime.configure_llm_call_observer(action_adapter.record_llm_iteration)
                 action_adapter.configure_background_processes(
                     lambda: runtime.runs_background_processes
+                )
+                action_adapter.configure_program_time_budget(
+                    lambda: runtime.program_time_budget_ms
                 )
                 action_adapter.bind_notice_sink(runtime.append_public_history_entries)
                 action_adapter.bind_classification_sink(publish_event)
@@ -3459,6 +3487,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             event_sink=publish_event,
             process_manager=process_manager,
             process_config=adapter_config,
+            turn_start_response=turn_start_response,
         )
         runtime_holder.append(runtime)
         # Fold the session's hook bindings into the base capabilities so an MCP/connector
@@ -3578,8 +3607,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             action_adapter.bind_approval_requester(session._request_approval)
             action_adapter.bind_retry_sink(session._set_provider_retry)
             runtime.configure_action_executor(action_adapter.execute)
+            runtime.configure_llm_call_observer(action_adapter.record_llm_iteration)
             action_adapter.configure_background_processes(
                 lambda: runtime.runs_background_processes
+            )
+            action_adapter.configure_program_time_budget(
+                lambda: runtime.program_time_budget_ms
             )
             action_adapter.bind_notice_sink(runtime.append_public_history_entries)
             action_adapter.bind_classification_sink(publish_event)
@@ -4942,16 +4975,20 @@ def _child_turn_outcome(
     if turn is None or turn.id != turn_id:
         raise RuntimeError("child Session does not retain the requested generation")
     if isinstance(turn, CompletedPublicTurn):
-        hook_reason = (
-            turn.skip_reason if turn.skip_reason is not None else turn.reject_reason
+        stated_reason = (
+            turn.skip_reason
+            if turn.skip_reason is not None
+            else turn.reject_reason
+            if turn.reject_reason is not None
+            else turn.repeated_tool_failure
         )
-        if hook_reason is not None:
-            # A skipped or rejected Turn has no answer of its own; the hook's reason
-            # is its answer. A ``pre_llm_call`` skip may give no reason.
+        if stated_reason is not None:
+            # A skipped, rejected or stopped Turn has no answer of its own; the stated
+            # reason is its answer. A ``pre_llm_call`` skip may give no reason.
             output: list[JsonValue] = (
-                [{"type": "text", "text": hook_reason}] if hook_reason else []
+                [{"type": "text", "text": stated_reason}] if stated_reason else []
             )
-            final_answer = hook_reason
+            final_answer = stated_reason
         else:
             output, final_answer = _assistant_output(state, turn_id)
         return CompletedChildTurnOutcome(
@@ -5445,6 +5482,16 @@ class _ProvidedToolGroup:
     factory: ProvidedToolExecutorFactory
     # ``None`` keeps ``config.provided_tool_mode``.
     mode: ProvidedToolApproval | None
+    # Tool names, within each registered group, hidden from subagents.
+    root_only: frozenset[str] = frozenset()
+
+
+def _root_only_tool_routes(groups: Mapping[str, _ProvidedToolGroup]) -> frozenset[str]:
+    return frozenset(
+        f"{group_name}.{tool_name}"
+        for group_name, group in groups.items()
+        for tool_name in group.root_only
+    )
 
 
 def _tools_left_out_notice(signal: ToolsLeftOutSignal) -> JsonObject:

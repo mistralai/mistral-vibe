@@ -28,7 +28,7 @@ pub fn manual_update_lines(state: &UpdatePromptState) -> [String; 2] {
             "  {}",
             color_span(
                 Style::default().add_modifier(Modifier::BOLD),
-                manual_update_command(state.source)
+                &crate::utils::tls::uv_command_hint(manual_update_command(state.source))
             )
         ),
     ]

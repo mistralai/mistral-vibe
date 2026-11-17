@@ -6,7 +6,9 @@ use ratatui::style::{Color, Style};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
+use crate::app::App;
 use crate::chat_input;
+use crate::mouse::MouseTarget;
 use crate::search_field::Search;
 use crate::ui::theme;
 
@@ -35,8 +37,33 @@ pub(crate) fn draw_row(
     input
 }
 
+/// The search row under a bottom-app box's title; the field owns its mouse, and a box drag never selects it.
+pub(crate) fn draw_under_title(
+    app: &mut App,
+    f: &mut Frame,
+    area: Rect,
+    field: fn(&mut App) -> &mut Search,
+    placeholder: &str,
+    target: MouseTarget,
+) {
+    let row = Rect::new(area.x + 3, area.y + 2, area.width.saturating_sub(6), 1);
+    let cursor_on = app.view.cursor_on;
+    let input = draw_row(
+        f,
+        row,
+        field(app),
+        placeholder,
+        cursor_on,
+        theme::background(),
+    );
+    field(app).area = input;
+    crate::mouse::register_region(app, input, target);
+    let chrome = (input.y, input.x, input.right().saturating_sub(1));
+    app.view.bottom_app_selection_chrome.push(chrome);
+}
+
 /// A one-line query field: placeholder or query, selection, and a caret kept in view.
-fn draw_field(
+pub(crate) fn draw_field(
     f: &mut Frame,
     input: Rect,
     search: &Search,

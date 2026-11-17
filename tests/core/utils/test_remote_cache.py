@@ -577,3 +577,24 @@ async def test_a_failing_listener_does_not_break_the_refresh() -> None:
     await _settle()
 
     assert cache.cached("k") == Cached("fresh", stored_at=clock.now)
+
+
+@pytest.mark.asyncio
+async def test_every_change_listener_is_told_until_it_unsubscribes() -> None:
+    clock, fetch = _Clock(), _Fetch(values=["fresh", "fresher"])
+    store = _Store({"k": Cached("old", stored_at=clock.now - 601)})
+    cache = _cache(fetch, clock, store)
+    await cache.load("k")
+    first: list[str] = []
+    second: list[str] = []
+    cache.on_changed(first.append)
+    stop_second = cache.on_changed(second.append)
+
+    await cache.refresh("k")
+    await _settle()
+    stop_second()
+    await cache.refresh("k")
+    await _settle()
+
+    assert first == ["k", "k"]
+    assert second == ["k"]

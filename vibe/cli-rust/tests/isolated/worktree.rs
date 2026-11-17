@@ -28,7 +28,9 @@ fn state_with(history: Vec<Value>, cwd: Option<&str>) -> PublicSessionState {
             cwd: cwd.map(str::to_owned),
             worktree: None,
             token_usage: None,
+            goal: None,
             status: None,
+            loops: Vec::new(),
         },
         history: Some(history),
         history_before_cursor: None,
@@ -545,7 +547,9 @@ fn session_state_worktree_tracks_without_an_effect() {
             created: true,
         })),
         token_usage: None,
+        goal: None,
         status: None,
+        loops: Vec::new(),
     };
     let info = WorktreeInfo::from_session(&session).unwrap();
     assert_eq!(info, demo_worktree(true));

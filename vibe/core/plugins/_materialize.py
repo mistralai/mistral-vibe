@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
+import stat
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -223,6 +224,7 @@ class PluginMaterializer:
             staged = temporary / "content"
             try:
                 shutil.copytree(definition.source_root, staged)
+                _make_owner_writable(staged)
                 try:
                     os.rename(staged, definition.runtime_root)
                 except FileExistsError:
@@ -355,6 +357,14 @@ class PluginMaterializer:
             option for option in (existing_options, loader_option) if option
         )
         return environment
+
+
+def _make_owner_writable(root: Path) -> None:
+    # The copy keeps the read-only modes of the pinned checkout, and moving a
+    # directory to another parent needs write access on the directory itself.
+    for directory, _, files in root.walk():
+        for path in (directory, *(directory / name for name in files)):
+            path.chmod(path.stat().st_mode | stat.S_IWUSR)
 
 
 def _node_modules_root(runtime_path: Path) -> Path:

@@ -138,7 +138,14 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, panes: &Panes) {
     }
     app.skills_browser.tab_areas = areas;
     if search {
-        browser_box::draw_search(app, f, area, field, PLACEHOLDER, MouseTarget::Skills);
+        super::search_field::draw_under_title(
+            app,
+            f,
+            area,
+            field,
+            PLACEHOLDER,
+            MouseTarget::Skills,
+        );
     }
     let room = usize::from(area.height.saturating_sub(browser_box::chrome(search)));
     let shown_rows = panes.shown_rows.min(room) as u16;

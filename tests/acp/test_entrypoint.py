@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import build_test_vibe_config
 import vibe.acp.entrypoint as entrypoint
 
 
@@ -19,6 +20,45 @@ def _record_exec(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     monkeypatch.setattr(entrypoint, "bootstrap_vibe_home", _forbid)
     monkeypatch.setattr("sys.argv", ["vibe-acp", "--setup"])
     return calls
+
+
+@pytest.mark.parametrize(
+    ("api_base", "telemetry", "enabled"),
+    [
+        ("https://api.mistral.ai/v1", True, True),
+        ("https://api.customer.mistral.ai/v1", True, True),
+        ("https://api.asml.example/v1", True, False),
+        ("https://api.mistral.ai/v1", False, False),
+    ],
+)
+def test_crash_reports_follow_telemetry_and_stay_off_self_hosted(
+    api_base: str, telemetry: bool, enabled: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from vibe.core.config import ProviderConfig
+    from vibe.core.types import Backend
+    import vibe.observability.sentry as sentry
+
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        sentry, "init_sentry", lambda **kwargs: calls.append(kwargs["enabled"])
+    )
+    # A DSN in the environment does not turn reports on for a self-hosted host.
+    monkeypatch.setenv("SENTRY_DSN", "https://key@sentry.example/1")
+    config = build_test_vibe_config(
+        enable_telemetry=telemetry,
+        providers=[
+            ProviderConfig(
+                name="mistral",
+                api_base=api_base,
+                api_key_env_var="MISTRAL_API_KEY",
+                backend=Backend.MISTRAL,
+            )
+        ],
+    )
+
+    entrypoint._start_crash_reporting(config)
+
+    assert calls == [enabled]
 
 
 def test_setup_runs_the_rust_wizard_before_acp_startup(

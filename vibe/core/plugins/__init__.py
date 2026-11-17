@@ -75,6 +75,7 @@ from vibe.core.plugins._native import (
     ResolvedPluginSet,
     plugin_skill_runtime_path,
     plugin_skill_translation,
+    user_facing_issues,
 )
 from vibe.core.plugins._paths import (
     PluginPathOutsideRootError,
@@ -242,5 +243,6 @@ __all__ = [
     "sort_diagnostics",
     "surviving_plugin_names",
     "tool_function_name",
+    "user_facing_issues",
     "validate_resolved_plugin_snapshot",
 ]

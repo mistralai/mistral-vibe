@@ -16,7 +16,7 @@ pub(super) fn build<'a>(
     expanded: &HashSet<String>,
     transcript: &Transcript,
     width: u16,
-    paused: bool,
+    (paused, raw): (bool, bool),
 ) -> &'a TranscriptLayout {
     let revision = transcript.revision();
     if cache.layout(revision, width).is_none() {
@@ -52,6 +52,7 @@ pub(super) fn build<'a>(
                     entry::ExpansionView {
                         entry: entry_expanded,
                         group: group_expanded,
+                        raw,
                     },
                     0,
                     entry::QueueView {

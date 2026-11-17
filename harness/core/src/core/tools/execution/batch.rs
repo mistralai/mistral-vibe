@@ -24,6 +24,7 @@ use crate::core::tools::execution::{
     LargeOutputSource, ToolBatch, ToolExecution, ToolExecutionState,
 };
 use crate::core::tools::external::ExternalToolCall;
+use crate::core::tools::resolved::EffectiveCall;
 use crate::core::tools::result::{
     approval_failed_result, approval_rejected_result, invalid_tool_call_result,
     model_tool_result_message,
@@ -181,7 +182,7 @@ fn start_tool_execution(
             ));
         }
     };
-    if matches!(pending.stage, ExternalCallStage::Pending) {
+    if matches!(pending.stage, ExternalCallStage::Pending { .. }) {
         match tools.admit(&pending.call) {
             Admission::Run => {}
             Admission::Deny(result) => {
@@ -232,6 +233,7 @@ fn advance_program(
     let ProgramTransition {
         advance,
         accepted_results,
+        warning,
     } = {
         let ToolExecutionState::ProgramPending { execution: program } = &mut execution.state else {
             return Err(CoreError::invariant(
@@ -242,6 +244,7 @@ fn advance_program(
             program.advance(context, &parent_call, input, determinism)
         })?
     };
+    observations.extend(warning);
     observations.extend(accepted_program_results(tools.turn_id, accepted_results));
     match advance {
         ProgramAdvance::Pending {
@@ -510,7 +513,12 @@ pub(crate) fn finish_tool_batch_action(
             let post_hook_binding_ids = tools
                 .hook_binding_ids(HookPoint::PostToolCall, Some(&pending.call.hook_tool_key()));
             if !post_hook_binding_ids.is_empty() {
-                effects.push(pending.await_post_hook(post_hook_binding_ids, result, tools.turn_id));
+                effects.push(pending.await_post_hook(
+                    post_hook_binding_ids,
+                    result,
+                    determinism.time_unix_ms,
+                    tools.turn_id,
+                ));
             } else {
                 let finalized = finalize_tool_result(
                     tools,
@@ -674,7 +682,11 @@ pub(crate) fn finish_tool_batch_approval(
 
     let result = match resolution {
         Ok(ApprovalOutcome::Approve) => {
-            let action = pending.send(pending.call.clone(), tools.turn_id);
+            let action = pending.send(
+                pending.call.clone(),
+                determinism.time_unix_ms,
+                tools.turn_id,
+            );
 
             return Ok(ToolBatchTransition {
                 resolution: resolve_tool_batch(batch, vec![action]),
@@ -771,36 +783,46 @@ pub(crate) fn finish_tool_batch_hook(
                     HookResult::PreToolCall(PreToolCallOutput::Continue {
                         effective_arguments,
                     }),
-                ) => {
-                    let effective_call =
-                        tools.effective_call(&pending.call, effective_arguments)?;
-                    match tools.admit(&effective_call) {
-                        Admission::Run => {
-                            effects.push(pending.send(effective_call, tools.turn_id));
-                        }
-                        Admission::Deny(result) => {
-                            let completed = completed_top_level_result(
-                                tools,
-                                &execution.call,
-                                LargeOutputSource::Direct {
-                                    call: effective_call,
-                                },
-                                result,
-                            );
-                            execution.state = completed.state;
-                            observations.extend(completed.observations);
-                        }
-                        Admission::Ask(grant_key) => {
-                            effects.push(pending.await_approval(
-                                effective_call,
-                                grant_key,
-                                ApprovalName::Direct,
-                                tools.turn_id,
-                            ));
-                        }
+                ) => match tools.effective_call(&pending.call, effective_arguments)? {
+                    EffectiveCall::Invalid { detail } => {
+                        let (result, warning) =
+                            pending.invalid_pre_hook_arguments(&detail, tools.turn_id)?;
+                        observations.push(warning);
+                        Some((result, pending.call.clone()))
                     }
-                    None
-                }
+                    EffectiveCall::Valid(effective_call) => {
+                        match tools.admit(&effective_call) {
+                            Admission::Run => {
+                                effects.push(pending.send(
+                                    effective_call,
+                                    determinism.time_unix_ms,
+                                    tools.turn_id,
+                                ));
+                            }
+                            Admission::Deny(result) => {
+                                let completed = completed_top_level_result(
+                                    tools,
+                                    &execution.call,
+                                    LargeOutputSource::Direct {
+                                        call: effective_call,
+                                    },
+                                    result,
+                                );
+                                execution.state = completed.state;
+                                observations.extend(completed.observations);
+                            }
+                            Admission::Ask(grant_key) => {
+                                effects.push(pending.await_approval(
+                                    effective_call,
+                                    grant_key,
+                                    ApprovalName::Direct,
+                                    tools.turn_id,
+                                ));
+                            }
+                        }
+                        None
+                    }
+                },
                 (HookSide::Pre, HookResult::PreToolCall(PreToolCallOutput::Skip { reason })) => {
                     Some((skipped_tool_result(reason)?, pending.call.clone()))
                 }

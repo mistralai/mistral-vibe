@@ -221,7 +221,7 @@ fn fixed_image_cost_lets_one_prompt_and_one_image_reach_the_agent() {
 
 /// The threshold of the image scenarios: one native image at the fixed cost
 /// fits with room for the reply and a small tool result.
-const IMAGE_SCENARIO_THRESHOLD: u64 = 16_000;
+const IMAGE_SCENARIO_THRESHOLD: u64 = 16_800;
 
 /// An image cost above the test facts' summary request budget
 /// (`compaction_threshold_max`), so no request carrying the image natively fits.

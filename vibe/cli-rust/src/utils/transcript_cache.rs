@@ -65,6 +65,7 @@ pub struct TranscriptCache {
     widths: (u16, u16),
     theme: usize,
     queue_paused: bool,
+    raw: bool,
 }
 
 impl TranscriptCache {
@@ -104,17 +105,26 @@ impl TranscriptCache {
         true
     }
 
-    /// Drop cached geometry when width, theme, or queue-header copy changes.
-    pub fn ensure_context(&mut self, full: u16, content: u16, theme: usize, queue_paused: bool) {
+    /// Drop cached geometry when width, theme, queue-header copy, or `/raw` changes.
+    pub fn ensure_context(
+        &mut self,
+        full: u16,
+        content: u16,
+        theme: usize,
+        queue_paused: bool,
+        raw: bool,
+    ) {
         let context_changed = self.widths != (full, content)
             || self.theme != theme
-            || self.queue_paused != queue_paused;
+            || self.queue_paused != queue_paused
+            || self.raw != raw;
         if context_changed {
             self.heights.clear();
             self.invalidate_layouts();
             self.widths = (full, content);
             self.theme = theme;
             self.queue_paused = queue_paused;
+            self.raw = raw;
         }
     }
 

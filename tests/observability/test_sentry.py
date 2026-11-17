@@ -112,6 +112,14 @@ def test_before_send_drops_a_full_disk_wrapped_in_another_error():
     assert _before_send_cli(cast(Event, {}), hint) is None
 
 
+def test_before_send_drops_a_write_to_a_read_only_file_system():
+    error = OSError(errno.EROFS, "Read-only file system", "0000000000000106.jsonl")
+    hint = cast(Hint, {"exc_info": (OSError, error, None)})
+
+    assert _before_send(cast(Event, {}), hint) is None
+    assert _before_send_cli(cast(Event, {}), hint) is None
+
+
 @pytest.mark.parametrize(
     "network_error",
     [
@@ -130,6 +138,29 @@ def test_before_send_drops_network_errors_even_when_wrapped(network_error):
         hint = cast(Hint, {"exc_info": (RuntimeError, wrapped, None)})
 
     assert _before_send_cli(cast(Event, {}), hint) is None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows locks the cwd")
+@pytest.mark.parametrize("before_send", [_before_send, _before_send_cli])
+def test_before_send_drops_a_cwd_lookup_after_the_cwd_was_deleted(
+    tmp_path, monkeypatch, before_send
+):
+    gone = tmp_path / "worktree"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    with pytest.raises(FileNotFoundError) as raised:
+        os.getcwd()
+    hint = cast(Hint, {"exc_info": (raised.type, raised.value, None)})
+
+    assert before_send(cast(Event, {}), hint) is None
+
+
+def test_before_send_keeps_a_missing_file_while_the_cwd_exists():
+    error = FileNotFoundError(errno.ENOENT, "No such file or directory")
+    hint = cast(Hint, {"exc_info": (type(error), error, None)})
+
+    assert _before_send_cli(cast(Event, {}), hint) is not None
 
 
 def test_before_send_keeps_an_http_status_error():

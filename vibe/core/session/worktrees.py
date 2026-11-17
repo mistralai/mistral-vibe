@@ -32,6 +32,7 @@ from vibe.core.git.worktree import (
     WorktreeRepository,
 )
 from vibe.core.git.worktree.naming_model import suggest_worktree_name
+from vibe.core.llm.utility_credentials import UtilityCredentialsFactory
 from vibe.core.telemetry.types import LaunchContext
 from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.observability.logging import logger
@@ -87,11 +88,16 @@ class SessionWorktrees:
     """Every worktree question a session has to answer."""
 
     def __init__(
-        self, launch_context_getter: Callable[[], LaunchContext | None] | None = None
+        self,
+        launch_context_getter: Callable[[], LaunchContext | None] | None = None,
+        *,
+        naming_credentials: UtilityCredentialsFactory | None = None,
     ) -> None:
         # Read lazily: the client metadata only exists after the app-server
         # handshake, and naming runs on the session-start path.
         self._launch_context_getter = launch_context_getter
+        # The connection's credentials for the naming call; None reads the key.
+        self._naming_credentials = naming_credentials
 
     def _launch_context(self) -> LaunchContext | None:
         if self._launch_context_getter is None:
@@ -336,7 +342,10 @@ class SessionWorktrees:
         if request.prompt and on_progress is not None:
             on_progress(WorktreeCreationProgress(WorktreeCreationPhase.NAMING))
         return await suggest_worktree_name(
-            request.prompt, cwd=base_cwd, launch_context=self._launch_context()
+            request.prompt,
+            cwd=base_cwd,
+            launch_context=self._launch_context(),
+            credentials=self._naming_credentials,
         )
 
     @staticmethod

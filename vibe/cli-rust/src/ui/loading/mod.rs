@@ -2,6 +2,7 @@
 
 pub mod failure;
 mod hint;
+mod idle;
 mod snake;
 
 use std::time::Duration;
@@ -25,8 +26,10 @@ pub const INITIALIZING_LOADING_STATUS: &str = "Initializing";
 pub const RETRYING_LOADING_STATUS: &str = "Retrying";
 /// Label for a slash command fetching in the background (`/whoami`).
 pub const COMMAND_LOADING_STATUS: &str = "Loading";
+/// Label while the `/resume` picker waits for `session/resume`.
+pub const RESUMING_LOADING_STATUS: &str = "Resuming";
 pub const SHELL_LOADING_STATUS: &str = "Running command";
-/// Still glyph in place of the spinner while the agent only waits.
+/// Still glyph for later work: a waiting agent, or an idle session's next loop.
 const WAITING_GLYPH: &str = "◷";
 
 /// Spinner glyph + label gradient state, recreated at the start of each turn.
@@ -187,7 +190,9 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
     let queue_hints = crate::input::composer_reachable(app)
         .then(|| crate::message_queue::mode_hints(app))
         .flatten();
+    let resuming = crate::resume_picker::spinning(app);
     if !app.view.command_loading
+        && !resuming
         && !matches!(
             app.session.status,
             Status::Starting | Status::Generating { .. }
@@ -196,6 +201,8 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
         if let Some(hints) = queue_hints {
             let mut spans = Vec::new();
             hint::push(&mut spans, String::new(), hints);
+            f.render_widget(Line::from(spans), content);
+        } else if let Some(spans) = idle::next_loop(app, content.width) {
             f.render_widget(Line::from(spans), content);
         }
         return;
@@ -227,18 +234,24 @@ pub fn draw(app: &App, f: &mut Frame, area: Rect) {
             let color = |pos: usize| Style::default().fg(anim.color_at(pos));
             // Snake spinner glyph + gap, then the label one color-cycled span per
             // character, then the trailing "… ".
+            let label = if resuming {
+                RESUMING_LOADING_STATUS
+            } else {
+                &anim.label
+            };
             let mut spans = vec![Span::styled(anim.snake.render(), color(0)), Span::raw(" ")];
-            for (i, ch) in anim.label.chars().enumerate() {
+            for (i, ch) in label.chars().enumerate() {
                 spans.push(Span::styled(ch.to_string(), color(1 + i)));
             }
-            spans.push(Span::styled("… ", color(1 + anim.label.chars().count())));
+            spans.push(Span::styled("… ", color(1 + label.chars().count())));
             spans
         }
     };
 
     // Background slash commands have no timer or controls; manual shell commands do.
     // Startup keeps queue cancellation available without offering turn interruption.
-    let background = app.view.command_loading && app.session.shell_operation_id.is_none();
+    let background =
+        (app.view.command_loading || resuming) && app.session.shell_operation_id.is_none();
     if background || app.session.status == Status::Starting {
         let hints = match queue_hints {
             Some(hints) => hints.to_vec(),

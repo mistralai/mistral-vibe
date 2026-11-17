@@ -79,6 +79,9 @@ pub struct StartupConfig {
     /// Main input blink preference; older caches keep the default blinking caret.
     #[serde(default = "default_cursor_blink")]
     pub cursor_blink: bool,
+    /// Whether the risky-folder warning mounts at startup; older caches keep it.
+    #[serde(default = "default_show_dangerous_directory_warning")]
+    pub show_dangerous_directory_warning: bool,
     pub active_model: String,
     pub active_model_display_name: String,
     /// Whether images are supported: model vision or a backend image describer.
@@ -116,6 +119,7 @@ impl Default for StartupConfig {
             enable_file_autocomplete: default_enable_file_autocomplete(),
             file_watcher_for_autocomplete: default_file_watcher_for_autocomplete(),
             cursor_blink: default_cursor_blink(),
+            show_dangerous_directory_warning: default_show_dangerous_directory_warning(),
             active_model: String::new(),
             active_model_display_name: String::new(),
             images_supported: false,
@@ -132,6 +136,10 @@ impl Default for StartupConfig {
 }
 
 fn default_cursor_blink() -> bool {
+    true
+}
+
+fn default_show_dangerous_directory_warning() -> bool {
     true
 }
 
@@ -232,6 +240,7 @@ impl StartupConfig {
             enable_file_autocomplete: config.enable_file_autocomplete,
             file_watcher_for_autocomplete: config.file_watcher_for_autocomplete,
             cursor_blink: config.cursor_blink,
+            show_dangerous_directory_warning: config.show_dangerous_directory_warning,
             active_model: format!("{model_name}[{thinking}]"),
             active_model_display_name: model_name,
             images_supported: config

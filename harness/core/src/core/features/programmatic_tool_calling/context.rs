@@ -3,6 +3,7 @@ use serde_json::Value;
 use crate::core::error::CoreError;
 use crate::core::tools::execution::external_call::Admission;
 use crate::core::tools::external::{ExternalTool, ExternalToolCall};
+use crate::core::tools::resolved::EffectiveCall;
 
 use super::descriptor::{ProgrammaticName, TypeScriptTool};
 use super::settings::Settings;
@@ -39,7 +40,7 @@ pub(crate) struct ProgramContext<'a> {
     message_count: usize,
     resolve_operation: &'a dyn Fn(&str, Value) -> Option<ResolvedProgramOperation>,
     post_hook_binding_ids: &'a dyn Fn(&ExternalToolCall) -> Vec<String>,
-    effective_call: &'a dyn Fn(&ExternalToolCall, Value) -> Result<ExternalToolCall, CoreError>,
+    effective_call: &'a dyn Fn(&ExternalToolCall, Value) -> Result<EffectiveCall, CoreError>,
     admit: &'a dyn Fn(&ExternalToolCall) -> Admission,
 }
 
@@ -52,7 +53,7 @@ impl<'a> ProgramContext<'a> {
         message_count: usize,
         resolve_operation: &'a dyn Fn(&str, Value) -> Option<ResolvedProgramOperation>,
         post_hook_binding_ids: &'a dyn Fn(&ExternalToolCall) -> Vec<String>,
-        effective_call: &'a dyn Fn(&ExternalToolCall, Value) -> Result<ExternalToolCall, CoreError>,
+        effective_call: &'a dyn Fn(&ExternalToolCall, Value) -> Result<EffectiveCall, CoreError>,
         admit: &'a dyn Fn(&ExternalToolCall) -> Admission,
     ) -> Self {
         Self {
@@ -99,7 +100,7 @@ impl<'a> ProgramContext<'a> {
         self,
         original: &ExternalToolCall,
         arguments: Value,
-    ) -> Result<ExternalToolCall, CoreError> {
+    ) -> Result<EffectiveCall, CoreError> {
         (self.effective_call)(original, arguments)
     }
 

@@ -49,3 +49,12 @@ async fn an_animation_ticks_once_per_advance_that_reaches_it() {
     clock::advance(Duration::from_millis(500));
     assert!(blink.is_due());
 }
+
+#[test]
+fn the_replay_wall_clock_moves_with_the_advance() {
+    freeze();
+    std::env::set_var("VIBE_REPLAY_NOW_MS", "1000000");
+    assert_eq!(clock::unix_now_seconds(), 1000.0);
+    clock::advance(Duration::from_secs(50));
+    assert_eq!(clock::unix_now_seconds(), 1050.0);
+}

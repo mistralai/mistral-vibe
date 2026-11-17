@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 import stat
+import threading
+import time
 import tomllib
 from unittest.mock import patch
 
@@ -12,6 +15,7 @@ import tomli_w
 from vibe.core.paths import AGENTS_MD_FILENAME, TRUSTED_FOLDERS_FILE
 from vibe.core.trusted_folders import (
     TrustedFoldersManager,
+    TrustFileError,
     WorkspaceTrustStatus,
     find_git_repo_ancestor,
     find_repo_trustable_files_for_cwd,
@@ -19,6 +23,12 @@ from vibe.core.trusted_folders import (
     find_untrusted_config_dirs,
     has_agents_md_file,
 )
+from vibe.core.utils.file_lock import acquire_file_lock, release_file_lock
+
+
+def _leftover_temp_files() -> list[Path]:
+    folder = TRUSTED_FOLDERS_FILE.path.parent
+    return [p for p in folder.glob(".trusted_folders.toml.*") if p.suffix != ".lock"]
 
 
 class TestTrustedFoldersManager:
@@ -64,14 +74,36 @@ class TestTrustedFoldersManager:
 
         assert manager.is_trusted(tmp_path) is True
 
-    def test_handles_corrupted_file(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        "content",
+        [b"trusted = [", b"\xff\xfe not utf-8", b'trusted = "/"', b"trusted = 1"],
+    )
+    def test_an_unreadable_file_is_ignored_and_kept(
+        self, tmp_path: Path, content: bytes
+    ) -> None:
+        """Vibe starts with no decision rather than lose or misread the user's."""
         trusted_file = TRUSTED_FOLDERS_FILE.path
-        trusted_file.write_text("invalid toml content {[", encoding="utf-8")
+        trusted_file.write_bytes(content)
 
         manager = TrustedFoldersManager()
 
         assert manager.is_trusted(tmp_path) is None
-        assert trusted_file.is_file()
+        assert manager.is_trusted(Path("/")) is None
+        assert trusted_file.read_bytes() == content
+
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0, reason="POSIX file modes, not as root"
+    )
+    def test_a_file_vibe_cannot_open_is_kept(self, tmp_path: Path) -> None:
+        trusted_file = TRUSTED_FOLDERS_FILE.path
+        trusted_file.write_text('trusted = ["/x/proj"]\n', encoding="utf-8")
+        trusted_file.chmod(0)
+        try:
+            TrustedFoldersManager().add_untrusted(tmp_path)
+        finally:
+            trusted_file.chmod(0o600)
+
+        assert trusted_file.read_text(encoding="utf-8") == 'trusted = ["/x/proj"]\n'
 
     def test_normalizes_paths_to_absolute(
         self, tmp_working_directory, monkeypatch: pytest.MonkeyPatch
@@ -234,6 +266,278 @@ class TestTrustedFoldersManager:
             manager.add_trusted(tmp_path)
 
         assert manager.is_trusted(tmp_path) is True
+
+    def test_edit_moves_and_forgets_stored_entries(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_trusted(tmp_path / "a")
+        manager.add_untrusted(tmp_path / "b")
+        a, b = str((tmp_path / "a").resolve()), str((tmp_path / "b").resolve())
+
+        manager.edit(a, False)
+        manager.edit(b, None)
+
+        assert TrustedFoldersManager().persisted_decisions() == {
+            "trusted": [],
+            "untrusted": [a],
+        }
+
+    def test_edit_never_writes_back_an_entry_another_process_forgot(
+        self, tmp_path: Path
+    ) -> None:
+        """The check that an entry is stored and the write happen on the same file."""
+        TrustedFoldersManager().add_trusted(tmp_path / "a")
+        entry = str((tmp_path / "a").resolve())
+        editor = TrustedFoldersManager.read_file()
+        TrustedFoldersManager.read_file().edit(entry, None)
+
+        assert editor.edit(entry, False) is False
+        assert TrustedFoldersManager().persisted_decisions() == {
+            "trusted": [],
+            "untrusted": [],
+        }
+
+    def test_edit_leaves_the_manager_holding_the_file_as_written(
+        self, tmp_path: Path
+    ) -> None:
+        TrustedFoldersManager().add_trusted(tmp_path / "a")
+        editor = TrustedFoldersManager.read_file()
+        TrustedFoldersManager().add_untrusted(tmp_path / "b")
+
+        editor.edit(str((tmp_path / "a").resolve()), None)
+
+        assert editor.persisted_decisions() == {
+            "trusted": [],
+            "untrusted": [str((tmp_path / "b").resolve())],
+        }
+
+    def test_a_later_write_keeps_what_another_manager_wrote(
+        self, tmp_path: Path
+    ) -> None:
+        """A long-lived manager answering the trust prompt never undoes an edit."""
+        stale = TrustedFoldersManager()
+        editor = TrustedFoldersManager.read_file()
+        editor.trust(tmp_path / "x")
+        editor.edit(str((tmp_path / "x").resolve()), False)
+
+        stale.add_trusted(tmp_path / "y")
+
+        assert TrustedFoldersManager().persisted_decisions() == {
+            "trusted": [str((tmp_path / "y").resolve())],
+            "untrusted": [str((tmp_path / "x").resolve())],
+        }
+
+    def test_edit_raises_when_the_file_cannot_be_written(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager.read_file()
+
+        with (
+            patch("vibe.core.trusted_folders.os.replace", side_effect=OSError("ro")),
+            pytest.raises(OSError, match="ro"),
+        ):
+            manager.trust(tmp_path)
+
+        assert TrustedFoldersManager().persisted_decisions()["trusted"] == []
+        assert _leftover_temp_files() == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")
+    def test_a_symlinked_trust_file_is_written_through_its_link(
+        self, tmp_path: Path
+    ) -> None:
+        target = tmp_path / "dotfiles" / "trusted_folders.toml"
+        target.parent.mkdir()
+        target.write_text("trusted = []\n", encoding="utf-8")
+        TRUSTED_FOLDERS_FILE.path.unlink(missing_ok=True)
+        TRUSTED_FOLDERS_FILE.path.symlink_to(target)
+
+        TrustedFoldersManager.read_file().trust(tmp_path)
+
+        assert TRUSTED_FOLDERS_FILE.path.is_symlink()
+        assert str(tmp_path.resolve()) in target.read_text(encoding="utf-8")
+
+    def test_read_file_shares_nothing_with_existing_managers(
+        self, tmp_path: Path
+    ) -> None:
+        session = TrustedFoldersManager().for_session()
+        TrustedFoldersManager().add_trusted(tmp_path / "a")
+
+        edited = TrustedFoldersManager.read_file()
+        edited.add_untrusted(tmp_path / "b")
+
+        assert edited.is_trusted(tmp_path / "a") is True
+        assert session.is_trusted(tmp_path / "a") is None
+        assert session.is_trusted(tmp_path / "b") is None
+
+    def test_read_file_raises_on_an_unreadable_file_and_keeps_it(self) -> None:
+        TRUSTED_FOLDERS_FILE.path.write_text("trusted = [", encoding="utf-8")
+
+        with pytest.raises(TrustFileError):
+            TrustedFoldersManager.read_file()
+
+        assert TRUSTED_FOLDERS_FILE.path.read_text(encoding="utf-8") == "trusted = ["
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"trusted = [", b"\xff\xfe not utf-8", b'trusted = "abc"', b"untrusted = [1]"],
+    )
+    def test_read_file_refuses_a_file_vibe_did_not_write(self, content: bytes) -> None:
+        TRUSTED_FOLDERS_FILE.path.write_bytes(content)
+
+        with pytest.raises(TrustFileError):
+            TrustedFoldersManager.read_file()
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"trusted = [", b"\xff\xfe not utf-8", b'trusted = "abc"', b"untrusted = [1]"],
+    )
+    def test_a_stale_manager_never_overwrites_an_unreadable_file(
+        self, tmp_path: Path, content: bytes
+    ) -> None:
+        """The trust prompt keeps its answer in memory rather than clobber the file."""
+        stale = TrustedFoldersManager()
+        stale.add_trusted(tmp_path / "a")
+        TRUSTED_FOLDERS_FILE.path.write_bytes(content)
+
+        stale.add_untrusted(tmp_path / "d")
+
+        assert TRUSTED_FOLDERS_FILE.path.read_bytes() == content
+        assert stale.is_trusted(tmp_path / "d") is False
+
+    @pytest.mark.skipif(
+        os.name == "nt" or os.geteuid() == 0, reason="POSIX file modes, not as root"
+    )
+    def test_a_lock_this_user_cannot_open_still_lets_it_read(
+        self, tmp_path: Path
+    ) -> None:
+        """A lock left by a `sudo vibe` run must not hide the stored decisions."""
+        TrustedFoldersManager().add_trusted(tmp_path)
+        lock = TRUSTED_FOLDERS_FILE.path.resolve().with_name(
+            ".trusted_folders.toml.lock"
+        )
+        lock.chmod(0o444)
+        try:
+            at_startup = TrustedFoldersManager()
+            for_editing = TrustedFoldersManager.read_file()
+        finally:
+            lock.chmod(0o600)
+
+        assert at_startup.is_trusted(tmp_path) is True
+        assert for_editing.is_trusted(tmp_path) is True
+
+    def test_a_lock_on_a_read_only_disk_still_lets_it_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        TrustedFoldersManager().add_trusted(tmp_path)
+
+        def read_only_disk(*_args: object, **_kwargs: object) -> None:
+            raise OSError(errno.EROFS, "Read-only file system")
+
+        monkeypatch.setattr("vibe.core.trusted_folders._locked", read_only_disk)
+
+        assert TrustedFoldersManager().is_trusted(tmp_path) is True
+        assert TrustedFoldersManager.read_file().is_trusted(tmp_path) is True
+
+    def test_a_missing_file_is_not_created_without_the_lock(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        TRUSTED_FOLDERS_FILE.path.unlink(missing_ok=True)
+
+        def read_only_disk(*_args: object, **_kwargs: object) -> None:
+            raise OSError(errno.EROFS, "Read-only file system")
+
+        monkeypatch.setattr("vibe.core.trusted_folders._locked", read_only_disk)
+
+        assert TrustedFoldersManager().persisted_decisions()["trusted"] == []
+        assert not TRUSTED_FOLDERS_FILE.path.exists()
+
+    def test_startup_reads_past_a_lock_held_too_long(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        TrustedFoldersManager().add_trusted(tmp_path)
+        monkeypatch.setattr("vibe.core.trusted_folders._LOCK_WAIT_SECONDS", 0.05)
+        lock = TRUSTED_FOLDERS_FILE.path.resolve().with_name(
+            ".trusted_folders.toml.lock"
+        )
+
+        with lock.open("a+b") as handle:
+            acquire_file_lock(handle, blocking=True)
+            try:
+                at_startup = TrustedFoldersManager()
+                for_editing = TrustedFoldersManager.read_file()
+            finally:
+                release_file_lock(handle)
+
+        assert at_startup.is_trusted(tmp_path) is True
+        assert for_editing.is_trusted(tmp_path) is True
+
+    def test_startup_with_no_file_waits_for_a_held_lock_once(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        TRUSTED_FOLDERS_FILE.path.unlink(missing_ok=True)
+        monkeypatch.setattr("vibe.core.trusted_folders._LOCK_WAIT_SECONDS", 0.3)
+        lock = TRUSTED_FOLDERS_FILE.path.resolve().with_name(
+            ".trusted_folders.toml.lock"
+        )
+
+        with lock.open("a+b") as handle:
+            acquire_file_lock(handle, blocking=True)
+            try:
+                started = time.monotonic()
+                TrustedFoldersManager()
+                waited = time.monotonic() - started
+            finally:
+                release_file_lock(handle)
+
+        assert waited < 0.5, "one wait for the lock, not one to create and one to read"
+        assert not TRUSTED_FOLDERS_FILE.path.exists()
+
+    def test_a_lock_held_too_long_is_a_clear_error(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("vibe.core.trusted_folders._LOCK_WAIT_SECONDS", 0.05)
+        lock = TRUSTED_FOLDERS_FILE.path.resolve().with_name(
+            ".trusted_folders.toml.lock"
+        )
+        manager = TrustedFoldersManager.read_file()
+
+        with lock.open("a+b") as handle:
+            acquire_file_lock(handle, blocking=True)
+            try:
+                with pytest.raises(BlockingIOError, match="locked by another Vibe"):
+                    manager.trust(tmp_path)
+            finally:
+                release_file_lock(handle)
+
+    def test_writes_wait_for_the_trust_file_lock(self, tmp_path: Path) -> None:
+        lock = TRUSTED_FOLDERS_FILE.path.resolve().with_name(
+            ".trusted_folders.toml.lock"
+        )
+        manager = TrustedFoldersManager.read_file()
+        started = threading.Event()
+
+        def edit() -> None:
+            started.set()
+            manager.trust(tmp_path)
+
+        with lock.open("a+b") as handle:
+            acquire_file_lock(handle, blocking=True)
+            writer = threading.Thread(target=edit)
+            writer.start()
+            started.wait()
+            writer.join(timeout=0.2)
+            assert writer.is_alive(), "the edit must wait for the lock"
+            assert not TRUSTED_FOLDERS_FILE.path.exists()
+            release_file_lock(handle)
+        writer.join(timeout=5)
+
+        assert TrustedFoldersManager().persisted_decisions()["trusted"] == [
+            str(tmp_path.resolve())
+        ]
+
+    def test_save_replaces_the_file_in_one_step(self, tmp_path: Path) -> None:
+        manager = TrustedFoldersManager()
+        manager.add_trusted(tmp_path)
+
+        assert _leftover_temp_files() == []
+        assert TrustedFoldersManager().is_trusted(tmp_path) is True
 
 
 class TestSessionTrustScopes:

@@ -92,7 +92,7 @@ pub(super) fn replace_group(app: &mut App, client: &Arc<Client>, server_message_
             }
             Err(error) => {
                 tracing::warn!(%error, "queued prompt preparation failed");
-                (Vec::new(), ReplacementOutcome::Failed)
+                (Vec::new(), ReplacementOutcome::Failed(Some(error)))
             }
         };
         let delivered = members
@@ -115,7 +115,7 @@ async fn replace_request(
     params: TurnQueueReplaceParams,
 ) -> ReplacementOutcome {
     let Ok(value) = serde_json::to_value(params) else {
-        return ReplacementOutcome::Failed;
+        return ReplacementOutcome::Failed(None);
     };
     match client.request(method::TURN_QUEUE_REPLACE, value).await {
         Ok(_) => ReplacementOutcome::Replaced,
@@ -128,7 +128,7 @@ async fn replace_request(
         }
         Err(error) => {
             tracing::warn!(%error, method = method::TURN_QUEUE_REPLACE, "queue command failed");
-            ReplacementOutcome::Failed
+            ReplacementOutcome::Failed(None)
         }
     }
 }

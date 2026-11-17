@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use crate::app::App;
 use crate::model_picker::UNPINNED_ACTIVE_MODEL;
 use crate::telemetry::{self, bmap, event};
+use crate::thinking_picker::ModelPick;
 
 /// The picker an `opened` event names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,9 +39,10 @@ pub fn opened(app: &App, picker: Picker) {
 /// chain sends only when it differs from the preselected one.
 pub fn picks(
     app: &App,
-    model_alias: Option<&str>,
+    pick: Option<&ModelPick>,
     level: Option<&str>,
 ) -> Vec<BTreeMap<String, Value>> {
+    let model_alias = pick.map(|pick| pick.alias.as_str());
     let picker = &app.model_picker;
     let active = event_model(match picker.is_pinned {
         true => &picker.current_model,
@@ -49,13 +51,14 @@ pub fn picks(
     let preselected = app.thinking_picker.current_level.as_str();
     let model = model_alias.map_or_else(|| active.clone(), event_model);
     let mut selections = Vec::new();
-    if model_alias.is_some() {
+    if let Some(pick) = pick {
         selections.push(with_base(json!({
             "selection_type": "model",
             "model": model,
             "previous_model": active,
             "default_model": picker.default_alias,
             "is_default_model": model == event_model("") || model == picker.default_alias,
+            "has_search_query": pick.searched,
         })));
     }
     if let Some(level) = level.filter(|level| model_alias.is_none() || *level != preselected) {

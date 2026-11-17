@@ -366,6 +366,9 @@ class LocalRuntimeAdapterConfig:
     # Reasoning effort passed to reasoning-capable providers: "off" or a level.
     thinking: ThinkingLevel = "off"
     active_model: LocalModelRoute = field(default_factory=LocalModelRoute)
+    # The name the user knows the active model by (its alias in the embedder's
+    # config), reported to pre_llm hooks; None when the embedder has none.
+    active_model_alias: str | None = None
     # The agent configuration this session runs: recorded in the transcript when it
     # changes, and matched by post_agent hooks. None disables the transcript record.
     active_agent: str | None = None
@@ -424,6 +427,12 @@ class LocalRuntimeAdapterConfig:
     # call is a long silence that a short limit cannot tell apart from a stall.
     stream_idle_timeout_s: float | None = STREAM_IDLE_SECONDS
     retry_max_elapsed_time_s: float = 300.0
+    # How long, in seconds the computer is awake, a model call waits for a
+    # provider credential the Host could not check yet (``ProviderAuthRequired``
+    # with reason ``unavailable``) before the turn fails. Separate from
+    # ``retry_max_elapsed_time_s``: no request has been sent yet. The last 5 s
+    # are left for the last check, so a budget of 5 s or less fails at once.
+    credential_wait_s: float = 120.0
     # Verify provider certificates with the operating system's trust store (the
     # macOS Keychain, for example) instead of OpenSSL's default roots plus
     # Certifi. That store also skips the strict chain checks of Python's
@@ -487,6 +496,8 @@ class LocalRuntimeAdapterConfig:
             and self.compaction_reasoning_limit_tokens < 1
         ):
             raise ValueError("compaction_reasoning_limit_tokens must be positive")
+        if self.credential_wait_s < 0:
+            raise ValueError("credential_wait_s must not be negative")
         if self.subagent_max_children is not None and self.subagent_max_children < 1:
             raise ValueError("subagent_max_children must be positive")
         if (
@@ -646,6 +657,7 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "temperature",
     "thinking",
     "active_model",
+    "active_model_alias",
     "active_agent",
     "compaction_model",
     "title_model",
@@ -665,6 +677,7 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "timeout_s",
     "stream_idle_timeout_s",
     "retry_max_elapsed_time_s",
+    "credential_wait_s",
     "enable_system_trust_store",
     "env",
     "command_environment",

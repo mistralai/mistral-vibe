@@ -103,3 +103,51 @@ fn omits_the_source_line_when_none_is_in_use() {
     let adc = json!({"authKind": "google_adc"});
     assert!(!whoami_text(&AccountReads::default(), Some(&adc)).contains("Credential source"));
 }
+
+#[test]
+fn ends_with_the_plan_offer_after_the_credential_source() {
+    let view = auth(json!([{"kind": "os_keyring", "state": "in_use"}]));
+    let text = whoami_text(
+        &reads(json!({
+            "status": "ready",
+            "plan": {"kind": "api", "name": "FREE", "title": "Free"},
+            "planOffer": {"kind": "switch_api_key", "url": "https://example.test/key"},
+            "apiKey": {"preview": "****wxyz", "scope": "workspace", "accessScope": null},
+        })),
+        Some(&view),
+    );
+    assert!(
+        text.ends_with(
+            "- **Key scope**: workspace\n\
+             - **Credential source (MISTRAL\\_API\\_KEY)**: OS keyring\n\n\
+             You have Vibe Pro, but this API key does not use it.\n\n\
+             To use your plan, quit and run `vibe --setup`, then choose **Launch browser** \
+             and sign in. Or copy your [Vibe Pro API key](https://example.test/key), \
+             choose **Use an API key** and paste it."
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn omits_the_plan_offer_without_a_switch_offer() {
+    let text = whoami_text(&reads(json!({"status": "ready", "planOffer": null})), None);
+    assert!(!text.contains("Vibe Pro"), "{text}");
+    let upgrade = json!({"status": "ready", "planOffer": {"kind": "upgrade_to_pro", "url": "u"}});
+    let text = whoami_text(&reads(upgrade), None);
+    assert!(!text.contains("Vibe Pro"), "{text}");
+}
+
+#[test]
+fn shows_the_switch_offer_without_an_identity() {
+    let reads = AccountReads {
+        identity: serde_json::Value::Null,
+        account: json!({"planOffer": {"kind": "switch_api_key", "url": "u"}}),
+    };
+    let text = whoami_text(&reads, None);
+    assert!(text.starts_with("## Who am I\n\nNo Mistral account information is available."));
+    assert!(
+        text.ends_with("choose **Use an API key** and paste it."),
+        "{text}"
+    );
+}

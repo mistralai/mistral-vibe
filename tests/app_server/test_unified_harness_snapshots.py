@@ -18,6 +18,7 @@ from vibe.app_server._effect_models import (
     FileWriteEffectOutput,
 )
 from vibe.app_server._unified_harness_snapshots import RewindFileSnapshots
+from vibe.app_server._unified_tool_projection import project_unified_history_entry
 from vibe.app_server.models import (
     BlockedSessionStatus,
     CompletedEffectState,
@@ -30,6 +31,7 @@ from vibe.app_server.models import (
     PublicSessionState,
     RunningSessionStatus,
     TextContentBlock,
+    validate_history_entry,
 )
 from vibe.core.checkpoints import FileState, FileStore
 from vibe.utils.tool_presentation import EffectCallDisplay, EffectResultDisplay
@@ -1159,3 +1161,645 @@ def test_review_reconstructs_a_turn_after_disk_has_overtaken_effect_delivery(
     assert len(review.review_state().files[0].regions) == 2
     review.revert_review(AllTarget())
     assert path.read_text() == original
+
+
+class TestTargetRuntimeResults:
+    """Restores from the target runtime's file tool results.
+
+    The target runtime carries a file's replaced text in its own annotation,
+    ``mistralai.vibe.harness.file_previous_content``. Each turn here is first
+    observed mid-flight, after the tool already wrote, so that carried text is
+    the only exact pre-state the recorder gets.
+    """
+
+    _PREVIEW_KEY = "mistralai.vibe.harness.file_diff_preview_blocks"
+    _PREVIOUS_KEY = "mistralai.vibe.harness.file_previous_content"
+    _TRUNCATED = "edit preview truncated because the diff exceeds preview limits"
+
+    @staticmethod
+    def _projected(
+        tool_name: str,
+        arguments: dict[str, Any],
+        structured_content: dict[str, Any],
+        annotations: dict[str, Any],
+    ) -> PublicEffectEntry:
+        raw: dict[str, Any] = {
+            "type": "effect",
+            "id": f"effect-{tool_name}",
+            "sessionId": "session-1",
+            "turnId": "t1",
+            "createdAt": _NOW,
+            "updatedAt": _NOW,
+            "generationStatus": "completed",
+            "title": tool_name,
+            "detail": {
+                "kind": "tool",
+                "toolName": tool_name,
+                "input": arguments,
+                "display": {"summary": tool_name, "statusText": tool_name},
+            },
+            "state": {
+                "status": "completed",
+                "output": {
+                    "structured_content": structured_content,
+                    **({"_meta": annotations} if annotations else {}),
+                },
+                "display": {"success": True, "message": tool_name},
+            },
+        }
+        entry = project_unified_history_entry(validate_history_entry(raw))
+        assert isinstance(entry, PublicEffectEntry)
+        return entry
+
+    @staticmethod
+    def _joined_mid_turn(
+        tmp_path: Path, effect: PublicEffectEntry
+    ) -> RewindFileSnapshots:
+        recorder = RewindFileSnapshots(cwd=lambda: str(tmp_path))
+        recorder.observe(_state("t1", [effect]))
+        recorder.observe(_state(None))
+        return recorder
+
+    def test_an_overwrite_restores_the_replaced_text(self, tmp_path: Path) -> None:
+        """*Prepare*: A CRLF file the target runtime already overwrote.
+        *Do*: Observe its write result, then rewind the turn.
+        *Assert*: The file gets its exact replaced bytes back.
+        """
+        # Prepare
+        target = tmp_path / "config.yaml"
+        original = b"name: demo\r\nreplicas: 2\r\n"
+        target.write_bytes(b"name: demo\r\nreplicas: 5\r\n")
+        effect = self._projected(
+            "file_system.write_file",
+            {"path": str(target), "content": "name: demo\nreplicas: 5\n"},
+            {"path": str(target), "bytes_written": 25, "file_existed": True},
+            {self._PREVIOUS_KEY: original.decode("utf-8")},
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert target.read_bytes() == original
+
+    def test_a_deletion_edit_restores_the_replaced_text(self, tmp_path: Path) -> None:
+        """*Prepare*: A file the target runtime already edited by deleting a
+        line, which the hunk reversal cannot undo.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: The file gets its pre-edit text back.
+        """
+        # Prepare
+        target = tmp_path / "alpha.txt"
+        original = "one\ntwo\nthree\n"
+        target.write_text("one\nthree\n", encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {"file_path": str(target), "old_string": "two\n", "new_string": ""},
+            {"file": str(target), "lines_changed": 1, "warnings": []},
+            {
+                self._PREVIEW_KEY: [
+                    {
+                        "old_start_line": 2,
+                        "new_start_line": 2,
+                        "old_lines": ["two\n"],
+                        "new_lines": [],
+                    }
+                ],
+                self._PREVIOUS_KEY: original,
+            },
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert _text(target) == original
+
+    def test_a_truncated_edit_without_blocks_restores_the_replaced_text(
+        self, tmp_path: Path
+    ) -> None:
+        """*Prepare*: A file the target runtime already edited, whose diff
+        preview went past its limits and kept no block.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: The file gets its pre-edit text back.
+        """
+        # Prepare
+        target = tmp_path / "app.py"
+        original = "a = foo\nb = foo\nc = foo\n"
+        target.write_text("a = bar\nb = bar\nc = bar\n", encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": "foo",
+                "new_string": "bar",
+                "replace_all": True,
+            },
+            {"file": str(target), "lines_changed": 3, "warnings": [self._TRUNCATED]},
+            {self._PREVIOUS_KEY: original},
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert _text(target) == original
+
+    def test_a_truncated_edit_without_replaced_text_is_not_half_undone(
+        self, tmp_path: Path
+    ) -> None:
+        """*Prepare*: A file over the replaced-text limit that the target
+        runtime already edited, whose preview kept two of its three blocks.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: The rewind does not undo the two blocks alone: the file keeps
+        the edit rather than turning into a mix of both versions.
+        """
+        # Prepare
+        target = tmp_path / "app.py"
+        edited = "a = bar\nb = bar\nc = bar\n"
+        target.write_text(edited, encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": "foo",
+                "new_string": "bar",
+                "replace_all": True,
+            },
+            {"file": str(target), "lines_changed": 3, "warnings": [self._TRUNCATED]},
+            {
+                self._PREVIEW_KEY: [
+                    {
+                        "old_start_line": line,
+                        "new_start_line": line,
+                        "old_lines": [f"{name} = foo\n"],
+                        "new_lines": [f"{name} = bar\n"],
+                    }
+                    for line, name in ((1, "a"), (2, "b"))
+                ]
+            },
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert _text(target) == edited
+
+    def test_a_truncated_edit_without_annotations_is_a_file_edit_left_as_is(
+        self, tmp_path: Path
+    ) -> None:
+        """*Prepare*: A file over the replaced-text limit that the target
+        runtime already edited, whose preview kept no block: its result has no
+        annotations at all.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: The edit shows as a file edit, and the rewind leaves the file
+        as edited rather than guessing.
+        """
+        # Prepare
+        target = tmp_path / "big.txt"
+        edited = "F\n" * 3
+        target.write_text(edited, encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": "filler\n",
+                "new_string": "F\n",
+                "replace_all": True,
+            },
+            {"file": str(target), "lines_changed": 3, "warnings": [self._TRUNCATED]},
+            {},
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert isinstance(effect.detail, FileEditEffectDetail)
+        assert _text(target) == edited
+
+    def test_insertions_without_replaced_text_undo_by_their_blocks(
+        self, tmp_path: Path
+    ) -> None:
+        """*Prepare*: A file the target runtime already edited by inserting
+        lines at two places, with blocks as the runtime builds them and no
+        replaced text.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: Undoing the blocks gives the pre-edit file back.
+        """
+        # Prepare
+        target = tmp_path / "f.txt"
+        original = "x\na\nc\na\nd\n"
+        target.write_text("x\na\nb\nb2\nc\na\nb\nb2\nd\n", encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": "a\n",
+                "new_string": "a\nb\nb2\n",
+                "replace_all": True,
+            },
+            {"file": str(target), "lines_changed": 4, "warnings": []},
+            {
+                self._PREVIEW_KEY: [
+                    {
+                        "old_start_line": old,
+                        "new_start_line": new,
+                        "old_lines": [],
+                        "new_lines": ["b\n", "b2\n"],
+                    }
+                    for old, new in ((2, 3), (4, 7))
+                ]
+            },
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert _text(target) == original
+
+    def test_removals_without_replaced_text_undo_by_their_blocks(
+        self, tmp_path: Path
+    ) -> None:
+        """*Prepare*: A file the target runtime already edited by removing a
+        line at two places, before a line the call kept, with blocks as the
+        runtime builds them and no replaced text.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: Undoing the blocks, with the line the call kept as context,
+        gives the pre-edit file back.
+        """
+        # Prepare
+        target = tmp_path / "f.txt"
+        original = "x\nk\ny\nx\nk\nz\n"
+        target.write_text("k\ny\nk\nz\n", encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": "x\nk\n",
+                "new_string": "k\n",
+                "replace_all": True,
+            },
+            {"file": str(target), "lines_changed": 2, "warnings": []},
+            {
+                self._PREVIEW_KEY: [
+                    {
+                        "old_start_line": old,
+                        "new_start_line": new,
+                        "old_lines": ["x\n"],
+                        "new_lines": [],
+                    }
+                    for old, new in ((1, 1), (4, 2))
+                ]
+            },
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert _text(target) == original
+
+    @pytest.mark.parametrize(
+        ("original", "old_string", "new_string", "blocks", "restored"),
+        [
+            pytest.param(
+                "x = 1\n    y = 2\n\ndef g():\n    x = 1\n    y = 2\n",
+                "x = 1\n    y = 2\n",
+                "x = 1\n    z = 3\n    y = 2\n",
+                [(1, 2, [], ["    z = 3\n"]), (5, 7, [], ["    z = 3\n"])],
+                True,
+                id="insertion-after-a-first-line-matched-mid-line",
+            ),
+            pytest.param(
+                "foo\nbar\nfoo()\n",
+                "foo",
+                "N\nfoo",
+                [(1, 1, [], ["N\n"]), (2, 4, [], ["N\n"])],
+                True,
+                id="insertion-before-a-last-line-matched-without-its-end",
+            ),
+            pytest.param(
+                "x = 1\nD\ny\n    x = 1\nD\ny\n",
+                "x = 1\nD\ny\n",
+                "x = 1\ny\n",
+                [(2, 1, ["D\n"], []), (5, 3, ["D\n"], [])],
+                False,
+                id="removal-after-a-first-line-matched-mid-line",
+            ),
+            pytest.param(
+                "a\nfoo\nz\na\nfoobar\n",
+                "a\nfoo",
+                "foo",
+                [(1, 1, ["a\n"], []), (4, 2, ["a\n"], [])],
+                False,
+                id="removal-before-a-last-line-matched-without-its-end",
+            ),
+        ],
+    )
+    def test_a_replace_all_matching_part_of_a_line_is_not_half_undone(
+        self,
+        tmp_path: Path,
+        original: str,
+        old_string: str,
+        new_string: str,
+        blocks: list[tuple[int, int, list[str], list[str]]],
+        restored: bool,
+    ) -> None:
+        """*Prepare*: A file over the replaced-text limit that the target
+        runtime already edited with a replace_all whose matched text starts or
+        ends mid-line at one site and on a line boundary at the other. The
+        blocks are the runtime's own, and no replaced text is carried.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: The call's partial line is not taken as the blocks' context
+        line, so the rewind treats every site alike: insertions are all undone,
+        and removals, which have nothing to check their place against, are all
+        left as they are, never one undone and not the other.
+        """
+        # Prepare
+        target = tmp_path / "f.txt"
+        edited = original.replace(old_string, new_string)
+        target.write_text(edited, encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": old_string,
+                "new_string": new_string,
+                "replace_all": True,
+            },
+            {"file": str(target), "lines_changed": len(blocks), "warnings": []},
+            {
+                self._PREVIEW_KEY: [
+                    {
+                        "old_start_line": old,
+                        "new_start_line": new,
+                        "old_lines": old_lines,
+                        "new_lines": new_lines,
+                    }
+                    for old, new, old_lines, new_lines in blocks
+                ]
+            },
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert _text(target) == (original if restored else edited)
+
+    @pytest.mark.parametrize(
+        ("original", "old_string", "new_string", "blocks"),
+        [
+            pytest.param(
+                "class A:\n    pass\n\nclass B:\n    pass\nclass C:\n    pass\n",
+                "    pass\n",
+                "    pass\n\n",
+                [(3, 4, "\n"), (5, 7, "\n"), (7, 10, "\n")],
+                id="blank-line-after-each-body",
+            ),
+            pytest.param(
+                "fn a() {\n}\n\nfn b() {\n}\nfn c() {\n}\n\nend\n",
+                "}\n",
+                "}\n\n",
+                [(3, 4, "\n"), (5, 7, "\n"), (8, 11, "\n")],
+                id="blank-line-after-each-brace",
+            ),
+            pytest.param(
+                "import os\nimport sys\nx = 1\nimport os\ny = 2\n",
+                "import os\n",
+                "import os\nimport sys\n",
+                [(2, 3, "import sys\n"), (4, 6, "import sys\n")],
+                id="line-equal-to-the-next-one",
+            ),
+        ],
+    )
+    def test_insertions_the_runtime_moved_past_equal_lines_rewind_exactly(
+        self,
+        tmp_path: Path,
+        original: str,
+        old_string: str,
+        new_string: str,
+        blocks: list[tuple[int, int, str]],
+    ) -> None:
+        """*Prepare*: A file over the replaced-text limit that the target
+        runtime already edited with a replace_all inserting a line after each
+        match. One match is already followed by an equal line, so the runtime
+        puts that insertion one line lower than the call tells. The blocks are
+        the runtime's own, and no replaced text is carried.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: Every insertion is undone where it is: the file gets its
+        pre-edit text back, not a mix of both versions.
+        """
+        # Prepare
+        target = tmp_path / "f.txt"
+        edited = original.replace(old_string, new_string)
+        target.write_text(edited, encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": old_string,
+                "new_string": new_string,
+                "replace_all": True,
+            },
+            {"file": str(target), "lines_changed": len(blocks), "warnings": []},
+            {
+                self._PREVIEW_KEY: [
+                    {
+                        "old_start_line": old,
+                        "new_start_line": new,
+                        "old_lines": [],
+                        "new_lines": [line],
+                    }
+                    for old, new, line in blocks
+                ]
+            },
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert _text(target) == original
+
+    def test_removals_the_runtime_moved_past_equal_lines_are_not_half_undone(
+        self, tmp_path: Path
+    ) -> None:
+        """*Prepare*: A file over the replaced-text limit that the target
+        runtime already edited with a replace_all removing the line after each
+        match. At one match that line equals the next one, so the runtime
+        removes the next one instead. The blocks are the runtime's own, and no
+        replaced text is carried.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: The rewind does not undo one removal and not the other: the
+        file stays as edited.
+        """
+        # Prepare
+        target = tmp_path / "f.txt"
+        edited = "a\nb\nx\na\ny\n"
+        target.write_text(edited, encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": "a\nb\n",
+                "new_string": "a\n",
+                "replace_all": True,
+            },
+            {"file": str(target), "lines_changed": 2, "warnings": []},
+            {
+                self._PREVIEW_KEY: [
+                    {
+                        "old_start_line": old,
+                        "new_start_line": new,
+                        "old_lines": ["b\n"],
+                        "new_lines": [],
+                    }
+                    for old, new in ((3, 2), (6, 4))
+                ]
+            },
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert _text(target) == edited
+
+    def test_removals_the_runtime_merged_with_a_kept_line_are_not_half_undone(
+        self, tmp_path: Path
+    ) -> None:
+        """*Prepare*: A file over the replaced-text limit that the target
+        runtime already edited with a replace_all removing a whole line. Two
+        matches one line apart come as one block that keeps a line, the other
+        as a block that only removes. The blocks are the runtime's own, and no
+        replaced text is carried.
+        *Do*: Project and observe its edit result, then rewind the turn.
+        *Assert*: The edit shows the call's strings, and the rewind leaves the
+        file as edited rather than bringing back some of the lines.
+        """
+        # Prepare
+        target = tmp_path / "f.py"
+        line = "    breakpoint()\n"
+        edited = "def f():\n    return 1\n\ndef g():\n    x = 2\n    return x\n"
+        target.write_text(edited, encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": line,
+                "new_string": "",
+                "replace_all": True,
+            },
+            {"file": str(target), "lines_changed": 3, "warnings": []},
+            {
+                self._PREVIEW_KEY: [
+                    {
+                        "old_start_line": 2,
+                        "new_start_line": 1,
+                        "old_lines": [line],
+                        "new_lines": [],
+                    },
+                    {
+                        "old_start_line": 6,
+                        "new_start_line": 5,
+                        "old_lines": [line, "    x = 2\n", line],
+                        "new_lines": ["    x = 2\n"],
+                    },
+                ]
+            },
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert isinstance(effect.state, CompletedEffectState)
+        output = FileEditEffectOutput.model_validate(effect.state.output)
+        assert (output.old_string, output.new_string, output.occurrences) == (
+            line,
+            "",
+            [],
+        )
+        assert _text(target) == edited
+
+    def test_a_removal_before_a_kept_line_undoes_at_that_line(
+        self, tmp_path: Path
+    ) -> None:
+        """*Prepare*: A file the target runtime already edited by removing a
+        line whose call kept the line after it, equal to the line before it,
+        with no replaced text.
+        *Do*: Observe its edit result, then rewind the turn.
+        *Assert*: The undo anchors on the kept line, not on the equal line
+        before the removal, and gives the pre-edit file back.
+        """
+        # Prepare
+        target = tmp_path / "f.py"
+        original = "x = 1\n\n# removed note\n\ny = 2\n"
+        target.write_text("x = 1\n\n\ny = 2\n", encoding="utf-8")
+        effect = self._projected(
+            "file_system.edit",
+            {
+                "file_path": str(target),
+                "old_string": "# removed note\n\n",
+                "new_string": "\n",
+            },
+            {"file": str(target), "lines_changed": 2, "warnings": []},
+            {
+                self._PREVIEW_KEY: [
+                    {
+                        "old_start_line": 3,
+                        "new_start_line": 2,
+                        "old_lines": ["# removed note\n"],
+                        "new_lines": [],
+                    }
+                ]
+            },
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+        recorder.restore(_anchor("t1"))
+
+        # Assert
+        assert _text(target) == original
+
+    def test_an_overwrite_without_replaced_text_restores_nothing(
+        self, tmp_path: Path
+    ) -> None:
+        """*Prepare*: A binary file the target runtime overwrote: its result
+        carries no replaced text.
+        *Do*: Observe its write result, then rewind the turn.
+        *Assert*: Nothing is restorable and the file stays as written.
+        """
+        # Prepare
+        target = tmp_path / "blob.bin"
+        target.write_text("hello", encoding="utf-8")
+        effect = self._projected(
+            "file_system.write_file",
+            {"path": str(target), "content": "hello"},
+            {"path": str(target), "bytes_written": 5, "file_existed": True},
+            {},
+        )
+
+        # Do
+        recorder = self._joined_mid_turn(tmp_path, effect)
+
+        # Assert
+        assert recorder.restorable_paths(_anchor("t1")) == []
+        assert recorder.restore(_anchor("t1")) == ([], [])
+        assert _text(target) == "hello"

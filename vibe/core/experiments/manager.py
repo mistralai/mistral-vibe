@@ -80,8 +80,8 @@ class ExperimentManager:
         logger.info(
             "Experiment variants %s (resolved=%s, applied=%s, in_experiment=%s)",
             source,
-            resolved,
-            self.config_variants(),
+            resolve.loggable_variants(resolved),
+            resolve.loggable_variants(self.config_variants()),
             self.assignments(),
         )
 

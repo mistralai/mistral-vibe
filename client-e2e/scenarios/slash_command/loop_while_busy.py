@@ -1,4 +1,4 @@
-"""Every loop form joins the ordinary prompt queue while a turn is running."""
+"""Every loop form with arguments joins the ordinary prompt queue while a turn is running."""
 
 from __future__ import annotations
 
@@ -20,14 +20,12 @@ timeline: Timeline = [
     user_msg("first"),
     assistant_msg("Working on it."),
     {"release": 4},
-    "/loop\r",
     "/loop list\r",
     "/loop cancel\r",
     "/loop 90s check build status\r",
 ]
 screen_contains = (
     "Queued",
-    "/loop",
     "/loop list",
     "/loop cancel",
     "/loop 90s check build status",

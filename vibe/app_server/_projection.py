@@ -9,6 +9,7 @@ from vibe.app_server.config import (
     AudioProviderView,
     ConfigView,
     ModelConfigView,
+    ModelRequirementView,
     ModelSource,
     SpeechConfigView,
     TranscribeModelConfigView,
@@ -33,6 +34,7 @@ from vibe.core.config import (
     TTSProviderConfig,
     VibeConfigSchema,
 )
+from vibe.core.config._self_hosted import crash_reports_allowed
 from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.layers.agent_profile import AgentProfileLayer
 from vibe.core.config.layers.default import DefaultConfigLayer
@@ -44,7 +46,7 @@ from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.log_reader import PaginatedLogs
-from vibe.core.skills.models import InstalledSkill, SkillInfo, SkillSource
+from vibe.core.skills.models import InstalledSkill, SkillInfo, SkillScope, SkillSource
 
 
 class _RouteFacts(NamedTuple):
@@ -114,7 +116,7 @@ def project_config_view(
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
         cursor_blink=config.cursor_blink,
         vim_keybindings=config.vim_keybindings,
-        show_greeting=config.show_greeting,
+        show_dangerous_directory_warning=config.show_dangerous_directory_warning,
         autocopy_to_clipboard=config.autocopy_to_clipboard,
         enable_mouse_capture=config.enable_mouse_capture,
         enable_sticky_prompt=config.enable_sticky_prompt,
@@ -126,14 +128,16 @@ def project_config_view(
         show_thinking_nodes=config.show_thinking_nodes,
         show_subagent_status_list=config.show_subagent_status_list,
         worktree_limit=config.worktree_limit,
+        auto_worktree=config.auto_worktree,
         enable_update_checks=config.enable_update_checks,
         enable_notifications=config.enable_notifications,
         enable_system_trust_store=config.enable_system_trust_store,
         experimental_enable_tab_status=config.experimental_enable_tab_status,
-        enable_telemetry=config.enable_telemetry,
+        crash_reports_enabled=crash_reports_allowed(config),
         experimental_enable_registry_skills=config.experimental_enable_registry_skills,
         experimental_enable_local_projects=config.experimental_enable_local_projects,
         enable_pr_monitoring=config.enable_pr_monitoring,
+        experimental_enable_storage_usage=config.experimental_enable_storage_usage,
         models=[
             _project_model_config(
                 model,
@@ -249,6 +253,11 @@ def _project_model_config(
         image_delivery=image_delivery,
         thinking_levels=thinking_levels,
         source=source,
+        requires=(
+            None
+            if model.requires is None
+            else ModelRequirementView(kind=model.requires.kind)
+        ),
     )
 
 
@@ -362,7 +371,8 @@ def project_installed_skill_summaries(
     assumes a single layer.
 
     Plugin skills are locked: they come from an installed plugin and are managed
-    through ``/plugins``, not by this config.
+    through ``/plugins``, not by this config. So is a skill picked for the session:
+    a toggle would disable its name for every later session.
 
     ``active`` is whether the agent resolves the skill's name to it. A pin that
     another skill of the same name shadows is still listed, so it can be managed.
@@ -378,7 +388,11 @@ def project_installed_skill_summaries(
         return info.source is SkillSource.PLUGIN or toggles.enabled(info.name)
 
     def _locked(info: SkillInfo) -> bool:
-        return info.source is SkillSource.PLUGIN or toggles.locked(info.name)
+        return (
+            info.source is SkillSource.PLUGIN
+            or info.scope is SkillScope.SESSION
+            or toggles.locked(info.name)
+        )
 
     return [
         _skill_summary(

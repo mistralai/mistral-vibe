@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import sys
 import tomllib
 from typing import Any
 
@@ -178,19 +179,21 @@ def _record_opened_backends(
     request: pytest.FixtureRequest,
     monkeypatch: pytest.MonkeyPatch,
     session_api_path: bool,
-) -> Iterator[None]:
+) -> Iterator[list[Any]]:
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
     )
 
     monkeypatch.setenv(SESSION_API_SWITCH, "true" if session_api_path else "false")
-    _opened_backends.clear()
+    # A list of this test's own; ``wait_for_background_integrations`` reads it.
+    opened: list[Any] = []
+    monkeypatch.setattr(sys.modules[__name__], "_opened_backends", opened)
     initialize = UnifiedHarnessBackendAdapter.initialize_integrations
 
     async def recording(self: UnifiedHarnessBackendAdapter) -> None:
         # The switch decides the path: a mismatch means the test ran the wrong one.
         assert (self._api_path is not None) is session_api_path
-        _opened_backends.append(self)
+        opened.append(self)
         await initialize(self)
 
     monkeypatch.setattr(
@@ -204,7 +207,7 @@ def _record_opened_backends(
                 name,
                 _recording_command(getattr(UnifiedHarnessBackendAdapter, name), driven),
             )
-    yield
+    yield opened
     if driven:
         pytest.fail(
             f"{request.node.name} drives {', '.join(sorted(driven))}, whose path "
@@ -220,6 +223,12 @@ def _recording_command(
         return await command(*args, **kwargs)
 
     return recorded
+
+
+@pytest.fixture
+def opened_backends(_record_opened_backends: list[Any]) -> list[Any]:
+    """The adapters of the sessions this test opened, in order."""
+    return _record_opened_backends
 
 
 async def wait_for_background_integrations() -> None:

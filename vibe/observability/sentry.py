@@ -100,8 +100,21 @@ def _is_benign_oserror(exc: OSError) -> bool:
     # EIO on stdio when the terminal/pty is already gone.
     if exc.errno == errno.EIO and exc.filename is None:
         return True
-    # Environmental filesystem faults, not Vibe bugs: disk full / permission denied.
-    return exc.errno in {errno.ENOSPC, errno.EACCES}
+    # Environmental filesystem faults: disk full, permission denied, read-only mount.
+    if exc.errno in {errno.ENOSPC, errno.EACCES, errno.EROFS}:
+        return True
+    # The user deleted the directory Vibe runs in, so every cwd lookup fails.
+    return (
+        isinstance(exc, FileNotFoundError) and exc.filename is None and _cwd_is_gone()
+    )
+
+
+def _cwd_is_gone() -> bool:
+    try:
+        os.getcwd()
+    except FileNotFoundError:
+        return True
+    return False
 
 
 def _is_environmental(exc: BaseException) -> bool:

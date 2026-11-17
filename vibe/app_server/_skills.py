@@ -13,7 +13,7 @@ stays on this side of the seam, exactly as it does for plugins.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 import logging
 from pathlib import Path
@@ -23,7 +23,7 @@ from pydantic import ValidationError
 
 from vibe.app_server.models import ConfigIssue
 from vibe.core.skills.manager import ShadowedSkill, SkillManager
-from vibe.core.skills.models import InstalledSkill, SkillInfo
+from vibe.core.skills.models import InstalledSkill, ManifestEntry, SkillInfo
 from vibe.core.skills.registry import mark_versions_used
 from vibe.core.tools.builtins.skill import render_skill_result, sample_skill_files
 
@@ -74,6 +74,7 @@ def resolve_session_skills(
     *,
     harness_files: HarnessFilesManager,
     sandbox: SandboxSessionSkills | None = None,
+    session_pins: Sequence[ManifestEntry] = (),
 ) -> SkillManager:
     """With ``sandbox``, the project's own skills are those read in the sandbox, ranked
     where the host ranks its project's files.
@@ -82,6 +83,7 @@ def resolve_session_skills(
         config,
         harness_files=harness_files,
         project_skills=None if sandbox is None else sandbox.project_skills,
+        session_pins=session_pins,
     )
 
 
@@ -96,10 +98,11 @@ def installed_session_skills(
     *,
     harness_files: HarnessFilesManager,
     sandbox: SandboxSessionSkills | None = None,
+    session_pins: Sequence[ManifestEntry] = (),
 ) -> list[InstalledSkill]:
     """In a sandbox, an active one is listed in the version the session runs."""
     installed = resolve_session_skills(
-        config, harness_files=harness_files, sandbox=sandbox
+        config, harness_files=harness_files, sandbox=sandbox, session_pins=session_pins
     ).installed_skills()
     return installed if sandbox is None else sandbox.installed(installed)
 
@@ -117,12 +120,13 @@ def resolved_registry_versions(
     *,
     harness_files: HarnessFilesManager,
     sandbox: SandboxSessionSkills | None = None,
+    session_pins: Sequence[ManifestEntry] = (),
 ) -> RegistryVersions:
     """As derivations resolve them, before a sandbox keeps an older copy for a version
     it holds no copy of.
     """
     manager = resolve_session_skills(
-        config, harness_files=harness_files, sandbox=sandbox
+        config, harness_files=harness_files, sandbox=sandbox, session_pins=session_pins
     )
     return registry_versions_of(manager.available_skills.values())
 
@@ -135,6 +139,7 @@ def discover_session_skills(
     plugin_contexts: Iterable[RustPluginContextDefinition],
     skill_tool_available: bool,
     sandbox: SandboxSessionSkills | None = None,
+    session_pins: Sequence[ManifestEntry] = (),
 ) -> tuple[list[ConfigIssue], SkillProjection]:
     """Project the session's skills.
 
@@ -150,10 +155,12 @@ def discover_session_skills(
     so it never runs a version that is gone; a sandboxed session runs the
     copies in its sandbox.
     """
-    manager, root_skills = _root_skills(config, harness_files, sandbox)
+    manager, root_skills = _root_skills(config, harness_files, sandbox, session_pins)
     marked = mark_versions_used(registry_versions_of(root_skills.values()).values())
     if not marked and sandbox is None:
-        manager, root_skills = _root_skills(config, harness_files, sandbox)
+        manager, root_skills = _root_skills(
+            config, harness_files, sandbox, session_pins
+        )
         mark_versions_used(registry_versions_of(root_skills.values()).values())
     issues = [
         ConfigIssue(file=str(issue.file), message=issue.message)
@@ -191,12 +198,13 @@ def _root_skills(
     config: Callable[[], VibeConfigSchema],
     harness_files: HarnessFilesManager,
     sandbox: SandboxSessionSkills | None,
+    session_pins: Sequence[ManifestEntry],
 ) -> tuple[SkillManager, Mapping[str, SkillInfo]]:
     """In a sandbox, an alias pin whose version has no copy loads the older version kept
     for it.
     """
     manager = resolve_session_skills(
-        config, harness_files=harness_files, sandbox=sandbox
+        config, harness_files=harness_files, sandbox=sandbox, session_pins=session_pins
     )
     if sandbox is None:
         return manager, manager.available_skills

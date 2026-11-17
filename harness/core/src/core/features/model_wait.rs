@@ -66,6 +66,7 @@ pub(crate) fn output_schema() -> Value {
 pub(crate) fn runtime_arguments(arguments: Value, time_unix_ms: u64) -> Result<Value, CoreError> {
     #[derive(Deserialize)]
     struct Request {
+        #[serde(deserialize_with = "integral_u64")]
         timeout_ms: u64,
     }
     let request: Request = serde_json::from_value(arguments)
@@ -80,25 +81,95 @@ pub(crate) fn runtime_arguments(arguments: Value, time_unix_ms: u64) -> Result<V
 /// only `timeout_ms`. Keep the deadline within the effective `timeout_ms` of
 /// the original start, so a Hook can shorten a wait but never extend it past
 /// `max_wait_ms`.
-pub(crate) fn clamp_hook_arguments(original: &Value, effective: Value) -> Result<Value, CoreError> {
+///
+/// The outer error is a Core bug, since Core wrote the original arguments. The
+/// inner error says why the hook's arguments cannot be read even though the
+/// schema accepted them, such as a deadline beyond `u64`.
+pub(crate) fn clamp_hook_arguments(
+    original: &Value,
+    effective: Value,
+) -> Result<Result<Value, String>, CoreError> {
     #[derive(Deserialize)]
     struct RuntimeRequest {
+        #[serde(deserialize_with = "integral_u64")]
         timeout_ms: u64,
+        #[serde(deserialize_with = "integral_u64")]
         deadline_unix_ms: u64,
     }
-    let parse = |value: Value| {
-        serde_json::from_value::<RuntimeRequest>(value)
-            .map_err(|error| CoreError::invariant(format!("invalid wait arguments: {error}")))
+    let original = serde_json::from_value::<RuntimeRequest>(original.clone())
+        .map_err(|error| CoreError::invariant(format!("invalid wait arguments: {error}")))?;
+    let effective = match serde_json::from_value::<RuntimeRequest>(effective) {
+        Ok(effective) => effective,
+        Err(_) => {
+            return Ok(Err(format!(
+                "`timeout_ms` and `deadline_unix_ms` must be integers from 0 to {}",
+                u64::MAX
+            )));
+        }
     };
-    let original = parse(original.clone())?;
-    let effective = parse(effective)?;
     let started_at_unix_ms = original
         .deadline_unix_ms
         .saturating_sub(original.timeout_ms);
-    Ok(json!({
+    Ok(Ok(json!({
         "timeout_ms": effective.timeout_ms,
         "deadline_unix_ms": effective
             .deadline_unix_ms
             .min(started_at_unix_ms.saturating_add(effective.timeout_ms)),
-    }))
+    })))
+}
+
+/// 2^64, the first value past `u64::MAX`. `u64::MAX as f64` rounds to it, so
+/// a range check must exclude it.
+const U64_END: f64 = 18_446_744_073_709_551_616.0;
+
+/// A JSON Schema `integer` that is not negative. JSON Schema counts a number
+/// with a zero fractional part, such as `500.0`, as an integer, so a value the
+/// schema accepted must also parse here.
+fn integral_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let number = serde_json::Number::deserialize(deserializer)?;
+    if let Some(value) = number.as_u64() {
+        return Ok(value);
+    }
+    number
+        .as_f64()
+        .filter(|value| value.fract() == 0.0 && *value >= 0.0 && *value < U64_END)
+        .map(|value| value as u64)
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!("{number} is not an integer from 0 to {}", u64::MAX))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn original() -> Value {
+        json!({"timeout_ms": 30_000, "deadline_unix_ms": 1_700_000_030_000_u64})
+    }
+
+    #[test]
+    fn a_hook_deadline_of_two_to_the_64_is_unreadable() {
+        let effective =
+            json!({"timeout_ms": 10_000, "deadline_unix_ms": 18_446_744_073_709_551_616.0});
+
+        let clamped = clamp_hook_arguments(&original(), effective).unwrap();
+
+        assert!(clamped.is_err(), "{clamped:?}");
+    }
+
+    #[test]
+    fn a_hook_deadline_just_below_two_to_the_64_is_read_and_clamped() {
+        let below = f64::from_bits(U64_END.to_bits() - 1);
+        let effective = json!({"timeout_ms": 10_000, "deadline_unix_ms": below});
+
+        let clamped = clamp_hook_arguments(&original(), effective).unwrap();
+
+        assert_eq!(
+            clamped,
+            Ok(json!({"timeout_ms": 10_000, "deadline_unix_ms": 1_700_000_010_000_u64}))
+        );
+    }
 }

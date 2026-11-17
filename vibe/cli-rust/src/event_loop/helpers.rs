@@ -18,6 +18,7 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
     let id = format!("rs-command-{}", app.view.transcript.revision());
     match command {
         CommandEvent::Plugins(event) => crate::plugins::apply_event(app, *event),
+        CommandEvent::TrustedFolders(event) => crate::trusted_folders::apply_event(app, *event),
         CommandEvent::Skills(event) => crate::skills_browser::apply_event(app, client, *event),
         CommandEvent::Context(event) => {
             let (generation, event) = *event;
@@ -64,19 +65,13 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             crate::voice_app::apply_saved(app, &runtime, previous_enabled, enabling_audio);
         }
         CommandEvent::ProxySettings(result) => crate::proxy_setup::apply_read(app, result),
-        CommandEvent::PostReady {
-            model,
-            reads,
-            greeting,
-        } => {
+        CommandEvent::PostReady { model, reads } => {
             let plan = reads
                 .as_ref()
                 .and_then(|reads| post_ready::plan_title(&reads.account));
-            if let Some(reads) = &reads {
-                crate::startup::banners::show_plan_offer(app, &reads.account);
-            }
             cache_reads(app, model, reads);
-            app.view.banner.set_account(plan, greeting);
+            crate::startup::banners::sync_plan_offer(app);
+            app.view.banner.set_account(plan);
         }
         CommandEvent::ArtifactsRead {
             session_id,

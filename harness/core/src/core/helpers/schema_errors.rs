@@ -1,5 +1,6 @@
 //! Readable JSON Schema validation messages for tool arguments.
 
+use crate::core::helpers::edit_distance;
 use jsonschema::error::ValidationErrorKind;
 use serde_json::Value;
 
@@ -13,7 +14,65 @@ pub(crate) fn schema_error_detail(
     schema: &Value,
     error: &jsonschema::ValidationError<'_>,
 ) -> String {
-    let mut detail = error.to_string();
+    let allowed = allowed_for(schema, error);
+    schema_error_detail_with_fields(error, &allowed, &allowed)
+}
+
+/// [`schema_error_detail`] with the rejected value replaced by its JSON type,
+/// such as `the string value is not of type "integer"`. Use it when the value
+/// does not come from the reader of the message, so it may hold a secret.
+pub(crate) fn schema_error_detail_without_value(
+    schema: &Value,
+    error: &jsonschema::ValidationError<'_>,
+) -> String {
+    let placeholder = format!("the {} value", json_type(error.instance()));
+    let allowed = allowed_for(schema, error);
+    detail_with_message(
+        error,
+        error.masked_with(placeholder).to_string(),
+        &allowed,
+        &allowed,
+    )
+}
+
+/// [`schema_error_detail`] with the allowed fields and the fields to match an
+/// unknown field against given by the caller, for a tool whose arguments take
+/// one of several alternatives: the reported alternative can lack the field the
+/// model meant. A field that a hint points to is listed after the allowed ones.
+pub(crate) fn schema_error_detail_with_fields(
+    error: &jsonschema::ValidationError<'_>,
+    allowed: &[String],
+    hint_fields: &[String],
+) -> String {
+    detail_with_message(error, error.to_string(), allowed, hint_fields)
+}
+
+fn allowed_for(schema: &Value, error: &jsonschema::ValidationError<'_>) -> Vec<String> {
+    match error.kind() {
+        ValidationErrorKind::AdditionalProperties { .. } => {
+            allowed_fields(schema, error.schema_path().as_str())
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn detail_with_message(
+    error: &jsonschema::ValidationError<'_>,
+    mut detail: String,
+    allowed: &[String],
+    hint_fields: &[String],
+) -> String {
     let location = error.instance_path().as_str();
     if !location.is_empty() {
         detail = format!("at {location}: {detail}");
@@ -21,34 +80,45 @@ pub(crate) fn schema_error_detail(
     let ValidationErrorKind::AdditionalProperties { unexpected } = error.kind() else {
         return detail;
     };
-    let allowed = allowed_fields(schema, error.schema_path().as_str());
     if allowed.is_empty() {
         return detail;
     }
+    let hints: Vec<(&str, &String)> = unexpected
+        .iter()
+        .filter_map(|name| {
+            closest_field(name, hint_fields)
+                .filter(|field| *field != name.as_str())
+                .map(|field| (field, name))
+        })
+        .collect();
+    let mut listed: Vec<&str> = allowed.iter().map(String::as_str).collect();
+    for (field, _) in &hints {
+        if !listed.contains(field) {
+            listed.push(field);
+        }
+    }
     detail.push_str(". Allowed fields: ");
     detail.push_str(
-        &allowed
+        &listed
             .iter()
             .take(LISTED_FIELDS)
-            .cloned()
+            .copied()
             .collect::<Vec<_>>()
             .join(", "),
     );
-    if allowed.len() > LISTED_FIELDS {
+    if listed.len() > LISTED_FIELDS {
         detail.push_str(", ...");
     }
     detail.push('.');
-    for name in unexpected {
-        if let Some(field) = closest_field(name, &allowed) {
-            detail.push_str(&format!(" Use {field:?} instead of {name:?}."));
-        }
+    for (field, name) in hints {
+        detail.push_str(&format!(" Use {field:?} instead of {name:?}."));
     }
     detail
 }
 
 /// The properties declared by the schema object whose `additionalProperties`
 /// rejected a field.
-fn allowed_fields(schema: &Value, keyword_location: &str) -> Vec<String> {
+pub(crate) fn allowed_fields(schema: &Value, keyword_location: &str) -> Vec<String> {
     let Some(object_location) = keyword_location.strip_suffix("/additionalProperties") else {
         return Vec::new();
     };
@@ -111,24 +181,6 @@ fn normalize_field(name: &str) -> String {
         .filter(|character| character.is_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect()
-}
-
-fn edit_distance(left: &str, right: &str) -> usize {
-    let right: Vec<char> = right.chars().collect();
-    let mut previous: Vec<usize> = (0..=right.len()).collect();
-    for (row, left_char) in left.chars().enumerate() {
-        let mut current = vec![row + 1];
-        for (column, right_char) in right.iter().enumerate() {
-            let substitution = previous[column] + usize::from(left_char != *right_char);
-            current.push(
-                substitution
-                    .min(previous[column + 1] + 1)
-                    .min(current[column] + 1),
-            );
-        }
-        previous = current;
-    }
-    previous[right.len()]
 }
 
 #[cfg(test)]

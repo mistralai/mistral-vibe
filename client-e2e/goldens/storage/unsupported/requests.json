@@ -1,0 +1,10 @@
+[
+ {
+  "method": "storage/usage/read",
+  "params": {}
+ },
+ {
+  "method": "storage/usage/read",
+  "params": {}
+ }
+]

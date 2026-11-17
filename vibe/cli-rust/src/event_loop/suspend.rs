@@ -46,6 +46,7 @@ pub(super) fn suspend_once(
     }
     app.terminal_notifier.invalidate_title();
     app.terminal_notifier.invalidate_program_status();
+    crate::tmux_hint::refresh(app);
     retry_eintr::<()>(|| crate::terminal::repaint(terminal).map_err(Into::into))?;
     if !suspended {
         let id = format!("rs-suspend-failed-{}", app.view.transcript.revision());

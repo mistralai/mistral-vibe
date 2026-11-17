@@ -6,7 +6,7 @@ use vibe_rs::app::App;
 use vibe_rs::input;
 use vibe_rs::paste_path::{
     image_path_mention_on, pasted_image_paths_on, path_candidates_on, paths_resolve_on,
-    rewrite_bare_image_paths_in_text_on, MAX_PASTED_PATHS,
+    MAX_PASTED_PATHS,
 };
 
 /// The `@` mentions an image-only pasted list stands for, or the paste unchanged.
@@ -102,16 +102,6 @@ fn pasted_image_lists_become_padded_placeholders() {
     input::handle_paste(&mut app, "/tmp/a.png /tmp/b\\ c.png".to_owned());
 
     assert_eq!(app.chat_input.input, "compare [Image #1] [Image #2] ");
-}
-
-#[test]
-fn other_unicode_spaces_still_end_typed_image_paths() {
-    for space in ['\u{a0}', '\u{3000}'] {
-        assert_eq!(
-            rewrite_bare_image_paths_in_text_on(&format!("/tmp/a.png{space}note"), false),
-            format!("@/tmp/a.png{space}note")
-        );
-    }
 }
 
 #[test]

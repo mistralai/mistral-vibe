@@ -5,6 +5,7 @@ mod outcome;
 pub(crate) use lifecycle_hooks::PendingLifecycleHook;
 pub(crate) use outcome::TurnOutcome;
 
+use crate::core::action_id;
 use crate::core::error::CoreError;
 
 use self::completion::candidate::{
@@ -24,6 +25,7 @@ use crate::core::features::compaction::{
 };
 use crate::core::features::notifications::notification_messages;
 use crate::core::features::permissions::{ApprovalFailureReason, ApprovalOutcome};
+use crate::core::features::repeated_tool_failure;
 use crate::core::hooks::{HookCall, HookPoint, HookResult};
 use crate::core::state::hook_binding_ids;
 use crate::core::state::{
@@ -251,7 +253,13 @@ fn apply_compaction_resolution(
     resolution: CompactionResolution,
 ) -> Result<Outcome, CoreError> {
     match resolution {
-        CompactionResolution::ContinueTurn { outcome } => {
+        CompactionResolution::ContinueTurn {
+            outcome,
+            input_reduced,
+        } => {
+            if input_reduced {
+                state.require_active_mut()?.input_reduced = true;
+            }
             // Compaction just ran, so resume with an agent completion without
             // checking the automatic threshold again.
             state.mark_model_input_ready()?;
@@ -392,8 +400,10 @@ fn next_completion(state: &HarnessState) -> Result<ActivePhase, CoreError> {
 }
 
 fn plan_next_agent_completion(state: &HarnessState) -> Result<AgentCompletionPlan, CoreError> {
+    let config = state.config();
+    let task_scope = action_id::task_scope(&config.task_id, config.action_id_namespace.as_deref());
     plan_agent_completion(AgentCompletionRequest::new(
-        &state.config().task_id,
+        &task_scope,
         state.context.message_count(),
         state.compaction_count,
         hook_binding_ids(state, HookPoint::PreLlmCall, None),
@@ -669,10 +679,44 @@ fn apply_completion_finish(
                 turn_id: active_turn_id(state)?.to_string(),
                 error: error.clone(),
             });
+            remove_rejected_turn_input(state, &error)?;
             state.finish_turn(TurnOutcome::Failed { error })?;
         }
     }
     Ok(outcome)
+}
+
+/// Replaces the active Turn's input in the model context with a note when the provider
+/// rejected the agent request carrying it for good: sent again, the same input fails again
+/// on every later Turn. A retryable rejection may succeed with the same input, so it keeps it.
+/// A compaction request never carries the input as it is (the in-context request ends
+/// before it, the standalone one renders images as text), so its rejection removes nothing.
+///
+/// Runs before finishing the Turn, which adds pending steering to its group. After a
+/// compaction reduced the Turn's input into its summary view, no single message is the
+/// input, so nothing is removed.
+fn remove_rejected_turn_input(
+    state: &mut HarnessState,
+    error: &ProtocolError,
+) -> Result<(), CoreError> {
+    let active = state.require_active_mut()?;
+    if !is_rejected_request(error) || error.retryable || active.input_reduced {
+        return Ok(());
+    }
+    let delivered_steering = active.delivered_steering;
+    let note = state.config().settings.prompts.rejected_input_note.clone();
+    state
+        .context
+        .replace_rejected_turn_input(delivered_steering, &note);
+    Ok(())
+}
+
+/// The code a Runtime reports for a request the provider rejected as invalid, such as an
+/// unreadable image.
+const REJECTED_REQUEST: &str = "completion_rejected";
+
+fn is_rejected_request(error: &ProtocolError) -> bool {
+    error.code == REJECTED_REQUEST
 }
 
 fn apply_accepted_completion(
@@ -735,9 +779,24 @@ fn apply_tool_batch_transition(
                 .context
                 .extend_current_turn(messages.into_iter().map(StoredMessage::visible));
             state.mark_model_input_ready()?;
-            let max_iterations = state.config().settings.turn.max_iterations;
+            let turn_settings = &state.config().settings.turn;
+            let max_iterations = turn_settings.max_iterations;
+            // Pending steering or a notification can change the model's next call, so it
+            // reaches the model before the turn stops.
+            let repeated_failure = !state.has_pending_turn_input()
+                && turn_settings
+                    .max_identical_tool_failures
+                    .is_some_and(|limit| {
+                        repeated_tool_failure::limit_reached(&state.context, limit)
+                    });
             let iterations = state.require_active()?.iterations;
-            if max_iterations.is_some_and(|max_iterations| iterations >= max_iterations) {
+            if repeated_failure {
+                finish_completed_turn(
+                    state,
+                    vec![ContentBlock::text(repeated_tool_failure::STOP_MESSAGE)],
+                    Some(TurnStopReason::RepeatedToolFailure),
+                )?
+            } else if max_iterations.is_some_and(|max_iterations| iterations >= max_iterations) {
                 // The partial output is what a final answer would hold: the latest
                 // assistant message's content, never tool results.
                 let output = state.context.latest_assistant_content_in_current_turn();
@@ -882,6 +941,15 @@ fn commit_pending_model_input(state: &mut HarnessState) -> Result<Outcome, CoreE
     let turn_id = active.turn_id.clone();
     let steering = active.take_pending_steer();
     let steering_count = steering.len();
+    // Context messages wait with the steering but are injected, so only the user's steering
+    // counts toward finding a rejected request's input.
+    let user_steering = steering
+        .iter()
+        .filter(|message| !message.is_injected())
+        .count();
+    active.delivered_steering = active
+        .delivered_steering
+        .saturating_add(u32::try_from(user_steering).unwrap_or(u32::MAX));
     let mut steering = steering.into_iter();
     let mut notifications = state
         .notifications
@@ -973,6 +1041,8 @@ fn start_turn(
             model_input_ready: false,
             output_limit_retries: 0,
             output_type,
+            delivered_steering: 0,
+            input_reduced: false,
         });
         return Ok(Outcome::action(pending_single_action(state)?));
     }
@@ -1040,6 +1110,8 @@ fn commit_turn(
         model_input_ready: true,
         output_limit_retries: 0,
         output_type,
+        delivered_steering: 0,
+        input_reduced: false,
     });
     let action = pending_single_action(state)?;
     outcome.absorb(outcome_for_action(state, action)?);

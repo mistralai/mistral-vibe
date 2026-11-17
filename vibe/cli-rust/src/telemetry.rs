@@ -151,9 +151,41 @@ pub fn session_branched(app: &App, source_session_id: &str, new_session_id: &str
     );
 }
 
+/// A `/trusted-folders` change the server stored; the path never leaves the machine.
+pub fn trusted_folder_updated(app: &App, action: &str) {
+    record(
+        app,
+        event::TRUSTED_FOLDER_UPDATED,
+        bmap(json!({"action": action})),
+    );
+}
+
 /// The first Normal-mode entry since `vim_keybindings` turned on.
 pub fn vim_normal_mode_entered(app: &App) {
     record(app, event::VIM_NORMAL_MODE_ENTERED, BTreeMap::new());
+}
+
+/// The tmux `mouse off` warning was filed in the startup box.
+pub fn tmux_mouse_hint_rendered(app: &App) {
+    record(app, event::TMUX_MOUSE_HINT_RENDERED, BTreeMap::new());
+}
+
+/// The user hid the tmux `mouse off` warning for good.
+pub fn tmux_mouse_hint_disabled(app: &App, entry_point: &str) {
+    record(
+        app,
+        event::TMUX_MOUSE_HINT_DISABLED,
+        bmap(json!({"entry_point": entry_point})),
+    );
+}
+
+/// `/raw` switched agent messages between raw Markdown and formatted rendering.
+pub fn raw_mode_toggled(app: &App, enabled: bool) {
+    record(
+        app,
+        event::RAW_MODE_TOGGLED,
+        bmap(json!({"enabled": enabled})),
+    );
 }
 
 pub fn voice_mode_toggled(app: &App, enabled: bool) {
@@ -219,7 +251,11 @@ pub mod event {
     pub const USER_CANCELLED_ACTION: &str = "vibe.user_cancelled_action";
     pub const SESSION_BRANCHED: &str = "vibe.session_branched";
     pub const VOICE_MODE_TOGGLED: &str = "vibe.voice_mode_toggled";
+    pub const RAW_MODE_TOGGLED: &str = "vibe.raw_mode_toggled";
     pub const VIM_NORMAL_MODE_ENTERED: &str = "vibe.vim_normal_mode_entered";
+    pub const TMUX_MOUSE_HINT_RENDERED: &str = "vibe.tmux_mouse_hint.rendered";
+    pub const TMUX_MOUSE_HINT_DISABLED: &str = "vibe.tmux_mouse_hint.disabled";
+    pub const TRUSTED_FOLDER_UPDATED: &str = "vibe.trusted_folder.updated";
     pub const TRANSCRIPTION_START: &str = "vibe.audio.transcription.start";
     pub const TRANSCRIPTION_CANCEL: &str = "vibe.audio.transcription.cancel_recording";
     pub const TRANSCRIPTION_DONE: &str = "vibe.audio.transcription.done";

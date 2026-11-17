@@ -36,13 +36,14 @@ pub fn mode_hints(app: &App) -> Option<&'static [Hint]> {
     })
 }
 
-/// Whether Up opens queue mode: startup or a turn is running, and prompts are queued.
+/// Whether Up opens queue mode: prompts are queued while startup or a turn runs, or the server holds them.
 pub fn is_available(app: &App) -> bool {
-    matches!(
-        app.session.status,
-        Status::Starting | Status::Generating { .. }
-    ) && !app.queue.is_empty()
-        && !super::mutation_in_flight(app)
+    let open = match app.session.status {
+        Status::Starting | Status::Generating { .. } => true,
+        Status::Ready => app.queue.paused,
+        Status::Failed => false,
+    };
+    open && !app.queue.is_empty() && !super::mutation_in_flight(app)
 }
 
 /// Selection mode owns the whole keyboard: ↑↓/jk move the highlight, Enter
@@ -125,7 +126,6 @@ pub fn edit_selected(app: &mut App) {
     app.queue.consumed_edit = None;
     let text = app.queue.items[position].raw_edit_text();
     crate::long_paste::load_collapsed_prompt(app, text);
-    crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
 }
 
 /// Leave edit mode back to selection, dropping any consumed-edit warning.

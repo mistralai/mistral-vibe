@@ -18,10 +18,15 @@ point's policy. The fail action per point:
 * ``post_agent`` — always *accepts* the turn (no blocking mode), so a broken
   review hook can never wedge completion; ``strict`` is accepted for a uniform
   builder API but does not change this.
+* ``pre_llm`` — ``strict`` fails closed to *skip* the model call (the turn ends),
+  else open to call the model.
+* ``post_llm`` — ``strict`` fails closed to *reject* the response (the turn ends,
+  its tools do not run, and nothing retries), else open to accept it.
 
-A ``pre_agent`` or ``post_agent`` hook may declare a ``match`` over the agent whose turn
-it is: the agent configuration name, plus the ``main`` alias for a root or fork
-session. A hook that does not match is filtered out by the executor before it runs.
+A turn hook (``pre_agent``, ``pre_llm``, ``post_llm``, ``post_agent``) may declare a
+``match`` over the agent whose turn it is: the agent configuration name, plus the
+``main`` alias for a root or fork session. A hook that does not match is filtered out by
+the executor before it runs.
 """
 
 from __future__ import annotations
@@ -40,17 +45,23 @@ from mistralai_vibe_local_harness.protocol import (
     RustAcceptCandidate,
     RustCompletionHookAccept,
     RustCompletionHookInput,
+    RustCompletionHookReject,
     RustCompletionHookRetry,
     RustContentBlock,
     RustExternalToolCall,
+    RustHookContinue,
     RustHookSkip,
+    RustJsonToolArguments,
+    RustModelToolCallPart,
     RustPostAgentTurnHookResult,
+    RustPostLlmCallHookResult,
     RustPostToolCallHookInput,
     RustPostToolCallHookResult,
     RustPostToolCallOutput,
     RustPreAgentTurnContinue,
     RustPreAgentTurnHookInput,
     RustPreAgentTurnHookResult,
+    RustPreLlmCallHookResult,
     RustPreToolCallContinue,
     RustPreToolCallHookInput,
     RustPreToolCallHookResult,
@@ -61,13 +72,16 @@ from mistralai_vibe_local_harness.protocol import (
 from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._hook_matcher import (
     match_predicate,
+    model_called_tool_name,
     qualified_tool_name,
     selects_agent,
     selects_tool,
 )
 from mistralai_vibe_local_harness.vibe._local_actions import (
     AcceptOrRetryPostAgentHandler,
+    AcceptOrRetryPostLlmHandler,
     AgentScopedHook,
+    AgentScopedPreLlmHook,
     HookAgentIdentity,
     HookContext,
     HookNoticeData,
@@ -100,14 +114,23 @@ _PREVIEW_CHARS = 80
 # An image described for a model without image input: see vibe.app_server._vision.
 _DESCRIBED_IMAGE_PREFIX = "<image alias="
 _DESCRIBED_IMAGE_SUFFIX = "</image>"
+_PRE_LLM_EVENT_NAME = "pre_llm"
+_POST_LLM_EVENT_NAME = "post_llm"
+_POST_LLM_DENY_REASON = "A post_llm hook asked the model to try again."
+_POST_LLM_STRICT_FAILURE_REASON = (
+    "A strict post_llm hook failed and rejected the response."
+)
+_PRE_LLM_STRICT_FAILURE_REASON = "A strict pre_llm hook failed and stopped the turn."
 
 __all__ = [
     "HookProcess",
     "HookProcessResolver",
     "HostHookResult",
     "build_post_agent_turn_handler",
+    "build_post_llm_call_handler",
     "build_post_tool_call_handler",
     "build_pre_agent_turn_handler",
+    "build_pre_llm_call_handler",
     "build_pre_tool_call_handler",
     "run_host_hook",
 ]
@@ -635,10 +658,7 @@ def _post_tool_payload(
         "tool_error": result.error.message
         if isinstance(result, RustToolFailureResult)
         else None,
-        # Stub: the harness protocol carries no per-tool timing (RustPostToolCallHookInput
-        # has only tool_call + tool_result), so there is nothing to plumb here yet. A hook
-        # keying off duration_ms always sees 0 until the Core surfaces execution timing.
-        "duration_ms": 0,
+        "duration_ms": hook_input.duration_ms,
     }
 
 
@@ -795,12 +815,22 @@ def _retry(feedback: str) -> RustPostAgentTurnHookResult:
     )
 
 
-def _post_agent_payload(context: HookContext) -> dict[str, Any]:
+def _response_text(hook_input: RustCompletionHookInput) -> str:
+    return "".join(
+        part.text
+        for part in hook_input.candidate.message.content
+        if isinstance(part, RustTextContentBlock)
+    )
+
+
+def _post_agent_payload(
+    hook_input: RustCompletionHookInput, context: HookContext
+) -> dict[str, Any]:
     return {
-        **_base_payload(context),
-        "hook_event_name": _POST_AGENT_EVENT_NAME,
-        # The agent configuration that finished its turn; never the ``main`` alias.
-        "agent_name": context.agent.name if context.agent is not None else None,
+        **_turn_payload(context, _POST_AGENT_EVENT_NAME),
+        # The journal records the reply only once every post_agent hook accepts it,
+        # so the transcript cannot show it yet.
+        "response_text": _response_text(hook_input),
     }
 
 
@@ -854,10 +884,10 @@ def build_post_agent_turn_handler(
     process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
 ) -> AcceptOrRetryPostAgentHandler:
     async def handler(
-        _hook_input: RustCompletionHookInput, context: HookContext
+        hook_input: RustCompletionHookInput, context: HookContext
     ) -> RustPostAgentTurnHookResult:
         try:
-            payload = _post_agent_payload(context)
+            payload = _post_agent_payload(hook_input, context)
             stdin = json.dumps(payload).encode("utf-8")
             stdout = await _run_command(
                 command,
@@ -884,7 +914,9 @@ def build_post_agent_turn_handler(
         return result
 
     # A foreign hook's stdout can only accept or ask for a retry, never replace.
-    return AcceptOrRetryPostAgentHandler(handler, selects=_agent_selector(match))
+    return AcceptOrRetryPostAgentHandler(
+        handler, selects=_agent_selector(match), name=name
+    )
 
 
 # --- pre_agent ---------------------------------------------------------------
@@ -937,11 +969,7 @@ def _pre_agent_payload(
     hook_input: RustPreAgentTurnHookInput, context: HookContext
 ) -> dict[str, Any]:
     return {
-        **_base_payload(context),
-        "hook_event_name": _PRE_AGENT_EVENT_NAME,
-        # The agent configuration whose turn starts; never the ``main`` alias.
-        "agent_name": context.agent.name if context.agent is not None else None,
-        "turn_id": context.turn_id,
+        **_turn_payload(context, _PRE_AGENT_EVENT_NAME),
         "prompt": _typed_text(hook_input.user_content),
     }
 
@@ -1121,3 +1149,236 @@ def build_pre_agent_turn_handler(
         return result
 
     return AgentScopedHook(run=handler, selects=_agent_selector(match))
+
+
+# --- pre_llm / post_llm --------------------------------------------------------
+
+
+def _turn_payload(context: HookContext, event: str) -> dict[str, Any]:
+    return {
+        **_base_payload(context),
+        "hook_event_name": event,
+        # The agent configuration whose turn it is; never the ``main`` alias.
+        "agent_name": context.agent.name if context.agent is not None else None,
+        "turn_id": context.turn_id,
+    }
+
+
+def _parsed_stdout(stdout: str) -> dict[str, Any] | str | None:
+    """The hook's JSON object, ``None`` for empty stdout, or why it is invalid."""
+    text = stdout.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        return f"stdout did not match the hook response schema: {error}"
+    if not isinstance(parsed, dict):
+        return "stdout did not match the hook response schema: not an object"
+    return cast(dict[str, Any], parsed)
+
+
+def _pre_llm_skip(reason: str) -> RustPreLlmCallHookResult:
+    return RustPreLlmCallHookResult(output=RustHookSkip(reason=_text_reason(reason)))
+
+
+_PRE_LLM_CONTINUE = RustPreLlmCallHookResult(output=RustHookContinue())
+
+
+def _interpret_pre_llm(
+    stdout: str | None, failure: str | None, *, strict: bool
+) -> tuple[RustPreLlmCallHookResult, _HookNotice | None]:
+    if failure is None and stdout is not None:
+        parsed = _parsed_stdout(stdout)
+        if parsed is None:
+            return _PRE_LLM_CONTINUE, None
+        if isinstance(parsed, str):
+            failure = parsed
+        else:
+            system_message = _system_message(parsed)
+            if parsed.get("decision") == "deny":
+                reason = parsed.get("reason")
+                # The turn ends with the reason as its answer; the notice shows
+                # it in the transcript too.
+                text = str(reason) if reason else "Blocked by a pre_llm hook."
+                return _pre_llm_skip(text), _HookNotice(
+                    system_message or f"Stopped the turn: {text}", "error"
+                )
+            if system_message:
+                return _PRE_LLM_CONTINUE, _HookNotice(system_message, "ok")
+            return _PRE_LLM_CONTINUE, None
+    reason = failure or "hook failed"
+    if strict:
+        # The skip reason is the turn's answer: it says a hook failed rather than
+        # being the bare failure text (an exit code, or a whole traceback).
+        return _pre_llm_skip(f"{_PRE_LLM_STRICT_FAILURE_REASON} {reason}"), _HookNotice(
+            f"Stopped the turn (strict): {reason}", "error"
+        )
+    return _PRE_LLM_CONTINUE, _HookNotice(reason, "warning")
+
+
+def build_pre_llm_call_handler(
+    *,
+    name: str,
+    command: str,
+    match: str | None = None,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
+) -> AgentScopedPreLlmHook:
+    """A pre_llm hook: before each model call. ``deny`` ends the turn unanswered."""
+
+    async def handler(context: HookContext) -> RustPreLlmCallHookResult:
+        stdout: str | None = None
+        failure: str | None = None
+        try:
+            # The alias the user knows; a route that has none (a subagent's own
+            # model) by its model name.
+            model = (
+                context.config.active_model_alias or context.config.active_model.model
+            )
+            payload = {**_turn_payload(context, _PRE_LLM_EVENT_NAME), "model": model}
+            stdin = json.dumps(payload).encode("utf-8")
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
+        except Exception as error:
+            failure = _execution_reason(error)
+        result, notice = _interpret_pre_llm(stdout, failure, strict=strict)
+        await _emit_completed(
+            context, name=name, scope="pre_llm", tool_call_id=None, notice=notice
+        )
+        return result
+
+    return AgentScopedPreLlmHook(handler, selects=_agent_selector(match))
+
+
+def _tool_call_payload(part: RustModelToolCallPart) -> dict[str, Any]:
+    tool_name = model_called_tool_name(part.name)
+    entry: dict[str, Any] = {"tool_name": tool_name, "tool_call_id": part.id}
+    arguments = part.arguments
+    if isinstance(arguments, RustJsonToolArguments) and isinstance(
+        arguments.value, dict
+    ):
+        value = dict(arguments.value)
+        translate = _AUTHOR_ARGUMENTS.get(tool_name)
+        entry["tool_input"] = translate(value) if translate is not None else value
+    else:
+        # The model wrote arguments that are not a JSON object: pass them as text.
+        entry["tool_input"] = None
+        entry["tool_input_raw"] = arguments.raw
+    return entry
+
+
+def _post_llm_payload(
+    hook_input: RustCompletionHookInput, context: HookContext
+) -> dict[str, Any]:
+    candidate = hook_input.candidate
+    parts = candidate.message.content
+    usage = candidate.usage
+    return {
+        **_turn_payload(context, _POST_LLM_EVENT_NAME),
+        "response_text": _response_text(hook_input),
+        "tool_calls": [
+            _tool_call_payload(part)
+            for part in parts
+            if isinstance(part, RustModelToolCallPart)
+        ],
+        "finish_reason": candidate.finish_reason,
+        "usage": usage.model_dump(mode="json") if usage is not None else None,
+    }
+
+
+def _post_llm_accept() -> RustPostLlmCallHookResult:
+    return RustPostLlmCallHookResult(
+        output=RustCompletionHookAccept(acceptance=RustAcceptCandidate())
+    )
+
+
+def _interpret_post_llm(
+    stdout: str | None, failure: str | None, *, strict: bool
+) -> tuple[RustPostLlmCallHookResult, _HookNotice | None]:
+    if failure is None and stdout is not None:
+        parsed = _parsed_stdout(stdout)
+        if parsed is None:
+            return _post_llm_accept(), None
+        if isinstance(parsed, str):
+            failure = parsed
+        else:
+            system_message = _system_message(parsed)
+            if parsed.get("decision") == "deny":
+                reason = parsed.get("reason")
+                return (
+                    RustPostLlmCallHookResult(
+                        output=RustCompletionHookRetry(
+                            feedback=_text_reason(
+                                str(reason) if reason else _POST_LLM_DENY_REASON
+                            )
+                        )
+                    ),
+                    _HookNotice(
+                        system_message or "Asked the model to try again", "warning"
+                    ),
+                )
+            if system_message:
+                return _post_llm_accept(), _HookNotice(system_message, "ok")
+            return _post_llm_accept(), None
+    reason = failure or "hook failed"
+    if strict:
+        # Rejecting, not retrying: a broken hook must not loop the turn.
+        return (
+            RustPostLlmCallHookResult(
+                output=RustCompletionHookReject(
+                    reason=_text_reason(f"{_POST_LLM_STRICT_FAILURE_REASON} {reason}")
+                )
+            ),
+            _HookNotice(f"Rejected the response (strict): {reason}", "error"),
+        )
+    return _post_llm_accept(), _HookNotice(reason, "warning")
+
+
+def build_post_llm_call_handler(
+    *,
+    name: str,
+    command: str,
+    match: str | None = None,
+    timeout_s: float = _DEFAULT_TIMEOUT_S,
+    strict: bool = False,
+    process: HookProcess | HookProcessResolver = _SESSION_HOOK_PROCESS,
+) -> AcceptOrRetryPostLlmHandler:
+    """A post_llm hook: after each model response, before Vibe acts on it.
+
+    ``deny`` asks the model to try again with the reason as feedback.
+    """
+
+    async def handler(
+        hook_input: RustCompletionHookInput, context: HookContext
+    ) -> RustPostLlmCallHookResult:
+        stdout: str | None = None
+        failure: str | None = None
+        try:
+            payload = _post_llm_payload(hook_input, context)
+            stdin = json.dumps(payload).encode("utf-8")
+            stdout = await _run_command(
+                command,
+                context.config,
+                timeout_s,
+                stdin,
+                _hook_process(process, context),
+            )
+        except Exception as error:
+            failure = _execution_reason(error)
+        result, notice = _interpret_post_llm(stdout, failure, strict=strict)
+        await _emit_completed(
+            context, name=name, scope="post_llm", tool_call_id=None, notice=notice
+        )
+        return result
+
+    # A foreign hook's stdout never replaces the response, so it streams.
+    return AcceptOrRetryPostLlmHandler(
+        handler, selects=_agent_selector(match), name=name
+    )

@@ -117,7 +117,9 @@ class ProtocolError(SessionModel):
     details: JsonValue = None
 
 
-type CompletedStopReason = Literal["iteration_limit", "skipped", "rejected", "output_limit"]
+type CompletedStopReason = Literal[
+    "iteration_limit", "skipped", "rejected", "output_limit", "repeated_tool_failure"
+]
 
 
 class CompletedTermination(SessionModel):

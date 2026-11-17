@@ -85,6 +85,8 @@ def find_local_config_dirs(root: Path) -> LocalConfigDirs:
             has_content
             or _safe_is_dir(vibe_dir / "prompts")
             or _safe_is_file(vibe_dir / "config.toml")
+            or _safe_is_file(vibe_dir / "hooks.toml")
+            or _safe_is_file(vibe_dir / "skills.toml")
         ):
             config_dirs.append(vibe_dir)
 

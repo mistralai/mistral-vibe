@@ -5,7 +5,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::core::helpers::schema_error_detail;
+use crate::core::helpers::{allowed_fields, schema_error_detail, schema_error_detail_with_fields};
 
 use crate::core::SpawnContext;
 use crate::core::conversation::{ForkedContext, FreshMode};
@@ -61,6 +61,7 @@ struct GenericSpawn {
 struct NamedSpawn {
     #[schemars(flatten)]
     task: ChildTask,
+    /// The `name` of an agent configuration that `tools.agents.list_configs` returns. The child runs with that configuration: its tools and its instructions.
     #[schemars(length(min = 1))]
     config_name: String,
 }
@@ -297,7 +298,8 @@ pub(crate) fn tools(conversation_forking: bool, prompts: &super::Prompts) -> Vec
 /// A spawn the schema rejected, in words: the schema's alternatives would
 /// otherwise read as "not valid under any of the given schemas". The reported
 /// alternative is the one the arguments' shape asks for: named with
-/// `config_name`, forked with an object `context`, otherwise generic.
+/// `config_name`, forked with an object `context`, otherwise generic. An
+/// unknown field is matched against the fields of every alternative.
 pub(crate) fn explain_spawn_schema_error(
     schema: &Value,
     error: &jsonschema::ValidationError<'_>,
@@ -355,7 +357,46 @@ fn explain_variant_error(
     if is_missing_instructions(error) {
         return None;
     }
+    if is_unknown_field(error) && error.instance_path().as_str().is_empty() {
+        let allowed = allowed_fields(schema, error.schema_path().as_str());
+        let candidates: Vec<String> = spawn_fields(schema)
+            .into_iter()
+            .filter(|field| !(named && field == "instructions"))
+            .collect();
+        return Some(schema_error_detail_with_fields(
+            error,
+            &allowed,
+            &candidates,
+        ));
+    }
     Some(schema_error_detail(schema, error))
+}
+
+fn is_unknown_field(error: &jsonschema::ValidationError<'_>) -> bool {
+    matches!(
+        error.kind(),
+        ValidationErrorKind::AdditionalProperties { .. }
+    )
+}
+
+/// Every field of every spawn alternative, in declaration order: an unknown
+/// field is matched against all of them, except `instructions` for a named
+/// child, which takes its instructions from its configuration. The reported alternative is chosen by
+/// the exact `config_name`, so for `configName` it is the generic one, which has
+/// no `config_name` field and would point the model to `name` instead.
+fn spawn_fields(schema: &Value) -> Vec<String> {
+    let mut fields: Vec<String> = Vec::new();
+    let properties = schema["oneOf"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|variant| variant["properties"].as_object());
+    for field in properties.flat_map(|properties| properties.keys()) {
+        if !fields.contains(field) {
+            fields.push(field.clone());
+        }
+    }
+    fields
 }
 
 /// The `name` pattern and the `context` alternatives, in words rather than as
@@ -660,6 +701,105 @@ mod tests {
                 assert_eq!(check(&schema, &arguments), expected, "{arguments}");
             }
         }
+    }
+
+    ///
+    /// *Prepare*: The spawn schemas, with conversation forking on and off.
+    /// *Do*: Spawn the named configuration with its field in camel case, as a model writing
+    /// TypeScript does (the call of a user report, 9 Nov: `configName` and `inheritContext`).
+    /// *Assert*: The error lists `config_name` and points `configName` to it, not to `name`.
+    ///
+    #[test]
+    fn a_camel_case_config_name_points_to_config_name() {
+        for (forking, arguments, expected) in [
+            (
+                true,
+                serde_json::json!({
+                    "name": "documentation-expert", "message": "Review the README.",
+                    "configName": "documentation-expert", "inheritContext": true
+                }),
+                "Additional properties are not allowed ('configName', 'inheritContext' were \
+                 unexpected). Allowed fields: name, message, instructions, context, config_name. \
+                 Use \"config_name\" instead of \"configName\". Use \"context\" instead of \
+                 \"inheritContext\".",
+            ),
+            (
+                false,
+                serde_json::json!({
+                    "name": "documentation-expert", "message": "Review the README.",
+                    "configName": "documentation-expert"
+                }),
+                "Additional properties are not allowed ('configName' was unexpected). Allowed \
+                 fields: name, message, instructions, config_name. Use \"config_name\" instead \
+                 of \"configName\".",
+            ),
+        ] {
+            let error = check(&spawn_schema(forking), &arguments).unwrap_err();
+
+            assert_eq!(error, expected, "forking: {forking}");
+        }
+    }
+
+    ///
+    /// *Prepare*: The spawn schemas, with conversation forking on.
+    /// *Do*: Spawn the named configuration with `inheritContext`, then with `instructions` in
+    /// place of `message` (the most frequent model error in live runs, 9 Nov).
+    /// *Assert*: The first lists the named fields and points to `context`; the second still
+    /// reports the missing `message`, as before. An unknown `instruction` gets no hint to
+    /// `instructions`, which a named child does not accept.
+    ///
+    #[test]
+    fn a_named_spawn_keeps_its_errors() {
+        for (arguments, expected) in [
+            (
+                serde_json::json!({
+                    "name": "documentation-expert", "message": "Review the README.",
+                    "config_name": "documentation-expert", "inheritContext": true
+                }),
+                "Additional properties are not allowed ('inheritContext' was unexpected). Allowed \
+                 fields: name, message, config_name, context. Use \"context\" instead of \
+                 \"inheritContext\".",
+            ),
+            (
+                serde_json::json!({
+                    "name": "documentation-expert", "config_name": "documentation-expert",
+                    "instructions": "Review the README."
+                }),
+                "\"message\" is a required property",
+            ),
+            (
+                serde_json::json!({
+                    "name": "documentation-expert", "message": "Review the README.",
+                    "config_name": "documentation-expert", "instruction": "Be brief."
+                }),
+                "Additional properties are not allowed ('instruction' was unexpected). Allowed \
+                 fields: name, message, config_name, context.",
+            ),
+        ] {
+            let error = check(&spawn_schema(true), &arguments).unwrap_err();
+
+            assert_eq!(error, expected);
+        }
+    }
+
+    ///
+    /// *Prepare*: The spawn schemas, with conversation forking off.
+    /// *Do*: Spawn a generic child with `config_name: null`.
+    /// *Assert*: The error lists the generic fields and points `config_name` to no other field.
+    ///
+    #[test]
+    fn a_null_config_name_lists_the_generic_fields_without_a_hint() {
+        let arguments = serde_json::json!({
+            "name": "a", "message": "hi", "instructions": "Work.", "config_name": null
+        });
+
+        let error = check(&spawn_schema(false), &arguments).unwrap_err();
+
+        assert_eq!(
+            error,
+            "Additional properties are not allowed ('config_name' was unexpected). Allowed \
+             fields: name, message, instructions."
+        );
     }
 
     #[test]

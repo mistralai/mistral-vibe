@@ -15,6 +15,7 @@ from vibe.app_server.client import AppServerClient
 from vibe.app_server.host import AppServerHost
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import memory_transport_pair
+from vibe.core.platform_auth import PlatformCredentialFactory
 
 __all__ = [
     "ClientDescriptor",
@@ -64,6 +65,17 @@ class LocalHarnessHost:
         server.
         """
         return self._services
+
+    def process_credentials(self) -> PlatformCredentialFactory:
+        """The shared process's credential selection, bound by the server.
+
+        Session builds and host reads ask it; ACP auth resolves over the
+        same selection so a status read matches what sessions run. The
+        process must exist: connect or start once first.
+        """
+        if self._process is None:
+            raise RuntimeError("The harness process is not created yet")
+        return self._process.credentials
 
     async def start(self, options: LocalHarnessOptions) -> AppServerSession:
         host = await self.connect(options)

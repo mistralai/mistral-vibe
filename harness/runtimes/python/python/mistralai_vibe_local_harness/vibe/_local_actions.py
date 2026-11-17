@@ -10,6 +10,7 @@ from pathlib import Path
 import secrets
 import tempfile
 import time
+from typing import Literal
 
 from mistralai_vibe_local_harness._native import process_tools_timeout_advice
 from mistralai_vibe_local_harness.protocol import (
@@ -18,6 +19,8 @@ from mistralai_vibe_local_harness.protocol import (
     RustCompletionFailedEvent,
     RustCompletionHookAccept,
     RustCompletionHookInput,
+    RustCompletionHookOutput,
+    RustCompletionHookReject,
     RustCompletionHookRetry,
     RustContentBlock,
     RustEvent,
@@ -30,6 +33,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustHarnessHookBinding,
     RustHookCallActionBase,
     RustHookCompletedEvent,
+    RustHookContinue,
     RustHookFailedEvent,
     RustHookSkip,
     RustHookToolCall,
@@ -41,6 +45,8 @@ from mistralai_vibe_local_harness.protocol import (
     RustModelToolCatalogReplace,
     RustPostAgentTurnHookAction,
     RustPostAgentTurnHookResult,
+    RustPostLlmCallHookAction,
+    RustPostLlmCallHookResult,
     RustPostToolCallHookAction,
     RustPostToolCallHookInput,
     RustPostToolCallHookResult,
@@ -49,6 +55,8 @@ from mistralai_vibe_local_harness.protocol import (
     RustPreAgentTurnHookAction,
     RustPreAgentTurnHookInput,
     RustPreAgentTurnHookResult,
+    RustPreLlmCallHookAction,
+    RustPreLlmCallHookResult,
     RustPreToolCallContinue,
     RustPreToolCallHookAction,
     RustPreToolCallHookInput,
@@ -59,6 +67,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustReplaceAssistantContent,
     RustRuntimeBuiltinToolCall,
     RustRuntimeBuiltinToolCallAction,
+    RustTextContentBlock,
     RustToolDefinition,
     RustToolFailedEvent,
     RustToolFailureResult,
@@ -230,6 +239,15 @@ type PostToolCallHookHandler = Callable[
 type PostAgentTurnHookHandler = Callable[
     [RustCompletionHookInput, HookContext], Awaitable[RustPostAgentTurnHookResult]
 ]
+# pre_llm_call has no input: the context names the turn, the agent and the model.
+type PreLlmCallHookHandler = Callable[
+    [HookContext], Awaitable[RustPreLlmCallHookResult]
+]
+# post_llm_call sees every model response, tool calls included, before it is acted on.
+# It shares post_agent_turn's result shape, so one accept-or-retry wrapper serves both.
+type PostLlmCallHookHandler = Callable[
+    [RustCompletionHookInput, HookContext], Awaitable[RustPostLlmCallHookResult]
+]
 
 
 def _select_every_agent(_identity: HookAgentIdentity) -> bool:
@@ -254,6 +272,8 @@ class AcceptOrRetryPostAgentHandler:
 
     handler: PostAgentTurnHookHandler
     selects: Callable[[HookAgentIdentity], bool] = _select_every_agent
+    # The hook's name, for a message that must name it; None for a builtin.
+    name: str | None = None
 
     async def __call__(
         self, hook_input: RustCompletionHookInput, context: HookContext
@@ -269,6 +289,51 @@ class AcceptOrRetryPostAgentHandler:
             "an accept-or-retry post_agent handler may only accept the candidate "
             "unchanged or ask for a retry"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AcceptOrRetryPostLlmHandler:
+    """A post_llm_call handler that only accepts the response unchanged, asks for a
+    retry, or rejects it (a strict hook that failed).
+
+    Like ``AcceptOrRetryPostAgentHandler``, it never replaces text, so the response
+    streams ahead of it: a retried or rejected draft is settled as discarded. Any
+    other decision fails the hook rather than reaching the Core.
+    """
+
+    handler: PostLlmCallHookHandler
+    selects: Callable[[HookAgentIdentity], bool] = _select_every_agent
+    # The hook's name, for a message that must name it; None for a builtin.
+    name: str | None = None
+
+    async def __call__(
+        self, hook_input: RustCompletionHookInput, context: HookContext
+    ) -> RustPostLlmCallHookResult:
+        result = await self.handler(hook_input, context)
+        output = result.output
+        if isinstance(output, RustCompletionHookRetry | RustCompletionHookReject) or (
+            isinstance(output, RustCompletionHookAccept)
+            and isinstance(output.acceptance, RustAcceptCandidate)
+        ):
+            return result
+        raise ValueError(
+            "an accept-or-retry post_llm handler may only accept the response "
+            "unchanged, ask for a retry or reject it"
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentScopedPreLlmHook:
+    """A pre_llm_call handler that runs only for the agents its ``selects`` accepts.
+
+    The point has no input, so the handler is called with the context alone.
+    """
+
+    run: PreLlmCallHookHandler
+    selects: Callable[[HookAgentIdentity], bool] = _select_every_agent
+
+    async def __call__(self, context: HookContext) -> RustPreLlmCallHookResult:
+        return await self.run(context)
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +412,8 @@ class HookHandlers:
     post_agent_turn: Mapping[str, PostAgentTurnHookHandler] = field(
         default_factory=dict
     )
+    pre_llm_call: Mapping[str, PreLlmCallHookHandler] = field(default_factory=dict)
+    post_llm_call: Mapping[str, PostLlmCallHookHandler] = field(default_factory=dict)
 
 
 def merge_hook_handlers(builtins: HookHandlers, foreign: HookHandlers) -> HookHandlers:
@@ -360,6 +427,8 @@ def merge_hook_handlers(builtins: HookHandlers, foreign: HookHandlers) -> HookHa
         pre_agent_turn={**foreign.pre_agent_turn, **builtins.pre_agent_turn},
         post_tool_call={**foreign.post_tool_call, **builtins.post_tool_call},
         post_agent_turn={**foreign.post_agent_turn, **builtins.post_agent_turn},
+        pre_llm_call={**foreign.pre_llm_call, **builtins.pre_llm_call},
+        post_llm_call={**foreign.post_llm_call, **builtins.post_llm_call},
     )
 
 
@@ -375,6 +444,8 @@ def foreign_binding_ids(handlers: HookHandlers) -> frozenset[str]:
         | frozenset(handlers.pre_agent_turn)
         | frozenset(handlers.post_tool_call)
         | frozenset(handlers.post_agent_turn)
+        | frozenset(handlers.pre_llm_call)
+        | frozenset(handlers.post_llm_call)
     )
 
 
@@ -390,6 +461,8 @@ def has_hook_handlers(handlers: HookHandlers) -> bool:
         or handlers.pre_agent_turn
         or handlers.post_tool_call
         or handlers.post_agent_turn
+        or handlers.pre_llm_call
+        or handlers.post_llm_call
     )
 
 
@@ -399,9 +472,10 @@ def streams_provisional_content(
     """Whether a session may project completion content before the Core commits it.
 
     The candidate streams when every post-agent handler the session binds is an
-    ``AcceptOrRetryPostAgentHandler``: a retried draft is then settled as discarded.
-    Any other handler may replace the candidate, for example to redact it, so binding
-    one keeps the candidate private until it is accepted. ``handlers`` is the
+    ``AcceptOrRetryPostAgentHandler`` and every post-llm one an
+    ``AcceptOrRetryPostLlmHandler``: a retried or rejected draft is then settled as
+    discarded. Any other handler may replace the candidate, for example to redact it,
+    so binding one keeps the candidate private until it is accepted. ``handlers`` is the
     session's merged registry, so on a shared ID the handler that actually runs
     decides.
 
@@ -409,12 +483,21 @@ def streams_provisional_content(
     handlers are Host-global, so testing those alone would stop every session streaming
     as soon as one of them wants the hook.
     """
-    return not any(
-        binding.point == "post_agent_turn"
-        and (handler := handlers.post_agent_turn.get(binding.id)) is not None
-        and not isinstance(handler, AcceptOrRetryPostAgentHandler)
-        for binding in hook_bindings
-    )
+
+    def withholds(binding: RustHarnessHookBinding) -> bool:
+        if binding.point == "post_agent_turn":
+            handler: object = handlers.post_agent_turn.get(binding.id)
+            return handler is not None and not isinstance(
+                handler, AcceptOrRetryPostAgentHandler
+            )
+        if binding.point == "post_llm_call":
+            handler = handlers.post_llm_call.get(binding.id)
+            return handler is not None and not isinstance(
+                handler, AcceptOrRetryPostLlmHandler
+            )
+        return False
+
+    return not any(withholds(binding) for binding in hook_bindings)
 
 
 type ProvidedToolExecutor = Callable[[RustProvidedToolCallAction], Awaitable[RustEvent]]
@@ -448,6 +531,7 @@ def build_local_action_executor(  # noqa: PLR0913 - explicit executor dependenci
     classify_model: str = DEFAULT_SMART_APPROVE_MODEL,
     provided_tool_modes: Mapping[str, ProvidedToolApproval] | None = None,
     background_processes: bool = False,
+    program_time_budget_ms: int | None = None,
 ) -> ActionExecutor:
     state = _LocalActionState(
         config,
@@ -464,6 +548,7 @@ def build_local_action_executor(  # noqa: PLR0913 - explicit executor dependenci
         provided_tool_modes=provided_tool_modes,
     )
     state.configure_background_processes(lambda: background_processes)
+    state.configure_program_time_budget(lambda: program_time_budget_ms)
     if notice_sink is not None:
         state.bind_notice_sink(notice_sink)
     return state.execute
@@ -522,6 +607,7 @@ class _LocalActionState:
         # Whether background processes run in this Session now; see
         # ``configure_background_processes``.
         self._runs_background_processes: Callable[[], bool] = lambda: False
+        self._program_time_budget_ms: Callable[[], int | None] = lambda: None
         self._parent_session_id = parent_session_id
         # A root or fork session, as opposed to a subagent; fixed for the session.
         self._main_session = main_session
@@ -536,14 +622,22 @@ class _LocalActionState:
         # gate and run as concurrent tasks, so one shared slot would let one
         # gate erase what another had already been approved for.
         self._resolved_authorized_paths: dict[str, Path] = {}
+        # One gate prompt at a time, and how many prompts of any kind have
+        # ended, so a call that waited behind one knows its permissions may
+        # have changed. See ``_gate_tool_call``.
+        self._prompt_lock = asyncio.Lock()
+        self._settled_prompts = 0
         self._foreign_binding_ids = foreign_binding_ids
         self._notice_sink: PublicHistoryEntrySink | None = None
         self._messages: list[RustMessage] = []
         self._tools: list[RustToolDefinition] = []
         self._message_revision: int | None = None
         self._tool_revision: int | None = None
-        # post_agent retry counts keyed by turn_id; bounds a retrying hook per turn.
+        # post_llm and post_agent retry counts keyed by turn_id, one budget for both;
+        # bounds a retrying hook per turn.
         self._post_agent_retries: dict[str, int] = {}
+        # The latest agent model call of each turn: (iteration, max_iterations).
+        self._llm_iterations: dict[str, tuple[int, int | None]] = {}
         # Approval notes recorded when a tool is auto-approved or human-approved,
         # keyed by the tool action_id; consumed when that builtin tool runs (rides
         # its result _meta to the UI).
@@ -600,6 +694,18 @@ class _LocalActionState:
         """
         self._runs_background_processes = runs
 
+    def configure_program_time_budget(
+        self, budget_ms: Callable[[], int | None]
+    ) -> None:
+        """Say how to read the program time budget of this Session.
+
+        A provided call a program makes is cancelled once it has run for the whole
+        budget: Core counts the call's time against the budget, so after that long
+        the program cannot go on, and a hung call must not hold it until the tool
+        timeout. Asked at each call, so the cap follows a reconfigure.
+        """
+        self._program_time_budget_ms = budget_ms
+
     def configure(self, config: LocalRuntimeAdapterConfig) -> None:
         if config.sandbox is not self._config.sandbox:
             self._saved_outputs = self._build_saved_outputs(config)
@@ -639,6 +745,24 @@ class _LocalActionState:
 
     def bind_approval_requester(self, request_approval: ApprovalRequester) -> None:
         self._request_approval = request_approval
+
+    async def _ask_human(
+        self,
+        action: GatedToolAction,
+        reason: str | None,
+        required: tuple[JsonObject, ...],
+    ) -> ApprovalGrant:
+        """Prompt through the bound requester, counting the prompt once it settles.
+
+        Any answer can grant more than its call, so every prompt is counted, not
+        only the gate's: see ``_gate_tool_call``.
+        """
+        requester = self._request_approval
+        assert requester is not None
+        try:
+            return await requester(action, reason, required)
+        finally:
+            self._settled_prompts += 1
 
     async def _resolve_permission(self, action: GatedToolAction) -> PermissionOutcome:
         resolver = self._config.permission_resolver
@@ -757,8 +881,9 @@ class _LocalActionState:
                 ),
             )
 
-    async def _execute(self, action: RustAction) -> RustEvent:  # noqa: PLR0911 - one return per action kind
+    async def _execute(self, action: RustAction) -> RustEvent:  # noqa: PLR0911, PLR0912 - one branch and return per action kind
         if isinstance(action, RustLLMCallAction):
+            self.record_llm_iteration(action)
             if self._before_model_step is not None and action.purpose == "agent":
                 await self._before_model_step()
             self._apply_model_input(action)
@@ -779,9 +904,32 @@ class _LocalActionState:
             )
             if denial is not None:
                 return self._with_approval_note(denial, action.action_id)
-            return self._with_approval_note(
-                await self._provided_tool_executor(action), action.action_id
+            budget_ms = (
+                self._program_time_budget_ms()
+                if action.parent_call_id is not None
+                else None
             )
+            # Known limit: the cap stops only work on this loop. A remote MCP or
+            # connector server keeps running its handler after the call fails,
+            # despite the "was cancelled" message.
+            cap = asyncio.timeout(None if budget_ms is None else budget_ms / 1_000)
+            try:
+                async with cap:
+                    event = await self._provided_tool_executor(action)
+            except TimeoutError:
+                if not cap.expired():
+                    raise
+                # Not `ProgramBudgetExceeded`: Core lists a call with that code as never
+                # started, and this one ran and may have had effects the model must check.
+                event = _failed_tool_action(
+                    action,
+                    code="tool_timeout",
+                    message=(
+                        f"{action.call.group_name}.{action.call.tool_name} ran for the "
+                        f"program's whole time budget of {budget_ms} ms and was cancelled."
+                    ),
+                )
+            return self._with_approval_note(event, action.action_id)
         if isinstance(action, RustRuntimeBuiltinToolCallAction):
             denial = await self._gate_tool_call(
                 action, self._config.tool_modes.get(action.call.name, "allow")
@@ -837,6 +985,10 @@ class _LocalActionState:
             return await self._execute_post_tool_call_hook(action)
         if isinstance(action, RustPostAgentTurnHookAction):
             return await self._execute_post_agent_turn_hook(action)
+        if isinstance(action, RustPreLlmCallHookAction):
+            return await self._execute_pre_llm_call_hook(action)
+        if isinstance(action, RustPostLlmCallHookAction):
+            return await self._execute_post_llm_call_hook(action)
         return _unsupported_action(action)
 
     async def _write_file(self, action: RustFilesystemAction) -> RustEvent:
@@ -1010,16 +1162,13 @@ class _LocalActionState:
             )
         try:
             context = self._hook_context()
-            tool_call = action.input.tool_call
-            tool_result = action.input.tool_result
+            hook_input = action.input
             for _, handler in selected:
-                result = await handler(
-                    RustPostToolCallHookInput(
-                        tool_call=tool_call, tool_result=tool_result
-                    ),
-                    context,
+                result = await handler(hook_input, context)
+                hook_input = hook_input.model_copy(
+                    update={"tool_result": result.output.tool_result}
                 )
-                tool_result = result.output.tool_result
+            tool_result = hook_input.tool_result
         except SandboxUnavailableError:
             raise
         except Exception as error:
@@ -1059,7 +1208,7 @@ class _LocalActionState:
                 agent,
             )
         except Exception as error:
-            self._post_agent_retries.pop(action.turn_id, None)
+            self._forget_turn(action.turn_id)
             return _hook_pipeline_failed(action, error)
         emit_run = self._emits_run_notices([bid for bid, _ in handlers])
         if emit_run:
@@ -1068,75 +1217,217 @@ class _LocalActionState:
             )
         try:
             context = self._hook_context(agent=agent, turn_id=action.turn_id)
-            candidate = action.input.candidate
-            replacement: list[RustContentBlock] | None = None
             # Each hook reviews the model's original completion, not a prior hook's
             # replacement: a candidate carries assistant parts while a replacement is
             # content blocks, so it cannot be fed back into the next hook's input without a
-            # lossy, protocol-undefined conversion. Among accepts, the last replacement wins.
-            for _, handler in handlers:
-                result = await handler(
-                    RustCompletionHookInput(candidate=candidate), context
-                )
-                output = result.output
-                if isinstance(output, RustCompletionHookAccept):
-                    if isinstance(output.acceptance, RustReplaceAssistantContent):
-                        replacement = output.acceptance.content
-                    continue
-                if isinstance(output, RustCompletionHookRetry):
-                    bounded = self._bounded_retry(action.turn_id, output)
-                    if bounded is None:
-                        # Retry cap hit: stop and force-accept below, honoring any
-                        # replacement an earlier accepting hook already collected.
-                        break
-                    return RustHookCompletedEvent(
-                        action_id=action.action_id,
-                        result=RustPostAgentTurnHookResult(output=bounded),
-                    )
-                # A reject is terminal.
-                self._post_agent_retries.pop(action.turn_id, None)
-                return RustHookCompletedEvent(
-                    action_id=action.action_id,
-                    result=RustPostAgentTurnHookResult(output=output),
-                )
+            # lossy, protocol-undefined conversion.
+            hook_input = RustCompletionHookInput(candidate=action.input.candidate)
+
+            async def review(
+                handler: PostAgentTurnHookHandler,
+            ) -> RustCompletionHookOutput:
+                return (await handler(hook_input, context)).output
+
+            decision = await self._review_completion(
+                action, "post_agent", handlers, review
+            )
         except asyncio.CancelledError:
             # The turn was abandoned mid-evaluation (shutdown/abort); drop its retry
             # counter so a cancelled retrying turn cannot leak one entry per turn_id.
-            self._post_agent_retries.pop(action.turn_id, None)
+            self._forget_turn(action.turn_id)
             raise
         except Exception as error:
-            self._post_agent_retries.pop(action.turn_id, None)
+            self._forget_turn(action.turn_id)
             return _hook_pipeline_failed(action, error)
         finally:
             if emit_run:
                 await self._emit_notice(
                     HookNoticeData(kind="hook_run_completed", scope="post_agent")
                 )
-        # The turn is accepted (normal accept or retry-cap force-accept): drop its
-        # retry counter so a long session cannot accumulate one entry per turn.
-        self._post_agent_retries.pop(action.turn_id, None)
-        acceptance: RustReplaceAssistantContent | RustAcceptCandidate = (
-            RustReplaceAssistantContent(content=replacement)
+        if isinstance(decision, RustHookFailedEvent):
+            return decision
+        if isinstance(decision, RustCompletionHookAccept):
+            # The turn is accepted (normal accept or retry-cap force-accept): drop its
+            # retry counter so a long session cannot accumulate one entry per turn.
+            self._forget_turn(action.turn_id)
+        return RustHookCompletedEvent(
+            action_id=action.action_id,
+            result=RustPostAgentTurnHookResult(output=decision),
+        )
+
+    def record_llm_iteration(self, action: RustLLMCallAction) -> None:
+        """Note the turn's latest model call: a hook reviewing its response may ask
+        for a retry, and whether one still fits the turn depends on this call.
+
+        The Runtime also calls it for a model call a restart answers from the
+        journal, which never reaches ``execute``.
+        """
+        if action.purpose != "agent" or action.turn_id is None:
+            return
+        if action.turn_id not in self._llm_iterations:
+            # A session runs one turn at a time: a new turn means every earlier
+            # one ended, however it ended, so their counters go.
+            self._llm_iterations.clear()
+            self._post_agent_retries = {
+                turn_id: count
+                for turn_id, count in self._post_agent_retries.items()
+                if turn_id == action.turn_id
+            }
+        self._llm_iterations[action.turn_id] = (action.iteration, action.max_iterations)
+
+    def _forget_turn(self, turn_id: str) -> None:
+        self._post_agent_retries.pop(turn_id, None)
+        self._llm_iterations.pop(turn_id, None)
+
+    async def _execute_pre_llm_call_hook(
+        self, action: RustPreLlmCallHookAction
+    ) -> RustEvent:
+        # The first skip wins: the model is not called and the turn ends.
+        try:
+            agent = HookAgentIdentity(
+                name=self._config.active_agent, main=self._main_session
+            )
+            handlers = _select_for_agent(
+                _resolve_hooks(
+                    action.hook_binding_ids, self._hook_handlers.pre_llm_call
+                ),
+                agent,
+            )
+        except Exception as error:
+            return _hook_pipeline_failed(action, error)
+        emit_run = self._emits_run_notices([bid for bid, _ in handlers])
+        if emit_run:
+            await self._emit_notice(
+                HookNoticeData(kind="hook_run_started", scope="pre_llm")
+            )
+        try:
+            context = self._hook_context(agent=agent, turn_id=action.turn_id)
+            for _, handler in handlers:
+                result = await handler(context)
+                if isinstance(result.output, RustHookSkip):
+                    # The Core ends the turn with the reason as its answer.
+                    self._forget_turn(action.turn_id)
+                    return RustHookCompletedEvent(
+                        action_id=action.action_id, result=result
+                    )
+        except Exception as error:
+            return _hook_pipeline_failed(action, error)
+        finally:
+            if emit_run:
+                await self._emit_notice(
+                    HookNoticeData(kind="hook_run_completed", scope="pre_llm")
+                )
+        return RustHookCompletedEvent(
+            action_id=action.action_id,
+            result=RustPreLlmCallHookResult(output=RustHookContinue()),
+        )
+
+    async def _execute_post_llm_call_hook(
+        self, action: RustPostLlmCallHookAction
+    ) -> RustEvent:
+        # The first retry or reject is the response's outcome and stops the rest.
+        # Retries share post_agent's budget for the turn; past it, the response is
+        # accepted. A retry the turn has no iteration left for fails the turn instead:
+        # the hook said no, so Vibe does not quietly accept.
+        try:
+            agent = HookAgentIdentity(
+                name=self._config.active_agent, main=self._main_session
+            )
+            handlers = _select_for_agent(
+                _resolve_hooks(
+                    action.hook_binding_ids, self._hook_handlers.post_llm_call
+                ),
+                agent,
+            )
+        except Exception as error:
+            return _hook_pipeline_failed(action, error)
+        emit_run = self._emits_run_notices([bid for bid, _ in handlers])
+        if emit_run:
+            await self._emit_notice(
+                HookNoticeData(kind="hook_run_started", scope="post_llm")
+            )
+        try:
+            context = self._hook_context(agent=agent, turn_id=action.turn_id)
+
+            async def review(
+                handler: PostLlmCallHookHandler,
+            ) -> RustCompletionHookOutput:
+                return (await handler(action.input, context)).output
+
+            decision = await self._review_completion(
+                action, "post_llm", handlers, review
+            )
+        except asyncio.CancelledError:
+            self._forget_turn(action.turn_id)
+            raise
+        except Exception as error:
+            self._forget_turn(action.turn_id)
+            return _hook_pipeline_failed(action, error)
+        finally:
+            if emit_run:
+                await self._emit_notice(
+                    HookNoticeData(kind="hook_run_completed", scope="post_llm")
+                )
+        if isinstance(decision, RustHookFailedEvent):
+            return decision
+        # Unlike post_agent, an accepted response does not end the turn: a tool call
+        # leads to another model call, whose retries still count.
+        return RustHookCompletedEvent(
+            action_id=action.action_id,
+            result=RustPostLlmCallHookResult(output=decision),
+        )
+
+    async def _review_completion[Handler](
+        self,
+        action: RustPostAgentTurnHookAction | RustPostLlmCallHookAction,
+        scope: Literal["post_llm", "post_agent"],
+        handlers: Sequence[tuple[str, Handler]],
+        review: Callable[[Handler], Awaitable[RustCompletionHookOutput]],
+    ) -> RustCompletionHookOutput | RustHookFailedEvent:
+        """What the hooks reviewing one completion decide, in their order.
+
+        A reject is final. The first retry is the outcome while the turn's retry
+        budget lasts and a model call is left for it; once the budget is spent, a
+        retry no longer stops the review, so a later hook still runs and may
+        reject. Among accepts, the last replacement wins.
+        """
+        replacement: list[RustContentBlock] | None = None
+        budget_spent = self._retry_budget_spent(action.turn_id)
+        for binding_id, handler in handlers:
+            output = await review(handler)
+            if isinstance(output, RustCompletionHookAccept):
+                if isinstance(output.acceptance, RustReplaceAssistantContent):
+                    replacement = output.acceptance.content
+                continue
+            if isinstance(output, RustCompletionHookRetry):
+                if budget_spent:
+                    continue
+                if not self._retry_fits(action.turn_id):
+                    self._forget_turn(action.turn_id)
+                    return _retry_out_of_iterations(
+                        action, scope, _hook_name(binding_id, handler), output
+                    )
+                self._post_agent_retries[action.turn_id] = (
+                    self._post_agent_retries.get(action.turn_id, 0) + 1
+                )
+                return output
+            self._forget_turn(action.turn_id)
+            return output
+        return RustCompletionHookAccept(
+            acceptance=RustReplaceAssistantContent(content=replacement)
             if replacement is not None
             else RustAcceptCandidate()
         )
-        return RustHookCompletedEvent(
-            action_id=action.action_id,
-            result=RustPostAgentTurnHookResult(
-                output=RustCompletionHookAccept(acceptance=acceptance)
-            ),
-        )
 
-    def _bounded_retry(
-        self, turn_id: str, retry: RustCompletionHookRetry
-    ) -> RustCompletionHookRetry | None:
-        count = self._post_agent_retries.get(turn_id, 0)
-        if count >= _MAX_POST_AGENT_RETRIES:
-            # The turn has retried too many times; signal the caller to force-accept
-            # (which honors any collected replacement) so the turn can finish.
-            return None
-        self._post_agent_retries[turn_id] = count + 1
-        return retry
+    def _retry_budget_spent(self, turn_id: str) -> bool:
+        return self._post_agent_retries.get(turn_id, 0) >= _MAX_POST_AGENT_RETRIES
+
+    def _retry_fits(self, turn_id: str) -> bool:
+        """Whether the turn has a model call left for a retry (the Core refuses one
+        that would reach ``max_iterations``).
+        """
+        iteration, max_iterations = self._llm_iterations.get(turn_id, (0, None))
+        return max_iterations is None or iteration + 1 < max_iterations
 
     def _hook_context(
         self, *, agent: HookAgentIdentity | None = None, turn_id: str | None = None
@@ -1261,14 +1552,13 @@ class _LocalActionState:
         hook body cannot approve a provided/MCP call through this bridge, so those deny
         under uncertainty rather than run unreviewed (the classify gate handles them).
         """
-        requester = self._request_approval
-        assert requester is not None
+        assert self._request_approval is not None
 
         async def approve(tool_call: RustHookToolCall, reason: str | None) -> bool:
             call = tool_call.call
             if not isinstance(call, RustRuntimeBuiltinToolCall):
                 return False
-            grant = await requester(
+            grant = await self._ask_human(
                 RustRuntimeBuiltinToolCallAction(
                     action_id=tool_call.action_id,
                     turn_id=turn_id,
@@ -1294,18 +1584,37 @@ class _LocalActionState:
         An ``ask`` call is first refined by the Host's per-call permission
         resolver (the Vibe rules: .env prompt, denylists, allowlist grants), which
         can lower it to allow/deny before the human is ever asked.
+
+        The human is asked about one call at a time. Parallel calls reach this
+        gate together, before any of them is answered, so a call that waited for
+        its turn asks the resolver again: an answer that granted more than the
+        call it was given for (for the session, or for good) then clears the
+        calls it covers instead of prompting for each of them.
         """
         self._resolved_authorized_paths.pop(action.action_id, None)
         if mode == "ask" and self._config.bypass_approval:
             mode = "allow"
-        outcome: PermissionOutcome | None = None
-        if mode == "ask":
-            outcome = await self._resolve_permission(action)
-            if outcome.authorized_path is not None:
-                self._resolved_authorized_paths[action.action_id] = (
-                    outcome.authorized_path
-                )
-            mode = outcome.decision
+        if mode != "ask":
+            return await self._apply_approval_mode(action, mode, None)
+        settled = self._settled_prompts
+        outcome = await self._resolve_permission(action)
+        if outcome.decision != "ask" or self._request_approval is None:
+            return await self._apply_approval_mode(action, outcome.decision, outcome)
+        async with self._prompt_lock:
+            if self._config.bypass_approval:
+                # Keep the path the resolver cleared: a file tool needs it to
+                # reach a file outside the workspace roots.
+                return await self._apply_approval_mode(action, "allow", outcome)
+            if self._settled_prompts != settled:
+                outcome = await self._resolve_permission(action)
+            return await self._apply_approval_mode(action, outcome.decision, outcome)
+
+    async def _apply_approval_mode(
+        self, action: GatedToolAction, mode: str, outcome: PermissionOutcome | None
+    ) -> RustEvent | None:
+        """Act on the mode left once bypass and the resolver had their say."""
+        if outcome is not None and outcome.authorized_path is not None:
+            self._resolved_authorized_paths[action.action_id] = outcome.authorized_path
         match mode:
             case "deny":
                 self._record_approval_meta(action.action_id, "skip", "never", "never")
@@ -1325,9 +1634,7 @@ class _LocalActionState:
                         message="Approval callbacks are not implemented yet",
                     )
                 required = outcome.required_permissions if outcome else ()
-                approved = (
-                    await self._request_approval(action, None, required)
-                ).approved
+                approved = (await self._ask_human(action, None, required)).approved
                 if not approved:
                     self._record_approval_meta(action.action_id, "skip", "ask", "user")
                     self._resolved_authorized_paths.pop(action.action_id, None)
@@ -1627,7 +1934,7 @@ class _LocalActionState:
             self._emit_result(action, tool_name, result, _ESCALATED_HEADLESS_DENIED)
             self._resolved_authorized_paths.pop(action.action_id, None)
             return _failed_tool_action(action, code="tool_denied", message=reason)
-        grant = await self._request_approval(action, reason, required)
+        grant = await self._ask_human(action, reason, required)
         if not grant.approved:
             self._record_approval_meta(action.action_id, "skip", "ask", "user")
             self._emit_result(action, tool_name, result, _ESCALATED_DENIED, grant)
@@ -1726,9 +2033,52 @@ def _select_for_agent[H](
     return [
         (binding_id, handler)
         for binding_id, handler in resolved
-        if not isinstance(handler, AcceptOrRetryPostAgentHandler | AgentScopedHook)
+        if not isinstance(
+            handler,
+            AcceptOrRetryPostAgentHandler
+            | AcceptOrRetryPostLlmHandler
+            | AgentScopedHook
+            | AgentScopedPreLlmHook,
+        )
         or handler.selects(agent)
     ]
+
+
+def _hook_name(binding_id: str, handler: object) -> str:
+    """The name a user gave the hook, or its binding id when it has none."""
+    name = getattr(handler, "name", None)
+    return name if isinstance(name, str) else binding_id
+
+
+def _retry_out_of_iterations(
+    action: RustHookCallActionBase,
+    scope: Literal["post_llm", "post_agent"],
+    name: str,
+    retry: RustCompletionHookRetry,
+) -> RustHookFailedEvent:
+    """Fail the turn: a hook asked for another try the turn has no model call for.
+
+    The Core refuses such a retry, and accepting the response instead would ignore
+    the hook, so the turn ends with a message naming the hook and its reason.
+    """
+    reason = " ".join(
+        block.text
+        for block in retry.feedback
+        if isinstance(block, RustTextContentBlock)
+    ).strip()
+    return RustHookFailedEvent(
+        action_id=action.action_id,
+        error=RustProtocolError(
+            code="hook_retry_out_of_iterations",
+            message=(
+                f"The {scope} hook {name!r} asked the model to try again, but the "
+                f"turn has no steps left (max turns)"
+                + (f": {reason}" if reason else ".")
+            ),
+            retryable=False,
+            details=None,
+        ),
+    )
 
 
 def _hook_pipeline_failed(
@@ -1805,7 +2155,9 @@ def _failed_tool_action(
 __all__ = [
     "CLASSIFICATION_EVENT_TYPE",
     "AcceptOrRetryPostAgentHandler",
+    "AcceptOrRetryPostLlmHandler",
     "AgentScopedHook",
+    "AgentScopedPreLlmHook",
     "ApprovalGrant",
     "ApprovalRequester",
     "ClassificationSink",
@@ -1816,8 +2168,10 @@ __all__ = [
     "HookNoticeData",
     "HookNoticeEmitter",
     "PostAgentTurnHookHandler",
+    "PostLlmCallHookHandler",
     "PostToolCallHookHandler",
     "PreAgentTurnHookHandler",
+    "PreLlmCallHookHandler",
     "PreToolCallHookHandler",
     "ProvidedToolExecutor",
     "ProvidedToolExecutorFactory",

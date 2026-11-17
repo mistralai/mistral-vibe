@@ -112,3 +112,33 @@ def test_make_json_patch_expands_a_relocated_list_element_into_remove_then_add()
         JsonPatchOperation(op="add", path="/items/0", value="c"),
     ]
     assert apply_json_patch(source, operations) == target
+
+
+def test_make_json_patch_sends_a_whole_key_as_one_replace() -> None:
+    source: dict[str, JsonValue] = {"loops": [{"id": "a"}, {"id": "b"}], "title": "x"}
+    target: dict[str, JsonValue] = {"loops": [{"id": "b"}], "title": "y"}
+
+    operations = make_json_patch(source, target, whole_keys=("loops",))
+
+    assert operations == [
+        JsonPatchOperation(op="replace", path="/title", value="y"),
+        JsonPatchOperation(op="replace", path="/loops", value=[{"id": "b"}]),
+    ]
+    assert apply_json_patch(source, operations) == target
+
+
+def test_make_json_patch_leaves_an_unchanged_whole_key_out() -> None:
+    source: dict[str, JsonValue] = {"loops": [{"id": "a"}], "title": "x"}
+    target: dict[str, JsonValue] = {"loops": [{"id": "a"}], "title": "y"}
+
+    operations = make_json_patch(source, target, whole_keys=("loops",))
+
+    assert operations == [JsonPatchOperation(op="replace", path="/title", value="y")]
+
+
+def test_make_json_patch_adds_or_removes_a_whole_key() -> None:
+    added = make_json_patch({}, {"loops": []}, whole_keys=("loops",))
+    removed = make_json_patch({"loops": []}, {}, whole_keys=("loops",))
+
+    assert added == [JsonPatchOperation(op="add", path="/loops", value=[])]
+    assert removed == [JsonPatchOperation(op="remove", path="/loops")]

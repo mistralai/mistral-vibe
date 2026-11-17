@@ -97,6 +97,7 @@ fn session_start_params_without_flags_match_default_payload() {
         },
         history_limit: HISTORY_LIMIT,
         model: None,
+        reasoning_effort: None,
         session_only: false,
         kind: None,
     };
@@ -123,6 +124,7 @@ fn headless_yolo_without_agent_is_a_session_wide_bypass() {
         agent_config: config,
         history_limit: HISTORY_LIMIT,
         model: None,
+        reasoning_effort: None,
         session_only: false,
         kind: None,
     };

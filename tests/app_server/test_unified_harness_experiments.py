@@ -28,6 +28,7 @@ from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import ExperimentManager
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
 from vibe.core.identity import IdentityResult
+from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE
 from vibe.core.platform_auth._api_key import api_key_principal
 import vibe.core.platform_auth._mistral as platform_mistral
 from vibe.core.telemetry.types import LaunchContext
@@ -350,6 +351,15 @@ async def test_unified_variants_resolved_mid_turn_wait_for_the_next_turn(
     assert len(session.applied) == 1
 
 
+def _syncs(adapter: Any) -> set[asyncio.Task[None]]:
+    """Its registry syncs, not the store cleanup a session runs with them off."""
+    return {
+        task
+        for task in adapter._registry_sync._tasks
+        if task.get_name() == "vibe-unified-registry-sync"
+    }
+
+
 @pytest.mark.asyncio
 async def test_unified_an_eval_turning_registry_skills_on_starts_their_sync(
     tmp_path: Path,
@@ -379,10 +389,10 @@ async def test_unified_an_eval_turning_registry_skills_on_starts_their_sync(
         process_services=process_services,
     )
     adapter.start_registry_sync()
-    opened_with = set(adapter._registry_sync._tasks)
+    opened_with = _syncs(adapter)
 
     await adapter.initialize_experiments(_launch_context())
-    [rolled_out] = adapter._registry_sync._tasks
+    [rolled_out] = _syncs(adapter)
     await rolled_out
 
     assert opened_with == set()
@@ -415,6 +425,45 @@ async def test_unified_experiments_are_skipped_when_the_ab_opt_out_is_set(
 
     assert client.attributes is None
     assert session.applied == []
+
+
+@pytest.mark.asyncio
+async def test_unified_a_self_hosted_session_never_asks_growthbook(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+
+    _enable_experiments(config_dir)
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["providers"] = [
+        {
+            "name": "mistral",
+            "api_base": "https://api.asml.example/v1",
+            "api_key_env_var": "MISTRAL_API_KEY",
+            "backend": "mistral",
+        }
+    ]
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    # Left by a session from before the deployment counted as self-hosted.
+    EXPERIMENT_EVAL_CACHE_FILE.path.write_text("{}", encoding="utf-8")
+    session = _RecordingSession()
+    adapter, client = await _build_adapter(
+        tmp_path,
+        response=_extra_models_response(),
+        session=session,
+        monkeypatch=monkeypatch,
+        process_services=process_services,
+    )
+
+    await adapter.initialize_experiments(_launch_context())
+
+    assert client.attributes is None
+    assert session.applied == []
+    assert not EXPERIMENT_EVAL_CACHE_FILE.path.exists()
 
 
 @pytest.mark.asyncio
@@ -1082,17 +1131,19 @@ async def test_unified_a_pinned_session_does_not_wait_for_the_eval(
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
 
     _enable_experiments(config_dir)  # the test config pins a built-in model
-    adapter, _client = await _build_adapter(
+    adapter, client = await _build_adapter(
         tmp_path,
         response=routing_eval_response(_ROUTED_ALIAS),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
     )
+    released = _hold_eval(client, monkeypatch)
 
     _start_experiments(adapter)
 
-    assert adapter._experiments_wait is None
+    await asyncio.wait_for(adapter._wait_for_first_turn_fetches(), timeout=2)
+    released.set()
     task = adapter._experiments_task
     assert task is not None
     await task
@@ -1110,13 +1161,14 @@ async def test_unified_a_reopened_session_with_a_pinned_model_does_not_wait(
     from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
 
     _unpin_with_experiments(config_dir)
-    adapter, _client = await _build_adapter(
+    adapter, client = await _build_adapter(
         tmp_path,
         response=routing_eval_response(_ROUTED_ALIAS),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
     )
+    released = _hold_eval(client, monkeypatch)
     # What a reopened session does with the model its first turn pinned.
     assert not await set_session_active_model_override(
         adapter._context.config_orchestrator,
@@ -1126,7 +1178,8 @@ async def test_unified_a_reopened_session_with_a_pinned_model_does_not_wait(
 
     _start_experiments(adapter)
 
-    assert adapter._experiments_wait is None
+    await asyncio.wait_for(adapter._wait_for_first_turn_fetches(), timeout=2)
+    released.set()
     task = adapter._experiments_task
     assert task is not None
     await task
@@ -1280,7 +1333,6 @@ async def test_unified_an_eval_outlasting_the_cap_in_a_pinned_session_stops_late
     )
     released = _hold_eval(client, monkeypatch)
     _start_experiments(pinned)
-    assert pinned._experiments_wait is None
 
     await asyncio.sleep(0.2)
 
@@ -2236,3 +2288,245 @@ async def test_unified_a_retired_pick_is_announced_once_across_refreshes(
         await adapter._settle_configuration()
 
     assert sum("is no longer" in notice for notice in session.notices) == 1
+
+
+# -- A model pick on a cold start ----------------------------------------------
+
+
+def _pick(adapter: Any, model: str) -> Any:
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    return adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=adapter.session_id, model_alias=model, session_only=True
+        )
+    )
+
+
+async def _cold_catalog_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    catalog: Any,
+) -> tuple[Any, asyncio.Event]:
+    """An adapter with no catalog cached, whose catalog fetch is held. The
+    session is not announced: a pick in session/start runs before it is.
+    """
+    released = asyncio.Event()
+
+    async def _held_fetch(_config: object, _credentials: object = None) -> object:
+        await released.wait()
+        return catalog
+
+    _serve_catalog(monkeypatch, process_services, _held_fetch)
+    adapter, _client = await _build_adapter(
+        tmp_path,
+        response=None,
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+        process_services=process_services,
+    )
+    adapter._start_model_catalog_fetch()
+    return adapter, released
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("active_model", [None, ""], ids=["built-in", "unset"])
+async def test_unified_a_pick_waits_for_the_catalog_that_brings_its_model(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    active_model: str | None,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    if active_model is None:
+        _write_user_config(config_dir)
+    else:
+        _write_user_config(config_dir, active_model=active_model)
+    adapter, released = await _cold_catalog_adapter(
+        tmp_path, monkeypatch, process_services, _runnable_catalog("fetched-model")
+    )
+
+    pick = asyncio.create_task(_pick(adapter, "fetched-model"))
+    await asyncio.sleep(0.01)
+    assert not pick.done()
+    released.set()
+    written = await asyncio.wait_for(pick, timeout=2)
+
+    assert not written.response.failures
+    config = adapter._context.config_orchestrator.config
+    assert config.get_active_model().alias == "fetched-model"
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unified_a_pick_ends_with_unknown_model_at_the_catalog_cap(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._session_backend_port import SessionBackendError
+    import vibe.core.model_catalog.wait as wait_module
+
+    _write_user_config(config_dir)
+    monkeypatch.setattr(wait_module, "MODEL_CATALOG_WAIT_CAP_SECONDS", 0.05)
+    adapter, _released = await _cold_catalog_adapter(
+        tmp_path, monkeypatch, process_services, _runnable_catalog("fetched-model")
+    )
+
+    with pytest.raises(SessionBackendError, match="Unknown model: fetched-model"):
+        await asyncio.wait_for(_pick(adapter, "fetched-model"), timeout=2)
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unified_a_pick_reaching_its_cap_does_not_stop_later_sessions_waiting(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    """A pinned session holds no readiness wait, only the pick's: its cap must
+    not record a process-wide failure that unpinned sessions would then skip.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.core.model_catalog.wait as wait_module
+
+    _write_user_config(config_dir)
+    monkeypatch.setattr(wait_module, "MODEL_CATALOG_WAIT_CAP_SECONDS", 0.05)
+    adapter, _released = await _cold_catalog_adapter(
+        tmp_path, monkeypatch, process_services, _runnable_catalog("fetched-model")
+    )
+    assert adapter._model_catalog_wait is None
+    assert adapter._model_catalog_pick_wait is not None
+
+    await asyncio.sleep(0.2)
+
+    assert process_services.model_catalog.failures.failed is False
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unified_a_pick_of_a_model_the_config_offers_does_not_wait(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    _write_user_config(config_dir)
+    adapter, _released = await _cold_catalog_adapter(
+        tmp_path, monkeypatch, process_services, _runnable_catalog("fetched-model")
+    )
+    offered = adapter._context.config_orchestrator.config.get_active_model().alias
+
+    written = await asyncio.wait_for(_pick(adapter, offered), timeout=2)
+
+    assert not written.response.failures
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unified_a_pick_waits_for_the_eval_that_turns_the_catalog_on(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    # Catalog setting left unset locally, the session on its built-in model.
+    _enable_experiments(config_dir)
+    catalog_released = asyncio.Event()
+
+    async def _held_fetch(_config: object, _credentials: object = None) -> object:
+        await catalog_released.wait()
+        return _runnable_catalog("catalog-model")
+
+    _serve_catalog(monkeypatch, process_services, _held_fetch)
+    adapter, client = await _build_adapter(
+        tmp_path,
+        response=_model_catalog_on_response(),
+        session=_RecordingSession(),
+        monkeypatch=monkeypatch,
+        process_services=process_services,
+    )
+    eval_released = _hold_eval(client, monkeypatch)
+    config = adapter._context.config_orchestrator.config
+    assert not config.experimental_enable_model_catalog
+    assert config.active_model
+
+    _start_experiments(adapter)
+    pick = asyncio.create_task(_pick(adapter, "catalog-model"))
+    await asyncio.sleep(0.01)
+    assert not pick.done()
+    eval_released.set()
+    await asyncio.sleep(0.01)
+    assert not pick.done()
+    catalog_released.set()
+    written = await asyncio.wait_for(pick, timeout=2)
+
+    assert not written.response.failures
+    config = adapter._context.config_orchestrator.config
+    assert config.get_active_model().alias == "catalog-model"
+    await adapter.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unified_session_start_takes_a_model_only_the_catalog_brings(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """`vibe -p … --model <catalog model>` on a first run: no catalog cached,
+    the fetch still running when session/start applies the model.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess, create_harness_server
+    from vibe.app_server.client import AppServerClient
+    from vibe.app_server.protocol import (
+        RuntimeReadParams,
+        RuntimeReadResponse,
+        SessionReadResponse,
+        SessionStartParams,
+    )
+    from vibe.app_server.transport import memory_transport_pair
+
+    _write_user_config(config_dir)
+    fetching = asyncio.Event()
+
+    async def _slow_fetch(_config: object, _credentials: object = None) -> object:
+        fetching.set()
+        await asyncio.sleep(0.2)
+        return _runnable_catalog("fetched-model")
+
+    _serve_catalog(monkeypatch, process_services, _slow_fetch)
+    client_transport, server_transport = memory_transport_pair()
+    server = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(services=process_services),
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    try:
+        await client.initialize(ClientInfo(name="test", version="0"))
+        await client.notify("initialized")
+        started = SessionReadResponse.model_validate(
+            await asyncio.wait_for(
+                client.request(
+                    "session/start",
+                    SessionStartParams(model="fetched-model", session_only=True),
+                ),
+                timeout=4,
+            )
+        )
+        runtime = RuntimeReadResponse.model_validate(
+            await client.request(
+                "runtime/read", RuntimeReadParams(session_id=started.state.session.id)
+            )
+        ).runtime
+    finally:
+        await client.close()
+
+    assert fetching.is_set()
+    assert runtime.config.active_model.alias == "fetched-model"

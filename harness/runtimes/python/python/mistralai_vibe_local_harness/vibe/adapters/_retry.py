@@ -81,7 +81,8 @@ async def call_with_retries[T](
     guard, which can be longer than the whole budget. It is one because when the
     silence was a long generation the provider does not stream, every attempt
     repeats it, and each one is paid for. A response whose tool calls all lack a name is retried at
-    most ``_MAX_UNUSABLE_TOOL_CALL_RETRIES`` times for the same reason.
+    most ``_MAX_UNUSABLE_TOOL_CALL_RETRIES`` times for the same reason, and an
+    empty response at most ``_MAX_EMPTY_RESPONSE_RETRIES`` times.
 
     ``completion_budget`` only counts spend here: the caller admits the call
     once before it starts, and its retries always run. A failed or cancelled
@@ -92,6 +93,7 @@ async def call_with_retries[T](
     retry_attempt = 0
     stall_retries = 0
     unusable_tool_call_retries = 0
+    empty_response_retries = 0
     while True:
         provider_attempt = ProviderAttempt()
         try:
@@ -110,7 +112,11 @@ async def call_with_retries[T](
                 failure.unusable_tool_calls
                 and unusable_tool_call_retries >= _MAX_UNUSABLE_TOOL_CALL_RETRIES
             )
-            if stalls_spent or unusable_spent or not failure.retryable:
+            empty_spent = (
+                failure.empty_response
+                and empty_response_retries >= _MAX_EMPTY_RESPONSE_RETRIES
+            )
+            if stalls_spent or unusable_spent or empty_spent or not failure.retryable:
                 raise
             wait_s = _requested_wait_s(
                 failure,
@@ -127,6 +133,8 @@ async def call_with_retries[T](
                 stall_retries += 1
             if failure.unusable_tool_calls:
                 unusable_tool_call_retries += 1
+            if failure.empty_response:
+                empty_response_retries += 1
             retry_attempt += 1
             logger.warning(
                 "Retrying model completion (attempt %d, delay %.2fs): %r",
@@ -193,6 +201,8 @@ _RETRY_BACKOFF = 1.5
 _MAX_RETRY_DELAY_S = 30.0
 _MAX_RETRY_JITTER_S = 1.0
 _MAX_UNUSABLE_TOOL_CALL_RETRIES = 1
+# Matches the target runtime's default stream_retries for an empty reply.
+_MAX_EMPTY_RESPONSE_RETRIES = 2
 # The backoff reaches its maximum long before this exponent; the cap keeps a
 # large retry budget from overflowing the power.
 _MAX_BACKOFF_EXPONENT = 16

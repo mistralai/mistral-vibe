@@ -157,6 +157,15 @@ pub(crate) fn render_agent_message(
                     &output,
                     continue_hint,
                 ),
+                AgentResultTermination::Completed {
+                    output,
+                    stop_reason: Some(TurnStopReason::RepeatedToolFailure),
+                } => render_stopped_result(
+                    "the same tool call failed repeatedly before the agent finished",
+                    &sender_agent_path,
+                    &output,
+                    continue_hint,
+                ),
                 AgentResultTermination::Completed { output, .. } => {
                     format!("Status: completed\nOutput: {output}")
                 }

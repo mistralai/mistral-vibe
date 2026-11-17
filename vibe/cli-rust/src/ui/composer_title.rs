@@ -78,6 +78,22 @@ pub fn title(app: &App, width: u16) -> Title {
     }
 }
 
+/// The bottom-border hint shown while Ctrl+S holds a stashed draft and can restore it.
+pub fn stash_hint(app: &App) -> Line<'static> {
+    if app.chat_input.stash.is_none() || !crate::composer_stash::key_reaches_stash(app) {
+        return Line::default();
+    }
+    let hint = (
+        crate::hints::key::CTRL_S,
+        crate::hints::action::RESTORE_STASH,
+    );
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(super::hint_line::spans(&[hint]));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled("─", theme::border_style()));
+    Line::from(spans).right_aligned()
+}
+
 /// Publish where the title painted the model in the composer at `area`, for `/model` clicks.
 pub fn place_model(app: &mut App, area: Rect, title: &Title) {
     let x = area.right().saturating_sub(title.line.width() as u16) + title.model.0;

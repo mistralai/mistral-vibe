@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import dataclass
 import os
 import sys
+from typing import TYPE_CHECKING
 
 from vibe import __version__
 from vibe._experimental_harness import (
@@ -12,12 +13,19 @@ from vibe._experimental_harness import (
     require_experimental_harness,
 )
 from vibe.cli.launcher import exec_rust_cli
+from vibe.core.config._self_hosted import (
+    crash_reports_allowed,
+    log_self_hosted_services,
+)
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import init_harness_files_manager
 from vibe.core.paths import LOG_FILE, bootstrap_vibe_home
 from vibe.core.telemetry.build_metadata import build_launch_context
 from vibe.core.utils.windows_asyncio import silence_proactor_transport_teardown_warnings
 from vibe.observability.logging import init_file_logging
+
+if TYPE_CHECKING:
+    from vibe.core.config import VibeConfigSchema
 
 # Read by vibe-rs; an env var rather than a flag so an older vibe-rs ignores it.
 SETUP_ENTRYPOINT_ENV = "VIBE_SETUP_ENTRYPOINT"
@@ -49,6 +57,25 @@ def _run_setup() -> None:
         extra_env={SETUP_ENTRYPOINT_ENV: "acp"},
         app_server_cmd=[sys.executable, SETUP_APP_SERVER_FLAG] if frozen else None,
     )
+
+
+def _start_crash_reporting(config: VibeConfigSchema) -> None:
+    from vibe.observability.sentry import init_sentry
+
+    log_self_hosted_services(config)
+    try:
+        init_sentry(
+            enabled=crash_reports_allowed(config),
+            headless=True,
+            tags=build_launch_context(
+                agent_entrypoint="acp",
+                agent_version=__version__,
+                client_name="vibe_acp",
+                client_version=__version__,
+            ).sentry_tags(),
+        )
+    except Exception:
+        pass  # error reporting disabled
 
 
 def main() -> None:
@@ -91,7 +118,6 @@ def main() -> None:
 
     from vibe.acp.agent import run_acp_server
     from vibe.core.config import load_dotenv_values
-    from vibe.observability.sentry import init_sentry
 
     environ_before_dotenv_load = os.environ.copy()
     load_dotenv_values()
@@ -103,19 +129,7 @@ def main() -> None:
         config = None
 
     if config is not None:
-        try:
-            init_sentry(
-                enabled=config.enable_telemetry,
-                headless=True,
-                tags=build_launch_context(
-                    agent_entrypoint="acp",
-                    agent_version=__version__,
-                    client_name="vibe_acp",
-                    client_version=__version__,
-                ).sentry_tags(),
-            )
-        except Exception:
-            pass  # error reporting disabled
+        _start_crash_reporting(config)
 
     # The Unified Harness is the required default runtime. Fail before the
     # ACP server starts serving: a missing or incompatible Runtime must abort

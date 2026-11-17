@@ -53,7 +53,6 @@ pub fn apply(app: &mut App, text: String) {
     let history = std::mem::take(&mut app.chat_input.edit_history);
     crate::long_paste::load_collapsed(app, text);
     app.chat_input.edit_history = history;
-    crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
     app.chat_input
         .record_edit(before, true, crate::clock::now());
     crate::input::reset_history_state(app);

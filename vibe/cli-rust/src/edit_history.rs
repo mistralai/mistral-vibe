@@ -51,6 +51,11 @@ impl Snapshot {
             .filter_map(|mention| mention.paste.as_ref())
     }
 
+    /// Whether the checkpoint holds only whitespace in prompt mode, as `full_text` would.
+    pub fn is_blank(&self) -> bool {
+        self.mode.prefix().is_none() && self.text.trim().is_empty()
+    }
+
     fn same_text(&self, other: &Self) -> bool {
         self.text == other.text && self.mode == other.mode
     }

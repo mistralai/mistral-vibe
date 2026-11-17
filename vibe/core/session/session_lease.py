@@ -23,7 +23,8 @@ class SessionBusyError(RuntimeError):
 class SessionLease:
     # The on-disk lease format (seed byte, {id}.lock.json, .registry) is
     # shared with the twin in
-    # agents/harness/harness/runtimes/python/.../vibe/_storage.py; change both.
+    # agents/harness/harness/runtimes/python/.../vibe/_storage.py and with the
+    # reader in vibe/app_server/_storage_usage/live.py; change all three.
 
     def __init__(self, root: Path, session_id: str) -> None:
         if _SESSION_ID_PATTERN.fullmatch(session_id) is None:

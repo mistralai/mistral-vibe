@@ -30,6 +30,7 @@ pub fn help_text(app: &App) -> String {
         "- `Ctrl+G` Edit input in external editor".to_owned(),
         "- `Ctrl+O` Toggle tool output view".to_owned(),
         "- `Ctrl+R` Search prompt history".to_owned(),
+        "- `Ctrl+S` Stash the input (restored after the next submit)".to_owned(),
         "- `Ctrl+T` Start or stop voice recording (voice mode)".to_owned(),
         "- `Shift+Tab` Cycle through agents (ask, accept-edits, ...)".to_owned(),
         "- `Esc Esc` Rewind to a previous message (when input is empty)".to_owned(),
@@ -236,16 +237,18 @@ fn identity_name(identity: &Value, email: Option<&str>) -> Option<String> {
     }
 }
 
-/// The `/whoami` body, or a fallback when no Mistral identity is available;
-/// either way it ends with the credential source in use, when known.
+/// The `/whoami` body, or a fallback without an identity, then the credential source and the switch offer.
 pub fn whoami_text(reads: &AccountReads, auth: Option<&Value>) -> String {
     let mut lines = vec!["## Who am I".to_owned(), String::new()];
     let source = auth.and_then(provider_auth::active_source_line);
+    let switch = crate::startup::banners::plan_offer(&reads.account).filter(|o| o.switch_key);
+    let offer = switch.map(|offer| offer.text);
     if reads.identity.is_null() {
         lines.push("No Mistral account information is available.".to_owned());
         if let Some(source) = source {
             lines.extend([String::new(), source]);
         }
+        lines.extend(offer.into_iter().flat_map(|text| [String::new(), text]));
         return lines.join("\n");
     }
     let identity = &reads.identity;
@@ -285,5 +288,6 @@ pub fn whoami_text(reads: &AccountReads, auth: Option<&Value>) -> String {
         }
     }
     lines.extend(source);
+    lines.extend(offer.into_iter().flat_map(|text| [String::new(), text]));
     lines.join("\n")
 }

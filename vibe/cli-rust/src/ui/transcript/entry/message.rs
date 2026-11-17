@@ -15,12 +15,20 @@ use crate::transcript::TranscriptEntry;
 use crate::ui::markdown::{self, LinkedLines};
 use crate::ui::theme;
 
+/// The per-frame state a message renders with.
+#[derive(Clone, Copy)]
+pub(super) struct MessageView {
+    pub selected: bool,
+    pub expanded: bool,
+    /// `/raw`: an agent message shows its Markdown source.
+    pub raw: bool,
+}
+
 pub(super) fn render(
     entry: &TranscriptEntry<'_>,
     message: &MessageEntry,
     width: u16,
-    selected: bool,
-    expanded: bool,
+    view: MessageView,
     pulse_frame: usize,
     cache: Option<&mut markdown::MarkdownCache>,
 ) -> RenderedEntry {
@@ -30,8 +38,22 @@ pub(super) fn render(
             &mut lines,
             message,
             width,
-            UserView::of(entry, selected, expanded),
+            UserView::of(entry, view.selected, view.expanded),
         ),
+        "assistant" if view.raw => {
+            let build = || super::raw::lines(&message_text(message), width);
+            let prepared = match cache {
+                Some(cache) => cache.prepare_wrapped(
+                    entry.index,
+                    entry.rev,
+                    width,
+                    theme::active_index(),
+                    build,
+                ),
+                None => Arc::new(markdown::PreparedMarkdown::from_wrapped(build(), width)),
+            };
+            return RenderedEntry::prepared(prepared, false);
+        }
         "command_result" => push_command_result(&mut lines, &message_text(message), width, false),
         "agent_statistics" => push_command_result(&mut lines, &message_text(message), width, true),
         "command_status" => push_command_status(
@@ -57,6 +79,7 @@ pub(super) fn render(
             push_subagent_severity(&mut lines, &message_text(message), width, theme::error())
         }
         "whats_new" => startup::push_whats_new(&mut lines, &message_text(message), width),
+        "plan_offer" => startup::push_plan_offer(&mut lines, &message_text(message), width),
         "startup_notices" => {
             startup::push_startup_notices(&mut lines, &message_text(message), width)
         }

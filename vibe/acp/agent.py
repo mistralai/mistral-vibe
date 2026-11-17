@@ -119,6 +119,7 @@ from vibe.acp.utils import (
     make_thinking_response,
 )
 from vibe.acp.voice import VoiceController
+from vibe.app_server._auth_context import OnboardingContextReader
 from vibe.app_server._integration_resources import MCPResource
 from vibe.app_server._project_links import (
     ProjectLinksController,
@@ -183,6 +184,7 @@ from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.observability.logging import logger
 from vibe.observability.sentry import capture_sentry_exception
 from vibe.questions import UserAnswer, UserQuestionRequest, UserQuestionResult
+from vibe.setup.auth.onboarding_context import OnboardingContext
 from vibe.user_content import UserDisplayContent, UserResource
 
 NON_INTERACTIVE_DISABLED_TOOLS: tuple[str, ...] = ("ask_user_question",)
@@ -445,6 +447,7 @@ class VibeAcpAgent(AcpAgent):
         self._start_session = session_starter or self._harness_host.start
         self._passive_host: AppServerHost | None = None
         self._passive_host_lock = asyncio.Lock()
+        self._onboarding_contexts: OnboardingContextReader | None = None
         # The loop holds only weak references to tasks.
         self._config_changed_tasks: set[asyncio.Task[None]] = set()
         # Headsup ahead of the change: sessions load an org-config change at
@@ -453,7 +456,10 @@ class VibeAcpAgent(AcpAgent):
             lambda _key: self._notify_config_changed()
         )
         auth_kwargs: dict[str, Any] = {
-            "context_loader": onboarding_context_loader,
+            # The reader resolves the provider over the held org config and
+            # cached layers, the same resolution the agent's sessions use.
+            "context_loader": onboarding_context_loader
+            or self._load_onboarding_context,
             "service_factory": browser_sign_in_service_factory,
             "environ_before_dotenv_load": environ_before_dotenv_load,
         }
@@ -484,7 +490,7 @@ class VibeAcpAgent(AcpAgent):
         self.client_info = client_info
         delegated = self._client_meta_flag("browser-auth-delegated")
         auth_methods: list[EnvVarAuthMethod | TerminalAuthMethod | Any] = [
-            *self._auth.browser_methods(delegated=delegated)
+            *(await self._auth.browser_methods(delegated=delegated))
         ]
         if self._client_meta_flag("terminal-auth"):
             command = sys.executable
@@ -511,7 +517,7 @@ class VibeAcpAgent(AcpAgent):
             )
         if (
             is_jetbrains_client(client_info)
-            and self._auth.status().can_use_active_provider
+            and (await self._auth.status()).can_use_active_provider
         ):
             auth_methods = []
         return InitializeResponse(
@@ -1177,16 +1183,17 @@ class VibeAcpAgent(AcpAgent):
     async def ext_method(self, method: str, params: dict) -> dict:  # noqa: PLR0912
         match method:
             case "auth/status":
-                report = self._auth.status_report()
+                report = await self._auth.status_report()
                 result = {
                     "authenticated": report.state.can_use_active_provider,
                     "authState": report.state.kind.value,
                     "signOutAvailable": report.state.sign_out_available,
                     "customDomain": report.custom_domain,
                     "customDomainLocked": report.custom_domain_locked,
+                    "configError": report.config_error,
                 }
             case "auth/signOut":
-                self._auth.sign_out()
+                await self._auth.sign_out()
                 result = {}
             case "config/schema":
                 result = await self._config_schema()
@@ -1495,6 +1502,18 @@ class VibeAcpAgent(AcpAgent):
                     )
                 )
         return self._passive_host
+
+    async def _load_onboarding_context(self) -> OnboardingContext:
+        # The connection binds the process's credential selection, so the
+        # process and its passive host must exist before the reader asks it.
+        await self._host_resources()
+        if self._onboarding_contexts is None:
+            self._onboarding_contexts = OnboardingContextReader(
+                org_config=self._harness_host.services.org_config,
+                model_catalog=self._harness_host.services.model_catalog,
+                credentials=self._harness_host.process_credentials(),
+            )
+        return await self._onboarding_contexts.load()
 
     async def _trust_extension(self, method: str, params: dict[str, Any]) -> dict:
         requested_session = params.get("sessionId") or params.get("session_id")

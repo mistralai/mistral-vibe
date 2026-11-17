@@ -45,16 +45,22 @@ pub enum MouseTarget {
     Approval,
     Question,
     Loading,
+    GoalRow,
     ThemePicker,
     ModelPicker,
     ThinkingPicker,
     LogLevelPicker,
     ArtifactsModal,
+    Loops,
+    /// The highlighted loop's instructions under or beside the `/loop` rows, scrolled on their own.
+    LoopsDetails,
+    GoalConfirm,
     ResumePicker,
     ProxySetup,
     BottomApp,
     Mcp,
     Plugins,
+    TrustedFolders,
     Skills,
     /// The body under the `/skills` rows, scrolled on its own.
     SkillsBody,
@@ -261,6 +267,9 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         MouseTarget::ThinkingPicker => thinking_picker::navigate(app, !up),
         MouseTarget::LogLevelPicker => log_level_picker::navigate(app, !up),
         MouseTarget::ArtifactsModal => crate::artifacts_modal::navigate(app, !up),
+        MouseTarget::Loops => crate::loops::navigate(app, !up),
+        MouseTarget::LoopsDetails => app.loops.details.scroll_by(!up, MOUSE_SCROLL_STEP as usize),
+        MouseTarget::GoalConfirm => crate::goal::step(app, !up),
         MouseTarget::ResumePicker => resume_picker::wheel(app, !up),
         MouseTarget::Mcp
         | MouseTarget::Skills
@@ -272,6 +281,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
             }
         }
         MouseTarget::Plugins => crate::plugins::wheel(app, !up),
+        MouseTarget::TrustedFolders => crate::trusted_folders::wheel(app, !up),
         MouseTarget::SkillsBody => {
             crate::skills_browser::wheel_body(app, !up, MOUSE_SCROLL_STEP as usize)
         }
@@ -292,6 +302,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         // pre-session surface with its own mouse handling.
         MouseTarget::Blocked
         | MouseTarget::Loading
+        | MouseTarget::GoalRow
         | MouseTarget::BottomApp
         | MouseTarget::McpOAuth
         | MouseTarget::ConnectorAuth

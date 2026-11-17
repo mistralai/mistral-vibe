@@ -173,13 +173,8 @@ class AuthCallback(BaseSessionCallback):
     """
 
     kind: Literal["auth"] = "auth"
-    tool_call_id: ToolCallId | None = Field(
-        default=None,
-        exclude_if=lambda value: value is None,
-        description=(
-            "The model's tool call that asked for the sign-in. Absent when the host opened "
-            "the callback itself."
-        ),
+    tool_call_id: ToolCallId = Field(
+        description="The model's tool call that asked for the sign-in.",
     )
     requests: Annotated[list[AuthRequest], Field(min_length=1)]
     reason: str = Field(

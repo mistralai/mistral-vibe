@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 from unittest.mock import patch
 
 import pytest
 
+from vibe.core.config import build_default_orchestrator
 from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.vibe_schema import VibeConfigSchema
 
@@ -93,6 +95,56 @@ async def test_unparseable_vars_are_ignored_and_the_others_still_apply(
     assert "VIBE_MODELS or VIBE_MODELS__*" in caplog.text
     assert "VIBE_API_TIMEOUT or VIBE_API_TIMEOUT__*" in caplog.text
     assert "mistral-large-latest" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_ignored_var_says_which_fields_are_wrong_without_its_value() -> None:
+    env = {"VIBE_MODELS": json.dumps([{"alias": "glm-5-3", "thinking": "max"}])}
+    with patch.dict(os.environ, env, clear=True):
+        layer = EnvironmentLayer(schema=VibeConfigSchema)
+        await layer.load()
+
+    assert layer.load_warnings == (
+        "Ignoring unparseable VIBE_MODELS or VIBE_MODELS__* environment value:"
+        " models.glm-5-3.name: Field required;"
+        " models.glm-5-3.provider: Field required",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_ignored_var_never_quotes_its_value() -> None:
+    env = {"VIBE_MCP_SERVERS": json.dumps([{"name": "x", "transport": "s3cr3t"}])}
+    with patch.dict(os.environ, env, clear=True):
+        layer = EnvironmentLayer(schema=VibeConfigSchema)
+        await layer.load()
+
+    assert layer.load_warnings == (
+        "Ignoring unparseable VIBE_MCP_SERVERS or VIBE_MCP_SERVERS__* environment"
+        " value: mcp_servers.0: union_tag_invalid",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_ignored_var_is_a_config_validation_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VIBE_API_TIMEOUT", "soon")
+
+    config = (await build_default_orchestrator()).config
+
+    assert any(
+        warning.startswith("Ignoring unparseable VIBE_API_TIMEOUT")
+        for warning in config.validation_warnings
+    )
+
+
+@pytest.mark.asyncio
+async def test_parseable_vars_leave_no_warning() -> None:
+    with patch.dict(os.environ, {"VIBE_ACTIVE_MODEL": "mistral-large"}, clear=True):
+        layer = EnvironmentLayer(schema=VibeConfigSchema)
+        await layer.load()
+
+    assert layer.load_warnings == ()
 
 
 @pytest.mark.asyncio

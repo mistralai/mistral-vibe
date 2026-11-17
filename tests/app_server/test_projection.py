@@ -64,6 +64,40 @@ def test_config_view_reports_the_configured_default_agent() -> None:
     assert config.model_dump(mode="json", by_alias=True)["defaultAgent"] == "ask"
 
 
+@pytest.mark.parametrize(
+    ("api_base", "telemetry", "enabled"),
+    [
+        ("https://api.mistral.ai/v1", True, True),
+        ("https://api.customer.mistral.ai/v1", True, True),
+        ("https://api.asml.example/v1", True, False),
+        ("https://api.mistral.ai/v1", False, False),
+    ],
+)
+def test_config_view_gates_the_rust_crash_reporter(
+    api_base: str, telemetry: bool, enabled: bool
+) -> None:
+    from vibe.core.config import ProviderConfig
+    from vibe.core.types import Backend
+
+    config = project_config_view(
+        build_test_vibe_config(
+            enable_telemetry=telemetry,
+            providers=[
+                ProviderConfig(
+                    name="mistral",
+                    api_base=api_base,
+                    api_key_env_var="MISTRAL_API_KEY",
+                    backend=Backend.MISTRAL,
+                )
+            ],
+        )
+    )
+
+    payload = config.model_dump(mode="json", by_alias=True)
+    assert payload["crashReportsEnabled"] is enabled
+    assert "enableTelemetry" not in payload
+
+
 @pytest.mark.parametrize("enabled", [True, False])
 def test_config_view_projects_cursor_blink(enabled: bool) -> None:
     config = project_config_view(build_test_vibe_config(cursor_blink=enabled))
@@ -82,6 +116,18 @@ def test_config_view_projects_vim_keybindings(enabled: bool) -> None:
     legacy_payload = config.model_dump(mode="json", by_alias=True)
     del legacy_payload["vimKeybindings"]
     assert type(config).model_validate(legacy_payload).vim_keybindings is False
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_show_dangerous_directory_warning(enabled: bool) -> None:
+    config = project_config_view(
+        build_test_vibe_config(show_dangerous_directory_warning=enabled)
+    )
+
+    payload = config.model_dump(mode="json", by_alias=True)
+    assert payload["showDangerousDirectoryWarning"] is enabled
+    del payload["showDangerousDirectoryWarning"]
+    assert type(config).model_validate(payload).show_dangerous_directory_warning
 
 
 @pytest.mark.parametrize("enabled", [True, False])
@@ -192,6 +238,22 @@ def test_installed_rows_are_locked_where_the_browser_cannot_switch_them(
     )
 
     assert (row.enabled, row.locked) == expected
+
+
+def test_a_skill_picked_for_the_session_offers_no_toggle() -> None:
+    skill = SkillInfo(
+        name="deploy",
+        description="Ship it.",
+        prompt="",
+        source=SkillSource.REGISTRY,
+        scope=SkillScope.SESSION,
+    )
+
+    [row] = project_installed_skill_summaries(
+        [InstalledSkill(info=skill, active=True)], build_test_vibe_config()
+    )
+
+    assert (row.enabled, row.locked) == (True, True)
 
 
 def test_snapshot_session_cost_discounts_cached_tokens() -> None:
@@ -355,6 +417,7 @@ async def test_config_view_lists_a_host_supplied_user_config_as_local() -> None:
 
     assert [(model.alias, model.source) for model in view.models] == [
         ("host-model", "local"),
+        ("mistral-large-4-0", "local"),
         ("mistral-medium-3.5", "local"),
     ]
 
@@ -513,6 +576,31 @@ def test_config_view_reports_file_image_delivery_per_model(active_model: str) ->
     ]
 
 
+def test_config_view_reports_the_models_that_require_an_upgrade() -> None:
+    from vibe.core.config import ModelConfig
+    from vibe.core.config.models import ModelRequirement
+
+    config = build_test_vibe_config(
+        models=[
+            ModelConfig(name="free-model", provider="mistral", alias="free"),
+            ModelConfig(
+                name="paid-model",
+                provider="mistral",
+                alias="paid",
+                requires=ModelRequirement(kind="higher_plan"),
+            ),
+        ],
+        active_model="free",
+    )
+
+    serialized = project_config_view(config).model_dump(mode="json", by_alias=True)
+
+    assert {model["alias"]: model["requires"] for model in serialized["models"]} == {
+        "free": None,
+        "paid": {"kind": "higher_plan"},
+    }
+
+
 def test_config_view_does_not_advertise_file_delivery_without_runtime_support() -> None:
     from vibe.core.config import ModelConfig
 
@@ -658,3 +746,17 @@ async def test_a_cached_system_prompt_variant_is_not_applied_when_experiments_ar
     await _apply_cached_experiment_variants(evaluation)
 
     assert evaluation.config.system_prompt_id == default_prompt
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_experimental_enable_storage_usage(enabled: bool) -> None:
+    config = project_config_view(
+        build_test_vibe_config(experimental_enable_storage_usage=enabled)
+    )
+
+    payload = config.model_dump(mode="json", by_alias=True)
+    assert payload["experimentalEnableStorageUsage"] is enabled
+    del payload["experimentalEnableStorageUsage"]
+    assert (
+        type(config).model_validate(payload).experimental_enable_storage_usage is False
+    )

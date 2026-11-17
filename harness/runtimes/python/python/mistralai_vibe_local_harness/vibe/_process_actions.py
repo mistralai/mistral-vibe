@@ -34,7 +34,10 @@ from mistralai_vibe_local_harness.vibe._processes._manager import (
 )
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 from mistralai_vibe_local_harness.vibe._sandbox import sandbox_path
-from mistralai_vibe_local_harness.vibe._sandbox_helper import PROCESS_ENV_DEFAULTS
+from mistralai_vibe_local_harness.vibe._sandbox_helper import (
+    PROCESS_ENV_DEFAULTS,
+    normalize_windows_drive_path,
+)
 from mistralai_vibe_local_harness.vibe._windows_path import with_registry_path
 
 type ProcessToolName = Literal[
@@ -508,7 +511,7 @@ def _resolve_working_directory(
     if not raw:
         raw = str(session_cwd)
     if windows:
-        raw = _normalize_windows_drive_path(raw)
+        raw = normalize_windows_drive_path(raw)
         if _invalid_windows_path(raw):
             return None, _cwd_issue("Working directory is invalid")
     try:
@@ -634,14 +637,6 @@ def _process_command_environment(
 
 def _is_windows(config: LocalRuntimeAdapterConfig) -> bool:
     return config.command_environment in {"git_bash", "powershell"}
-
-
-def _normalize_windows_drive_path(path: str) -> str:
-    match = re.fullmatch(r"/([A-Za-z])(?:[/\\](.*))?", path)
-    if match is None:
-        return path
-    suffix = match.group(2)
-    return f"{match.group(1)}:/{suffix or ''}"
 
 
 def _invalid_windows_path(path: str) -> bool:

@@ -73,8 +73,21 @@ from vibe.app_server.models import (
     WebSearchEffectSource,
 )
 
+# The local runtime's file tool annotations.
 _SEARCH_REPLACE_ANNOTATION_KEY = "mistralai.vibe.sdk.search_replace"
 _WRITE_FILE_ANNOTATION_KEY = "mistralai.vibe.sdk.write_file"
+# The target runtime's, shared by write_file and edit. They mirror
+# `mistralai.vibe.harness.sandbox_helpers`, which the app server does not
+# depend on; tests pin the names.
+_FILE_DIFF_PREVIEW_BLOCKS_ANNOTATION_KEY = (
+    "mistralai.vibe.harness.file_diff_preview_blocks"
+)
+_FILE_PREVIOUS_CONTENT_ANNOTATION_KEY = "mistralai.vibe.harness.file_previous_content"
+# The target runtime's edit warning when it dropped diff blocks past its preview
+# limits: the blocks it kept cover only part of the change.
+_TARGET_PREVIEW_TRUNCATED_WARNING = (
+    "edit preview truncated because the diff exceeds preview limits"
+)
 type UnifiedToolCategory = Literal[
     "cron",
     "file_edit",
@@ -154,12 +167,37 @@ class _WriteFileAnnotations(_SourceModel):
     previous_content: str
 
 
+class _TargetPreviousContent(_SourceModel):
+    """The target runtime's replaced text, flat in ``_meta``.
+
+    Absent for a new, binary, non-UTF-8 or oversized file.
+    """
+
+    previous_content: str | None = Field(
+        default=None, alias=_FILE_PREVIOUS_CONTENT_ANNOTATION_KEY
+    )
+
+
+class _TargetEditAnnotations(_TargetPreviousContent):
+    """The target runtime's edit annotations: its diff blocks are absent for an
+    unchanged file, and partial or absent past its preview limits.
+    """
+
+    blocks: list[_EditPreview] = Field(
+        default_factory=list, alias=_FILE_DIFF_PREVIEW_BLOCKS_ANNOTATION_KEY
+    )
+
+
 class _ShellArguments(_SourceModel):
     command: str = Field(min_length=1)
 
 
 class _SkillArguments(_SourceModel):
     name: str = Field(min_length=1)
+
+
+class _SleepArguments(_SourceModel):
+    seconds: float = Field(gt=0, allow_inf_nan=False)
 
 
 class _ShellResult(_SourceModel):
@@ -639,9 +677,14 @@ def _project_edit(
     def project_result(state: CompletedEffectState) -> CompletedEffectState:
         envelope = _ToolResultEnvelope.model_validate(state.output)
         result = _EditResult.model_validate(envelope.structured_content)
-        annotations = _edit_annotations(envelope)
+        blocks, previous_content = _edit_annotations(
+            envelope, result.warnings, arguments
+        )
         output = FileEditEffectOutput(
             file=result.file,
+            # Without blocks, the call's own strings stand for the change.
+            old_string=None if blocks else arguments.old_string,
+            new_string=None if blocks else arguments.new_string,
             occurrences=[
                 FileEditEffectOccurrence(
                     start_line=block.old_start_line,
@@ -649,9 +692,9 @@ def _project_edit(
                     old_text="".join(block.old_lines),
                     new_text="".join(block.new_lines),
                 )
-                for block in annotations.blocks
+                for block in blocks
             ],
-            previous_content=annotations.previous_content,
+            previous_content=previous_content,
         )
         display = EffectResultDisplay(
             success=True,
@@ -1054,6 +1097,41 @@ def _project_skill(detail: GenericEffectDetail) -> _ProjectedCall:
                 ),
             }
         )
+
+    return _ProjectedCall(detail=semantic, project_result=project_result)
+
+
+def _project_sleep(detail: GenericEffectDetail) -> _ProjectedCall:
+    # A sleep only runs inside a model-written script, which goes on with more
+    # tool calls afterwards: say the script is still running, not that it idles.
+    try:
+        arguments = _SleepArguments.model_validate(detail.input)
+    except ValidationError:
+        return _project_labeled(
+            detail, _ToolLabel("Script in progress", "", "Script waited")
+        )
+    duration = f"{arguments.seconds:g}s"
+    semantic = detail.model_copy(
+        update={
+            "display": EffectCallDisplay(
+                summary=f"Script in progress, next step in {duration}",
+                verb="Script in progress,",
+                message=f"next step in {duration}",
+                settled_verb="Script waited",
+                settled_message=duration,
+                status_text="Script in progress",
+            )
+        }
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        # The Harness stamps the raw tool key into the settled result message.
+        if state.display.message != detail.tool_name:
+            return state
+        display = state.display.model_copy(
+            update={"verb": "Script waited", "message": duration}
+        )
+        return state.model_copy(update={"display": display})
 
     return _ProjectedCall(detail=semantic, project_result=project_result)
 
@@ -1629,6 +1707,60 @@ def _project_cron(detail: GenericEffectDetail) -> _ProjectedCall:
     )
 
 
+# `update_goal` statuses, as the header reads them.
+_GOAL_STATUS_VERBS: dict[str, tuple[str, str]] = {
+    "complete": ("Completing", "Completed"),
+    "blocked": ("Marking", "Marked"),
+    "paused": ("Pausing", "Paused"),
+}
+
+
+def _goal_objective_summary(objective: str) -> str:
+    return " ".join(objective.split())[:100]
+
+
+def _project_goal(detail: GenericEffectDetail) -> _ProjectedCall:
+    """Headers for the goal tools: the model reads, creates or ends the goal."""
+    arguments = detail.input if isinstance(detail.input, dict) else {}
+    match detail.tool_name:
+        case "vibe.get_goal":
+            verb, settled, message = "Reading", "Read", "the goal"
+        case "vibe.create_goal":
+            objective = arguments.get("objective")
+            if not isinstance(objective, str) or not objective.strip():
+                raise ValueError("create_goal names no objective")
+            verb, settled = "Setting", "Set"
+            message = f"goal: {_goal_objective_summary(objective)}"
+        case _:
+            status = arguments.get("status")
+            if not isinstance(status, str) or status not in _GOAL_STATUS_VERBS:
+                raise ValueError(f"unknown goal status: {status}")
+            verb, settled = _GOAL_STATUS_VERBS[status]
+            message = "the goal blocked" if status == "blocked" else "the goal"
+    display = EffectCallDisplay(
+        summary=f"{verb} {message}",
+        verb=verb,
+        message=message,
+        settled_verb=settled,
+        settled_message=message,
+        status_text=f"{verb} {message}",
+    )
+
+    def project_result(state: CompletedEffectState) -> CompletedEffectState:
+        return state.model_copy(
+            update={
+                "display": state.display.model_copy(
+                    update={"verb": settled, "message": message}
+                )
+            }
+        )
+
+    return _ProjectedCall(
+        detail=detail.model_copy(update={"display": display}),
+        project_result=project_result,
+    )
+
+
 _SCRATCHPAD_VERBS: dict[str, tuple[str, str]] = {
     "list": ("Listing", "Listed"),
     "read": ("Reading", "Read"),
@@ -1705,20 +1837,233 @@ def _project_scratchpad(detail: GenericEffectDetail) -> _ProjectedCall:
 
 def _replaced_content(envelope: _ToolResultEnvelope) -> str | None:
     """What the write replaced, absent for a creation or an unreadable file."""
-    annotation = (
-        None if envelope.meta is None else envelope.meta.get(_WRITE_FILE_ANNOTATION_KEY)
-    )
-    if annotation is None:
-        return None
-    return _WriteFileAnnotations.model_validate(annotation).previous_content
-
-
-def _edit_annotations(envelope: _ToolResultEnvelope) -> _EditAnnotations:
     if envelope.meta is None:
-        raise ValueError("edit result has no annotations")
-    return _EditAnnotations.model_validate(
-        envelope.meta.get(_SEARCH_REPLACE_ANNOTATION_KEY)
+        return None
+    annotation = envelope.meta.get(_WRITE_FILE_ANNOTATION_KEY)
+    if annotation is not None:
+        return _WriteFileAnnotations.model_validate(annotation).previous_content
+    return _TargetPreviousContent.model_validate(envelope.meta).previous_content
+
+
+def _edit_annotations(
+    envelope: _ToolResultEnvelope, warnings: Sequence[str], arguments: _EditArguments
+) -> tuple[list[_EditPreview], str | None]:
+    """An edit's diff blocks and the text it replaced.
+
+    The blocks are empty when the target runtime truncated its preview: partial
+    blocks would show part of the change, and a rewind without the replaced
+    text would undo only that part. The target runtime then often sends no
+    annotation at all.
+    """
+    meta = envelope.meta or {}
+    annotation = meta.get(_SEARCH_REPLACE_ANNOTATION_KEY)
+    if annotation is not None:
+        local = _EditAnnotations.model_validate(annotation)
+        return local.blocks, local.previous_content
+    if _TARGET_PREVIEW_TRUNCATED_WARNING in warnings:
+        return [], _TargetPreviousContent.model_validate(meta).previous_content
+    target = _TargetEditAnnotations.model_validate(meta)
+    if not target.blocks:
+        raise ValueError("edit result has no diff blocks")
+    blocks = _with_context_lines(
+        target.blocks, target.previous_content, _call_change(arguments)
     )
+    bare_removals = [not block.new_lines for block in blocks]
+    if (
+        target.previous_content is None
+        and any(bare_removals)
+        and not all(bare_removals)
+    ):
+        # Without the replaced text a rewind undoes the blocks by position, and
+        # it skips a block with no new lines: it would undo the other blocks
+        # alone. The call's strings show the change and give it no position.
+        return [], None
+    return blocks, target.previous_content
+
+
+@dataclass(frozen=True)
+class _CallChange:
+    """An edit call that only inserts or only removes whole lines.
+
+    ``old_lines`` are the lines the call matches. ``changed`` are the lines it
+    puts in (an insertion) or takes out (a removal), right after
+    ``old_lines[:index]``. All use ``\\n`` line breaks. ``line_after`` tells
+    whether the call kept a line after the change.
+    """
+
+    old_lines: list[str]
+    changed: list[str]
+    index: int
+    insertion: bool
+    line_after: bool
+
+
+def _call_change(arguments: _EditArguments) -> _CallChange | None:
+    """The call's insertion or removal, aligned as the target runtime aligns it:
+    after the lines both strings start with. None when the call does both.
+
+    The alignment is exact only when the call kept a line after the change
+    (``line_after``): at the end of the match, the Runtime also skips the file
+    lines past it that equal the changed ones, so the change can sit lower than
+    the call tells.
+    """
+    old = _lf(arguments.old_string).splitlines(keepends=True)
+    new = _lf(arguments.new_string).splitlines(keepends=True)
+    insertion = len(new) > len(old)
+    longer, shorter = (new, old) if insertion else (old, new)
+    index = 0
+    while index < len(shorter) and shorter[index] == longer[index]:
+        index += 1
+    changed = longer[index : len(longer) - (len(shorter) - index)]
+    if not changed or [*shorter[:index], *changed, *shorter[index:]] != longer:
+        return None
+    return _CallChange(
+        old_lines=old,
+        changed=changed,
+        index=index,
+        insertion=insertion,
+        line_after=index < len(shorter),
+    )
+
+
+def _lf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _with_context_lines(
+    blocks: list[_EditPreview], previous_content: str | None, call: _CallChange | None
+) -> list[_EditPreview]:
+    """The target runtime's blocks, each one-sided block given a line of context.
+
+    The target runtime leaves unchanged lines out of its blocks, so a block
+    that only adds lines has no old lines, and one that only removes lines has
+    no new lines. Such a block takes the unchanged line next to it on both
+    sides (:func:`_with_context_line`), as a local runtime edit shows the text
+    it matched: no side of the diff is empty.
+
+    An insertion's ``old_start_line`` names the line before it, as a unified
+    diff does; it is first moved to where its lines land in the file before
+    the edit: its ``new_start_line`` less the lines the earlier blocks added.
+    A removal's ``new_start_line`` names the line before it in the edited
+    file; it moves to the line after it when that line is the context.
+    """
+    lines = (
+        None if previous_content is None else previous_content.splitlines(keepends=True)
+    )
+    anchored: list[_EditPreview] = []
+    added = 0
+    for block in blocks:
+        if block.new_start_line is not None and bool(block.old_lines) != bool(
+            block.new_lines
+        ):
+            if not block.old_lines:
+                block = block.model_copy(
+                    update={"old_start_line": max(1, block.new_start_line - added)}
+                )
+            block = _with_context_line(block, lines, call, added=added)
+        anchored.append(block)
+        added += len(block.new_lines) - len(block.old_lines)
+    return anchored
+
+
+def _with_context_line(
+    block: _EditPreview,
+    lines: list[str] | None,
+    call: _CallChange | None,
+    *,
+    added: int,
+) -> _EditPreview:
+    """A one-sided block with the unchanged line next to it on both sides.
+
+    The line is the one before the changed lines, or the one after them when
+    the call changed the start of what it matched or the change starts the
+    file. It comes from the replaced text, numbered as the Runtime numbers
+    lines (Python's line breaks, the BOM aside), else from the call's matched
+    lines, with the file's line ending, but only when the call kept a line
+    after the change (otherwise the Runtime may have moved the change down past
+    equal lines, and a context line in the wrong place would make a rewind
+    undo some hunks and not others) and only when the line is whole: not the
+    first matched line before the change, nor a last one without a line
+    break. The block stays bare when neither gives the line. ``added`` counts
+    the lines the earlier blocks added.
+    """
+    insertion = not block.old_lines
+    changed = block.new_lines if insertion else block.old_lines
+    start = block.old_start_line
+    new_start = block.new_start_line or start
+    after = start == 1 or (call is not None and call.index == 0)
+    # The line after the change, counted in the file before the edit.
+    after_line = start if insertion else start + len(changed)
+    # The call's own line next to the change, when the call is this change.
+    call_index: int | None = None
+    if (
+        call is not None
+        and call.insertion == insertion
+        and [_lf(line) for line in changed] == call.changed
+    ):
+        if not after:
+            call_index = call.index - 1
+        else:
+            call_index = call.index if insertion else call.index + len(call.changed)
+        if not 0 <= call_index < len(call.old_lines):
+            # The call matched no unchanged line: a local runtime edit shows
+            # none either.
+            return block
+    context: str | None = None
+    if lines is not None:
+        index = after_line - 1 if after else start - 2
+        if 0 <= index < len(lines):
+            line = lines[index]
+            context = line.removeprefix("\ufeff") if index == 0 else line
+    elif call is not None and call_index is not None and call.line_after:
+        context = _whole_call_line(
+            call, call_index, after_insertion=after and insertion
+        )
+        if context is not None:
+            context = context.removesuffix("\n") + _line_break(changed[-1])
+    # The line before the change, or the change before the line, must end in a
+    # line break, or the lines would join.
+    if context is None or not _line_break(changed[-1] if after else context):
+        return block
+    if after:
+        return block.model_copy(
+            update={
+                # A removal's context line follows the earlier blocks' changes.
+                "new_start_line": new_start if insertion else start + added,
+                "old_lines": [*block.old_lines, context],
+                "new_lines": [*block.new_lines, context],
+            }
+        )
+    return block.model_copy(
+        update={
+            "old_start_line": start - 1,
+            "new_start_line": new_start - 1 if insertion else new_start,
+            "old_lines": [context, *block.old_lines],
+            "new_lines": [context, *block.new_lines],
+        }
+    )
+
+
+def _whole_call_line(
+    call: _CallChange, index: int, *, after_insertion: bool
+) -> str | None:
+    """The call's matched line at ``index``, when it is a whole file line.
+
+    The match can start or end mid-line, so the line must end in a line
+    break and follow one: from the call, or from lines inserted before it,
+    which add no line of their own unless the match starts a line. A partial
+    line does not sit in the file, and a rewind of a replace_all would undo
+    the sites where the line is whole and skip the others.
+    """
+    line = call.old_lines[index]
+    if not line.endswith("\n") or (index == 0 and not after_insertion):
+        return None
+    return line
+
+
+def _line_break(line: str) -> str:
+    """The line break ending ``line``, empty when it has none."""
+    return line[len(line.splitlines()[0]) :] if line else ""
 
 
 def _completed_state(
@@ -1828,7 +2173,6 @@ class _ToolLabel:
 _TOOL_LABELS: dict[str, _ToolLabel] = {
     # ── Built-in harness tools ──────────────────────────────────────────
     "ui.ask_user_question": _ToolLabel("Asking", "a question", "Asked"),
-    "self.sleep": _ToolLabel("Sleeping", "", "Slept"),
     # The model waits for its subagents or background processes, not for the
     # user: a message the user sends joins the waiting turn.
     "self.wait": _ToolLabel("Waiting", "for background work", "Waited"),
@@ -2159,6 +2503,7 @@ _PATH_PROJECTORS: dict[
 
 _CALL_PROJECTORS: dict[str, Callable[[GenericEffectDetail], _ProjectedCall]] = {
     "skill.read": _project_skill,
+    "self.sleep": _project_sleep,
     "process.start": _project_process_start,
     "process.stop": _project_process_stop,
     "process.output": _project_process_output,
@@ -2173,6 +2518,9 @@ _CALL_PROJECTORS: dict[str, Callable[[GenericEffectDetail], _ProjectedCall]] = {
     "vibe.todo": _project_todo,
     "vibe.cron": _project_cron,
     "vibe.unified_harness_scratchpad": _project_scratchpad,
+    "vibe.get_goal": _project_goal,
+    "vibe.create_goal": _project_goal,
+    "vibe.update_goal": _project_goal,
 }
 
 _TOOL_CATEGORIES: dict[str, UnifiedToolCategory] = {

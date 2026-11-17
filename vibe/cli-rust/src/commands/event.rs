@@ -16,6 +16,7 @@ use crate::server::Client;
 /// per dispatch, so the reducer can tell when the UI is settled again.
 pub enum CommandEvent {
     Plugins(Box<crate::plugins::Event>),
+    TrustedFolders(Box<crate::trusted_folders::Event>),
     Skills(Box<crate::skills_browser::Event>),
     /// The `/context` breakdown read, with the generation it was requested at.
     Context(Box<(u64, crate::context_app::Event)>),
@@ -42,11 +43,10 @@ pub enum CommandEvent {
     },
     /// The `/proxy-setup` settings read, or why it failed.
     ProxySettings(Result<crate::server::proto_proxy::ProxySettingsView, String>),
-    /// The post-ready account and identity reads asked under `model`, for the banner.
+    /// The post-ready account and identity reads asked under `model`, for the banner and `/whoami`.
     PostReady {
         model: String,
         reads: Option<AccountReads>,
-        greeting: Option<String>,
     },
     /// An `artifacts/list` answer for `session_id`, for the bottom-bar PR link.
     ArtifactsRead {
@@ -124,6 +124,12 @@ where
 impl From<crate::plugins::Event> for CommandEvent {
     fn from(event: crate::plugins::Event) -> Self {
         Self::Plugins(Box::new(event))
+    }
+}
+
+impl From<crate::trusted_folders::Event> for CommandEvent {
+    fn from(event: crate::trusted_folders::Event) -> Self {
+        Self::TrustedFolders(Box::new(event))
     }
 }
 

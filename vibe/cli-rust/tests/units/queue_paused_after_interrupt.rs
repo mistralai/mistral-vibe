@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crossterm::event::KeyCode;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use vibe_rs::app::{App, Status};
@@ -11,7 +12,7 @@ use vibe_rs::message_queue::{self as mq, QueueItem};
 use vibe_rs::server::{notification, Client, HistoryEntry, MessageContent, Notification};
 use vibe_rs::ui_event::UiEvent;
 
-use crate::support::{message, queued, queued_texts, stub};
+use crate::support::{message, press, queued, queued_texts, redraw, rows, stub};
 
 const SENT_ID: &str = "u-block";
 const QUEUED_ID: &str = "queued-2";
@@ -86,6 +87,17 @@ fn submit_text(app: &mut App, client: &Arc<Client>, text: &str) -> bool {
     submission::submit(app, client, &config_tx)
 }
 
+fn user_texts(app: &App) -> Vec<String> {
+    app.view
+        .transcript
+        .lines()
+        .filter_map(|line| match line.entry {
+            HistoryEntry::Message(message) if message.role == "user" => Some(message.text("\n")),
+            _ => None,
+        })
+        .collect()
+}
+
 fn command_errors(app: &App) -> Vec<String> {
     let mut errors = Vec::new();
     for line in app.view.transcript.lines() {
@@ -136,6 +148,149 @@ async fn an_empty_enter_resumes_the_paused_queue() {
         ["queued prompt"],
         "the server promotes it"
     );
+}
+
+#[tokio::test]
+async fn up_on_a_paused_queue_opens_queue_selection() {
+    let client = stub();
+    let mut app = busy_app_with_follow_up();
+    submission::interrupt_turn(&mut app, &client);
+    server_pauses_after_interrupt(&mut app, &client);
+
+    press(&mut app, KeyCode::Up);
+
+    assert_eq!(app.queue.selected.as_deref(), Some(QUEUED_ID));
+    assert!(app.chat_input.full_text().is_empty(), "no history recall");
+}
+
+#[tokio::test]
+async fn the_paused_header_drops_its_shortcuts_while_queue_mode_rebinds_them() {
+    let client = stub();
+    let mut app = busy_app_with_follow_up();
+    submission::interrupt_turn(&mut app, &client);
+    server_pauses_after_interrupt(&mut app, &client);
+    let header = |app: &mut App| {
+        rows(&redraw(app))
+            .into_iter()
+            .find(|row| row.contains("» Queued"))
+            .expect("the queue header is drawn")
+    };
+
+    assert!(header(&mut app).contains("↑ to edit"));
+    press(&mut app, KeyCode::Up);
+    assert_eq!(header(&mut app).trim_end(), "» Queued");
+    press(&mut app, KeyCode::Esc);
+    assert!(header(&mut app).contains("↑ to edit"));
+}
+
+#[tokio::test]
+async fn saving_an_edit_keeps_the_paused_queue_held() {
+    let (client, mut frames) = Client::stub_answering();
+    let client = Arc::new(client);
+    let mut app = busy_app_with_follow_up();
+    submission::interrupt_turn(&mut app, &client);
+    server_pauses_after_interrupt(&mut app, &client);
+    assert!(mq::enter(&mut app));
+    mq::edit_selected(&mut app);
+
+    assert!(!submit_text(&mut app, &client, ""), "an emptied edit");
+    assert!(
+        app.queue.paused,
+        "an empty Enter while editing never resumes"
+    );
+    assert!(app.queue.editing);
+
+    assert!(!submit_text(&mut app, &client, "edited prompt"));
+
+    let replace = next_frame(&mut frames, "session/turn/queue/replace").await;
+    assert_eq!(replace["params"]["queueItemId"], "q-2");
+    assert!(app.queue.paused, "the edit is saved, not sent");
+    assert!(app.queue.selected.is_none());
+    assert_eq!(queued_texts(&app), ["edited prompt"]);
+}
+
+/// Whether the queue is still held after a prompt typed during an edit's replace, paused before or after typing.
+async fn held_after_a_deferred_prompt(paused_first: bool) -> bool {
+    let (client, mut frames) = Client::stub_answering();
+    let client = Arc::new(client);
+    let (tx, mut rx) = mpsc::channel(4);
+    let mut app = busy_app_with_follow_up();
+    app.events = Some(tx);
+    if paused_first {
+        submission::interrupt_turn(&mut app, &client);
+        server_pauses_after_interrupt(&mut app, &client);
+    }
+    assert!(mq::enter(&mut app));
+    mq::edit_selected(&mut app);
+    assert!(!submit_text(&mut app, &client, "edited prompt"));
+    assert!(!submit_text(&mut app, &client, "follow-up"));
+    if !paused_first {
+        submission::interrupt_turn(&mut app, &client);
+        server_pauses_after_interrupt(&mut app, &client);
+    }
+    assert!(app.queue.paused, "held while the replace is in flight");
+    next_frame(&mut frames, "session/turn/queue/replace").await;
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await;
+    let Ok(Some(UiEvent::Queue(event))) = settled else {
+        panic!("the replace settles");
+    };
+    mq::apply_event(&mut app, &client, event);
+    assert_eq!(queued_texts(&app), ["edited prompt", "follow-up"]);
+    app.queue.paused
+}
+
+#[tokio::test]
+async fn a_prompt_typed_on_a_held_queue_during_an_edit_releases_it_once_it_lands() {
+    assert!(!held_after_a_deferred_prompt(true).await);
+}
+
+#[tokio::test]
+async fn a_prompt_deferred_before_an_interrupt_leaves_the_queue_held() {
+    assert!(held_after_a_deferred_prompt(false).await);
+}
+
+#[tokio::test]
+async fn removing_the_head_of_a_merged_group_hands_the_entry_id_to_the_survivor() {
+    let (client, mut frames) = Client::stub_answering();
+    let client = Arc::new(client);
+    let mut app = busy_app_with_follow_up();
+    app.view.transcript.add(&json!({"entry": {
+        "id": "queued-3", "type": "message", "role": "user",
+        "content": [{"type": "text", "text": "survivor"}],
+        "generationStatus": "completed", "local": true, "pending": true
+    }}));
+    app.queue.items.push(QueueItem {
+        queue_item_id: Some("q-2".into()),
+        server_message_id: QUEUED_ID.into(),
+        ..queued("queued-3", "survivor")
+    });
+    assert!(mq::enter(&mut app));
+    mq::select_older(&mut app);
+
+    mq::remove_selected(&mut app, &client);
+
+    let replace = next_frame(&mut frames, "session/turn/queue/replace").await;
+    let entry = &replace["params"]["entries"][0];
+    assert_eq!(entry["entryId"], "queued-3");
+    assert_eq!(entry["content"][0]["text"], "survivor");
+
+    // The server promotes the item and echoes the merged entry under the id it was sent.
+    let turn = json!({"id": "t-2", "sessionId": "sess", "status": "running", "queueItemId": "q-2"});
+    notify(
+        &mut app,
+        &client,
+        notification::TURN_STARTED,
+        json!({"sessionId": "sess", "turn": turn}),
+    );
+    let echo = json!({"id": entry["entryId"], "type": "message", "role": "user",
+        "content": [{"type": "text", "text": "survivor"}], "generationStatus": "completed"});
+    notify(
+        &mut app,
+        &client,
+        notification::HISTORY_ENTRY_ADDED,
+        json!({"sessionId": "sess", "entry": echo}),
+    );
+    assert_eq!(user_texts(&app), ["block queue", "survivor"], "shown once");
 }
 
 #[tokio::test]

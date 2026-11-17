@@ -92,6 +92,16 @@ Expected turn IDs reject stale control requests. If enqueue finds an idle,
 unpaused session, exactly one item is promoted after the enqueue response.
 This handles busy-submit races without changing `turn/start` semantics.
 
+`turn/start` takes an optional `injected` flag (default `false`); `turn/steer`
+does not, and rejects it as an unknown field. Injected input reaches the model like any other input but creates no
+public user entry: no `history/entryAdded` user message, no bubble to render.
+The server uses it for its own notes and goal continuations; a client sending
+user input leaves it unset.
+
+A turn that fails carries a `PublicError` whose `code` names the cause.
+`usage_limit` means the provider refused the request because the account has
+no credit left (HTTP 402); retrying does not help until credit is added.
+
 ## Accepted turn queue
 
 Queue state belongs to the live session Runtime. It is currently process-local,
@@ -168,8 +178,10 @@ state. Handoffs contain old identity, replacement state, watermark and log
 summary; clients adopt them atomically before later events. Root replacement
 is serialized and closes staged resources if adoption fails.
 
-Projection events carry positive monotonic IDs within the loaded session.
-The snapshot's `eventId` is its watermark. Reducers:
+Projection events carry positive monotonic IDs within their session: a
+connection carries the root's sequence and, for a client that asks for them,
+one sequence per child (see below). The snapshot's `eventId` is its watermark.
+Reducers, per session:
 
 1. Ignore IDs at or below the watermark.
 2. Accept the next ID.
@@ -243,11 +255,16 @@ No HTTP listener, bridge token, MCP marker or capability file is used.
 A client that advertises `capabilities.sessionSpawn` in `initialize` hosts
 sessions the model starts: its sessions are offered Vibe's `start_session`
 tool, permission-gated like other Vibe tools (`ask` by default). The tool takes
-`prompt`, an optional `title`, a `placement`, and an optional `model` and
-`reasoning_effort` its description lists from the host's models; the server
+`prompt`, an optional `title`, a `placement`, a `link`, and an optional `model`
+and `reasoning_effort` its description lists from the host's models; the server
 checks both. A call sends **`session/spawn`** `{parentSessionId, prompt,
-title?, checkout, idempotencyKey, model, reasoningEffort?, approvalPolicy}` to
-that client. `checkout` is where
+title?, checkout, idempotencyKey, model, reasoningEffort?, approvalPolicy,
+attached?}` to that client. `attached` is `false` when the model chose `link:
+"detached"`: the client starts an ordinary top-level session and leaves its
+`startedBySessionId` unset, so it is not archived with the caller and does not
+report back. It is left out when true, and a missing value means attached: the
+client starts the session with `startedBySessionId` set to `parentSessionId`.
+`parentSessionId` names the caller either way. `checkout` is where
 the session runs, resolved from the parent's live directory:
 `{kind: "new_worktree"}`, the parent's Vibe-managed worktree
 `{kind: "managed_worktree", path}`, or the parent's own directory
@@ -294,9 +311,10 @@ connection, and the client answers for that session's project only:
   `tool` line per tool call naming what it ran or touched. A message longer
   than `maxMessageChars` is cut and says so. It never waits for the target.
 - **`session/peer/send`** `{targetSessionId, text, idempotencyKey, sender,
-  delivery, hops}` hands `text` to the target through `session/turn/enqueue`,
-  with `sender`, `delivery` and `hops` as they came, and answers `{sessionId,
-  title?, url?, queued}`, `queued` as the server's `waits` says.
+  delivery, hops, reply?}` hands `text` to the target through
+  `session/turn/enqueue`, with `sender`, `delivery`, `hops` and `reply` as they
+  came, and answers `{sessionId, title?, url?, queued}`, `queued` as the
+  server's `waits` says.
 - **`session/peer/archive`** `{sessionIds}` archives those sessions, as the
   user's archive action does, and answers `{archived: [{sessionId, title?}],
   failed: [{sessionId, error}]}`; one that is not a session of the project, is
@@ -311,6 +329,22 @@ connection, and the client answers for that session's project only:
   title?}], failed: [{sessionId, error}]}`; one that is not a session of the
   project, is the caller itself, or is working or waits for the user, fails
   alone. A marked session turns unread again when it next finishes a turn.
+
+A client that advertises `capabilities.sessionPeers` takes replies: when a
+turn another session started ends (a handed task, or a `start_turn`
+message from that session), the server sends that session one
+`session/peer/send` with `reply: true`, `delivery: "start_turn"`, one hop more
+than the turn, and the turn's final assistant message, cut to the message
+limit. A turn that did not simply finish puts its outcome first (failed with
+its error, stopped by the user, or cut at a limit), as does one that ended
+without a reply. It goes out once the session no
+longer runs that turn's work, so an archive right after it is not refused as
+busy. A turn the user, a `queue` message or a reply started sends none, so two
+sessions never keep replying to each other. The reply owed is saved with the
+session before the turn runs and cleared once the client takes it or the
+target is archived or gone; `session/list` with `owesReply: true` lists the
+sessions still owing one, each with `owesReply`, and the client resumes them
+when it starts so a reply a restart interrupted still goes out, once.
 
 Session ids are the client's: the `clientSessionId` a `session/spawn` answer
 carries, which `start_session` then returns to the model. The model may name a
@@ -347,10 +381,11 @@ public history without starting one, so the session's next turn reads it
 sessions in a row since a user wrote: each send and `session/spawn` carries one
 more than the turn sending it, a turn the user starts, queues or steers resets
 the count, and a message joining a turn raises it. Past `MAX_SESSION_HOPS` (32)
-the server refuses `send_to_session` and `start_session`. It also refuses
-`start_session` from a session another session started (read from the starter
-the session saved, so it holds across restarts), and past
-`MAX_TURN_STARTED_SESSIONS` (32) sessions started in one turn. Each refusal is a tool error whose `details.reason` is
+the server refuses `send_to_session` and `start_session`. A detached session
+keeps the hops of its first turn too, so detached starts cannot chain past it.
+It also refuses `start_session` from a session attached to the one that started
+it (read from the starter the session saved, so it holds across restarts), and
+past `MAX_TURN_STARTED_SESSIONS` (32) sessions started in one turn. Each refusal is a tool error whose `details.reason` is
 `session_depth`, `started_sessions` or `session_hops`. The task a session hands with `start_session` tells the model
 to report back that way when it is done, in a block public history leaves out,
 so the starter learns the outcome without reading the session over and over. A refusal or a
@@ -392,9 +427,23 @@ unchanged. Unarchiving ignores the flag.
 A client that advertises `capabilities.agentWorktrees` lets its local
 sessions move into git worktrees of their own: those sessions are offered
 `enter_worktree`, and, when they start in the user's checkout, their system
-prompt has the model ask the user (through `ask_user_question`) before its
-first edit whether to work in a new worktree or in place. Other clients never
-see the tool.
+prompt carries a "## Worktrees" section telling the agent where to edit. The
+`auto_worktree` setting picks it: off (the default) the agent edits the
+checkout in place and calls `enter_worktree` only when the user asks to work
+in a worktree; on it calls `enter_worktree` before the first edit, unless the
+user asks to work in their checkout. Either way, a request about work already
+in progress in the checkout (fixing, finishing or testing it) is edited in
+place, no mode has the agent ask, and an explicit user request always wins. A
+session started in a managed worktree gets the tool but no section: the
+choice was already made. Other clients never see the tool.
+
+The worktree settings persist in the user config through the host methods
+`workspace/git/worktrees/limit/update` (retention: `{limit: int}` answered
+with `{limit, failures}`) and `workspace/git/worktrees/auto/update`
+(placement: `{auto: bool}` answered with `{auto, failures}`), which the
+config view reports as `worktreeLimit` and `autoWorktree`. `failures` lists
+the config layers that could not be saved; an empty list means the setting
+persisted.
 
 `initialize` ignores client capabilities the server does not know, so a client
 may declare one ahead of the servers that act on it. The rest of the handshake
@@ -417,6 +466,11 @@ then the oldest, then the lowest id. A session another process holds gets the ma
 the answer only, and a later listing saves it; a legacy session is matched on
 every listing.
 
+`projects/remove` deletes a local project and the folder links that would
+import it back; its folders, sessions and worktrees stay. Its sessions then
+join the project on their folder, or no project. A listing purges the projects
+an older app server only hid.
+
 `session/move` puts a root session in another project:
 `{sessionId, project: {kind: "local", id} | {kind: "none"}}`. It needs
 `experimental_enable_local_projects` and answers `{state}`. The session is
@@ -429,10 +483,185 @@ project is `not_found`. A session only the
 legacy store has is refused as `invalid_params` until it is opened.
 
 `session/start` takes an optional `startedBySessionId`: the session that started
-this one to hand it `firstTurn`, and `hops`, the `session/spawn` request's. The session keeps it, `/clear` included, and
+this one to hand it `firstTurn`, and `hops`, the `session/spawn` request's, which
+`firstTurn` carries with or without a starter. The session keeps the starter, `/clear` included, and
 every `PublicSession` of it (listed, read, or updated) returns it as
 `startedBySessionId`; a session nobody started leaves it out. App servers before
 it accept the param but do not save it, so they report no starter.
+
+## Session goal
+
+A root session holds at most one durable goal: an objective Vibe keeps working
+on between turns until it ends. The server owns it entirely: storage, the
+continuation turns, accounting and every stop. Clients render
+`PublicSession.goal` and send `goal/*` requests; they schedule nothing.
+
+### `PublicSession.goal`
+
+`PublicSession.goal` is absent while the session has no goal. `session/read`
+and `session/snapshot` carry it, and `session/updated` patches it live with
+JSON Patch operations, as for any other `PublicSession` field:
+`{op: "add", path: "/goal", value: PublicGoal}` sets it, `{op: "remove",
+path: "/goal"}` clears it, and a change to the current goal usually arrives as
+`add`, `replace` or `remove` operations on its fields, such as
+`{op: "replace", path: "/goal/status"}`,
+`/goal/tokensUsed` or `/goal/timeUsedSeconds` while a goal turn runs, or
+`/goal/goalId` and the other fields when a goal replaces it. Apply every
+operation whose path starts with `/goal`, not only `add` and `remove`.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `goalId` | string | Identity; a replaced goal gets a new one. |
+| `revision` | int | Bumped on every change, for compare-and-swap. |
+| `objectiveRevision` | int | Bumped only when the objective text changes. |
+| `objective` | string | At most 4,000 characters. |
+| `status` | `active`, `paused`, `blocked`, `complete`, `budget_limited`, `usage_limited` | See below. |
+| `statusReason` | `null`, `user`, `interrupted`, `suspended`, `model`, `no_progress`, `tool_failures`, `turn_failed` | Why the goal left `active`; `null` while active and for budget and usage limits. |
+| `tokenBudget` | int or `null` | `null` means no budget; under `max_goal_token_budget` a goal always has one. |
+| `tokensUsed` | int | Billable tokens of the turns bound to the goal, subagents included; live while a goal turn runs. |
+| `timeUsedSeconds` | int | Time those turns ran, without the time spent waiting for the user; live while a goal turn runs. |
+| `createdAt`, `updatedAt` | int | Milliseconds since the epoch. |
+
+Status transitions:
+
+- `paused`: the user paused it (`user`), interrupted a goal turn
+  (`interrupted`), or reopened the session while it was active (`suspended`);
+  or the model paused it at the user's request (`model`).
+- `blocked`: the model reported a blocker (`model`), three continuations in a
+  row called no tool (`no_progress`), three continuations in a row had only
+  failed tool calls (`tool_failures`), or a goal turn failed (`turn_failed`).
+- `budget_limited`: `tokensUsed` reached `tokenBudget`. The limit is soft:
+  the running turn is not interrupted, and no new continuation starts.
+- `usage_limited`: a goal turn failed with the `usage_limit` turn error.
+- `complete`: the model marked the goal complete. Once the turn that
+  completed it ends, the server records the `completed` notice and clears the
+  goal: `PublicSession.goal` is removed and `goal.json` deleted.
+
+### `goal/*` methods
+
+- **`goal/get`** `{sessionId}` returns `{goal: PublicGoal | null}`. It and the
+  `goal/set` response count the goal's running turns, as `PublicSession.goal`
+  does.
+- **`goal/set`** `{sessionId, idempotencyKey?, expectedGoalId?,
+  expectedRevision?, replace?, objective?, status?, tokenBudget?}` returns
+  `{goal}`. Without a current goal, or with `replace: true`, it creates a new
+  goal and needs `objective`; `status: "paused"` creates it paused. Otherwise
+  it edits the current goal: a new `objective`, a `status` of `active`
+  (resume) or `paused`, and `tokenBudget`. An omitted `tokenBudget` keeps
+  the budget; an explicit `null` removes it, or sets it to
+  `max_goal_token_budget` when that is set. Raising or removing the budget of
+  a `budget_limited` goal makes it active again; resuming it without that
+  fails. A request that changes nothing returns the goal unchanged; pausing a
+  goal that is already `paused`, whatever its `statusReason`, changes nothing.
+- **`goal/clear`** `{sessionId, idempotencyKey?, expectedGoalId}` returns
+  `{cleared}`, `false` when there was no goal.
+
+`expectedGoalId` and `expectedRevision` guard against concurrent changes: the
+model, the server and other clients also move the goal. Every new goal starts
+at revision 1, so an edit or a clear of a goal the client read sends its
+`expectedGoalId` too: a goal replaced meanwhile then fails with `conflict`
+instead of taking the edit. An edit (`replace` false) that names either one
+while the session has no goal also fails with `conflict` rather than creating
+a goal; `replace: true` creates one whatever it expected. Every mutation is
+persisted before it returns, and a retried request with the same
+`idempotencyKey` returns the recorded answer without changing the goal twice.
+The requests work while a turn runs; the model learns of the change through a
+hidden note before its next turn, so a running turn finishes on what it had.
+
+| Error | When | Client action |
+| --- | --- | --- |
+| `conflict` | `expectedGoalId` or `expectedRevision` is stale, or names a goal that no longer exists. | Reload the goal, then retry or tell the user. |
+| `invalid_params` | Empty or over-4,000-character objective; budget `<= 0` or above `max_goal_token_budget`; a new goal without an objective; resuming a `budget_limited` goal; editing a `complete` goal. | Show the message. |
+| `not_implemented` | The session cannot hold a goal (headless, or closed). | Hide or disable goal controls. |
+| `method_not_found` | The app server predates goals. | Treat goals as unavailable. |
+
+### Continuations and life cycle
+
+While the goal is `active` and the session is idle, the server starts the next
+continuation turn: after every queued user turn, and after any due scheduled
+loop. A paused queue, an open callback or an archived session holds it back,
+and so does a session no client is subscribed to: the server charges goal
+turns from its event stream, so it starts none it could not charge. When a
+client subscribes again, the server settles the goal turns that ended in
+between.
+A continuation is an injected turn (see [Session operations and
+turns](#session-operations-and-turns)): it creates no user history entry, and
+its `turn/started` and `turn/completed` are otherwise ordinary.
+
+The model sees three tools on the root session only, never in subagents:
+`get_goal`, `create_goal` (only when the user asks for a goal; it fails while
+an unfinished goal exists) and `update_goal` (`complete`, `blocked`, or
+`paused` at the user's request; only an `active` goal moves). They never ask
+for approval. Their results count the goal's running turns, as
+`PublicSession.goal` does. `update_goal` with `complete` fails with a
+conflict when the calling turn started before the user's last objective edit:
+the error quotes the new objective, so the model checks it before completing.
+
+Interrupting a goal turn (`turn/interrupt`, or an approval answered with
+"cancel turn") pauses the goal on the server; the client sends nothing else.
+A disconnect or restart does not count as a user interrupt.
+
+The goal is stored in `goal.json` beside the session. When the session is
+reopened, an active goal comes back `paused` with `statusReason: "suspended"`,
+so no work starts until the user resumes it. `session/history/clear` and
+`session/fork` start without a goal; `session/rewind` hands the goal and its
+counters to the rewound session. A rewind into a new session keeps the goal
+notices in the source session: the fork's copied entries carry no turn ids and
+share the fork's time, so the notices could not be placed among them. Headless sessions (`vibe -p`, `vibe-acp`)
+have no goal.
+
+### Goal notices in the transcript
+
+The server adds a `notice` history entry for each step a reader of the
+transcript needs to follow the goal. The app server keeps these notices itself,
+in `goal-notices.json` beside the session, and places them in the history it
+returns: `history/entryAdded` delivers one live, and `session/read` and
+`session/history/list` return them after a resume. A page that does not start
+at the first entry shows a notice only when it shows the notice's turn (or,
+for a notice without a turn, its time), and never as its first item, so the
+page's cursor stays a history entry and paging repeats and skips nothing. An
+in-place rewind drops the notices of the turns it removes, and the notices
+without a turn recorded after the rewound message. Its `detail` has `kind: "goal"`:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `event` | `set`, `edited`, `paused`, `resumed`, `cleared`, `continued`, `completed`, `blocked`, `budget_limited`, `usage_limited`, `interrupted` | What happened. |
+| `goalId` | string | The goal it is about. |
+| `objective` | string or `null` | Set on `set`, on `edited` when the objective changed, and on `completed`, since a complete goal then leaves the session. |
+| `status`, `statusReason` | as in `PublicGoal` | The goal's state right after the event. |
+| `continuation` | int or `null` | On `continued`: the continuation's number for this goal. |
+| `tokensUsed`, `tokenBudget`, `timeUsedSeconds` | as in `PublicGoal` | Counters right after the event. |
+| `error` | string or `null` | On `blocked` with `statusReason: "turn_failed"`: the failed turn's error message, at most 300 characters. |
+
+The user's own actions (`goal/set`, `goal/clear`) record `set`, `edited`,
+`paused`, `resumed` or `cleared`, and a goal the model creates records `set`.
+Each continuation records `continued` with its `turnId`, once that turn has
+started and only if it works on the goal: a continuation that starts just as
+the goal stops records nothing and is interrupted. The server starts no
+continuation until the end of every goal turn it saw start has been
+processed, so a failed turn blocks the goal before the next one could start. A goal that stops
+records `completed`, `blocked`, `budget_limited`, `usage_limited`,
+`interrupted` for an interrupted goal turn, or `paused` (with
+`statusReason: "model"`) when the model paused it, whoever stopped it. A stop made
+during a turn is recorded when that turn ends, with its `turnId` and the
+counters that include it, so a client can show it after that turn's output even
+when a queued turn has already started. A goal blocked by a failed turn says
+why in `message` and `detail.error`, and what to do next: `/goal resume` when
+the error may pass on a retry, or `/rewind` or a new session when the same
+request would fail again (a 4xx other than a timeout, conflict or rate limit,
+a context or image error, an invalid model or key). Other changes the model makes stay
+visible as its goal tool calls. `message` is a plain-text fallback, such as `Goal set:
+<objective>` or `Working on the goal`, for clients without a dedicated
+rendering. The model never sees these notices.
+
+`max_goal_token_budget` caps the budget a goal may set, and is the budget of
+a goal set without one (`/goal <objective>`, `tokenBudget: null`, or the
+model's `create_goal`); unset allows any budget and no budget. The server
+records `vibe.goal.created`, `vibe.goal.updated` and `vibe.goal.deleted`
+telemetry with ids, statuses and counts, never the objective text.
+`vibe.goal.updated` fires on a status change, and on an edit that keeps the
+status, where `has_objective_changed` and `has_token_budget_changed` say what
+the user changed and `objective_chars` gives the new objective's length.
 
 ## Product resources and child sessions
 
@@ -447,10 +676,75 @@ to its child ID instead of embedding private child state. Hosting code routes
 child events, callbacks, I/O and cleanup. Derived sessions receive inherited
 resolved configuration before tool discovery or prompt rendering.
 
+The root's stream summarizes each child in `session/childSessionUpdated`. A
+client that advertises `capabilities.childSessionEvents` also receives each
+child's own projection events on the root's connection, tagged with the child's
+`sessionId` and numbered on the child's own sequence, so it can keep a replica
+of the child as it does of the root. A child's callback then also arrives as a
+history entry of the child. `session/read` of a live child answers the state
+its next event continues. Clients that do not advertise the capability get
+only the summaries.
+
 The Rust CLI renders public values over the stdio API, in both interactive and
 programmatic mode, and ACP translates protocol content and callbacks.
 Clients own rendering and explicitly local facilities, while attached session
 mutations use public APIs.
+
+### Storage usage
+
+`storage/usage/read`, `storage/usage/refresh` and the `storage/usage/updated`
+notification report how much disk Vibe uses, in total and per session. They
+need no session: a connection with none attached (Desktop's catalogue
+connection) can call them. A client finds support by calling
+`storage/usage/read`; an older server answers "method not found".
+
+- `storage/usage/read` takes `{}` and answers at once from the shared cache:
+  `status` (`up_to_date`, `refreshing`, `partial` or `failed`), `snapshot`
+  (`null` before the first scan), `disk` (total, free, `lowThresholdBytes` =
+  the lower of 10% of the disk and 20 GB, `isLow`, read live) and `stale`
+  (an archive, delete or worktree removal happened after the scan started).
+  Each session row's `open` and the snapshot's `archiveSuggestion` are
+  computed at read time. A session row's `historyPath` is the absolute path
+  of its own history folder (its subagent children's folders count in
+  `historyBytes` but sit beside it), for a local client to reveal; it is
+  `null` from a server before it, and never sent in telemetry.
+- `storage/usage/refresh` takes `maxAgeMs`, `full` and `waitForSessionIds`, all
+  optional, and answers `started`, or `started: false` with `reason`
+  `fresh`, `already_running` or `running_elsewhere`. A plain refresh while
+  another process scans reports `running_elsewhere` and forwards that scan's
+  result. `full` and `waitForSessionIds` wait for the other scan, at most 11
+  minutes, then run their own; past that they report `failed`.
+  `waitForSessionIds` waits up to 60 s for the worktree folders of those
+  sessions to go; the result then says `complete: false` if one stayed.
+  The answer also carries `scanId`, the scan whose result will answer the
+  request: the new scan when one started, the scan under way for a plain
+  refresh during one, the scan queued behind it for `full` or
+  `waitForSessionIds`, and this process's forwarding of the other process's
+  scan for `running_elsewhere`. It is absent for `fresh`, where no event
+  follows. Only a scan that starts after the call measures what the call
+  followed (an archive, say): pass `waitForSessionIds` (or `full`) and the
+  `scanId` always names one, since such a request never gets `fresh` or
+  `running_elsewhere` and, behind a scan under way, gets the scan queued
+  after it. A plain refresh answered `already_running` or
+  `running_elsewhere` names a scan that started before the call.
+- `storage/usage/updated` carries a read response plus `eventId`, increasing
+  per process, and `complete`. It is sent with `refreshing` when a scan starts
+  and with the result when it ends, success or `failed`, to every connection
+  that called a storage method. Both carry the scan's `scanId`, so a client
+  waiting for the scan its refresh named takes the first non-`refreshing`
+  event with that id as its answer, and ignores a late result of an earlier
+  scan. Scan ids increase per process; a server before them sends none.
+
+Clients show the storage UI (`/storage` in the CLI, the Storage panel and
+low-disk alert in Desktop) only when the config view's
+`experimentalEnableStorageUsage` is true; it follows the
+`vibe_storage_usage` experiment and defaults to false, absent from an older
+server. The methods themselves answer whatever the flag says.
+
+Sizes are the space really used on disk: on macOS the private size of each
+file, so a copy-on-write worktree counts only what it added; the template
+counts its allocated size, once. A worktree not measured yet has `bytes:
+null` and is left out of the totals.
 
 ### Experimental: subagent control
 

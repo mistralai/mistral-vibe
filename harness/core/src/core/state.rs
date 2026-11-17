@@ -266,12 +266,7 @@ impl HarnessState {
                 self,
                 pending.action_id().to_string(),
                 None,
-                CompletionActionKind::Compaction {
-                    compaction_id: pending.compaction_id().to_string(),
-                    trigger: pending.trigger(),
-                    attempt: pending.attempt(),
-                    request: pending.projection().request_kind(),
-                },
+                pending.completion_action_kind(),
                 0,
                 None,
             )],
@@ -288,12 +283,7 @@ impl HarnessState {
                     self,
                     pending.action_id().to_string(),
                     Some(active.turn_id.clone()),
-                    CompletionActionKind::Compaction {
-                        compaction_id: pending.compaction_id().to_string(),
-                        trigger: pending.trigger(),
-                        attempt: pending.attempt(),
-                        request: pending.projection().request_kind(),
-                    },
+                    pending.completion_action_kind(),
                     active.iterations,
                     // A compaction summary answers in its own text envelope.
                     None,
@@ -633,6 +623,14 @@ pub(crate) struct ActiveTurn {
     /// started it. Every agent completion of this Turn, and only of this Turn,
     /// asks for it.
     pub output_type: Option<OutputType>,
+    /// User steering messages this turn added to the model context, not counting
+    /// context messages. They follow the turn's input, so a rejected request's
+    /// input is found before them.
+    pub delivered_steering: u32,
+    /// A compaction during this turn showed one of the turn's messages (its input,
+    /// steering, replies or tool results) only in its reduced view, so the input,
+    /// or the replies that keep it, may no longer be messages of their own.
+    pub input_reduced: bool,
 }
 
 /// What the Runtime is currently waiting on for the active turn.

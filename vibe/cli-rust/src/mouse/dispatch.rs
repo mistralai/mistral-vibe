@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 use super::{option_gesture, MouseTarget};
 use crate::app::App;
 use crate::config;
-use crate::config_write::Scope;
 use crate::option_list::{Click, MultiAction, OptionList, OptionView, SingleAction};
 use crate::selection::{self, RegionId, Release};
 use crate::server::Client;
@@ -30,12 +29,18 @@ pub(super) fn dispatch(
         MouseTarget::Transcript | MouseTarget::Composer => selection_event(app, target, event),
         MouseTarget::BottomBar => bottom_bar_event(app, client, event),
         MouseTarget::Loading => loading_event(app, event),
+        MouseTarget::GoalRow => owned_region_event(app, event, |app, at| {
+            selection::press_owned(app, at, selection::RegionId::Goal)
+        }),
         MouseTarget::Question => question_input::handle_mouse(app, client, event),
         MouseTarget::Approval => approval::handle_mouse(app, client, event),
         MouseTarget::Mcp => mcp::mouse(app, event),
         MouseTarget::Plugins => crate::plugins::mouse(app, event),
+        MouseTarget::TrustedFolders => crate::trusted_folders::mouse(app, client, event),
         MouseTarget::Skills => crate::skills_browser::mouse(app, client, event),
-        MouseTarget::SkillsBody => bottom_app_event(app, event, |_, _| {}),
+        MouseTarget::SkillsBody | MouseTarget::LoopsDetails => {
+            bottom_app_event(app, event, |_, _| {})
+        }
         MouseTarget::ReleaseNotes => crate::release_notes::mouse(app, event),
         MouseTarget::McpOAuth => {
             if picked(app, event, |app| &mut app.mcp_oauth.list) {
@@ -47,11 +52,7 @@ pub(super) fn dispatch(
                 connector_auth::select(app);
             }
         }
-        MouseTarget::ModelPicker => {
-            if confirmed(app, event, |app| &mut app.model_picker.list) {
-                model_picker::select(app, client, Scope::Saved);
-            }
-        }
+        MouseTarget::ModelPicker => model_picker::mouse(app, event, client),
         MouseTarget::ThemePicker => {
             if picked(app, event, |app| &mut app.theme_picker.list) {
                 crate::input::select_theme(app, client);
@@ -63,6 +64,8 @@ pub(super) fn dispatch(
                 thinking_picker::select(app, client, scope);
             }
         }
+        // A click must not move the highlight off the session being resumed or deleted.
+        MouseTarget::ResumePicker if resume_picker::frozen(app) => {}
         MouseTarget::ResumePicker => {
             let click = option_gesture(app, event, RegionId::BottomApp, |app| {
                 &mut app.resume_picker.list
@@ -84,6 +87,15 @@ pub(super) fn dispatch(
         MouseTarget::ArtifactsModal => {
             if confirmed(app, event, |app| &mut app.artifacts_modal.list) {
                 artifacts_modal::select(app);
+            }
+        }
+        // A click highlights a loop; deleting stays on `d`.
+        MouseTarget::Loops => {
+            let _ = option_gesture(app, event, RegionId::BottomApp, |app| &mut app.loops.list);
+        }
+        MouseTarget::GoalConfirm => {
+            if picked(app, event, |app| &mut app.goal.list) {
+                crate::goal::choose(app, client);
             }
         }
         MouseTarget::BottomApp => bottom_app_event(app, event, |_, _| {}),
@@ -149,9 +161,14 @@ pub(crate) fn option_list(app: &mut App, target: MouseTarget) -> Option<&mut dyn
         MouseTarget::ThinkingPicker => &mut app.thinking_picker.list,
         MouseTarget::LogLevelPicker => &mut app.log_level_picker.list,
         MouseTarget::ArtifactsModal => &mut app.artifacts_modal.list,
+        MouseTarget::Loops => &mut app.loops.list,
+        MouseTarget::GoalConfirm => &mut app.goal.list,
         MouseTarget::ResumePicker => &mut app.resume_picker.list,
         MouseTarget::Mcp => &mut app.mcp.list,
         MouseTarget::Plugins => &mut app.plugins.list,
+        MouseTarget::TrustedFolders => {
+            crate::trusted_folders::visible_list(&mut app.trusted_folders)
+        }
         MouseTarget::Skills => crate::skills_browser::visible_list(&mut app.skills_browser),
         MouseTarget::Config => &mut app.config_screen.list,
         MouseTarget::ConfigEditor => &mut app.config_screen.edit.as_mut()?.list,
@@ -365,7 +382,19 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
                     }
                 }
             } else if matches!(released, Release::RegionClick) {
-                toggle_effect_at(app, event.row);
+                // A plain click on the resting cat replays its animation round,
+                // unless the user disabled the animation; the click stays a no-op.
+                if app
+                    .view
+                    .banner_cat_area
+                    .is_some_and(|area| area.contains((event.column, event.row).into()))
+                {
+                    if !app.session.startup_config.disable_welcome_banner_animation {
+                        app.view.banner.restart();
+                    }
+                } else {
+                    toggle_effect_at(app, event.row);
+                }
             }
         }
         _ => {}

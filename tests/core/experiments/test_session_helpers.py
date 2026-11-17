@@ -67,6 +67,9 @@ def _make_config(
     config = MagicMock()
     config.enable_telemetry = enable_telemetry
     config.experiments.enable = enable_experiments
+    config.get_mistral_provider.return_value = MagicMock(
+        api_base="https://api.mistral.ai/v1"
+    )
     return config
 
 
@@ -208,7 +211,9 @@ async def test_initialize_returns_none_when_mistral_provider_but_no_api_key(
     # failed", not "not our user", so user_plan is None (not the sentinel) and
     # no attribute snapshot is stamped.
     config = _make_config()
-    config.get_mistral_provider = lambda: MagicMock()
+    config.get_mistral_provider = lambda: MagicMock(
+        api_base="https://api.mistral.ai/v1"
+    )
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: None,

@@ -148,20 +148,30 @@ def test_runtime_without_host_factory_fails_the_build(
         helper.require_unified_runtime()
 
 
-def test_collect_unified_runtime_collects_the_runtime_package(
+def test_collect_unified_runtime_collects_both_runtime_packages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     helper = load_helper()
     install_findable_runtime(monkeypatch, helper)
-    sentinel = ([object()], [object()], [object()])
     collected_packages = install_fake_collect_all(
-        monkeypatch, {"mistralai_vibe_local_harness": sentinel}
+        monkeypatch,
+        {
+            "mistralai_vibe_local_harness": (["rt-data"], ["rt-bin"], ["rt-mod"]),
+            "mistralai.vibe.harness": (["tr-data"], ["tr-bin"], ["tr-mod"]),
+        },
     )
 
     result = helper.collect_unified_runtime(platform="linux")
 
-    assert collected_packages == ["mistralai_vibe_local_harness"]
-    assert result is sentinel
+    assert collected_packages == [
+        "mistralai_vibe_local_harness",
+        "mistralai.vibe.harness",
+    ]
+    assert result == (
+        ["rt-data", "tr-data"],
+        ["rt-bin", "tr-bin"],
+        ["rt-mod", "tr-mod"],
+    )
 
 
 def test_collect_unified_runtime_also_collects_winpty_on_windows(
@@ -173,18 +183,45 @@ def test_collect_unified_runtime_also_collects_winpty_on_windows(
         monkeypatch,
         {
             "mistralai_vibe_local_harness": (["rt-data"], ["rt-bin"], ["rt-mod"]),
+            "mistralai.vibe.harness": (["tr-data"], ["tr-bin"], ["tr-mod"]),
             "winpty": (["pty-data"], ["pty-bin"], ["pty-mod"]),
         },
     )
 
     result = helper.collect_unified_runtime(platform="win32")
 
-    assert collected_packages == ["mistralai_vibe_local_harness", "winpty"]
+    assert collected_packages == [
+        "mistralai_vibe_local_harness",
+        "mistralai.vibe.harness",
+        "winpty",
+    ]
     assert result == (
-        ["rt-data", "pty-data"],
-        ["rt-bin", "pty-bin"],
-        ["rt-mod", "pty-mod"],
+        ["rt-data", "tr-data", "pty-data"],
+        ["rt-bin", "tr-bin", "pty-bin"],
+        ["rt-mod", "tr-mod", "pty-mod"],
     )
+
+
+def test_missing_target_runtime_fails_the_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    helper = load_helper()
+    install_findable_runtime(monkeypatch, helper)
+
+    def import_without_target_runtime(name: str) -> types.ModuleType:
+        if name.startswith("mistralai.vibe.harness"):
+            raise ModuleNotFoundError("No module named 'mistralai.vibe.harness'")
+        return fake_import_module(name)
+
+    monkeypatch.setattr(helper, "import_module", import_without_target_runtime)
+    collected_packages = install_fake_collect_all(monkeypatch, {})
+
+    with pytest.raises(
+        helper.UnifiedRuntimeRequiredError,
+        match=r"mistralai\.vibe\.harness\.core\._native",
+    ):
+        helper.collect_unified_runtime(platform="linux")
+    assert collected_packages == []
 
 
 def test_missing_winpty_fails_the_windows_build(

@@ -57,13 +57,19 @@ pub(super) fn resume(app: &App, client: &Arc<Client>, id: String, params: Value)
 
 pub(super) fn delete(app: &App, client: &Arc<Client>, id: String) {
     spawn(app, client, |client| async move {
-        let error = client
-            .request(method::SESSION_DELETE, json!({"sessionId": id}))
+        let error = delete_session(&client, &id)
             .await
             .err()
             .map(|error| describe(&error));
         Event::Deleted { id, error }
     });
+}
+
+/// `session/delete` for one saved session.
+pub(crate) async fn delete_session(client: &Client, id: &str) -> anyhow::Result<Value> {
+    client
+        .request(method::SESSION_DELETE, json!({"sessionId": id}))
+        .await
 }
 
 /// Subscribe to the session-lease watch, answering with the locked set.

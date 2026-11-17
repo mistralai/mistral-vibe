@@ -576,6 +576,10 @@ fn agent_results_survive_restore_and_are_seen_once_before_new_input() {
             "Status: stopped, output limit reached before the agent finished its reply\nTo let it continue with its history, send a message to /root/child.",
         ),
         (
+            json!({"outcome":"completed", "output":[{"type":"text", "text":"Stopped this turn."}], "stop_reason":"repeated_tool_failure"}),
+            "Status: stopped, the same tool call failed repeatedly before the agent finished\nPartial output: [{\"type\":\"text\",\"text\":\"Stopped this turn.\"}]\nTo let it continue with its history, send a message to /root/child.",
+        ),
+        (
             json!({"outcome":"completed", "output":[{"type":"text", "text":"Skipped by policy"}], "stop_reason":"skipped"}),
             "Status: completed\nOutput: [{\"type\":\"text\",\"text\":\"Skipped by policy\"}]",
         ),

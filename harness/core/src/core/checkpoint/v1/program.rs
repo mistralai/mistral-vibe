@@ -42,7 +42,7 @@ pub(super) struct CheckpointProgramExecution {
     paused_since_unix_ms: Option<u64>,
 }
 
-fn is_zero(value: &u64) -> bool {
+pub(super) fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
@@ -243,11 +243,17 @@ enum CheckpointProgramExternalExecution {
         /// the time budget. Earlier V1 checkpoints do not record it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         requested_sleep_seconds: Option<f64>,
+        /// Earlier V1 checkpoints do not record it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatched_at_unix_ms: Option<u64>,
     },
     AwaitingPostHook {
         hook_binding_ids: Vec<String>,
         call: CheckpointExternalTool,
         result: CheckpointToolResult,
+        /// Earlier V1 checkpoints do not record it.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        duration_ms: u64,
     },
     Resolved {
         value: Value,
@@ -286,18 +292,23 @@ impl CheckpointProgramExternalExecution {
                     call,
                 }
             }
-            ExternalCallStage::Pending => Self::Pending {
+            ExternalCallStage::Pending {
+                dispatched_at_unix_ms,
+            } => Self::Pending {
                 call,
                 requested_sleep_seconds: pending.requested_sleep_seconds,
+                dispatched_at_unix_ms: *dispatched_at_unix_ms,
             },
             ExternalCallStage::AwaitingPostHook {
                 hook_binding_ids,
                 result,
+                duration_ms,
                 ..
             } => Self::AwaitingPostHook {
                 hook_binding_ids: hook_binding_ids.clone(),
                 call,
                 result: CheckpointToolResult::capture(result),
+                duration_ms: *duration_ms,
             },
         })
     }
@@ -330,7 +341,7 @@ impl CheckpointProgramExternalExecution {
                 }
                 Ok(())
             }
-            ExternalCallStage::Pending => Ok(()),
+            ExternalCallStage::Pending { .. } => Ok(()),
             ExternalCallStage::AwaitingPostHook { hook_action_id, .. } => {
                 validate_tool_hook_action_id(
                     hook_action_id,
@@ -373,20 +384,23 @@ impl CheckpointProgramExternalExecution {
             Self::Pending {
                 call,
                 requested_sleep_seconds,
+                dispatched_at_unix_ms,
             } => (
-                PendingExternalCall::pending(restore_call(call)),
+                PendingExternalCall::pending(restore_call(call), dispatched_at_unix_ms),
                 requested_sleep_seconds,
             ),
             Self::AwaitingPostHook {
                 hook_binding_ids,
                 call,
                 result,
+                duration_ms,
             } => {
                 let call = restore_call(call);
                 let stage = ExternalCallStage::AwaitingPostHook {
                     hook_action_id: hook_action_id(&call.action_id, HookPoint::PostToolCall),
                     hook_binding_ids,
                     result: result.restore(),
+                    duration_ms,
                 };
                 (PendingExternalCall { call, stage }, None)
             }

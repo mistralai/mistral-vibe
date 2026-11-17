@@ -30,6 +30,13 @@ pub(crate) fn loading_region(app: &mut App, f: &mut Frame, area: Rect) {
     overlay_region(app, f, RegionId::Loading);
 }
 
+/// Register the goal row for mouse routing and paint its selection overlay.
+pub(crate) fn goal_region(app: &mut App, f: &mut Frame, area: Rect) {
+    crate::mouse::register_region(app, area, crate::mouse::MouseTarget::GoalRow);
+    app.view.goal_selection_region = frame_region(area);
+    overlay_region(app, f, RegionId::Goal);
+}
+
 /// Highlight the selection inside the main screen region.
 pub fn overlay(app: &mut App, f: &mut Frame) {
     overlay_region(app, f, RegionId::Main);

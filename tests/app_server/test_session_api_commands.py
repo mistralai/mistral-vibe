@@ -117,12 +117,17 @@ async def test_a_model_switch_goes_through_config_write_with_its_limits(
         SessionConfig(
             core=switched_core,
             local=replace(
-                local, active_model=small_route, compaction_model=small_route
+                local,
+                active_model=small_route,
+                # The alias the user knows the new model by moves with it.
+                active_model_alias="small",
+                compaction_model=small_route,
             ),
         )
     )
     after_write = session.adapter_config
     assert after_write is not None
+    alias_after_write = after_write.active_model_alias
     await commands.apply_config(
         SessionConfig(
             core=switched_core,
@@ -141,6 +146,7 @@ async def test_a_model_switch_goes_through_config_write_with_its_limits(
     assert written["model"] == "small-model"
     assert written["context_window"] == 65_536
     assert written["input_modalities"] == ["text"]
+    assert alias_after_write == "small"
     assert session.adapter_config is not None
     assert session.adapter_config.active_model.model == "model-c"
     assert session.adapter_config.extra_headers == {"x-team": "qa"}
@@ -612,6 +618,7 @@ async def test_a_subagent_approval_is_answered_through_the_session_api(
 _KNOWN_LOCAL_FIELDS = frozenset({
     "active_agent",
     "active_model",
+    "active_model_alias",
     "affinity_id",
     "agent_max_tokens",
     "api_style",
@@ -647,6 +654,7 @@ _KNOWN_LOCAL_FIELDS = frozenset({
     "region",
     "request_sent_sink",
     "retry_max_elapsed_time_s",
+    "credential_wait_s",
     "sandbox",
     "session_api",
     "shell",

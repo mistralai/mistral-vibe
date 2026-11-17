@@ -5,16 +5,14 @@ use crate::server::{ImageAttachment, ImageSource, PreparedPrompt};
 
 impl QueueItem {
     /// The prompt as the composer edits it, led by an `@` mention for each
-    /// file-backed attachment its text does not mention. Bare image paths are
-    /// left for the composer to rewrite around the mentions it restores.
+    /// file-backed attachment its text does not mention.
     pub fn raw_edit_text(&self) -> String {
         let text = self.text.clone();
-        let rewritten = crate::paste_path::rewrite_bare_image_paths_in_text(&self.text);
         let mentions: Vec<String> = self
             .images
             .iter()
             .filter_map(|image| match &image.source {
-                ImageSource::File { path } if !image_is_mentioned(&rewritten, image) => {
+                ImageSource::File { path } if !image_is_mentioned(&text, image) => {
                     Some(crate::paste_path::image_path_mention(path))
                 }
                 _ => None,

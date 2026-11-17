@@ -92,6 +92,11 @@ impl ToolGroupDefinition {
 #[serde(deny_unknown_fields)]
 pub(crate) struct TurnSettings {
     pub max_iterations: Option<u32>,
+    /// How many model replies in a row may fail the same tool call the same way before Core
+    /// completes the Turn with `repeated_tool_failure`. `None` sets no limit. Omitted when
+    /// unset, so settings without it serialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_identical_tool_failures: Option<u32>,
     #[serde(default, skip_serializing_if = "OutputLimitRecovery::is_disabled")]
     pub output_limit_recovery: OutputLimitRecovery,
 }
@@ -315,6 +320,11 @@ pub(crate) struct HarnessSettings {
 #[serde(deny_unknown_fields)]
 pub(crate) struct HarnessConfig {
     pub task_id: String,
+    /// Sets the completion and compaction Action IDs of this Core apart from
+    /// those of an earlier Core of the same task. Omitted, they derive from
+    /// `task_id` alone. A restore supplies the namespace the Core was created with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id_namespace: Option<String>,
     #[serde(default)]
     pub system_instructions: String,
     pub settings: HarnessSettings,
@@ -346,6 +356,12 @@ pub(crate) fn validate_settings(settings: &HarnessSettings) -> Result<(), CoreEr
         return Err(CoreError::invalid_configuration(
             "settings.turn.max_iterations",
             "settings.turn.max_iterations must be greater than zero",
+        ));
+    }
+    if settings.turn.max_identical_tool_failures == Some(0) {
+        return Err(CoreError::invalid_configuration(
+            "settings.turn.max_identical_tool_failures",
+            "settings.turn.max_identical_tool_failures must be greater than zero",
         ));
     }
     settings.turn.output_limit_recovery.validate()?;

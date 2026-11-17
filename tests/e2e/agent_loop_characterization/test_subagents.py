@@ -16,8 +16,8 @@ from tests.e2e.agent_loop_characterization.support import (
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
-    wait_for_main_screen,
     wait_for_rendered_text,
+    wait_for_session_ready,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -107,7 +107,7 @@ def test_spawned_subagent_returns_result_to_parent_model(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send(PARENT_PROMPT)
         child.send("\r")
 
@@ -225,7 +225,7 @@ def test_subagent_result_wakes_a_waiting_parent_model(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send(WAITING_PARENT_PROMPT)
         child.send("\r")
 

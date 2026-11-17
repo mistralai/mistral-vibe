@@ -141,6 +141,29 @@ def test_the_desktop_block_formats_for_the_rendered_chat_panel(variant: str) -> 
 
 
 @pytest.mark.parametrize("variant", _VARIANTS)
+def test_the_desktop_block_says_it_is_the_desktop_app(variant: str) -> None:
+    """*Prepare*: Each variant.
+    *Do*: Append the Desktop block.
+    *Assert*: It tells the model it runs in Vibe Desktop rather than the CLI,
+    and to answer questions about Vibe for the desktop app; the CLI and
+    neutral blocks make no such claim.
+    """
+    # Do
+    common, desktop = _prompt(variant, "desktop")
+    _, cli = _prompt(variant, "cli")
+    _, neutral = _prompt(variant, "neutral")
+
+    # Assert
+    block = desktop.removeprefix(f"{common}\n\n")
+    assert "You are running in Vibe Desktop" in block
+    assert "not in the Vibe CLI" in block
+    assert "answer for the desktop app" in block
+    assert "The `vibe` skill describes the CLI" in block
+    assert "You are running in Vibe Desktop" not in cli
+    assert "You are running in Vibe Desktop" not in neutral
+
+
+@pytest.mark.parametrize("variant", _VARIANTS)
 def test_the_neutral_block_claims_no_terminal_and_no_renderer(variant: str) -> None:
     """*Prepare*: Each variant, with or without its own response format.
     *Do*: Append the neutral block.

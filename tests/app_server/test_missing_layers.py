@@ -160,6 +160,8 @@ class _Remote:
         self.eval_response = eval_response or _smart_approve_eval()
         self.delays = delays or {}
         self.org_toml = org_toml
+        # Fails each org config fetch at once, when set.
+        self.org_error: str | None = None
         self.release = asyncio.Event()
         self.calls = {"org": 0, "eval": 0, "catalog": 0}
         self.client_names: list[str | None] = []
@@ -200,6 +202,8 @@ class _Remote:
 
     async def _org(self) -> ManagedConfigResult:
         await self._block("org")
+        if self.org_error is not None:
+            return ManagedConfigResult(error=self.org_error)
         return ManagedConfigResult(
             config=ManagedConfig(state="enabled", toml=self.org_toml)
         )
@@ -487,8 +491,12 @@ async def test_hanging_endpoints_answer_local_defaults_and_are_not_waited_for_ag
     first = (await _read_config(handler)).config
     first_duration = time.monotonic() - started
     # GrowthBook's and the catalog's own limits start once the org config's
-    # ends, so all three have failed or hit their limit by now.
-    await asyncio.sleep(2 * _LIMIT)
+    # ends: all three have failed or hit their limit once both are marked.
+    while not (
+        process_services.experiments.failures.failed
+        and process_services.model_catalog.failures.failed
+    ):
+        await asyncio.sleep(0.01)
     # Any wait now would take seconds, far above the read's own cost.
     _set_limits(monkeypatch, 5.0)
     started = time.monotonic()
@@ -543,6 +551,35 @@ async def test_a_catalog_the_eval_leaves_off_is_not_fetched(
 
 
 @pytest.mark.asyncio
+async def test_a_self_hosted_read_never_asks_growthbook(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+    config_dir: Path,
+) -> None:
+    _set_local_config(
+        config_dir,
+        enable_telemetry=True,
+        experimental_enable_model_catalog=True,
+        providers=[
+            {
+                "name": "mistral",
+                "api_base": "https://api.asml.example/v1",
+                "api_key_env_var": "MISTRAL_API_KEY",
+                "backend": "mistral",
+            }
+        ],
+    )
+    remote = _Remote(monkeypatch, org_server)
+
+    await _read_config(_handler(process_services=process_services))
+
+    assert remote.calls["eval"] == 0
+    assert remote.calls["org"] == 1
+    assert remote.calls["catalog"] == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("remote_config_enabled")
 async def test_a_read_with_everything_cached_fetches_nothing(
     monkeypatch: pytest.MonkeyPatch,
@@ -592,31 +629,25 @@ async def test_concurrent_reads_share_one_fetch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("short_limits")
 async def test_a_session_start_after_a_failed_org_config_read_waits_for_the_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, org_server: FakeOrgConfigServer
 ) -> None:
     # A failed fetch is not retried before its delay: a session opened
     # meanwhile neither waits nor fetches, and the next one after it does.
     clock = [1_000_000.0]
-    services = fake_process_services(
-        org_server,
-        policy=replace(ORG_CONFIG_POLICY, fetch_timeout_s=_LIMIT),
-        first_wait_s=_LIMIT,
-        clock=lambda: clock[0],
-    )
-    remote = _Remote(monkeypatch, org_server, hang=True)
+    services = fake_process_services(org_server, clock=lambda: clock[0])
+    remote = _Remote(monkeypatch, org_server)
+    remote.org_error = "offline"
     try:
         await _read_config(_handler(process_services=services))
-        await asyncio.sleep(2 * _LIMIT)
-        assert remote.calls["org"] == 1
-        remote.hang = False
-        remote.release.set()
         process = runtime_module.HarnessProcess(services=services)
 
+        # Joins the read's fetch if it is still failing, or finds it failed.
         during = await process._build_session_config(
             SessionOptions(cwd=str(tmp_path)), org_config=OrgConfigSource.ENSURED
         )
+        assert remote.calls["org"] == 1
+        remote.org_error = None
         clock[0] += ORG_CONFIG_POLICY.retry_after_s
         after = await process._build_session_config(
             SessionOptions(cwd=str(tmp_path)), org_config=OrgConfigSource.ENSURED

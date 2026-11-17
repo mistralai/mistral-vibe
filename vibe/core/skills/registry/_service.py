@@ -18,7 +18,7 @@ from vibe.core.platform_auth import (
     PlatformCredentialProvider,
 )
 from vibe.core.platform_auth._mistral import mistral_credentials
-from vibe.core.skills.models import REGISTRY_LATEST_ALIAS, SkillScope
+from vibe.core.skills.models import REGISTRY_LATEST_ALIAS, ManifestEntry, SkillScope
 from vibe.core.skills.registry import (
     _eviction,
     _known_manifests,
@@ -28,8 +28,8 @@ from vibe.core.skills.registry import (
     _store,
 )
 from vibe.core.skills.registry._client import RegistrySkillsClient, RegistrySkillsError
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
-from vibe.core.skills.registry.models import SkillVersionInfo
+from vibe.core.skills.registry._manifest import SkillManifest
+from vibe.core.skills.registry.models import RegistrySkillItem, SkillVersionInfo
 from vibe.observability.logging import logger
 from vibe.utils.paths import resolves_within
 
@@ -482,26 +482,8 @@ async def import_skill(
     skill per name, so another shared skill pinned there under the same name is
     refused rather than replaced.
     """
-    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
-    if endpoint is None:
-        raise RegistrySkillsError("no authenticated Mistral endpoint available")
-    pin: int | str
-    if version is not None:
-        pin = version
-    elif alias is not None:
-        pin = alias
-    else:
-        pin = REGISTRY_LATEST_ALIAS
-
-    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
-        if isinstance(pin, int):
-            item = await client.get_skill(skill_id, version=pin)
-        else:
-            item = await client.get_skill(skill_id, alias=pin)
-
-    name = item.resolved_name
-    if name is None:
-        raise RegistrySkillsError(f"skill {skill_id} has no usable name")
+    pin = _pin_for(version, alias)
+    item, name = await _fetch(config, skill_id, pin, credentials)
     path = _manifest_path_for_scope(scope, roots)
     manifest = await _manifest.load(path)
     if any(
@@ -512,6 +494,102 @@ async def import_skill(
             f"another shared skill named {name!r} is pinned in {scope.value}; "
             "remove it first"
         )
+    await _store_fetched(item, skill_id, name, pin)
+    entry = ManifestEntry(
+        name=name, skill_id=skill_id, version=pin, description=item.resolved_description
+    )
+    manifest.upsert(entry)
+    await _manifest.save(path, manifest)
+    if scope is SkillScope.PROJECT:
+        await asyncio.to_thread(_known_manifests.remember, [path])
+    return entry
+
+
+async def import_session_skill(
+    config: VibeConfigSchema,
+    skill_id: str,
+    *,
+    version: int | None = None,
+    alias: str | None = None,
+    credentials: PlatformCredentialFactory | None = None,
+) -> ManifestEntry:
+    """Materialize a skill and return its pin, writing no manifest.
+
+    The pin holds the version fetched now, so the session keeps running what it
+    imported; importing again moves it to the alias's current version.
+    """
+    pin = _pin_for(version, alias)
+    item, name = await _fetch(config, skill_id, pin, credentials)
+    await _store_fetched(item, skill_id, name, pin)
+    return ManifestEntry(
+        name=name,
+        skill_id=skill_id,
+        version=item.version,
+        description=item.resolved_description,
+    )
+
+
+async def restore_session_skills(
+    config: VibeConfigSchema,
+    pins: Sequence[ManifestEntry],
+    *,
+    credentials: PlatformCredentialFactory | None = None,
+) -> None:
+    """Fetch again the picked versions a store cleanup took, so a reopened session
+    runs what it picked. One that cannot be fetched is logged and left out.
+    """
+    for pin in pins:
+        if not isinstance(pin.version, int) or not _store.is_safe_skill_id(
+            pin.skill_id
+        ):
+            continue
+        if await _store.is_materialized(pin.skill_id, pin.version):
+            continue
+        try:
+            await import_session_skill(
+                config, pin.skill_id, version=pin.version, credentials=credentials
+            )
+        except RegistrySkillsError as exc:
+            logger.warning(
+                "Could not restore the session's skill %s (%s@%d): %s",
+                pin.name,
+                pin.skill_id,
+                pin.version,
+                exc.reason,
+            )
+
+
+def _pin_for(version: int | None, alias: str | None) -> int | str:
+    if version is not None:
+        return version
+    if alias is not None:
+        return alias
+    return REGISTRY_LATEST_ALIAS
+
+
+async def _fetch(
+    config: VibeConfigSchema,
+    skill_id: str,
+    pin: int | str,
+    credentials: PlatformCredentialFactory | None,
+) -> tuple[RegistrySkillItem, str]:
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
+    if endpoint is None:
+        raise RegistrySkillsError("no authenticated Mistral endpoint available")
+    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
+        if isinstance(pin, int):
+            item = await client.get_skill(skill_id, version=pin)
+        else:
+            item = await client.get_skill(skill_id, alias=pin)
+    name = item.resolved_name
+    if name is None:
+        raise RegistrySkillsError(f"skill {skill_id} has no usable name")
+    return item, name
+
+
+async def _store_fetched(
+    item: RegistrySkillItem, skill_id: str, name: str, pin: int | str
+) -> None:
     try:
         stored = await _store.materialize(item, name)
     except OSError as exc:
@@ -521,18 +599,8 @@ async def import_skill(
         ) from exc
     if stored is None:
         raise RegistrySkillsError(f"skill {skill_id} has an empty body")
-
     if isinstance(pin, str) and pin != REGISTRY_LATEST_ALIAS:
         await asyncio.to_thread(_resolved.record, {(skill_id, pin): item.version})
-
-    entry = ManifestEntry(
-        name=name, skill_id=skill_id, version=pin, description=item.resolved_description
-    )
-    manifest.upsert(entry)
-    await _manifest.save(path, manifest)
-    if scope is SkillScope.PROJECT:
-        await asyncio.to_thread(_known_manifests.remember, [path])
-    return entry
 
 
 def _manifest_path_for_scope(

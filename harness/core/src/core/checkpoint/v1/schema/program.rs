@@ -24,6 +24,10 @@ pub(in crate::core::checkpoint::v1) enum CheckpointRuntimeBuiltinToolName {
     FileSystemBash,
     #[serde(rename = "skill.read")]
     SkillRead,
+    #[serde(rename = "builtin.auth.request_sign_in")]
+    SignInRequest,
+    #[serde(rename = "builtin.auth.list_unauthenticated_sources")]
+    SignInList,
     #[serde(rename = "process.start")]
     ProcessStart,
     #[serde(rename = "process.output")]
@@ -63,6 +67,8 @@ impl CheckpointRuntimeBuiltinToolName {
             }
             RuntimeBuiltinToolName::FileSystemBash => Self::FileSystemBash,
             RuntimeBuiltinToolName::SkillRead => Self::SkillRead,
+            RuntimeBuiltinToolName::SignInRequest => Self::SignInRequest,
+            RuntimeBuiltinToolName::SignInList => Self::SignInList,
             RuntimeBuiltinToolName::ProcessStart => Self::ProcessStart,
             RuntimeBuiltinToolName::ProcessOutput => Self::ProcessOutput,
             RuntimeBuiltinToolName::ProcessWrite => Self::ProcessWrite,
@@ -94,6 +100,8 @@ impl CheckpointRuntimeBuiltinToolName {
             }
             Self::FileSystemBash => RuntimeBuiltinToolName::FileSystemBash,
             Self::SkillRead => RuntimeBuiltinToolName::SkillRead,
+            Self::SignInRequest => RuntimeBuiltinToolName::SignInRequest,
+            Self::SignInList => RuntimeBuiltinToolName::SignInList,
             Self::ProcessStart => RuntimeBuiltinToolName::ProcessStart,
             Self::ProcessOutput => RuntimeBuiltinToolName::ProcessOutput,
             Self::ProcessWrite => RuntimeBuiltinToolName::ProcessWrite,

@@ -54,6 +54,7 @@ pub(super) async fn start_session(
         agent_config,
         history_limit: HISTORY_LIMIT,
         model: None,
+        reasoning_effort: None,
         session_only: false,
         kind: start_kind(resume),
     };

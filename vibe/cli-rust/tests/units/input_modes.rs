@@ -72,13 +72,21 @@ fn input_classification_distinguishes_bash_skill_and_prompt() {
 }
 
 #[test]
-fn removed_teleport_syntax_is_a_prompt() {
-    assert_eq!(
-        classify("/teleport", &[]),
-        ClassifiedInput::Prompt {
-            text: "/teleport".to_owned()
-        }
-    );
+fn removed_commands_are_reported_instead_of_sent() {
+    for (value, name) in [
+        ("/teleport", "/teleport"),
+        ("/Teleport fix the tests", "/teleport"),
+        ("/remote-project", "/remote-project"),
+    ] {
+        assert_eq!(
+            classify(value, &[]),
+            ClassifiedInput::RemovedCommand {
+                command: name,
+                version: "3.1.1"
+            },
+            "{value:?}"
+        );
+    }
     assert_eq!(
         classify("&deploy", &[]),
         ClassifiedInput::Prompt {
@@ -86,9 +94,21 @@ fn removed_teleport_syntax_is_a_prompt() {
         }
     );
     assert_eq!(
-        classify("/remote-project", &[]),
+        classify_submitted(InputMode::Prompt, " /teleport", &[]),
         ClassifiedInput::Prompt {
-            text: "/remote-project".to_owned()
+            text: " /teleport".to_owned()
+        }
+    );
+}
+
+#[test]
+fn a_skill_named_like_a_removed_command_still_runs() {
+    let skills = vec![Skill::new("teleport", "Custom teleport")];
+    assert_eq!(
+        classify("/teleport", &skills),
+        ClassifiedInput::Skill {
+            command: "/teleport".to_owned(),
+            name: "teleport".to_owned(),
         }
     );
 }

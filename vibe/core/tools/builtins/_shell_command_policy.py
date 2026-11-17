@@ -11,6 +11,9 @@ class ShellCommandPolicy:
     inspect_positional_paths: bool = False
     inspect_git_repository: bool = False
     option_path_values: tuple[str, ...] = ()
+    reads_recursively: bool = False
+    """Whether the reader descends into directories, where it can open files the
+    command never names. Only the sensitive-file check acts on this."""
 
 
 def _matches_long_option(token: str, option: str) -> bool:
@@ -102,7 +105,30 @@ def _sort_policy(args: list[str]) -> ShellCommandPolicy:
 
 
 def _grep_policy(args: list[str]) -> ShellCommandPolicy:
+    directory_actions = (
+        *_long_option_values(args, frozenset({"--directories"})),
+        *_short_option_values(
+            args,
+            frozenset({"d"}),
+            preceding_value_options=frozenset({"A", "B", "C", "D", "e", "f", "m"}),
+        ),
+    )
+    recursive = any(
+        [action for action in ("read", "recurse", "skip") if action.startswith(value)]
+        == ["recurse"]
+        for value in directory_actions
+    ) or any(
+        _matches_long_option(option, "--recursive")
+        or _matches_long_option(option, "--dereference-recursive")
+        or _contains_short_option(
+            option,
+            frozenset({"r", "R"}),
+            preceding_value_options=frozenset({"A", "B", "C", "D", "d", "e", "f", "m"}),
+        )
+        for option in _option_tokens(args)
+    )
     return ShellCommandPolicy(
+        reads_recursively=recursive,
         option_path_values=(
             *_long_option_values(args, frozenset({"--exclude-from", "--file"})),
             *_short_option_values(
@@ -110,8 +136,130 @@ def _grep_policy(args: list[str]) -> ShellCommandPolicy:
                 frozenset({"f"}),
                 preceding_value_options=frozenset({"A", "B", "C", "D", "d", "e", "m"}),
             ),
-        )
+        ),
     )
+
+
+def _grep_positional_paths(
+    args: list[str], *, pattern_may_be_omitted: bool
+) -> tuple[str, ...]:
+    """Return grep's file operands without mistaking its pattern for a path."""
+    value_options = frozenset({"A", "B", "C", "D", "d", "e", "f", "m"})
+    long_value_options = frozenset({
+        "--after-context",
+        "--before-context",
+        "--binary-files",
+        "--context",
+        "--devices",
+        "--directories",
+        "--exclude",
+        "--exclude-dir",
+        "--exclude-from",
+        "--file",
+        "--group-separator",
+        "--include",
+        "--include-dir",
+        "--label",
+        "--max-count",
+        "--regexp",
+    })
+    long_options = long_value_options | frozenset({
+        "--basic-regexp",
+        "--binary",
+        "--byte-offset",
+        "--color",
+        "--colour",
+        "--count",
+        "--dereference-recursive",
+        "--extended-regexp",
+        "--files-with-matches",
+        "--files-without-match",
+        "--fixed-strings",
+        "--help",
+        "--ignore-case",
+        "--initial-tab",
+        "--invert-match",
+        "--line-buffered",
+        "--line-number",
+        "--line-regexp",
+        "--mmap",
+        "--no-filename",
+        "--no-group-separator",
+        "--no-ignore-case",
+        "--no-messages",
+        "--null",
+        "--null-data",
+        "--only-matching",
+        "--perl-regexp",
+        "--quiet",
+        "--recursive",
+        "--silent",
+        "--text",
+        "--unix-byte-offsets",
+        "--version",
+        "--with-filename",
+        "--word-regexp",
+    })
+    explicit_pattern = False
+    pattern_is_uncertain = False
+    positional: list[str] = []
+    index = 0
+    options_ended = False
+
+    while index < len(args):
+        token = args[index]
+        if not options_ended and token == "--":
+            options_ended = True
+            index += 1
+            continue
+        if not options_ended and token.startswith("--"):
+            option_name, separator, _ = token.partition("=")
+            matching_options = (
+                (option_name,)
+                if option_name in long_options
+                else tuple(
+                    option
+                    for option in long_options
+                    if _matches_long_option(token, option)
+                )
+            )
+            if any(option in {"--regexp", "--file"} for option in matching_options):
+                explicit_pattern = True
+            if len(matching_options) > 1:
+                pattern_is_uncertain = True
+            # --context has an optional attached value; a following token is
+            # still a possible pattern. Ambiguous prefixes must not hide paths.
+            if (
+                not separator
+                and len(matching_options) == 1
+                and matching_options[0] in long_value_options
+                and matching_options[0] != "--context"
+            ):
+                index += 1
+            index += 1
+            continue
+        if not options_ended and token.startswith("-") and token != "-":
+            for option_index, option in enumerate(token[1:]):
+                if option not in value_options:
+                    continue
+                if option in {"e", "f"}:
+                    explicit_pattern = True
+                if not token[option_index + 2 :]:
+                    index += 1
+                break
+            index += 1
+            continue
+        positional.append(token)
+        index += 1
+
+    if (
+        not explicit_pattern
+        and not pattern_is_uncertain
+        and positional
+        and not (pattern_may_be_omitted and len(positional) == 1)
+    ):
+        positional.pop(0)
+    return tuple(positional)
 
 
 def _file_policy(args: list[str]) -> ShellCommandPolicy:
@@ -285,7 +433,28 @@ def _date_policy(args: list[str]) -> ShellCommandPolicy:
 
 
 def _diff_policy(args: list[str]) -> ShellCommandPolicy:
+    recursive = any(
+        _matches_long_option(option, "--recursive")
+        or _contains_short_option(
+            option,
+            frozenset({"r"}),
+            preceding_value_options=frozenset({
+                "C",
+                "D",
+                "F",
+                "I",
+                "L",
+                "S",
+                "U",
+                "W",
+                "X",
+                "x",
+            }),
+        )
+        for option in _option_tokens(args)
+    )
     return ShellCommandPolicy(
+        reads_recursively=recursive,
         option_path_values=(
             *_long_option_values(
                 args, frozenset({"--exclude-from", "--from-file", "--to-file"})
@@ -305,7 +474,7 @@ def _diff_policy(args: list[str]) -> ShellCommandPolicy:
                     "x",
                 }),
             ),
-        )
+        ),
     )
 
 
@@ -864,7 +1033,10 @@ def has_option_guardrails(tokens: list[str]) -> bool:
 
 
 def path_candidates(
-    tokens: list[str], *, inspect_positional_paths: bool
+    tokens: list[str],
+    *,
+    inspect_positional_paths: bool,
+    grep_pattern_may_be_omitted: bool = False,
 ) -> tuple[str, ...]:
     """Return operands and known option values that may name filesystem paths."""
     if not tokens:
@@ -876,6 +1048,14 @@ def path_candidates(
         return tuple(candidates)
 
     command = _command_name(tokens[0])
+    if command == "grep":
+        return (
+            *candidates,
+            *_grep_positional_paths(
+                tokens[1:], pattern_may_be_omitted=grep_pattern_may_be_omitted
+            ),
+        )
+
     options_ended = False
     for token in tokens[1:]:
         if token == "--":

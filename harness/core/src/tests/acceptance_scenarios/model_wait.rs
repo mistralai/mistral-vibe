@@ -384,3 +384,118 @@ fn pre_tool_hook_cannot_extend_the_wait_deadline() {
         )
         .only_action();
 }
+
+/// *Prepare*: A direct 30-second wait passes through an always-matching pre-tool Hook.
+/// *Do*: The Hook continues with both arguments written as integral floats, which JSON Schema counts as integers.
+/// *Assert*: The Runtime receives the wait with integer arguments, and the deadline is still clamped.
+#[test]
+fn pre_tool_hook_may_write_wait_arguments_as_integral_floats() {
+    let mut configuration = waiting_config();
+    configuration.capabilities.hook_bindings = serde_json::from_value(json!([
+        {"id": "pre-tool", "point": "pre_tool_call", "order": 0, "selector": {"type": "always"}}
+    ]))
+    .unwrap();
+    let mut runtime = SynchronousRuntime::new(configuration);
+    let completion = runtime.start_turn("waiting", "wait for more input");
+    let calls = vec![tool_call("wait-1", "wait", json!({"timeout_ms": 30_000}))];
+    let hook = runtime
+        .apply_at(
+            tool_call_completion(action_id(&completion), calls.clone()),
+            1_700_000_000_000,
+            running("waiting")
+                .observe(assistant_tool_calls_committed(
+                    "waiting",
+                    &completion,
+                    &calls,
+                ))
+                .dispatch(hook_call("pre_tool_call", &["pre-tool"], Value::Null))
+                .observe(tool_execution_started("waiting", "wait-1")),
+        )
+        .only_action();
+
+    runtime
+        .apply_at(
+            hook_completed(
+                &hook,
+                "pre_tool_call",
+                json!({
+                    "type": "continue",
+                    "effective_arguments": {"timeout_ms": 15_000.0, "deadline_unix_ms": 1_800_000_000_000.0},
+                }),
+            ),
+            1_700_000_001_000,
+            running("waiting").dispatch(runtime_tool(
+                "self.wait",
+                json!({"timeout_ms": 15_000, "deadline_unix_ms": 1_700_000_015_000_u64}),
+            )),
+        )
+        .only_action();
+}
+
+/// *Prepare*: A direct 30-second wait passes through an always-matching pre-tool Hook.
+/// *Do*: The Hook continues with a `deadline_unix_ms` that the schema accepts but that does not fit in 64 bits.
+/// *Assert*: Core warns and commits a failure without starting the wait, and the Turn stays running.
+#[test]
+fn pre_tool_hook_wait_arguments_beyond_u64_fail_the_call() {
+    let mut configuration = waiting_config();
+    configuration.capabilities.hook_bindings = serde_json::from_value(json!([
+        {"id": "pre-tool", "point": "pre_tool_call", "order": 0, "selector": {"type": "always"}}
+    ]))
+    .unwrap();
+    let mut runtime = SynchronousRuntime::new(configuration);
+    let completion = runtime.start_turn("waiting", "wait for more input");
+    let calls = vec![tool_call("wait-1", "wait", json!({"timeout_ms": 30_000}))];
+    let hook = runtime
+        .apply_at(
+            tool_call_completion(action_id(&completion), calls.clone()),
+            1_700_000_000_000,
+            running("waiting")
+                .observe(assistant_tool_calls_committed(
+                    "waiting",
+                    &completion,
+                    &calls,
+                ))
+                .dispatch(hook_call("pre_tool_call", &["pre-tool"], Value::Null))
+                .observe(tool_execution_started("waiting", "wait-1")),
+        )
+        .only_action();
+    let message = format!(
+        "A pre_tool_call hook returned arguments for `self.wait` that do not satisfy its input \
+         schema: `timeout_ms` and `deadline_unix_ms` must be integers from 0 to {}. The tool did \
+         not run.",
+        u64::MAX
+    );
+    let failure = json!({
+        "type": "failure",
+        "content": [{"type": "text", "text": message}],
+        "error": {
+            "code": "pre_tool_call_arguments_invalid",
+            "message": message,
+            "retryable": false,
+            "details": null,
+        },
+    });
+
+    runtime.apply_at(
+        hook_completed(
+            &hook,
+            "pre_tool_call",
+            json!({
+                "type": "continue",
+                "effective_arguments": {"timeout_ms": 10_000, "deadline_unix_ms": 1e30},
+            }),
+        ),
+        1_700_000_001_000,
+        running("waiting")
+            .dispatch(llm_call(1))
+            .observe(json!({
+                "type": "warning",
+                "turn_id": "waiting",
+                "code": "pre_tool_call_arguments_invalid",
+                "message": message,
+                "details": {"call_id": "wait-1", "tool": "self.wait", "hook_binding_ids": ["pre-tool"]},
+            }))
+            .observe(tool_result_committed("waiting", &hook["input"]["tool_call"], failure.clone()))
+            .observe_tool_execution_finished("wait-1", failure),
+    );
+}

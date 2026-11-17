@@ -299,6 +299,10 @@ def _raw_effect(
         "title": display.get("title") or call.name,
         "detail": cast(Any, detail),
         "state": cast(Any, state),
+        # Only a model's call has an ID of its own to name: a Host effect, such
+        # as a manual shell command, is its own call, and the client already
+        # holds it, as it streamed, without one.
+        **({"toolCallId": call.tool_call_id} if call.tool_call_id != entry_id else {}),
     }
 
 

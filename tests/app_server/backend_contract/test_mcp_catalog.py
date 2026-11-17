@@ -19,6 +19,7 @@ from tests.app_server.backend_contract.conftest import (
     wait_for_background_integrations,
 )
 from tests.constants import CONNECTORS_BOOTSTRAP_PATH, MISTRAL_BASE_URL
+from tests.stubs import fake_mcp_stdio_server
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
@@ -53,27 +54,9 @@ from vibe.app_server.protocol import (
 from vibe.app_server.session import AppServerSession
 from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
 
+_FAKE_MCP_SERVER = fake_mcp_stdio_server.__file__
 _HEALTHY_SERVER = "healthy"
 _OAUTH_SERVER = "oauth"
-_MCP_SERVER_SOURCE = """
-from mcp.server.mcpserver import MCPServer
-
-mcp = MCPServer("backend-contract")
-
-
-@mcp.tool()
-def echo(value: str) -> str:
-    return value
-
-
-@mcp.tool(description="Summarize a document.\\n\\nUsage notes the UI must not show.")
-def summarize(value: str) -> str:
-    return value
-
-
-if __name__ == "__main__":
-    mcp.run()
-"""
 
 
 type BackendWithMCP = Any
@@ -81,16 +64,14 @@ type BackendWithMCPClass = type[Any]
 
 
 @pytest.fixture(autouse=True)
-def backend_contract_mcp_configuration(config_dir: Path, tmp_path: Path) -> None:
-    server = tmp_path / "backend_contract_mcp_server.py"
-    server.write_text(_MCP_SERVER_SOURCE, encoding="utf-8")
+def backend_contract_mcp_configuration(config_dir: Path) -> None:
     config_path = config_dir / "config.toml"
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
     config["mcp_servers"] = [
         {
             "name": _HEALTHY_SERVER,
             "transport": "stdio",
-            "command": [sys.executable, str(server)],
+            "command": [sys.executable, _FAKE_MCP_SERVER],
             "startup_timeout_sec": 30.0,
             "tool_timeout_sec": 30.0,
         },
@@ -764,43 +745,8 @@ def _assert_login_wire_order(timeline: list[tuple[str, dict[str, Any]]]) -> None
     assert response < runtime_updated
 
 
-_COUNTING_SERVER_SOURCE = """
-import sys
-from pathlib import Path
-
-from mcp.server.mcpserver import MCPServer
-
-log, fail = Path(sys.argv[1]), sys.argv[2] == "fail"
-server = MCPServer("counting")
-
-
-@server.tool()
-def echo(value: str) -> str:
-    return value
-
-
-list_tools = server.list_tools
-
-
-async def counted_list_tools():
-    with log.open("a") as stream:
-        stream.write("tools/list\\n")
-    if fail:
-        raise RuntimeError("down")
-    return await list_tools()
-
-
-server.list_tools = counted_list_tools
-
-if __name__ == "__main__":
-    server.run()
-"""
-
-
 def _configure_counting_servers(config_dir: Path, tmp_path: Path) -> dict[str, Path]:
     """A healthy and a failing stdio server, each logging every tools/list."""
-    source = tmp_path / "counting_mcp_server.py"
-    source.write_text(_COUNTING_SERVER_SOURCE, encoding="utf-8")
     logs = {name: tmp_path / f"{name}.log" for name in ("counted", "failing")}
     config_path = config_dir / "config.toml"
     config = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -810,7 +756,7 @@ def _configure_counting_servers(config_dir: Path, tmp_path: Path) -> dict[str, P
             "transport": "stdio",
             "command": [
                 sys.executable,
-                str(source),
+                _FAKE_MCP_SERVER,
                 str(log),
                 "fail" if name == "failing" else "ok",
             ],
@@ -882,5 +828,5 @@ async def test_sessions_of_one_process_discover_each_mcp_server_once(
     for read in reads:
         counted = _source(read, "counted")
         assert counted.status is MCPSourceStatus.ENABLED
-        assert {tool.name for tool in counted.tools} == {"echo"}
+        assert {tool.name for tool in counted.tools} == {"echo", "summarize"}
         assert _source(read, "failing").status is MCPSourceStatus.UNAVAILABLE

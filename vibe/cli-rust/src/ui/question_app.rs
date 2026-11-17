@@ -5,15 +5,19 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::Frame;
+use unicode_width::UnicodeWidthStr;
 
 use super::bottom_app::Kind;
 use super::question_layout::{chrome_gaps, draw_box, visible_folds, Row};
 use super::question_other::{self, other_rows};
-use super::question_rows::{help_row, option_prefix, submit_row};
+use super::question_rows::{help_row, option_prefix, style_marker, submit_row};
 use super::theme;
 use crate::app::App;
-use crate::question_app::{current_question, other_option_idx, submit_option_idx, OtherField};
+use crate::question_app::{
+    answered_option, current_question, other_option_idx, submit_option_idx, OtherField,
+};
 use crate::selection::fold;
+use crate::utils::text::ellipsize;
 
 /// The box takes at most 70% of the screen height.
 const MAX_HEIGHT_RATIO: (u16, u16) = (7, 10);
@@ -28,6 +32,12 @@ type FoldRows = Vec<(u16, u16)>;
 /// The two border columns plus the `padding: 0 1` of `#question-app`, split
 /// evenly left/right of the content.
 const BORDER_WIDTH: u16 = 4;
+
+/// The spaces between two question tabs on the same row.
+const TAB_GAP: &str = "  ";
+
+/// The suffix of an answered question's tab.
+const ANSWERED: &str = " ✓";
 
 fn content_width(area: Rect) -> usize {
     area.width.saturating_sub(BORDER_WIDTH) as usize
@@ -86,19 +96,24 @@ fn rows(app: &App, width: usize) -> (Vec<Row>, OptionRows, ChromeRows, FoldRows)
     let mut folds: FoldRows = Vec::new();
 
     if state.questions.len() > 1 {
-        rows.push(vec![(tabs(app), theme::text(theme::primary()))]);
+        for tab_row in tab_rows(app, width) {
+            rows.push(vec![(tab_row, theme::text(theme::primary()))]);
+        }
         rows.push(Vec::new());
     }
     let title = theme::text(theme::primary()).add_modifier(Modifier::BOLD);
     push_wrapped(&mut rows, &mut folds, &question.question, title, width);
     rows.push(Vec::new());
 
+    let answered = answered_option(app, state.current_question_idx);
     for (index, option) in question.options.iter().enumerate() {
         let focused = index == state.list.selected();
+        let current = answered == Some(index);
         let mut text = option_prefix(
             index,
             question.multi_select,
             multi_selected.is_some_and(|selections| selections.contains(&index)),
+            current,
         );
         let prefix_width = text.chars().count() as u16;
         text.push_str(&option.label);
@@ -110,13 +125,17 @@ fn rows(app: &App, width: usize) -> (Vec<Row>, OptionRows, ChromeRows, FoldRows)
         option_rows.resize(rows.len(), None);
         chrome.push((start, 0, prefix_width));
         push_wrapped(&mut rows, &mut folds, &text, option_style(focused), width);
+        if current {
+            style_marker(&mut rows[usize::from(start)]);
+        }
         option_rows.resize(rows.len(), Some(index));
     }
     if let Some(other_idx) = other_option_idx(app) {
         option_rows.resize(rows.len(), None);
+        let prefix_width = question_other::prefix_width(app, other_idx) as u16;
         for (row, arrow, gap) in other_rows(app, other_idx, width) {
             let at = rows.len() as u16;
-            chrome.push((at, 0, row[0].0.chars().count() as u16));
+            chrome.push((at, 0, prefix_width));
             if arrow {
                 chrome.push((at, (width as u16).saturating_sub(1), 1));
             }
@@ -170,26 +189,40 @@ fn option_style(focused: bool) -> Style {
     }
 }
 
-/// The question tabs, e.g. ` DB ✓   [Framework]`.
-fn tabs(app: &App) -> String {
+/// The question tabs, e.g. ` DB ✓   [Framework]`, wrapped between tabs to fit `width`.
+fn tab_rows(app: &App, width: usize) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
+    for tab in tabs(app, width) {
+        match rows.last_mut() {
+            Some(row) if row.width() + TAB_GAP.width() + tab.width() <= width => {
+                row.push_str(TAB_GAP);
+                row.push_str(&tab);
+            }
+            _ => rows.push(tab),
+        }
+    }
+    rows
+}
+
+/// One label per question, the header ellipsized so its brackets and `✓` fit in `width`.
+fn tabs(app: &App, width: usize) -> impl Iterator<Item = String> + '_ {
     app.question_app
         .questions
         .iter()
         .enumerate()
-        .map(|(index, question)| {
+        .map(move |(index, question)| {
             let mut header = match question.header.is_empty() {
                 true => format!("Q{}", index + 1),
                 false => question.header.clone(),
             };
-            if app.question_app.answers.contains_key(&index) {
-                header.push_str(" ✓");
-            }
+            let answered = app.question_app.answers.contains_key(&index);
+            let check = if answered { ANSWERED } else { "" };
+            header = ellipsize(&header, width.saturating_sub(2 + check.width()));
+            header.push_str(check);
             if index == app.question_app.current_question_idx {
                 format!("[{header}]")
             } else {
                 format!(" {header} ")
             }
         })
-        .collect::<Vec<_>>()
-        .join("  ")
 }

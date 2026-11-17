@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Literal, NamedTuple
+from typing import Literal, NamedTuple, SupportsIndex
 
 _SINGLE_QUOTES = frozenset("'‘’‚‛")
 _DOUBLE_QUOTES = frozenset('"“”„')
@@ -37,6 +37,42 @@ _BACKTICK_ESCAPES = {
 _UNICODE_ESCAPE = re.compile(r"\{([0-9A-Fa-f]{1,6})\}")
 _MAX_CODE_POINT = 0x10FFFF
 _STOP_PARSING = "--%"
+
+
+class PowerShellArgument(str):
+    """A decoded word retaining whether PowerShell still evaluates its value."""
+
+    def __new__(
+        cls,
+        value: str,
+        dynamic: bool = False,
+        array_element: bool = False,
+        parameter: bool = False,
+    ) -> PowerShellArgument:
+        argument = super().__new__(cls, value)
+        argument.dynamic = dynamic
+        argument.array_element = array_element
+        argument.parameter = parameter
+        return argument
+
+    dynamic: bool
+    array_element: bool
+    parameter: bool
+
+    def __getitem__(self, key: SupportsIndex | slice) -> str:
+        value = super().__getitem__(key)
+        return (
+            PowerShellArgument(value, self.dynamic, self.array_element, self.parameter)
+            if isinstance(key, slice)
+            else value
+        )
+
+    @classmethod
+    def join_parts(cls, parts: list[str]) -> PowerShellArgument:
+        return cls(
+            "".join(parts),
+            any(isinstance(part, cls) and part.dynamic for part in parts),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,10 +210,13 @@ class _Lexer:
         extends_previous_word = self.after_comma or (
             bool(self.tokens) and self.tokens[-1].end == self.colon_parameter_end
         )
+        array_element = self.after_comma
         self.after_comma = False
         start = self.index
         value = self._word()
-        self.tokens.append(_Token("argument", start, self.index, value))
+        self.tokens.append(
+            _Token("argument", start, self.index, value, array=array_element)
+        )
         # Stop-parsing is decided on the decoded word, so '--%' and -`-% count.
         # Windows PowerShell 5.1 has no `u{} escape, so a word that needs one to
         # spell --% is read normally there, and here too.
@@ -202,9 +241,11 @@ class _Lexer:
             char == "@" and next_char in {"(", "{"}
         ):
             self.index += 1
-            return char + self._group() + self._generic()
+            return PowerShellArgument(
+                char + self._group() + self._generic(), dynamic=True
+            )
         if char in {"(", "{"}:
-            return self._group()
+            return PowerShellArgument(self._group(), dynamic=True)
         if char in _DASHES and (next_char.isalpha() or next_char in {"_", "?"}):
             return self._parameter()
         return self._generic()
@@ -224,9 +265,13 @@ class _Lexer:
             elif char == "$" and self.peek(1) in {"(", "{"}:
                 value.append(self._variable_or_subexpression())
             else:
-                value.append(char)
+                value.append(
+                    PowerShellArgument(
+                        char, dynamic=char == "$" or (char == "@" and not value)
+                    )
+                )
                 self.index += 1
-        return "".join(value)
+        return PowerShellArgument.join_parts(value)
 
     def _parameter(self) -> str:
         start = self.index
@@ -243,7 +288,7 @@ class _Lexer:
             if char == ":":
                 self.colon_parameter_end = self.index
                 break
-        return self.text[start : self.index]
+        return PowerShellArgument(self.text[start : self.index], parameter=True)
 
     def _backtick(self) -> str:
         escaped = self.peek(1)
@@ -271,7 +316,7 @@ class _Lexer:
                 self.index += 1
             else:
                 break
-        return "".join(value)
+        return PowerShellArgument("".join(value))
 
     def _double_quoted(self) -> str:
         value: list[str] = []
@@ -289,9 +334,9 @@ class _Lexer:
             elif char == "$" and self.peek(1) in {"(", "{"}:
                 value.append(self._variable_or_subexpression())
             else:
-                value.append(char)
+                value.append(PowerShellArgument(char, dynamic=char == "$"))
                 self.index += 1
-        return "".join(value)
+        return PowerShellArgument.join_parts(value)
 
     def _here_string(self) -> str | None:
         quotes = _SINGLE_QUOTES if self.peek(1) in _SINGLE_QUOTES else _DOUBLE_QUOTES
@@ -313,7 +358,9 @@ class _Lexer:
         self.index = min(footer + 2, len(self.text))
         if quotes is _DOUBLE_QUOTES:
             self._record_subexpressions(body)
-        return body
+        return PowerShellArgument(
+            body, dynamic=quotes is _DOUBLE_QUOTES and "$" in body
+        )
 
     def _next_line(self, index: int) -> int:
         while index < len(self.text) and self.text[index] not in _NEWLINES:
@@ -327,11 +374,11 @@ class _Lexer:
         if self.peek(1) == "{":
             end = self.text.find("}", start + 2)
             self.index = len(self.text) if end == -1 else end + 1
-            return self.text[start : self.index]
+            return PowerShellArgument(self.text[start : self.index], dynamic=True)
         # PowerShell tokenizes "$(" like any script, even inside a string, so a
         # ")" in a quote or comment does not close it.
         self.index += 1
-        return "$" + self._group()
+        return PowerShellArgument("$" + self._group(), dynamic=True)
 
     def _record_subexpressions(self, body: str) -> None:
         scanner = _Lexer(body)
@@ -398,9 +445,37 @@ def split_powershell_commands(script: str) -> list[str]:
     return commands
 
 
+def powershell_pipeline_inputs(script: str) -> list[bool]:
+    """Whether each statement of ``split_powershell_commands`` follows a ``|``.
+
+    A cmdlet after a pipe binds the objects it receives to its parameters,
+    so ``dir .env | Get-Content`` reads a file the reader itself never names.
+    """
+    lexer = _lex(script)
+    piped: list[bool] = []
+    previous_pipe = False
+    span_open = False
+    for token in [*lexer.tokens, _Token("separator", len(script), len(script))]:
+        if token.kind != "separator":
+            if not span_open:
+                piped.append(previous_pipe)
+                span_open = True
+            continue
+        span_open = False
+        previous_pipe = script[token.start : token.end] == "|"
+    for nested in lexer.nested:
+        piped.extend(powershell_pipeline_inputs(nested))
+    return piped
+
+
 def split_powershell_arguments(command: str) -> list[str]:
     return [
-        token.value
+        PowerShellArgument(
+            token.value,
+            isinstance(token.value, PowerShellArgument) and token.value.dynamic,
+            token.array,
+            isinstance(token.value, PowerShellArgument) and token.value.parameter,
+        )
         for token in _lex(command).tokens
         if token.kind == "argument" and token.value is not None
     ]

@@ -13,8 +13,10 @@ pub enum Focus {
     BranchApp,
     ProxySetup,
     ResumePicker,
+    Storage,
     Mcp,
     Plugins,
+    TrustedFolders,
     Skills,
     ContextApp,
     McpOAuth,
@@ -25,6 +27,8 @@ pub enum Focus {
     LogLevelPicker,
     ThinkingPicker,
     ArtifactsModal,
+    Loops,
+    Goal,
     SubagentList,
     Composer,
 }
@@ -42,8 +46,10 @@ impl App {
             (self.branch_app.open, Focus::BranchApp),
             (self.proxy_setup.open, Focus::ProxySetup),
             (self.resume_picker.open, Focus::ResumePicker),
+            (self.storage.open, Focus::Storage),
             (self.mcp.open, Focus::Mcp),
             (self.plugins.open, Focus::Plugins),
+            (self.trusted_folders.open, Focus::TrustedFolders),
             (self.skills_browser.open, Focus::Skills),
             (self.context_app.open, Focus::ContextApp),
             (self.mcp_oauth.open, Focus::McpOAuth),
@@ -54,6 +60,8 @@ impl App {
             (self.log_level_picker.open, Focus::LogLevelPicker),
             (self.thinking_picker.open, Focus::ThinkingPicker),
             (self.artifacts_modal.open, Focus::ArtifactsModal),
+            (self.loops.open, Focus::Loops),
+            (self.goal.panel.is_some(), Focus::Goal),
             (self.subagents.list.focused, Focus::SubagentList),
         ]
         .into_iter()
@@ -67,5 +75,16 @@ impl App {
             self.focus(),
             Focus::Approval | Focus::Question | Focus::Composer | Focus::SubagentList
         )
+    }
+}
+
+/// Whether the focused surface moves through something with Tab, so Shift+Tab moves back through it instead of cycling agents.
+pub fn tab_navigates(app: &App) -> bool {
+    match app.focus() {
+        Focus::Loops => app.loops.form.is_some(),
+        Focus::Goal | Focus::ProxySetup => true,
+        Focus::Skills => app.skills_browser.registry && app.skills_browser.page.is_none(),
+        Focus::Config => app.config_screen.edit.is_some() && !app.config_screen.targets.is_empty(),
+        _ => false,
     }
 }

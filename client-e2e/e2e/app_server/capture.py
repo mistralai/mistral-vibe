@@ -45,6 +45,8 @@ _COMPARED_METHODS = frozenset({
     "connector_catalog/toggle",
     "feedback/record",
     "feedback/shouldShow",
+    "goal/clear",
+    "goal/set",
     "mcp_catalog/add",
     "mcp_catalog/login",
     "mcp_catalog/logout",

@@ -137,6 +137,15 @@ class ShellNotFoundError(LookupError):
 # Paths
 
 
+def normalize_windows_drive_path(path: str) -> str:
+    """Spell a Git Bash drive path (``/c/Users``) as ``C:/Users``."""
+    match = re.fullmatch(r"/([A-Za-z])(?:[/\\](.*))?", path)
+    if match is None:
+        return path
+    suffix = match.group(2)
+    return f"{match.group(1).upper()}:/{suffix or ''}"
+
+
 def resolve_path(
     raw_path: str, *, cwd: str, roots: Sequence[str], roots_are_a_boundary: bool
 ) -> Path:
@@ -147,6 +156,9 @@ def resolve_path(
     """
     if not raw_path.strip():
         raise ValueError("Path cannot be empty")
+    if os.name == "nt":
+        # Windows would anchor ``/c/Users`` to the current drive: ``C:\c\Users``.
+        raw_path = normalize_windows_drive_path(raw_path)
     path = Path(raw_path).expanduser()
     if not path.is_absolute():
         path = Path(cwd) / path
@@ -1150,6 +1162,9 @@ def _git_eol(path: Path, repository: Path) -> str | None:
                 relative,
             ],
             capture_output=True,
+            # On Windows, git stalls at startup while another thread reads an
+            # inherited stdin pipe, and the timeout cannot kill its child.
+            stdin=subprocess.DEVNULL,
             text=True,
             timeout=_GIT_ATTRIBUTE_TIMEOUT_SECONDS,
             check=False,

@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Iterator
 from io import BytesIO
 import os
+from pathlib import Path
 import signal
 import sys
 import threading
@@ -14,6 +15,7 @@ import pytest
 from vibe.app_server import _termination, stdio
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._termination import (
     TERMINATED_EXIT_CODE,
@@ -339,3 +341,90 @@ async def test_a_sigtermed_stdio_server_closes_as_on_the_end_of_its_stdin(
     assert exits == [TERMINATED_EXIT_CODE]
     # The real process exits instead: the loop would wait for the read.
     stdin.released.set()
+
+
+_FAKE_MODEL_CONFIG = """
+active_model = "fake-model"
+include_project_context = false
+[experiments]
+enable = false
+[telemetry]
+enable = false
+[[providers]]
+name = "fake"
+api_base = "http://127.0.0.1:1/v1"
+api_key_env_var = "TEST_FAKE_API_KEY"
+api_style = "openai"
+[[models]]
+name = "fake-model"
+provider = "fake"
+alias = "fake-model"
+thinking = "off"
+"""
+
+
+@pytest.mark.asyncio
+async def test_input_ending_while_a_stop_saves_the_session_ends_serving_cleanly(
+    config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    import vibe.app_server._unified_harness_backend_adapter as adapter_module
+
+    monkeypatch.setenv("TEST_FAKE_API_KEY", "test")
+    (config_dir / "config.toml").write_text(_FAKE_MODEL_CONFIG)
+    client, transport = memory_transport_pair()
+    server = await create_harness_server(
+        transport,
+        transport_kind="stdio",
+        process=HarnessProcess(services=process_services),
+    )
+    serving = asyncio.create_task(server.serve())
+    incoming = client.messages()
+
+    async def request(
+        request_id: int, method: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        await client.send({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        })
+        async for message in incoming:
+            if message.get("id") == request_id:
+                assert "error" not in message, message
+                return message["result"]
+        raise AssertionError("Connection closed before responding")
+
+    await request(1, "initialize", {"clientInfo": {"name": "test", "version": "1"}})
+    await client.send({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+    started = await request(2, "session/start", {"agentConfig": {"cwd": str(tmp_path)}})
+    persist = adapter_module.persist_metadata
+    saving = asyncio.Event()
+
+    async def hold_first_save(metadata: Any, session_dir: Path) -> None:
+        if not saving.is_set():
+            saving.set()
+            await asyncio.Event().wait()
+        await persist(metadata, session_dir)
+
+    monkeypatch.setattr(adapter_module, "persist_metadata", hold_first_save)
+    # As a session with a turn to save.
+    monkeypatch.setattr(
+        adapter_module.UnifiedHarnessBackendAdapter, "_persists_to_disk", lambda _: True
+    )
+    await client.send({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "session/stop",
+        "params": {"sessionId": started["state"]["session"]["id"]},
+    })
+    await asyncio.wait_for(saving.wait(), timeout=5)
+
+    # As the TUI does once its wait for the stop runs out.
+    await client.close()
+
+    await asyncio.wait_for(serving, timeout=10)

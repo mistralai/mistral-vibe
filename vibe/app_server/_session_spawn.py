@@ -39,19 +39,25 @@ START_SESSION_TOOL_DESCRIPTION = f"""\
 Start a separate coding session that works on a task on its own, next to this \
 one. Use it when the user asks for something to be done in another session, or \
 for a side task that should not interrupt the current work. Never use it to \
-hand off the task you were asked to do: do that task yourself. The new session \
+hand off the whole task you were asked to do: do that yourself, and start an \
+attached session only for a piece of it. The new session \
 starts with `prompt` as its first message and knows nothing else, so the \
 prompt must carry everything it needs: the goal, the \
 relevant files, and what done looks like. Write it as the task itself, addressed \
 to the session that will do it: it must not ask that session to start or use \
 another session. It runs in the same project; choose `placement` 'new_worktree' \
 when it will edit files this session is also working on, and 'current_checkout' \
-when it should see this session's uncommitted changes. Set `title` only when \
+when it should see this session's uncommitted changes. Choose `link` \
+'attached' when the user asks for a sub-session, or the work is a piece of \
+this session's task, and 'detached' when the user asks for a new session, or \
+the work is unrelated and should outlive this one; when it is unclear which \
+the user wants, ask them (with `ask_user_question` when you have it) before \
+starting the session. Set `title` only when \
 the user names the session: left out, the session names itself from its work. \
 It runs like this one, on the same model, thinking level and approval policy; \
 set `model` or `reasoning_effort` only when the user asks for one. When you \
 tell the user, link the new session as in the result's `message`; do not \
-quote its id. A session started by another session cannot start sessions \
+quote its id. A session attached to another session cannot start sessions \
 itself, and one turn starts at most {MAX_TURN_STARTED_SESSIONS} sessions: past \
 that, do the work here."""
 
@@ -84,6 +90,15 @@ class StartSessionArgs(BaseModel):
             "'current_checkout' to work in this session's checkout."
         )
     )
+    link: Literal["attached", "detached"] = Field(
+        description=(
+            "'attached' for a sub-task of this session's own work: it nests "
+            "under this session, is archived with it and reports back here when "
+            "done. 'detached' for separate work that lives on its own: a "
+            "top-level session with no tie to this one, which does not report "
+            "back."
+        )
+    )
     # Their descriptions list the host's models: see `start_session_input_schema`.
     model: str | None = Field(default=None, min_length=1)
     reasoning_effort: ThinkingLevel | None = None
@@ -105,7 +120,7 @@ def spawn_models(config: VibeConfigSchema) -> tuple[SpawnModel, ...]:
             display_name=model.display_name,
             levels=tuple(offered_levels(config, model)),
         )
-        for model in config.available_models().values()
+        for model in config.runnable_models().values()
     )
 
 
@@ -259,6 +274,7 @@ async def run_start_session(
         reasoning_effort=reasoning_effort,
         approval_policy=inherited.approval_policy,
         hops=origin.hops + 1,
+        attached=args.link == "attached",
     )
     # Counted before the client answers, so starts made at once see each other.
     origin.count_turn_start(1)
@@ -283,7 +299,7 @@ async def run_start_session(
         session_id=spawned.client_session_id or spawned.session_id,
         title=title,
         url=spawned.url,
-        message=_started_message(title, spawned.url),
+        message=_started_message(title, spawned.url, attached=params.attached),
     )
 
 
@@ -317,7 +333,14 @@ def _model_choice(
     return model, level
 
 
-def _started_message(title: str | None, url: str | None) -> str:
+def _started_message(title: str | None, url: str | None, *, attached: bool) -> str:
+    started = _started_label(title, url)
+    if attached:
+        return started
+    return f"{started}. It is a session of its own and will not report back here."
+
+
+def _started_label(title: str | None, url: str | None) -> str:
     if url is None:
         return f'Started "{title}"' if title else "Started a new session"
     label = _escape_link_label(title) if title else "the new session"

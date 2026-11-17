@@ -1493,18 +1493,19 @@ def test_resolve_drops_connector_with_duplicate_trimmed_tool_names(
     assert [connector.alias for connector in catalog.connectors] == ["wiki"]
 
 
-def test_resolve_drops_connector_exceeding_tool_limit() -> None:
-    over_limit = _connector(connector_id="c-many", name="many")
-    over_limit["tools"] = [
+def test_resolve_keeps_every_tool_of_a_large_connector() -> None:
+    large = _connector(connector_id="c-many", name="many")
+    large["tools"] = [
         {"name": f"tool_{index}", "description": "x", "inputSchema": {}}
-        for index in range(connector_catalog._MAX_TOOLS_PER_CONNECTOR + 1)
+        for index in range(300)
     ]
 
     catalog = connector_catalog._resolve_catalog(
-        {"connectors": [over_limit, _connector(name="wiki")]}, "fingerprint"
+        {"connectors": [large, _connector(name="wiki")]}, "fingerprint"
     )
 
-    assert [connector.alias for connector in catalog.connectors] == ["wiki"]
+    assert [connector.alias for connector in catalog.connectors] == ["many", "wiki"]
+    assert len(catalog.connectors[0].tools) == 300
 
 
 def test_resolve_drops_oversized_tool_but_keeps_connector() -> None:

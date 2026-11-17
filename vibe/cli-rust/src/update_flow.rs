@@ -58,7 +58,7 @@ pub async fn run_check_upgrade() -> std::process::ExitCode {
                 "  Update by running: {}",
                 color_span(
                     ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-                    "uv tool upgrade mistral-vibe"
+                    &utils::tls::uv_command_hint("uv tool upgrade mistral-vibe")
                 )
             );
             return std::process::ExitCode::SUCCESS;
@@ -91,7 +91,7 @@ pub async fn run_check_upgrade() -> std::process::ExitCode {
             "  Update by running: {}",
             color_span(
                 ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::BOLD),
-                "uv tool install mistral-vibe"
+                &utils::tls::uv_command_hint("uv tool install --python 3.14 mistral-vibe")
             )
         );
         return std::process::ExitCode::SUCCESS;
@@ -155,6 +155,8 @@ pub async fn maybe_run_startup_update_prompt(
     {
         return;
     }
+    // ADR 0015: the dialog's `uv tool upgrade` runs before the live config applies it.
+    update_notifier::gateway::configure_tls_trust(startup_config.enable_system_trust_store);
     let latest = pending.latest_version;
     let state = update_prompt::UpdatePromptState::new(
         env!("CARGO_PKG_VERSION"),

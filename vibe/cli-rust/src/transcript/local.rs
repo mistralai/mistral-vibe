@@ -216,11 +216,20 @@ pub fn add_warning(transcript: &mut Transcript, id: &str, text: &str) {
 /// Mount the what's-new body of a fresh session, pinned below every message
 /// the transcript will ever hold.
 pub fn add_whats_new(transcript: &mut Transcript, id: &str, text: &str) {
+    add_pinned(transcript, id, "whats_new", text);
+}
+
+/// Mount the plan offer in its own box, pinned below the what's-new body.
+pub fn add_plan_offer(transcript: &mut Transcript, id: &str, text: &str) {
+    add_pinned(transcript, id, "plan_offer", text);
+}
+
+fn add_pinned(transcript: &mut Transcript, id: &str, role: &str, text: &str) {
     transcript.add(&serde_json::json!({
         "entry": {
             "id": id,
             "type": "message",
-            "role": "whats_new",
+            "role": role,
             "content": [{"type": "text", "text": text}],
             "generationStatus": "completed",
             "local": true,

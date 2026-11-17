@@ -16,8 +16,8 @@ from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
     wait_for_dialog_to_accept_keys,
-    wait_for_main_screen,
     wait_for_rendered_text,
+    wait_for_session_ready,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -76,7 +76,7 @@ def test_ask_user_question_waits_for_answer_and_reports_it_to_the_model(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Ask me for a mode")
         child.send("\r")
 

@@ -51,7 +51,7 @@ pub fn print_using(cwd: &str) {
 pub fn settle_cwd(params: &Value) -> Option<String> {
     let mut cwd = None;
     let mut moved = false;
-    for (path, value) in crate::worktree::replace_ops(params.get("patch")?) {
+    for (path, value) in crate::utils::json::replace_ops(params.get("patch")?) {
         match path {
             "/cwd" => cwd = value.as_str().map(str::to_owned),
             "/worktree" => moved = !value.is_null(),
@@ -67,7 +67,7 @@ pub fn settle_cwd(params: &Value) -> Option<String> {
 
 /// The worktree the settle announced (`/worktree` replace), as tracked info.
 pub fn settle_worktree(params: &Value) -> Option<crate::worktree::WorktreeInfo> {
-    for (path, value) in crate::worktree::replace_ops(params.get("patch")?) {
+    for (path, value) in crate::utils::json::replace_ops(params.get("patch")?) {
         if path != "/worktree" {
             continue;
         }

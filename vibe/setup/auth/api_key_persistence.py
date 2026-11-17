@@ -69,16 +69,9 @@ def _get_mistral_provider() -> ProviderConfig:
     )
 
 
-def _load_onboarding_provider() -> ProviderConfig:
-    from vibe.setup.auth.onboarding_context import OnboardingContext
-
-    return OnboardingContext.load().provider
-
-
-def resolve_api_key_provider(provider: ProviderConfig | None = None) -> ProviderConfig:
-    resolved_provider = provider or _load_onboarding_provider()
-    if resolved_provider.api_key_env_var:
-        return resolved_provider
+def resolve_api_key_provider(provider: ProviderConfig) -> ProviderConfig:
+    if provider.api_key_env_var:
+        return provider
     return _get_mistral_provider()
 
 

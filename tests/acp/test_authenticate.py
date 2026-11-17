@@ -76,7 +76,7 @@ class MutableOnboardingContextLoader:
         self.provider = provider
         self.pinned_console_url = pinned_console_url
 
-    def __call__(self) -> OnboardingContext:
+    async def __call__(self) -> OnboardingContext:
         return OnboardingContext(
             provider=self.provider, pinned_console_url=self.pinned_console_url
         )

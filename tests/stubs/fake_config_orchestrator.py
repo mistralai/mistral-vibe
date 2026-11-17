@@ -22,7 +22,12 @@ from vibe.core.config.orchestrator import (
     _changed_keys_between,
     _sparse_override_model_aliases,
 )
-from vibe.core.config.patch import AddOperationPatch, PatchOp, ensure_parent_paths
+from vibe.core.config.patch import (
+    AddOperationPatch,
+    PatchOp,
+    RemoveOperationPatch,
+    ensure_parent_paths,
+)
 from vibe.core.config.types import ConfigChangeEvent, ConflictStrategy
 from vibe.core.utils.concurrency import run_sync
 
@@ -251,11 +256,27 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         ]
         if persistent_operations:
             orchestrator = await self._persistence_orchestrator()
-            failures = await orchestrator.apply_patch(
-                persistent_operations, reason, on_conflict=on_conflict
-            )
-            if failures:
-                return failures
+            # The persisted stack knows only the models the user file defines:
+            # removing a field of another, which the real stack holds, is the
+            # same no-op there as removing one the file does not set.
+            persisted = orchestrator.config.model_dump()
+            missing = object()
+            persistent_operations = [
+                operation
+                for operation in persistent_operations
+                if not (
+                    isinstance(operation, RemoveOperationPatch)
+                    and operation.path.startswith("/models/")
+                    and JsonPointer(operation.path).resolve(persisted, missing)
+                    is missing
+                )
+            ]
+            if persistent_operations:
+                failures = await orchestrator.apply_patch(
+                    persistent_operations, reason, on_conflict=on_conflict
+                )
+                if failures:
+                    return failures
         self._base_config = type(self._base_config).model_validate(data)
         self.rebuild()
         self._publish(before, reason)

@@ -12,7 +12,11 @@ from jsonpointer import JsonPointer, JsonPointerException
 from pydantic import ValidationError
 
 from vibe.core.config._retry import retry_on_conflict
-from vibe.core.config.builder import ConfigBuilder, InvalidConfigError
+from vibe.core.config.builder import (
+    ConfigBuilder,
+    InvalidConfigError,
+    MissingMergeKeyError,
+)
 from vibe.core.config.event_bus import EventBus
 from vibe.core.config.layer import (
     ConfigLayer,
@@ -515,7 +519,7 @@ class ConfigOrchestrator[S: ConfigSchema]:
         """Patch the layers as loaded; callers refresh and validate first."""
         try:
             candidate = await self._preview_patch(operations)
-        except (KeyError, ConfigLayerError) as exc:
+        except (KeyError, ConfigLayerError, MissingMergeKeyError) as exc:
             return _PatchOutcome(failures=[exc])
         if preflight is not None:
             await preflight(candidate)
@@ -640,12 +644,7 @@ class ConfigOrchestrator[S: ConfigSchema]:
         data = self.get_layer(layer_name).cached_data
         if data is None:
             return list(operations)
-        raw = data.model_dump()
-        return [
-            mapped
-            for op in operations
-            for mapped in self._config.expand_layer_write(op, raw)
-        ]
+        return self._config.expand_layer_writes(operations, data.model_dump())
 
     async def _apply_patch_to_layer(
         self,
@@ -658,6 +657,10 @@ class ConfigOrchestrator[S: ConfigSchema]:
         layer = self.get_layer(layer_name)
         if layer.fingerprint is None:
             raise LayerNotLoadedError(layer_name)
+        # Nothing left for this layer, say a removal of a field already gone:
+        # its store is not rewritten.
+        if not layer_operations:
+            return
         await layer.apply(
             ConfigPatch(
                 *layer_operations, fingerprint=layer.fingerprint, reason=reason

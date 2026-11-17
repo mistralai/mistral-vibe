@@ -1,4 +1,4 @@
-//! The box `/plugins` and `/skills` share: frame, search row, option list, lines.
+//! The box `/plugins` and `/skills` share: frame, option list, lines.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -13,7 +13,6 @@ use super::{hint_line, list_cursor, scrollbar, theme};
 use crate::app::App;
 use crate::hints::Hint;
 use crate::mouse::MouseTarget;
-use crate::search_field::Search;
 
 /// Columns the option list loses to the border, the padding and its own gutter.
 pub(crate) const GUTTER: u16 = 6;
@@ -125,26 +124,6 @@ fn tab_texts<T: Copy + PartialEq>(tabs: &[(T, String)], open: T) -> Vec<(T, Stri
     tabs.iter()
         .map(|(tab, label)| (*tab, text(*tab, label)))
         .collect()
-}
-
-/// The search row under the title; the field owns its mouse, and a box drag never selects it.
-pub(crate) fn draw_search(
-    app: &mut App,
-    f: &mut Frame,
-    area: Rect,
-    field: fn(&mut App) -> &mut Search,
-    placeholder: &str,
-    target: MouseTarget,
-) {
-    let row = Rect::new(area.x + 3, area.y + 2, area.width.saturating_sub(6), 1);
-    let cursor_on = app.view.cursor_on;
-    let background = theme::background();
-    let input =
-        super::search_field::draw_row(f, row, field(app), placeholder, cursor_on, background);
-    field(app).area = input;
-    crate::mouse::register_region(app, input, target);
-    let chrome = (input.y, input.x, input.right().saturating_sub(1));
-    app.view.bottom_app_selection_chrome.push(chrome);
 }
 
 /// One option line, clipped to the option column so wide glyphs never reach the border.

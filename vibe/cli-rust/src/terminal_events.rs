@@ -76,6 +76,7 @@ fn read_terminal(
             serve(pause);
             continue;
         }
+        crate::platform::keep_key_records();
         let timeout = bursts.deadline().map_or(POLL_INTERVAL, |deadline| {
             deadline.saturating_duration_since(crate::clock::real_now())
         });

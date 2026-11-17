@@ -4,13 +4,16 @@ from collections.abc import Callable, Mapping
 import json
 from typing import Any, Final
 
+from pydantic import ValidationError
+
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config._catalog_filter import CATALOG_FILTER_KEY, parse_catalog_filter
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
-from vibe.core.config.models import parse_routed_model_payload
+from vibe.core.config.models import ModelRequirement, parse_routed_model_payload
 from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.core.experiments.active import ExperimentName
+from vibe.observability.logging import logger
 
 type GrowthbookConfigMapper = Callable[[object], str | bool | None]
 
@@ -52,6 +55,12 @@ def _map_system_prompt_variant(value: object) -> str | None:
     except ValueError:
         return None
     return value
+
+
+def _map_system_prompt_behavior(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
 
 
 def _as_json_value(value: object) -> object:
@@ -103,6 +112,9 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
     dict[ExperimentName, tuple[tuple[str, GrowthbookConfigMapper], ...]]
 ] = {
     ExperimentName.SYSTEM_PROMPT: (("system_prompt_id", _map_system_prompt_variant),),
+    ExperimentName.SYSTEM_PROMPT_BEHAVIOR: (
+        ("system_prompt_behavior", _map_system_prompt_behavior),
+    ),
     ExperimentName.CLI_MODEL_ROUTING: (
         ("routed_default_model", _map_default_routing_model),
         ("routed_model_config", _map_routed_model_config),
@@ -134,6 +146,7 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
         ("experimental_local_runtime_session_api", _map_on),
     ),
     ExperimentName.MODEL_CATALOG: (("experimental_enable_model_catalog", _map_on),),
+    ExperimentName.STORAGE_USAGE: (("experimental_enable_storage_usage", _map_on),),
 }
 
 
@@ -223,7 +236,28 @@ def _routed_models(data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         entries = decoded if isinstance(decoded, list) else [decoded]
         for entry in entries:
             model = parse_routed_model_payload(entry)
+            if model is None and _unknown_requirement(entry):
+                # Like a catalog entry: a requirement this client cannot upsell
+                # hides the model rather than letting a turn fail on it.
+                logger.info(
+                    "GrowthBook model '%s' skipped: requires %r",
+                    entry.get("alias") or entry.get("name"),
+                    entry["requires"],
+                )
             if model is None or not model.alias:
                 continue
             models[model.alias] = entry
     return models
+
+
+def _unknown_requirement(entry: object) -> bool:
+    """Whether a routed-model payload is locked in a way this client cannot
+    upsell, as opposed to invalid for another reason.
+    """
+    if not isinstance(entry, dict) or entry.get("requires") is None:
+        return False
+    try:
+        ModelRequirement.model_validate(entry["requires"])
+    except ValidationError:
+        return True
+    return False

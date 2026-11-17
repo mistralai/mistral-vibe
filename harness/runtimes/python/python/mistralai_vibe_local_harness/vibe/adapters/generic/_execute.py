@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import aclosing
+from dataclasses import dataclass
 from html import escape
 import json
 import logging
@@ -57,6 +58,7 @@ from mistralai_vibe_local_harness.vibe._runtime_config import (
 from mistralai_vibe_local_harness.vibe._ssl import build_ssl_context
 from mistralai_vibe_local_harness.vibe.adapters._correlation import correlation_hook
 from mistralai_vibe_local_harness.vibe.adapters._provider_failure import (
+    EmptyProviderResponse,
     IncompleteProviderStream,
     ProviderRefusal,
     is_read_timeout,
@@ -347,7 +349,9 @@ async def _complete_once(
     accumulated: LLMChunk | None = None
     raw_usage: dict[str, object] | None = None
     wire = generic_wire(provider.api_style)
-    raw_chunks = _stream_json_chunks(client, url, body, headers, guard)
+    end = _StreamEnd()
+    saw_error_payload = False
+    raw_chunks = _stream_json_chunks(client, url, body, headers, guard, end)
     async for parsed in until_connection_lost(
         adapter.parse_stream(raw_chunks, provider),
         # Read when the stream fails, so it must see the latest chunk.
@@ -360,6 +364,8 @@ async def _complete_once(
         chunk = parsed.chunk
         if _carries_model_output(chunk):
             guard.mark_output()
+        if "error" in parsed.data:
+            saw_error_payload = True
         if (reported := _reported_usage(parsed.data)) is not None:
             raw_usage = merge_reported_usage(raw_usage, reported)
             if has_reply_usage(wire, raw_usage):
@@ -376,11 +382,17 @@ async def _complete_once(
                     )
                 )
 
+    # An error payload is a failure, possibly transient, not an empty answer.
+    empty = end.done and not guard.output_started and not saw_error_payload
     if accumulated is None:
+        if empty:
+            raise _empty_response(provider, model)
         raise IncompleteProviderStream(
             f"Model stream from {provider.name} ({model}) produced no chunks."
         )
     if provider.emits_finish_reason and accumulated.stop is None:
+        if empty:
+            raise _empty_response(provider, model)
         raise IncompleteProviderStream(
             f"Model stream from {provider.name} ({model}) ended without a finish reason."
         )
@@ -407,6 +419,21 @@ async def _complete_once(
         source=CompletionSource(provider=provider.name, model=model),
         record=malformed,
     )
+
+
+def _empty_response(provider: ProviderView, model: str) -> EmptyProviderResponse:
+    return EmptyProviderResponse(
+        f"Model stream from {provider.name} ({model}) ended without sending any "
+        "content. The provider may not support a setting of this request, such "
+        "as its reasoning effort."
+    )
+
+
+@dataclass(slots=True)
+class _StreamEnd:
+    """Whether the stream ended with the ``[DONE]`` marker, not a closed body."""
+
+    done: bool = False
 
 
 def _carries_model_output(chunk: LLMChunk) -> bool:
@@ -441,6 +468,7 @@ async def _stream_json_chunks(
     body: bytes,
     headers: dict[str, str],
     guard: StreamGuard,
+    end: _StreamEnd,
 ) -> AsyncGenerator[dict[str, Any]]:
     opened = False
 
@@ -483,6 +511,7 @@ async def _stream_json_chunks(
                 # e.g. anthropic/responses `event:` lines, or OpenRouter comments.
                 continue
             if value.strip() == "[DONE]":
+                end.done = True
                 return
             try:
                 yield json.loads(value.strip())

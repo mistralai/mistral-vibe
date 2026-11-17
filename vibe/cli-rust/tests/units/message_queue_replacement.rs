@@ -187,7 +187,7 @@ fn failed_replacement_keeps_the_prompt_and_surfaces_the_error() {
             "message-1",
             1,
             &[("message-1", "edited")],
-            ReplacementOutcome::Failed,
+            ReplacementOutcome::Failed(None),
         ),
     );
 

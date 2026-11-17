@@ -13,13 +13,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from vibe.app_server._background_worker import BackgroundWorker
+from vibe.app_server._config_changes import ConfigChanges
 from vibe.app_server._experiments_service import ExperimentsService
 from vibe.app_server._mcp_discovery_service import MCPDiscoveryService
+from vibe.app_server._missing_model_warnings import MissingModelWarnings
 from vibe.app_server._model_catalog_service import ModelCatalogService
 from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigService
 from vibe.app_server._skill_shadows import ShadowWarnings
 from vibe.app_server._skill_store_cleanup import SkillStoreCleanup
+from vibe.app_server._storage_usage import StorageUsageService
 from vibe.app_server._worktree_housekeeping import WorktreeHousekeeping
 from vibe.app_server.connector_catalog import SharedConnectorCatalog
 from vibe.setup.auth._oidc_tenant import OidcTenantResolver
@@ -36,10 +39,18 @@ class ProcessServices:
     experiments: ExperimentsService
     mcp_discovery: MCPDiscoveryService
     skill_shadows: ShadowWarnings
+    missing_models: MissingModelWarnings
     skill_store: SkillStoreCleanup
     # Every channel's open sessions, so one channel archives another's.
     open_sessions: OpenSessions
+    storage_usage: StorageUsageService
     model_catalog: ModelCatalogService
+    # Tells subscribed connections that the config a new session would run may
+    # have changed: the org config refreshed, or a session-less setting written.
+    config_changes: ConfigChanges
+
+    def __post_init__(self) -> None:
+        self.org_config.on_changed(lambda _key: self.config_changes.publish())
 
     @classmethod
     def create(cls) -> ProcessServices:
@@ -54,9 +65,12 @@ class ProcessServices:
             experiments=ExperimentsService(),
             mcp_discovery=MCPDiscoveryService(),
             skill_shadows=ShadowWarnings(),
+            missing_models=MissingModelWarnings(),
             skill_store=SkillStoreCleanup(background),
             open_sessions=OpenSessions(),
+            storage_usage=StorageUsageService(background),
             model_catalog=ModelCatalogService(),
+            config_changes=ConfigChanges(),
         )
 
     async def close(self) -> None:
@@ -65,6 +79,7 @@ class ProcessServices:
             await self.connector_catalog.close()
             await self.experiments.close()
             await self.mcp_discovery.close()
+            await self.storage_usage.close()
             await self.model_catalog.close()
         finally:
             await self.background.close()

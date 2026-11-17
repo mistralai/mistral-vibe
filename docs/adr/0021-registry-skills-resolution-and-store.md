@@ -33,6 +33,20 @@ follow these rules:
   (resolved aliases, project manifests on record, leases) are written to disk
   and replaced in one rename, the shared ones under their lock. An alias or
   manifest record that cannot be read stops the cleanup.
+- **A session can pick a skill for itself.** `skills/import` with scope
+  `session` stores the version it fetched and pins it in the session's
+  `meta.json`, not in a manifest, so no other session runs it. A pick loads
+  whether or not `experimental_enable_registry_skills` is on: Desktop picks
+  cloud skills without turning on manifest pins. It ranks after every file and
+  pin, so it never shadows one; it only replaces a pin of the same skill under
+  the same name. A pick whose name another skill holds, even a disabled one,
+  loads as `<name>-cloud`. The session's lease holds the versions it loads, picks
+  included, with the flag on or off, and a reopened session fetches again a
+  picked version a cleanup took. Without the flag a session syncs no manifest
+  but still runs the daily cleanup, once its lease holds what it loads. A
+  refused or failed pick leaves the session on the picks it had. A pick has no
+  toggle in `skills/installed` and stays until the session is
+  deleted; a sandboxed session refuses picks.
 
 ## Rationale
 

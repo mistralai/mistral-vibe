@@ -48,6 +48,19 @@ pub(super) fn push_notice_row(lines: &mut LinkedLines, text: &str, width: u16, e
     }
 }
 
+/// The account's plan offer, one row down in its own `$warning`-framed box.
+pub(in crate::ui::transcript) fn push_plan_offer(lines: &mut LinkedLines, text: &str, width: u16) {
+    let title = crate::startup::banners::PLAN_OFFER_TITLE;
+    lines.push_gap();
+    lines.append(markdown::framed(
+        text,
+        width,
+        title,
+        theme::warning(),
+        |_| false,
+    ));
+}
+
 /// The release notes of a fresh session, in a titled frame, versions in `$primary`.
 pub(super) fn push_whats_new(lines: &mut LinkedLines, text: &str, width: u16) {
     let is_version = |line: &Line| crate::whats_new::is_version_heading(line.to_string().trim());

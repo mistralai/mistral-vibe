@@ -17,9 +17,9 @@ from tests.e2e.common import (
     poll_until,
     send_ctrl_c_until_quit_confirmation,
     strip_ansi,
-    wait_for_main_screen,
     wait_for_rendered_text,
     wait_for_request_count_while_draining_child_output,
+    wait_for_session_ready,
 )
 from tests.e2e.mock_server import StreamingMockServer
 from vibe.utils.io import read_safe
@@ -147,7 +147,7 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("First run")
         child.send("\r")
 
@@ -177,7 +177,7 @@ def test_resumed_session_prints_only_fresh_token_usage_on_exit(
         resumed_child,
         resumed_captured,
     ):
-        wait_for_main_screen(resumed_child, timeout=15)
+        wait_for_session_ready(resumed_child, resumed_captured, timeout=15)
         wait_for_rendered_text(
             resumed_child, resumed_captured, "Resumed session", timeout=15
         )

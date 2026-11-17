@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from vibe.core.config._self_hosted import experiments_allowed
 from vibe.core.experiments._constants import EVAL_CACHE_TTL_SECONDS
 from vibe.core.experiments.models import EvalResponse
 from vibe.core.paths import EXPERIMENT_EVAL_CACHE_FILE, EXPERIMENT_HELD_EVAL_CACHE_FILE
@@ -84,7 +85,7 @@ def _cache_key(
     config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
 ) -> str | None:
     # The eval cache is telemetry-gated: no telemetry, no bucketing.
-    if not config.enable_telemetry or not config.experiments.enable:
+    if not experiments_allowed(config):
         return None
     from vibe.core.telemetry.send import mistral_credential_cache_key
 

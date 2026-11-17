@@ -124,8 +124,8 @@ fn a_drag_across_a_multi_select_option_excludes_its_checkbox_prefix() {
 fn a_drag_across_the_free_text_row_excludes_its_prefix() {
     let chat = Rect::new(2, 6, 40, 3);
     let mut buf = Buffer::empty(Rect::new(0, 0, 44, 9));
-    buf.set_string(0, 6, "│ › 1. First", Style::default());
-    buf.set_string(0, 7, "│ › 2. Second", Style::default());
+    buf.set_string(0, 6, "│   1. First", Style::default());
+    buf.set_string(0, 7, "│   2. Second", Style::default());
     buf.set_string(0, 8, "│ › 3. draft answer", Style::default());
     let mut app = with_question(false);
     app.view.bottom_app_selection_region = question_region(2, 6, 40, 3);

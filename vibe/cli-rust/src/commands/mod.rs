@@ -9,6 +9,7 @@ mod dispatch;
 pub mod event;
 pub mod leanstall;
 pub mod provider_auth;
+mod raw;
 pub mod retry;
 pub mod retry_prompt;
 pub mod shell;
@@ -17,6 +18,7 @@ pub mod stress;
 pub mod submission;
 
 pub use commands::{
-    argument_hint, builtin, entries, has_command, is_side_channel, parse, waits_for_jobs, Feature,
+    argument_hint, builtin, entries, has_command, is_side_channel, parse, removed, runs,
+    waits_for_jobs, Feature,
 };
 pub use event::{spawn_session, CommandEvent};

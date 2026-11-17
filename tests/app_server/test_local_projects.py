@@ -10,6 +10,7 @@ from typing import Any, cast
 from unittest.mock import MagicMock
 from uuid import UUID
 
+from git import Actor, Repo
 import pytest
 import tomli_w
 
@@ -23,14 +24,19 @@ from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._local_projects import (
     CloudBacking,
+    CloudOwner,
     LocalProject,
+    LocalProjectError,
     LocalProjectNotFound,
     LocalProjectStore,
     session_project,
 )
 from vibe.app_server._session_backend_port import SessionBackendHost
+from vibe.app_server._unified_harness_backend_adapter import _folder_stamps
+from vibe.app_server.models import PublicSession, PublicSessionProject
 from vibe.app_server.protocol import (
     SERVER_METHODS,
+    LocalProjectCloudOwner,
     LocalProjectCloudView,
     LocalProjectView,
     ProjectMutationResponse,
@@ -40,12 +46,14 @@ from vibe.app_server.protocol import (
 from vibe.app_server.server import AppServer
 from vibe.app_server.transport import memory_transport_pair
 from vibe.core.config.harness_files import HarnessFilesManager
+from vibe.core.paths import WORKTREES_DIR
 from vibe.core.types import SessionProject
 from vibe.core.vibe_code_project import (
     LocalProjectLink,
     ProjectLink,
     RemoteProjectLink,
     VibeProjectsStore,
+    project_link_path,
 )
 
 _CLIENT = ClientInfo(name="test-client", version="0.0.0")
@@ -102,8 +110,18 @@ def _entry(project_id: str, root: Path, **extra: Any) -> dict[str, Any]:
     }
 
 
+def _hidden(project_id: str, root: Path, **extra: Any) -> dict[str, Any]:
+    """A project an older server removed by only stamping it."""
+    return _entry(project_id, root, deleted_at=1, **extra)
+
+
 def _link(config_dir: Path, link: ProjectLink) -> None:
     VibeProjectsStore(config_dir / "projects.toml").upsert_project_link(link)
+
+
+def _linked_folders(config_dir: Path) -> set[Path]:
+    links = VibeProjectsStore(config_dir / "projects.toml").list_project_links()
+    return {project_link_path(link) for link in links}
 
 
 def _local_link(
@@ -119,37 +137,23 @@ def _backed(cloud_id: str) -> LocalProjectCloudView:
 def test_project_methods_are_advertised() -> None:
     assert {
         "projects/create",
+        "projects/link",
         "projects/list",
         "projects/remove",
         "projects/rename",
+        "projects/retireCloud",
+        "projects/setCloud",
     }.issubset(SERVER_METHODS)
 
 
 @pytest.mark.asyncio
-async def test_config_read_reports_the_local_projects_flag_set_in_the_config(
+async def test_config_read_reports_local_projects_on_by_default(
     config_dir: Path,
 ) -> None:
-    config_file = config_dir / "config.toml"
-    config_file.write_text(
-        "experimental_enable_local_projects = true\n"
-        + config_file.read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
-
     result = await _handler().dispatch("config/read", {}, client_info=_CLIENT)
 
     payload = result.response.model_dump(mode="json", by_alias=True)
     assert payload["config"]["experimentalEnableLocalProjects"] is True
-
-
-@pytest.mark.asyncio
-async def test_config_read_reports_local_projects_off_by_default(
-    config_dir: Path,
-) -> None:
-    result = await _handler().dispatch("config/read", {}, client_info=_CLIENT)
-
-    payload = result.response.model_dump(mode="json", by_alias=True)
-    assert payload["config"]["experimentalEnableLocalProjects"] is False
 
 
 @pytest.mark.asyncio
@@ -211,6 +215,26 @@ async def test_create_names_the_project_after_its_folder(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_projects_report_whether_their_folder_has_commits(tmp_path: Path) -> None:
+    plain, empty, committed = (tmp_path / name for name in ("plain", "empty", "repo"))
+    plain.mkdir()
+    Repo.init(empty).close()
+    repo = Repo.init(committed)
+    tester = Actor("Tester", "t@example.com")
+    repo.index.commit("initial", author=tester, committer=tester)
+    repo.close()
+
+    for root in (plain, empty, committed):
+        await _mutate("projects/create", {"rootPath": str(root)})
+
+    assert [(p.name, p.has_commits) for p in await _list()] == [
+        ("plain", False),
+        ("empty", False),
+        ("repo", True),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_folder_can_belong_to_several_projects(tmp_path: Path) -> None:
     first = await _mutate("projects/create", {"rootPath": str(tmp_path)})
     second = await _mutate("projects/create", {"rootPath": str(tmp_path)})
@@ -264,7 +288,7 @@ async def test_rename_keeps_everything_else_including_unknown_fields(
         {
             "version": 1,
             "projects": [
-                _entry("lp_1", tmp_path, cloud=cloud, deleted_at=5),
+                _entry("lp_1", tmp_path, cloud=cloud, archived_at=5),
                 _entry("lp_2", tmp_path),
             ],
         },
@@ -281,7 +305,7 @@ async def test_rename_keeps_everything_else_including_unknown_fields(
     assert renamed.cloud.state == "backed"
     stored = _read_store(config_dir)["projects"]
     assert stored[0] == {
-        **_entry("lp_1", tmp_path, cloud=cloud, deleted_at=5),
+        **_entry("lp_1", tmp_path, cloud=cloud, archived_at=5),
         "name": "Renamed",
         "updated_at": renamed.updated_at,
     }
@@ -289,7 +313,9 @@ async def test_rename_keeps_everything_else_including_unknown_fields(
 
 
 @pytest.mark.asyncio
-async def test_remove_drops_only_the_entry(config_dir: Path, tmp_path: Path) -> None:
+async def test_remove_deletes_the_project_and_keeps_its_folder(
+    config_dir: Path, tmp_path: Path
+) -> None:
     keep = await _mutate("projects/create", {"rootPath": str(tmp_path)})
     gone = await _mutate("projects/create", {"rootPath": str(tmp_path)})
 
@@ -297,6 +323,294 @@ async def test_remove_drops_only_the_entry(config_dir: Path, tmp_path: Path) -> 
 
     assert await _list() == [keep]
     assert tmp_path.is_dir()
+    assert [entry["id"] for entry in _read_store(config_dir)["projects"]] == [keep.id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "params"),
+    [
+        ("projects/rename", {"name": "x"}),
+        ("projects/remove", {}),
+        ("projects/setCloud", {"cloudProjectId": "cloud-1"}),
+    ],
+)
+async def test_a_removed_project_is_not_found(
+    tmp_path: Path, method: str, params: dict[str, Any]
+) -> None:
+    gone = await _mutate("projects/create", {"rootPath": str(tmp_path)})
+    await _handler().dispatch("projects/remove", {"id": gone.id})
+
+    assert (
+        await _failure(method, {"id": gone.id, **params}) is ProtocolErrorCode.NOT_FOUND
+    )
+
+
+@pytest.mark.asyncio
+async def test_remove_unlinks_a_backed_projects_folder_so_it_is_not_imported_back(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    _link(config_dir, _local_link(tmp_path.resolve()))
+    [imported] = await _list()
+    await _handler().dispatch("projects/remove", {"id": imported.id})
+
+    assert await _list() == []
+    assert _read_store(config_dir)["projects"] == []
+    assert _linked_folders(config_dir) == set()
+
+
+@pytest.mark.asyncio
+async def test_remove_unlinks_a_folder_linked_to_its_cloud_project_since_the_last_listing(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    first, later = root / "first", root / "later"
+    first.mkdir()
+    later.mkdir()
+    _link(config_dir, _local_link(first))
+    [imported] = await _list()
+    _link(config_dir, _local_link(later))
+
+    await _handler().dispatch("projects/remove", {"id": imported.id})
+
+    assert await _list() == []
+    assert _linked_folders(config_dir) == set()
+
+
+@pytest.mark.asyncio
+async def test_remove_succeeds_when_the_import_merges_the_project_away(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    backed, unbacked = root / "backed", root / "unbacked"
+    backed.mkdir()
+    unbacked.mkdir()
+    _link(config_dir, _local_link(backed))
+    [backing] = await _list()
+    gone = await _mutate("projects/create", {"rootPath": str(unbacked)})
+    _link(config_dir, _local_link(unbacked))
+
+    await _handler().dispatch("projects/remove", {"id": gone.id})
+
+    [project] = await _list()
+    assert project.id == backing.id
+
+
+@pytest.mark.asyncio
+async def test_a_listing_racing_a_removal_does_not_import_the_project_back(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _link(config_dir, _local_link(tmp_path.resolve()))
+    [imported] = await _list()
+    store = LocalProjectStore(_store_file(config_dir))
+    removed: list[str] = []
+
+    class RemovedAfterReading(VibeProjectsStore):
+        def read_project_links(self) -> tuple[list[ProjectLink], bool]:
+            links = super().read_project_links()
+            if not removed:
+                removed.append(imported.id)
+                store.remove(imported.id, VibeProjectsStore())
+            return links
+
+    monkeypatch.setattr(
+        local_projects_controller_module, "VibeProjectsStore", RemovedAfterReading
+    )
+
+    assert await _list() == []
+    assert removed == [imported.id]
+    assert _read_store(config_dir)["projects"] == []
+
+
+@pytest.mark.asyncio
+async def test_remove_keeps_a_link_another_project_on_the_folder_uses(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    backed = {"project_id": "cloud-1", "state": "backed"}
+    _link(config_dir, _local_link(root))
+    _write_store(
+        config_dir,
+        {
+            "version": 1,
+            "projects": [
+                _entry("lp_gone", root, cloud={**backed, "state": "retired"}),
+                _entry("lp_kept", root, cloud=backed),
+            ],
+        },
+    )
+
+    await _handler().dispatch("projects/remove", {"id": "lp_gone"})
+
+    assert [entry["id"] for entry in _read_store(config_dir)["projects"]] == ["lp_kept"]
+    assert _linked_folders(config_dir) == {root}
+
+
+@pytest.mark.asyncio
+async def test_a_folder_linked_to_a_removed_projects_cloud_project_gets_its_own_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    first = root / "first"
+    later = root / "later"
+    first.mkdir()
+    later.mkdir()
+    _link(config_dir, _local_link(first))
+    [removed] = await _list()
+    await _handler().dispatch("projects/remove", {"id": removed.id})
+    _link(config_dir, _local_link(later))
+
+    [project] = await _list()
+
+    assert project.id != removed.id
+    assert (project.root_paths, project.cloud) == ([str(later)], _backed("cloud-1"))
+
+
+def test_a_removed_projects_sessions_join_the_project_on_their_folder(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    store = LocalProjectStore(_store_file(config_dir))
+    removed = store.create(name="Removed", root_path=root)
+    store.remove(removed.id, VibeProjectsStore(config_dir / "projects.toml"))
+    live = store.create(name="Live", root_path=root)
+    stamped = PublicSession.model_construct(
+        id="stamped",
+        cwd=str(root),
+        project=PublicSessionProject(kind="local", id=removed.id),
+    )
+
+    stamps = _folder_stamps(store.list_projects(), store.project_ids(), [stamped])
+
+    assert stamps == {"stamped": SessionProject(kind="local", id=live.id)}
+
+
+@pytest.mark.asyncio
+async def test_list_purges_the_projects_an_older_server_hid_and_their_links(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    first, second, other = root / "first", root / "second", root / "other"
+    for folder in (first, second, other):
+        folder.mkdir()
+    _link(config_dir, _local_link(first))
+    _link(config_dir, _local_link(second, "cloud-2"))
+    # Linked to the purged project's cloud project, but from another folder.
+    _link(config_dir, _local_link(other))
+    _write_store(
+        config_dir,
+        {
+            "version": 1,
+            "projects": [
+                _hidden(
+                    "lp_first",
+                    first,
+                    cloud={"project_id": "cloud-1", "state": "backed"},
+                ),
+                _hidden("lp_local", root / "local"),
+                _hidden(
+                    "lp_second",
+                    second,
+                    cloud={"project_id": "cloud-2", "state": "backed"},
+                ),
+            ],
+        },
+    )
+
+    projects = await _list()
+
+    assert [(p.root_paths, p.cloud) for p in projects] == [
+        ([str(other)], _backed("cloud-1"))
+    ]
+    assert [entry["id"] for entry in _read_store(config_dir)["projects"]] == [
+        projects[0].id
+    ]
+    assert _linked_folders(config_dir) == {other}
+
+
+@pytest.mark.asyncio
+async def test_purging_keeps_a_link_a_kept_project_on_the_same_folder_uses(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    backed = {"project_id": "cloud-1", "state": "backed"}
+    _link(config_dir, _local_link(root))
+    _write_store(
+        config_dir,
+        {
+            "version": 1,
+            "projects": [
+                _hidden("lp_old", root, cloud=backed),
+                _entry("lp_kept", root, cloud=backed),
+            ],
+        },
+    )
+
+    await _list()
+
+    assert [entry["id"] for entry in _read_store(config_dir)["projects"]] == ["lp_kept"]
+    assert _linked_folders(config_dir) == {root}
+
+
+@pytest.mark.asyncio
+async def test_purging_a_retired_project_unlinks_its_folder(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    retired = {"project_id": "cloud-gone", "state": "retired"}
+    _link(config_dir, _local_link(root, "cloud-gone"))
+    _write_store(
+        config_dir, {"version": 1, "projects": [_hidden("lp_1", root, cloud=retired)]}
+    )
+
+    assert await _list() == []
+    assert _read_store(config_dir)["projects"] == []
+    assert _linked_folders(config_dir) == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("removed_by", ["remove", "older server"])
+async def test_a_partly_read_links_file_still_drops_the_project_and_its_readable_links(
+    config_dir: Path, tmp_path: Path, removed_by: str
+) -> None:
+    root = tmp_path.resolve()
+    backed = {"project_id": "cloud-1", "state": "backed"}
+    _link(config_dir, _local_link(root))
+    links_file = config_dir / "projects.toml"
+    with links_file.open("a", encoding="utf-8") as file:
+        file.write('\n[[projects]]\nkind = "future"\n')
+    entry = (
+        _entry("lp_1", root, cloud=backed)
+        if removed_by == "remove"
+        else _hidden("lp_1", root, cloud=backed)
+    )
+    _write_store(config_dir, {"version": 1, "projects": [entry]})
+
+    if removed_by == "remove":
+        await _handler().dispatch("projects/remove", {"id": "lp_1"})
+
+    assert await _list() == []
+    assert _read_store(config_dir)["projects"] == []
+    assert _linked_folders(config_dir) == set()
+    assert 'kind = "future"' in links_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_set_cloud_backs_the_project_and_the_folder_link_keeps_it(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    created = await _mutate("projects/create", {"rootPath": str(tmp_path)})
+
+    backed = await _mutate(
+        "projects/setCloud", {"id": created.id, "cloudProjectId": "cloud-1"}
+    )
+    _link(config_dir, _local_link(tmp_path, "cloud-1"))
+
+    assert backed.id == created.id
+    assert backed.cloud == _backed("cloud-1")
+    assert [(project.id, project.cloud) for project in await _list()] == [
+        (created.id, _backed("cloud-1"))
+    ]
 
 
 @pytest.mark.asyncio
@@ -305,12 +619,46 @@ async def test_remove_drops_only_the_entry(config_dir: Path, tmp_path: Path) -> 
     [
         ("projects/rename", {"id": "lp_missing", "name": "x"}),
         ("projects/remove", {"id": "lp_missing"}),
+        ("projects/setCloud", {"id": "lp_missing", "cloudProjectId": "cloud-1"}),
     ],
 )
 async def test_unknown_project_is_not_found(
     method: str, params: dict[str, Any]
 ) -> None:
     assert await _failure(method, params) is ProtocolErrorCode.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_a_project_an_older_server_hid_is_gone_even_when_the_purge_fails(
+    config_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path.resolve()
+    _write_store(
+        config_dir,
+        {
+            "version": 1,
+            "projects": [_hidden("lp_hidden", root), _entry("lp_live", root)],
+        },
+    )
+
+    def fail(*_: object) -> None:
+        raise OSError("links unreadable")
+
+    monkeypatch.setattr(LocalProjectStore, "purge_removed", fail)
+    store = LocalProjectStore(_store_file(config_dir))
+    stamped = PublicSession.model_construct(
+        id="stamped",
+        cwd=str(root),
+        project=PublicSessionProject(kind="local", id="lp_hidden"),
+    )
+
+    assert [project.id for project in await _list()] == ["lp_live"]
+    assert await _failure("projects/rename", {"id": "lp_hidden", "name": "x"}) is (
+        ProtocolErrorCode.NOT_FOUND
+    )
+    assert _folder_stamps(store.list_projects(), store.project_ids(), [stamped]) == {
+        "stamped": SessionProject(kind="local", id="lp_live")
+    }
 
 
 @pytest.mark.asyncio
@@ -667,7 +1015,7 @@ async def test_a_backing_is_never_dropped_from_a_project_in_another_state(
 
 
 @pytest.mark.asyncio
-async def test_a_cloud_project_linked_to_two_folders_backs_a_project_per_folder(
+async def test_a_cloud_project_linked_to_two_folders_backs_one_project(
     config_dir: Path, tmp_path: Path
 ) -> None:
     first = tmp_path / "first"
@@ -680,9 +1028,154 @@ async def test_a_cloud_project_linked_to_two_folders_backs_a_project_per_folder(
     projects = await _list()
 
     assert [(p.root_paths, p.cloud) for p in projects] == [
-        ([str(first.resolve())], _backed("cloud-1")),
-        ([str(second.resolve())], _backed("cloud-1")),
+        ([str(first.resolve()), str(second.resolve())], _backed("cloud-1"))
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_folder_linked_later_joins_the_backed_project_as_a_context_folder(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    first = (tmp_path / "first").resolve()
+    second = (tmp_path / "second").resolve()
+    first.mkdir()
+    second.mkdir()
+    _link(config_dir, _local_link(first))
+    [imported] = await _list()
+    local = await _mutate("projects/create", {"rootPath": str(second)})
+
+    _link(config_dir, _local_link(second))
+    projects = await _list()
+
+    # The folder's own local project joins it too.
+    assert [(p.id, p.name, p.root_paths, p.cloud) for p in projects] == [
+        (imported.id, "Linked", [str(first), str(second)], _backed("cloud-1"))
+    ]
+    assert local.id not in {
+        entry["id"] for entry in _read_store(config_dir)["projects"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_relinking_a_context_folder_moves_it_to_its_new_cloud_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    first = (tmp_path / "first").resolve()
+    second = (tmp_path / "second").resolve()
+    first.mkdir()
+    second.mkdir()
+    _link(config_dir, _local_link(first, "cloud-1"))
+    _link(config_dir, _local_link(second, "cloud-1"))
+    await _list()
+
+    _link(config_dir, _local_link(second, "cloud-2", "Two"))
+
+    assert [(p.root_paths, p.cloud) for p in await _list()] == [
+        ([str(first)], _backed("cloud-1")),
+        ([str(second)], _backed("cloud-2")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_relinked_context_folder_leaves_a_retired_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    first = (tmp_path / "first").resolve()
+    second = (tmp_path / "second").resolve()
+    first.mkdir()
+    second.mkdir()
+    retired = _entry("lp_1", first, cloud={"project_id": "cloud-1", "state": "retired"})
+    retired["root_paths"].append(str(second))
+    _write_store(config_dir, {"version": 1, "projects": [retired]})
+    _link(config_dir, _local_link(first, "cloud-1"))
+    _link(config_dir, _local_link(second, "cloud-2", "Two"))
+
+    assert [(p.root_paths, p.cloud) for p in await _list()] == [
+        ([str(first)], LocalProjectCloudView(project_id="cloud-1", state="retired")),
+        ([str(second)], _backed("cloud-2")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_relinking_a_folder_to_a_backed_cloud_project_merges_its_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    first = (tmp_path / "first").resolve()
+    second = (tmp_path / "second").resolve()
+    first.mkdir()
+    second.mkdir()
+    _link(config_dir, _local_link(first, "cloud-1"))
+    _link(config_dir, _local_link(second, "cloud-2"))
+    [kept, _] = await _list()
+
+    _link(config_dir, _local_link(second, "cloud-1"))
+
+    assert [(p.id, p.root_paths, p.cloud) for p in await _list()] == [
+        (kept.id, [str(first), str(second)], _backed("cloud-1"))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_store_backing_a_cloud_project_twice_is_merged_into_its_first_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    backed = {"project_id": "cloud-1", "state": "backed"}
+    second = _entry("lp_second", root / "b", cloud=backed)
+    second["root_paths"].append(str(root / "a"))
+    _write_store(
+        config_dir,
+        {
+            "version": 1,
+            "projects": [
+                _entry("lp_first", root / "a", cloud=backed),
+                _entry("lp_local", root / "c"),
+                second,
+            ],
+        },
+    )
+    before = _store_file(config_dir).read_bytes()
+
+    listed = LocalProjectStore(_store_file(config_dir)).list_projects()
+
+    assert [(p.id, p.root_paths) for p in listed] == [
+        ("lp_first", (root / "a", root / "b")),
+        ("lp_local", (root / "c",)),
+    ]
+    assert _store_file(config_dir).read_bytes() == before
+    await _list()
+    assert [entry["id"] for entry in _read_store(config_dir)["projects"]] == [
+        "lp_first",
+        "lp_local",
+    ]
+
+
+def test_a_worktree_session_of_a_merged_project_follows_it(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    backed = {"project_id": "cloud-1", "state": "backed"}
+    _write_store(
+        config_dir,
+        {
+            "version": 1,
+            "projects": [
+                _entry("lp_first", root / "a", cloud=backed),
+                _entry("lp_second", root / "b", cloud=backed),
+            ],
+        },
+    )
+    store = LocalProjectStore(_store_file(config_dir))
+    # A worktree matches no project folder: only its stamp names its project.
+    session = PublicSession.model_construct(
+        id="session-1",
+        cwd=str(WORKTREES_DIR.path / "b-feature"),
+        project=PublicSessionProject(kind="local", id="lp_second"),
+    )
+
+    stamps = _folder_stamps(store.list_projects(), store.project_ids(), [session])
+
+    assert stamps == {"session-1": SessionProject(kind="local", id="lp_first")}
 
 
 @pytest.mark.asyncio
@@ -837,12 +1330,461 @@ def test_set_cloud_replaces_the_backing(config_dir: Path, tmp_path: Path) -> Non
     }
 
 
+def test_set_cloud_never_backs_a_cloud_project_twice(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    backed = {"project_id": "cloud-1", "state": "backed"}
+    _write_store(
+        config_dir,
+        {
+            "version": 1,
+            "projects": [
+                _entry("lp_1", tmp_path / "a", cloud=backed),
+                _entry("lp_2", tmp_path / "b"),
+            ],
+        },
+    )
+    before = _store_file(config_dir).read_bytes()
+    store = LocalProjectStore(_store_file(config_dir))
+
+    with pytest.raises(LocalProjectError):
+        store.set_cloud("lp_2", CloudBacking(project_id="cloud-1", state="backed"))
+    assert _store_file(config_dir).read_bytes() == before
+
+
+_OWNER = CloudOwner(organization_id="org-a", workspace_id="ws-a", user_id="user-a")
+_OTHER_OWNER = CloudOwner(
+    organization_id="org-b", workspace_id="ws-b", user_id="user-a"
+)
+_STORED_OWNER = {
+    "organization_id": "org-a",
+    "workspace_id": "ws-a",
+    "user_id": "user-a",
+}
+
+
+@pytest.mark.asyncio
+async def test_set_cloud_keeps_the_account_that_made_the_backing(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    created = await _mutate("projects/create", {"rootPath": str(tmp_path)})
+    owner = {"organizationId": "org-a", "workspaceId": "ws-a", "userId": "user-a"}
+
+    backed = await _mutate(
+        "projects/setCloud",
+        {"id": created.id, "cloudProjectId": "cloud-1", "owner": owner},
+    )
+    _link(config_dir, _local_link(tmp_path, "cloud-1"))
+
+    expected = LocalProjectCloudView(
+        project_id="cloud-1",
+        state="backed",
+        owner=LocalProjectCloudOwner(
+            organization_id="org-a", workspace_id="ws-a", user_id="user-a"
+        ),
+    )
+    assert backed.cloud == expected
+    assert [project.cloud for project in await _list()] == [expected]
+    assert _read_store(config_dir)["projects"][0]["cloud"] == {
+        "project_id": "cloud-1",
+        "state": "backed",
+        "owner": _STORED_OWNER,
+    }
+
+
+def test_set_cloud_gives_a_backing_made_before_owners_its_account(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    backed = {"project_id": "cloud-1", "state": "backed"}
+    _write_store(
+        config_dir, {"version": 1, "projects": [_entry("lp_1", tmp_path, cloud=backed)]}
+    )
+    store = LocalProjectStore(_store_file(config_dir))
+
+    project = store.set_cloud(
+        "lp_1", CloudBacking(project_id="cloud-1", state="backed", owner=_OWNER)
+    )
+
+    assert project.cloud == CloudBacking(
+        project_id="cloud-1", state="backed", owner=_OWNER
+    )
+
+
+def test_set_cloud_without_an_account_keeps_the_backings_account(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    backed = {"project_id": "cloud-1", "state": "backed", "owner": _STORED_OWNER}
+    _write_store(
+        config_dir, {"version": 1, "projects": [_entry("lp_1", tmp_path, cloud=backed)]}
+    )
+    store = LocalProjectStore(_store_file(config_dir))
+
+    project = store.set_cloud(
+        "lp_1", CloudBacking(project_id="cloud-1", state="backed")
+    )
+
+    assert project.cloud == CloudBacking(
+        project_id="cloud-1", state="backed", owner=_OWNER
+    )
+
+
+@pytest.mark.parametrize(
+    "cloud",
+    [
+        CloudBacking(project_id="cloud-2", state="backed", owner=_OWNER),
+        CloudBacking(project_id="cloud-1", state="backed", owner=_OTHER_OWNER),
+    ],
+    ids=["another cloud project", "another account"],
+)
+def test_set_cloud_never_takes_a_backed_project_from_its_cloud_project(
+    config_dir: Path, tmp_path: Path, cloud: CloudBacking
+) -> None:
+    backed = {"project_id": "cloud-1", "state": "backed", "owner": _STORED_OWNER}
+    _write_store(
+        config_dir, {"version": 1, "projects": [_entry("lp_1", tmp_path, cloud=backed)]}
+    )
+    before = _store_file(config_dir).read_bytes()
+    store = LocalProjectStore(_store_file(config_dir))
+
+    with pytest.raises(LocalProjectError):
+        store.set_cloud("lp_1", cloud)
+    assert _store_file(config_dir).read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_retire_cloud_keeps_the_backings_account(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    backed = {"project_id": "cloud-gone", "state": "backed", "owner": _STORED_OWNER}
+    _write_store(
+        config_dir, {"version": 1, "projects": [_entry("lp_1", tmp_path, cloud=backed)]}
+    )
+
+    await _handler().dispatch("projects/retireCloud", {"cloudProjectId": "cloud-gone"})
+
+    [project] = LocalProjectStore(_store_file(config_dir)).list_projects()
+    assert project.cloud == CloudBacking(
+        project_id="cloud-gone", state="retired", owner=_OWNER
+    )
+
+
 def test_set_cloud_on_an_unknown_project_is_not_found(config_dir: Path) -> None:
     store = LocalProjectStore(_store_file(config_dir))
 
     with pytest.raises(LocalProjectNotFound):
         store.set_cloud("lp_missing", CloudBacking(project_id="c", state="backed"))
     assert not _store_file(config_dir).exists()
+
+
+def _link_params(root: Path, cloud_id: str = "cloud-1") -> dict[str, Any]:
+    return {"rootPath": str(root), "cloudProjectId": cloud_id, "name": "Team project"}
+
+
+@pytest.mark.asyncio
+async def test_link_keeps_the_account_that_links_the_folder(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "widgets"
+    root.mkdir()
+    owner = {"organizationId": "org-a", "workspaceId": "ws-a", "userId": "user-a"}
+
+    linked = await _mutate("projects/link", {**_link_params(root), "owner": owner})
+
+    assert linked.cloud == LocalProjectCloudView(
+        project_id="cloud-1",
+        state="backed",
+        owner=LocalProjectCloudOwner(
+            organization_id="org-a", workspace_id="ws-a", user_id="user-a"
+        ),
+    )
+    assert _read_store(config_dir)["projects"][0]["cloud"]["owner"] == _STORED_OWNER
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cloud_id", [None, "cloud-1", "cloud-other"])
+async def test_link_purges_a_project_an_older_server_hid_on_the_folder(
+    config_dir: Path, tmp_path: Path, cloud_id: str | None
+) -> None:
+    root = tmp_path.resolve()
+    cloud = (
+        {}
+        if cloud_id is None
+        else {"cloud": {"project_id": cloud_id, "state": "backed"}}
+    )
+    _write_store(
+        config_dir, {"version": 1, "projects": [_hidden("lp_removed", root, **cloud)]}
+    )
+
+    linked = await _mutate("projects/link", _link_params(root))
+
+    assert linked.id != "lp_removed"
+    assert (linked.root_paths, linked.cloud) == ([str(root)], _backed("cloud-1"))
+    assert [project.id for project in await _list()] == [linked.id]
+
+
+@pytest.mark.asyncio
+async def test_link_creates_a_backed_project_for_a_new_folder(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path / "widgets"
+    root.mkdir()
+
+    linked = await _mutate("projects/link", _link_params(root))
+
+    assert str(UUID(linked.id)) == linked.id
+    assert (linked.name, linked.root_paths, linked.cloud) == (
+        "Team project",
+        [str(root.resolve())],
+        _backed("cloud-1"),
+    )
+    assert _read_store(config_dir)["projects"] == [
+        {
+            "id": linked.id,
+            "name": "Team project",
+            "root_paths": [str(root.resolve())],
+            "created_at": linked.created_at,
+            "updated_at": linked.updated_at,
+            "cloud": {"project_id": "cloud-1", "state": "backed"},
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cloud",
+    [
+        pytest.param(None, id="local-only"),
+        pytest.param({"project_id": "cloud-old", "state": "retired"}, id="retired"),
+    ],
+)
+async def test_link_backs_the_unbacked_project_on_the_folder(
+    config_dir: Path, tmp_path: Path, cloud: dict[str, str] | None
+) -> None:
+    root = tmp_path.resolve()
+    extra: dict[str, Any] = {"future": "kept"} if cloud is None else {"cloud": cloud}
+    _write_store(
+        config_dir,
+        {
+            "version": 1,
+            "projects": [
+                _entry(
+                    "lp_secondary",
+                    root / "primary",
+                    root_paths=[str(root / "primary"), str(root)],
+                ),
+                _entry("lp_mine", root, **extra),
+            ],
+        },
+    )
+
+    linked = await _mutate("projects/link", _link_params(root))
+
+    assert (linked.id, linked.name, linked.cloud) == (
+        "lp_mine",
+        "Team project",
+        _backed("cloud-1"),
+    )
+    assert linked.updated_at > 1
+    stored = _read_store(config_dir)["projects"]
+    assert [(entry["id"], entry.get("cloud")) for entry in stored] == [
+        ("lp_secondary", None),
+        ("lp_mine", {"project_id": "cloud-1", "state": "backed"}),
+    ]
+    if cloud is None:
+        assert stored[1]["future"] == "kept"
+
+
+@pytest.mark.asyncio
+async def test_link_keeps_a_folder_already_backed_by_the_cloud_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    cloud = {"project_id": "cloud-1", "state": "backed"}
+    _write_store(
+        config_dir, {"version": 1, "projects": [_entry("lp_1", root, cloud=cloud)]}
+    )
+    _link(config_dir, _local_link(root, "cloud-1"))
+    before = _store_file(config_dir).read_bytes()
+
+    linked = await _mutate("projects/link", _link_params(root))
+
+    assert (linked.id, linked.name, linked.cloud) == (
+        "lp_1",
+        root.name,
+        _backed("cloud-1"),
+    )
+    assert _store_file(config_dir).read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_link_refuses_a_folder_another_cloud_project_backs(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    cloud = {"project_id": "cloud-other", "state": "backed"}
+    _write_store(
+        config_dir, {"version": 1, "projects": [_entry("lp_1", root, cloud=cloud)]}
+    )
+    _link(config_dir, _local_link(root, "cloud-other"))
+    before = _store_file(config_dir).read_bytes()
+
+    code = await _failure("projects/link", _link_params(root))
+
+    assert code is ProtocolErrorCode.CONFLICT
+    assert _store_file(config_dir).read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_link_refuses_a_folder_linked_to_another_cloud_project_not_listed_yet(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    _link(config_dir, _local_link(root, "cloud-other"))
+
+    code = await _failure("projects/link", _link_params(root))
+
+    assert code is ProtocolErrorCode.CONFLICT
+    assert [(p.root_paths, p.cloud) for p in await _list()] == [
+        ([str(root)], _backed("cloud-other"))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_link_adds_a_second_folder_to_the_cloud_projects_local_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    first = tmp_path.resolve() / "first"
+    second = tmp_path.resolve() / "second"
+    first.mkdir()
+    second.mkdir()
+    _write_store(config_dir, {"version": 1, "projects": [_entry("lp_2", second)]})
+    existing = await _mutate("projects/link", _link_params(first))
+    _link(config_dir, _local_link(first, "cloud-1", "Team project"))
+    await _mutate("projects/rename", {"id": existing.id, "name": "Renamed"})
+
+    linked = await _mutate("projects/link", _link_params(second))
+
+    assert (linked.id, linked.name, linked.root_paths, linked.cloud) == (
+        existing.id,
+        "Renamed",
+        [str(first), str(second)],
+        _backed("cloud-1"),
+    )
+    # The folder's own project merges in, so its sessions follow.
+    [stored] = _read_store(config_dir)["projects"]
+    assert stored["merged_ids"] == ["lp_2"]
+
+
+@pytest.mark.asyncio
+async def test_a_linked_project_is_kept_once_its_folder_link_is_saved(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    linked = await _mutate("projects/link", _link_params(root))
+
+    _link(config_dir, _local_link(root, "cloud-1", "Team project"))
+
+    assert await _list() == [linked]
+
+
+@pytest.mark.asyncio
+async def test_link_rejects_a_path_that_is_not_a_folder(config_dir: Path) -> None:
+    code = await _failure("projects/link", _link_params(Path("/no/such/folder")))
+
+    assert code is ProtocolErrorCode.INVALID_PARAMS
+    assert not _store_file(config_dir).exists()
+
+
+@pytest.mark.asyncio
+async def test_retire_cloud_retires_the_backing_by_the_gone_cloud_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    gone = {"project_id": "cloud-gone", "state": "backed"}
+    other = {"project_id": "cloud-other", "state": "backed"}
+    first = _entry("lp_1", tmp_path / "a", cloud=gone, archived_at=5)
+    first["root_paths"].append(str(tmp_path / "b"))
+    _write_store(
+        config_dir,
+        {
+            "version": 1,
+            "projects": [
+                first,
+                _entry("lp_3", tmp_path / "c", cloud=other),
+                _entry("lp_4", tmp_path / "d"),
+            ],
+        },
+    )
+
+    await _handler().dispatch("projects/retireCloud", {"cloudProjectId": "cloud-gone"})
+
+    retired = CloudBacking(project_id="cloud-gone", state="retired")
+    projects = LocalProjectStore(_store_file(config_dir)).list_projects()
+    # The context folder stays with the project.
+    assert [(p.id, p.root_paths, p.cloud) for p in projects] == [
+        ("lp_1", (tmp_path / "a", tmp_path / "b"), retired),
+        (
+            "lp_3",
+            (tmp_path / "c",),
+            CloudBacking(project_id="cloud-other", state="backed"),
+        ),
+        ("lp_4", (tmp_path / "d",), None),
+    ]
+    stored = _read_store(config_dir)["projects"][0]
+    assert stored["archived_at"] == 5
+    assert stored["updated_at"] > 1
+
+
+@pytest.mark.asyncio
+async def test_retiring_a_cloud_project_nothing_backs_writes_nothing(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    retired = {"project_id": "cloud-gone", "state": "retired"}
+    _write_store(
+        config_dir,
+        {"version": 1, "projects": [_entry("lp_1", tmp_path, cloud=retired)]},
+    )
+    before = _store_file(config_dir).read_bytes()
+
+    await _handler().dispatch("projects/retireCloud", {"cloudProjectId": "cloud-gone"})
+
+    assert _store_file(config_dir).read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_a_retired_backing_is_not_imported_again_from_its_link(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    _link(config_dir, _local_link(tmp_path, "cloud-gone"))
+    [imported] = await _list()
+
+    await _handler().dispatch("projects/retireCloud", {"cloudProjectId": "cloud-gone"})
+
+    assert [(p.id, p.cloud) for p in await _list()] == [
+        (imported.id, LocalProjectCloudView(project_id="cloud-gone", state="retired"))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_folder_linked_to_a_retired_cloud_project_is_not_imported(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    first = tmp_path / "first"
+    later = tmp_path / "later"
+    first.mkdir()
+    _link(config_dir, _local_link(first, "cloud-gone"))
+    _link(config_dir, _local_link(later, "cloud-gone"))
+    await _list()
+    await _handler().dispatch("projects/retireCloud", {"cloudProjectId": "cloud-gone"})
+    later.mkdir()
+
+    projects = await _list()
+
+    assert [(p.root_paths, p.cloud) for p in projects] == [
+        (
+            [str(first.resolve())],
+            LocalProjectCloudView(project_id="cloud-gone", state="retired"),
+        )
+    ]
 
 
 def test_session_project_resolves_ids_like_the_runner(tmp_path: Path) -> None:
@@ -862,6 +1804,9 @@ def test_session_project_resolves_ids_like_the_runner(tmp_path: Path) -> None:
     ]
 
     assert session_project(projects, "cloud-1") == SessionProject(
+        kind="local", id="lp_backed"
+    )
+    assert session_project(projects, "lp_backed") == SessionProject(
         kind="local", id="lp_backed"
     )
     assert session_project(projects, "lp_requested") == SessionProject(

@@ -10,9 +10,9 @@ from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
     wait_for_dialog_to_accept_keys,
-    wait_for_main_screen,
     wait_for_rendered_text,
     wait_for_request_count_while_draining_child_output,
+    wait_for_session_ready,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -75,7 +75,7 @@ def test_spawn_cli_asks_bash_permission_and_shows_tool_output_after_approval(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Run a shell command")
         child.send("\r")
 

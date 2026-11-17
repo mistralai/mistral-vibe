@@ -86,6 +86,8 @@ _CLAIM_SECONDS = 120.0
 # When to ask again for a read another process had claimed.
 _CLAIM_RETRY_SECONDS = 15.0
 _WATCH_DEBOUNCE_MS = 200
+_WATCH_RETRY_INITIAL_SECONDS = 1.0
+_WATCH_RETRY_MAX_SECONDS = 60.0
 
 
 class CachedPullRequest(BaseModel):
@@ -642,23 +644,38 @@ class PullRequestCache:
     # --- Other processes' reads --------------------------------------------
 
     async def _watch_files(self) -> None:
-        await asyncio.to_thread(self._directory.mkdir, parents=True, exist_ok=True)
-        async for changes in watchfiles.awatch(
-            self._directory,
-            debounce=_WATCH_DEBOUNCE_MS,
-            recursive=False,
-            watch_filter=lambda _change, path: path.endswith(".json"),
-        ):
-            names = {Path(path).name for _change, path in changes}
-            for external_key in list(self._details):
-                if _entry_file(self._directory, external_key).name not in names:
-                    continue
-                entry = await asyncio.to_thread(
-                    _read_entry, self._directory, external_key
+        """Retries a failed watch (inotify limit reached) with backoff."""
+        delay = _WATCH_RETRY_INITIAL_SECONDS
+        while True:
+            try:
+                await asyncio.to_thread(
+                    self._directory.mkdir, parents=True, exist_ok=True
                 )
-                # Its own writes come back too: _store drops what it has.
-                if entry is not None:
-                    self._store(entry, local=False)
+                async for changes in watchfiles.awatch(
+                    self._directory,
+                    debounce=_WATCH_DEBOUNCE_MS,
+                    recursive=False,
+                    watch_filter=lambda _change, path: path.endswith(".json"),
+                ):
+                    delay = _WATCH_RETRY_INITIAL_SECONDS
+                    await self._read_changed({Path(path).name for _, path in changes})
+            except Exception:
+                logger.warning(
+                    "Pull request cache watch failed; retrying in %ss",
+                    delay,
+                    exc_info=True,
+                )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _WATCH_RETRY_MAX_SECONDS)
+
+    async def _read_changed(self, names: set[str]) -> None:
+        for external_key in list(self._details):
+            if _entry_file(self._directory, external_key).name not in names:
+                continue
+            entry = await asyncio.to_thread(_read_entry, self._directory, external_key)
+            # Its own writes come back too: _store drops what it has.
+            if entry is not None:
+                self._store(entry, local=False)
 
 
 def _failures(

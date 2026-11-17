@@ -135,6 +135,12 @@ pub struct Cli {
     #[arg(long = "model", value_name = "ALIAS", overrides_with = "model")]
     pub model: Option<String>,
 
+    /// Thinking level of the model (off, low, medium, high, xhigh, max, or a
+    /// level the model lists; any other word is sent as written), headless
+    /// mode only, new sessions. Not saved.
+    #[arg(long = "thinking", value_name = "LEVEL", overrides_with = "thinking")]
+    pub thinking: Option<String>,
+
     /// Approves all tool calls without prompting: a new session on a built-in
     /// mode starts the auto-approve agent instead.
     #[arg(long = "auto-approve", visible_alias = "yolo", action = ArgAction::SetTrue, overrides_with = "auto_approve")]
@@ -370,6 +376,7 @@ pub struct HeadlessOptions {
     pub output_dir: Option<PathBuf>,
     pub system_prompt: Option<String>,
     pub model: Option<String>,
+    pub thinking: Option<String>,
     pub agent: Option<String>,
     pub auto_approve: bool,
     pub enabled_tools: Vec<String>,
@@ -530,6 +537,9 @@ impl Cli {
         if self.model.is_some() && session != HeadlessSession::New {
             return Err("--model only applies to a new session".to_owned());
         }
+        if self.thinking.is_some() && session != HeadlessSession::New {
+            return Err("--thinking only applies to a new session".to_owned());
+        }
         let system_prompt = self
             .system_prompt_file
             .as_deref()
@@ -547,6 +557,7 @@ impl Cli {
             output_dir: self.output_dir.clone(),
             system_prompt,
             model: self.model.clone(),
+            thinking: self.thinking.clone(),
             agent: execution_control.agent,
             auto_approve: execution_control.auto_approve,
             enabled_tools: self.enabled_tools.clone(),

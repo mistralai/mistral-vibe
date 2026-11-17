@@ -20,6 +20,10 @@ from mistralai_vibe_local_harness.protocol import (
     RustTextContentBlock,
     RustTokenUsage,
 )
+from mistralai_vibe_local_harness.session_api.app_server.session.models import (
+    HistoryEntryAddedEvent,
+    MessageHistoryEntry,
+)
 from mistralai_vibe_local_harness.vibe import _local_actions
 from mistralai_vibe_local_harness.vibe._session_api_extensions import (
     RETRYING_UPDATED,
@@ -218,14 +222,15 @@ async def test_a_switch_turned_off_mid_session_leaves_its_subagents_on_the_api(
 
 
 @pytest.mark.asyncio
-async def test_a_subagent_retry_notifies_under_its_own_id_and_clearing_it_is_silent(
+async def test_a_subagent_retry_notifies_under_its_own_id_and_updates_only_its_replica(
     root: ApiAdapter,
 ) -> None:
     """*Prepare*: A root whose subagent runs and is followed on its own stream.
     *Do*: Publish a subagent batch that starts a provider retry, then one that
         clears it.
-    *Assert*: The start sends one ``turn/retrying`` under the subagent's ID and
-        no snapshot; the clear sends nothing and leaves no retry in its state.
+    *Assert*: The start sends one ``turn/retrying`` under the subagent's ID;
+        the start and the clear each send one snapshot on the subagent's own
+        sequence and nothing for the root, and the clear leaves no retry.
     """
     # Prepare
     adapter = root.adapter
@@ -258,9 +263,59 @@ async def test_a_subagent_retry_notifies_under_its_own_id_and_clearing_it_is_sil
     assert notices[0].session_id == child_id
     assert notices[0].event.params.category is PublicRetryCategory.RATE_LIMITED
     assert notices[0].event_id is None
-    assert not any(isinstance(event.event, SessionSnapshot) for event in started)
-    assert cleared == []
+    # The subagent's snapshots come only on its own sequence, for the clients
+    # that keep a replica of it.
+    for events in (started, cleared):
+        snapshots = [
+            event for event in events if isinstance(event.event, SessionSnapshot)
+        ]
+        assert len(snapshots) == 1
+        assert snapshots[0].child_session
+        assert snapshots[0].session_id == child_id
+    assert all(event.child_session for event in cleared)
     assert adapter._child_states[child_id].retrying is None
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_message_comes_on_its_own_sequence(root: ApiAdapter) -> None:
+    """*Prepare*: A root whose subagent runs and is followed on its own stream.
+    *Do*: Publish a subagent batch that adds an assistant message.
+    *Assert*: The message comes as a ``history/entryAdded`` for the subagent,
+        numbered right after the subagent's last event, and a live read of the
+        subagent answers the state that event leaves.
+    """
+    # Prepare
+    adapter = root.adapter
+    child_id = (await _spawn_child(root)).child_id
+    before = adapter._child_states[child_id].event_id
+    message = MessageHistoryEntry.model_validate({
+        "id": "child-message-1",
+        "index": 99,
+        "turn_id": "child-turn-1",
+        "generation_status": "complete",
+        "created_at": 1,
+        "updated_at": 1,
+        "role": "assistant",
+        "content": [{"type": "text", "text": "found it"}],
+    })
+
+    # Do
+    events = await publish(
+        adapter,
+        StreamBatches(child_id).batch(HistoryEntryAddedEvent(entry=message)),
+        session_id=child_id,
+    )
+
+    # Assert
+    [added] = [event for event in events if event.method == "history/entryAdded"]
+    assert added.child_session
+    assert added.session_id == child_id
+    assert added.event_id == before + 1
+    read = await adapter.read(
+        SessionReadParams(session_id=child_id, history=PageRequest(limit=100))
+    )
+    assert read.last_event_id == added.event_id
+    assert "child-message-1" in [entry.id for entry in read.state.history or []]
 
 
 @pytest.mark.asyncio

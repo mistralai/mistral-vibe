@@ -18,7 +18,7 @@ pub fn defer_prompt(app: &mut App, text: String) -> bool {
     if app.queue.deferred_prompt.is_some() {
         return false;
     }
-    app.queue.deferred_prompt = Some(text);
+    app.queue.deferred_prompt = Some((text, app.queue.paused));
     true
 }
 
@@ -225,8 +225,12 @@ pub(crate) fn turn_started(app: &mut App, queue_item_id: &str) -> bool {
     true
 }
 
+/// Send the prompt typed during a mutation; typed on a held queue, it releases it like a direct prompt.
 pub(crate) fn flush_deferred(app: &mut App, client: &Arc<Client>) {
-    if let Some(text) = app.queue.deferred_prompt.take() {
+    if let Some((text, typed_while_paused)) = app.queue.deferred_prompt.take() {
         super::requests::enqueue_prompt(app, client, text);
+        if typed_while_paused {
+            super::requests::resume(app, client);
+        }
     }
 }

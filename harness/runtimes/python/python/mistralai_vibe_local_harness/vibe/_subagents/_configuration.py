@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 import logging
 from pathlib import Path
@@ -16,6 +16,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustHarnessCapabilitySet,
     RustHarnessConfig,
     RustModelFacts,
+    RustToolGroupDefinition,
 )
 from mistralai_vibe_local_harness.vibe._connector_models import (
     ResolvedConnectorCatalog,
@@ -107,12 +108,16 @@ def resolve_subagent_configuration(
     connector_selection: ResolvedConnectorSelection | None = None,
     connector_gateway_authority_digest: str | None = None,
     connector_policy_digest: str | None = None,
+    root_only_tools: Collection[str] = (),
 ) -> ResolvedSubagentConfiguration:
     """Resolve the generic subagent profile beneath one parent ceiling.
 
     ``connector_policy_digest`` is ``connector_policy_digest_of`` the same
     connector arguments, computed once by a caller that resolves often under
     one catalog. Omitted, it is computed here.
+
+    ``root_only_tools`` names provided tools, as ``group.tool`` routes, that the
+    root Session advertises but no child does.
     """
     integration_authority = _integration_authority(
         mcp_catalog=mcp_catalog,
@@ -126,7 +131,9 @@ def resolve_subagent_configuration(
     )
     policy_digest = _policy_ceiling_digest(policy)
     generic_config = _child_core_config(
-        config, system_instructions=config.system_instructions
+        config,
+        system_instructions=config.system_instructions,
+        root_only_tools=root_only_tools,
     )
     generic_adapter = replace(
         adapter, env=dict(adapter.env), tool_modes=dict(adapter.tool_modes)
@@ -356,6 +363,7 @@ class _CompletionOverlay(TypedDict, total=False):
     """``LocalRuntimeAdapterConfig`` fields a declared route replaces in its children."""
 
     active_model: LocalModelRoute
+    active_model_alias: str | None
     model: str
     temperature: float
     thinking: ThinkingLevel
@@ -385,6 +393,8 @@ def _completion_overlay(
     # default as unset and would rebuild it from the session's direct fields.
     overlay: _CompletionOverlay = {
         "active_model": route,
+        # The route names no alias; the parent's would name the wrong model.
+        "active_model_alias": None,
         "model": route.model,
         "temperature": route.temperature,
         "thinking": route.thinking,
@@ -473,7 +483,10 @@ def _child_model_facts(
 
 
 def _child_core_config(
-    config: RustHarnessConfig, *, system_instructions: str
+    config: RustHarnessConfig,
+    *,
+    system_instructions: str,
+    root_only_tools: Collection[str] = (),
 ) -> RustHarnessConfig:
     update: dict[str, object] = {"subagents": RustDisabledRuntimeToolFeature()}
     if config.settings.tools.model_wait.mode == "enabled":
@@ -482,7 +495,15 @@ def _child_core_config(
         update["model_wait"] = RustEnabledModelWait(external_input=True)
     tools = config.settings.tools.model_copy(update=update, deep=True)
     settings = config.settings.model_copy(update={"tools": tools}, deep=True)
-    capabilities = config.capabilities.model_copy(update={"agent_types": []}, deep=True)
+    capabilities = config.capabilities.model_copy(
+        update={
+            "agent_types": [],
+            "tool_groups": _without_root_only_tools(
+                config.capabilities.tool_groups, frozenset(root_only_tools)
+            ),
+        },
+        deep=True,
+    )
     return config.model_copy(
         update={
             "system_instructions": system_instructions,
@@ -491,6 +512,26 @@ def _child_core_config(
         },
         deep=True,
     )
+
+
+def _without_root_only_tools(
+    groups: Sequence[RustToolGroupDefinition], root_only_tools: frozenset[str]
+) -> list[RustToolGroupDefinition]:
+    """Drop root-only tools, and any group they leave empty, from a child's groups."""
+    if not root_only_tools:
+        return list(groups)
+    kept: list[RustToolGroupDefinition] = []
+    for group in groups:
+        tools = [
+            tool
+            for tool in group.tools
+            if f"{group.name}.{tool.name}" not in root_only_tools
+        ]
+        if len(tools) == len(group.tools):
+            kept.append(group)
+        elif tools:
+            kept.append(group.model_copy(update={"tools": tools}, deep=True))
+    return kept
 
 
 def _policy_ceiling(

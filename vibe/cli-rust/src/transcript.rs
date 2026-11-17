@@ -1,6 +1,8 @@
 //! Transcript reducer: raw JSON and its typed render projection, kept in sync by id.
 
+mod goal_notice;
 pub(crate) mod grouping;
+mod hook_anchor;
 pub(crate) mod local;
 mod older;
 pub(crate) mod patch;
@@ -11,7 +13,7 @@ mod subagent;
 
 use std::collections::{HashMap, HashSet};
 
-use crate::server::HistoryEntry;
+use crate::server::{is_discarded_draft, HistoryEntry};
 use serde_json::Value;
 
 use grouping::is_hidden_hook_notice;
@@ -145,14 +147,15 @@ impl Transcript {
         self.live_tail_open = false;
     }
 
-    /// Most recent non-empty assistant text, for `/copy`, skipping hidden entries.
+    /// Most recent non-empty assistant text, for `/copy`, skipping hidden entries
+    /// and drafts a hook sent back or rejected.
     pub fn last_assistant_message(&self) -> Option<String> {
         self.entries
             .iter()
             .enumerate()
             .rev()
             .find_map(|(index, stored)| {
-                if self.is_hidden(index) {
+                if self.is_hidden(index) || is_discarded_draft(&stored.raw) {
                     return None;
                 }
                 let HistoryEntry::Message(message) = &stored.typed else {
@@ -350,14 +353,16 @@ impl Transcript {
         }
         // The queued run is pinned to the bottom, so content arriving for the
         // running turn slots in above it; a bottom-pinned banner stays below even
-        // the queue. A pre-tool hook notice slots in ahead of its paired tool entry.
-        let at = grouping::pre_tool_anchor(&stored.typed)
-            .and_then(|anchor| self.indices.get(&anchor).copied())
+        // the queue. A tool and its pre-tool hook notices slot in next to each other.
+        let at = hook_anchor::above_its_tool(&stored.typed, &self.entries)
+            .or_else(|| hook_anchor::below_its_hook_lines(&stored.typed, &self.entries))
             .unwrap_or_else(|| match (stored.pinned_bottom, stored.pending) {
                 (true, _) => self.entries.len(),
                 (false, true) => self.first_pinned(),
                 (false, false) => self.first_pending().min(self.first_pinned()),
             });
+        // A goal notice tied to a turn sits with that turn's output.
+        let at = goal_notice::anchor(&self.entries[..at], &stored.typed, &stored.raw).unwrap_or(at);
         if let Some(notification) = subagent::notification(&stored.typed) {
             let previous = [
                 subagent::EffectMatch::ChildSession,
@@ -618,6 +623,10 @@ impl Transcript {
             && visible.iter().any(|(_, entry)| {
                 matches!(entry.typed, HistoryEntry::Reasoning(_)) && entry.typed.in_progress()
             });
+        let hooks = visible
+            .iter()
+            .filter(|(_, entry)| matches!(entry.typed, HistoryEntry::Notice(_)))
+            .count();
         Some(Group {
             key: format!("{}{}", grouping::KEY_PREFIX, first_entry.id),
             first,
@@ -627,6 +636,7 @@ impl Transcript {
             running,
             reasoning,
             thinking,
+            hooks,
         })
     }
 

@@ -68,6 +68,13 @@ class OidcUnauthorized(OidcError):
     """The platform refused the ID token itself (HTTP 401)."""
 
 
+class OidcDiscoveryFailed(OidcError):
+    """Discovery got no answer: a timeout, a network error, or a platform that
+    was down or busy (5xx, 408, 429). It says nothing about the token or the
+    user's memberships, so a later attempt may pass, and it is not cached.
+    """
+
+
 class _Workspace(BaseModel):
     id: str
     organization_id: str
@@ -141,8 +148,8 @@ class OidcTenantResolver:
     The first caller runs the discovery on its own event loop; concurrent
     callers, on any loop, wait for its answer. The lock only guards the maps,
     never the network, so ``invalidate`` (on the event loop, from a Desktop
-    sign-out) returns at once. A failure answers the next callers until
-    ``_FAILURE_RETRY_S``.
+    sign-out) returns at once. A failure other than ``OidcDiscoveryFailed``
+    answers the next callers until ``_FAILURE_RETRY_S``.
     """
 
     def __init__(
@@ -210,9 +217,14 @@ class OidcTenantResolver:
         except OidcError as exc:
             self._settle(key, flight, started, id_token, failure=exc)
             raise
-        except Exception:
-            error = OidcError(
+        except Exception as exc:
+            message = (
                 f"OIDC workspace discovery failed; retry or set {ORGANIZATION_ENV}"
+            )
+            # A refusal (403, 404) or an answer this client cannot read fails
+            # the same way again; only no answer at all may pass later.
+            error = (
+                OidcDiscoveryFailed(message) if _unanswered(exc) else OidcError(message)
             )
             self._settle(key, flight, started, id_token, failure=error)
             raise error from None
@@ -260,7 +272,13 @@ class OidcTenantResolver:
             if current and tenant is not None:
                 self._cache[key] = tenant
                 self._failures.pop(key, None)
-            elif current and failure is not None:
+            elif (
+                current
+                and failure is not None
+                # No answer is retried by the next caller: one that waits for
+                # the network to come back must not read a stale failure.
+                and not isinstance(failure, OidcDiscoveryFailed)
+            ):
                 self._failures[key] = _Failure(
                     failure, self._clock() + _FAILURE_RETRY_S, _digest(id_token)
                 )
@@ -268,6 +286,38 @@ class OidcTenantResolver:
             flight.set_result(tenant)
         else:
             flight.set_exception(failure or _Abandoned())
+
+
+# Client errors that a later attempt can pass, as in ``model_probe``.
+_RETRYABLE_CLIENT_STATUSES = frozenset({
+    httpx2.codes.REQUEST_TIMEOUT,
+    httpx2.codes.TOO_MANY_REQUESTS,
+})
+
+
+def _unanswered(error: Exception) -> bool:
+    """Whether discovery got no answer it could act on: a timeout, a network
+    error, a connection the server dropped mid-response, or a platform that
+    was down or busy.
+    """
+    # Not every transport error: a bad proxy or URL fails the same way again.
+    if isinstance(
+        error,
+        (
+            TimeoutError,
+            httpx2.TimeoutException,
+            httpx2.NetworkError,
+            httpx2.RemoteProtocolError,
+        ),
+    ):
+        return True
+    if not isinstance(error, httpx2.HTTPStatusError):
+        return False
+    status = error.response.status_code
+    return (
+        status >= httpx2.codes.INTERNAL_SERVER_ERROR
+        or status in _RETRYABLE_CLIENT_STATUSES
+    )
 
 
 def _digest(id_token: str) -> str:
@@ -293,6 +343,7 @@ def tenant_principal(
 
 
 __all__ = [
+    "OidcDiscoveryFailed",
     "OidcTenant",
     "OidcTenantResolver",
     "OidcUnauthorized",

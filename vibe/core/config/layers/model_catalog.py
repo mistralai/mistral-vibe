@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from vibe.config_values import ThinkingLevel
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
-from vibe.core.config.models import ModelConfig
+from vibe.core.config.models import ModelConfig, ModelRequirement
 from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.observability.logging import logger
 
@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 # Always defined: providers union-merge by name, so no layer can remove it.
 _CATALOG_PROVIDER = "mistral"
+# The catalog's ``provider`` value for a model the Mistral API serves.
+_WIRE_MISTRAL_PROVIDER = "mistral"
 
 # The catalog lists ``reasoning_effort`` wire values; "none" is the wire value
 # of the "off" level, every other value names its level.
@@ -35,6 +37,8 @@ _CATALOG_FIELDS = frozenset({
     "temperature",
     "thinking_levels",
     "thinking",
+    "auto_compact_threshold",
+    "requires",
 })
 
 
@@ -96,11 +100,17 @@ def _catalog_snapshot(catalog: ModelCatalogResponse | None) -> LayerConfigSnapsh
 def _catalog_model_payload(entry: ModelCatalogEntry) -> dict[str, Any] | None:
     """The model config an entry contributes, or None to drop the entry.
 
-    Dropped: no function calling (the agent loop needs tool calls), or values
-    the model config rejects (one bad entry must not fail the config, ADR 0014).
+    Dropped: an entry this client can neither run nor upsell (see
+    ``_hide_reasons``), no function calling (the agent loop needs tool calls), or values the model
+    config rejects (one bad entry must not fail the config, ADR 0014).
     A null value maps to the field default, so an entry never inherits a
     built-in model's value under the same ID.
     """
+    if reasons := _hide_reasons(entry):
+        logger.info(
+            "Model catalog entry '%s' skipped: %s", entry.id, ", ".join(reasons)
+        )
+        return None
     if not entry.capabilities.function_calling:
         logger.info("Model catalog entry '%s' skipped: no function calling", entry.id)
         return None
@@ -111,6 +121,7 @@ def _catalog_model_payload(entry: ModelCatalogEntry) -> dict[str, Any] | None:
         "display_name": entry.label,
         "supports_images": entry.capabilities.vision,
         "max_context_length": entry.max_context_length,
+        "auto_compact_threshold": entry.parameters.auto_compact_threshold,
     }
     if entry.parameters.temperature is not None:
         values["temperature"] = entry.parameters.temperature
@@ -118,6 +129,8 @@ def _catalog_model_payload(entry: ModelCatalogEntry) -> dict[str, Any] | None:
         values["thinking_levels"] = _thinking_levels(
             entry.id, entry.parameters.reasoning
         )
+    if (requirement := _requirement(entry)) is not None:
+        values["requires"] = requirement
     try:
         model = ModelConfig.model_validate(values)
     except ValidationError:
@@ -128,6 +141,31 @@ def _catalog_model_payload(entry: ModelCatalogEntry) -> dict[str, Any] | None:
     if entry.parameters.reasoning is not None:
         model = model.model_copy(update={"thinking": model.default_thinking})
     return model.model_dump(include=set(_CATALOG_FIELDS))
+
+
+def _hide_reasons(entry: ModelCatalogEntry) -> list[str]:
+    """Why this client can neither run nor upsell *entry*: a requirement it
+    does not know, or a model served by another provider. Any unknown value
+    counts, so a later backend never shows a model that fails when picked.
+    """
+    reasons: list[str] = []
+    if entry.requires is not None and _requirement(entry) is None:
+        reasons.append(f"requires {entry.requires!r}")
+    if entry.provider is not None and entry.provider != _WIRE_MISTRAL_PROVIDER:
+        reasons.append(f"provider {entry.provider!r}")
+    return reasons
+
+
+def _requirement(entry: ModelCatalogEntry) -> ModelRequirement | None:
+    """The requirement a model locked behind a higher plan carries, or None
+    when *entry* has none or one this client cannot upsell.
+    """
+    if entry.requires is None:
+        return None
+    try:
+        return ModelRequirement.model_validate(entry.requires)
+    except ValidationError:
+        return None
 
 
 def _thinking_levels(model_id: str, reasoning: list[str]) -> list[ThinkingLevel]:

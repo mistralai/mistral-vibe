@@ -1,3 +1,5 @@
+use crate::core::helpers::escape_xml;
+
 use super::SkillDefinition;
 
 pub(crate) fn rules_prompt_section() -> &'static str {
@@ -35,13 +37,4 @@ pub(crate) fn catalog_prompt_section<'a>(
 </available-skills>"#,
         entries.join("\n")
     ))
-}
-
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }

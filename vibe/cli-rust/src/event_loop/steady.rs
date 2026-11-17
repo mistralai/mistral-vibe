@@ -5,7 +5,7 @@ use anyhow::Result;
 use crate::app::Status;
 use crate::{completion_manager, event_handler, turn_summary, ui};
 
-use super::deadlines::{approval_pause_deadline, typing_pause_deadline};
+use super::deadlines::{approval_pause_deadline, next_loop_deadline, typing_pause_deadline};
 use super::external_editor::open_external_editor;
 use super::handoff::TerminalHandoff;
 use super::helpers::{apply_command, frame_settled, redraw_frame};
@@ -124,7 +124,7 @@ impl EventLoop {
                         crate::terminal_notifier::flush(&mut self.app);
                     }
                     let changed = !self.app.session.startup_config.disable_welcome_banner_animation
-                        && self.app.view.banner.tick(crate::clock::now());
+                        && self.app.view.banner.tick();
                     state.redraw_pending |= changed;
                 }
                 _ = spin.tick() => {
@@ -134,6 +134,7 @@ impl EventLoop {
                         .viewed_child()
                         .is_some_and(|child| crate::subagents::is_active(child.status));
                     let active = self.app.view.command_loading
+                        || crate::resume_picker::spinning(&self.app)
                         || self.app.compacting
                         || subagent_loading
                         || crate::commands::stress::running(&self.app)
@@ -238,6 +239,9 @@ impl EventLoop {
                 }
                 _ = clock::sleep_until(approval_pause_deadline(&self.app)), if crate::approval::can_wake(&self.app) => {
                     crate::approval::show_pending(&mut self.app);
+                    state.redraw_pending = true;
+                }
+                _ = clock::sleep_until(next_loop_deadline(&self.app)) => {
                     state.redraw_pending = true;
                 }
                 _ = clock::sleep_until(self.app.feedback.hide_at) => {

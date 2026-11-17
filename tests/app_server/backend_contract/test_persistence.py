@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+import contextlib
+import json
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -298,6 +301,140 @@ async def test_unified_compaction_responds_before_checkpoint_notifications(
         for _index, message in notifications
     )
     await session.close()
+
+
+@pytest.mark.asyncio
+async def test_compaction_reply_keeps_the_paused_turn_queue(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+) -> None:
+    """*Prepare*: A message queued behind a turn that is then interrupted, which
+    pauses the queue and leaves the session idle.
+    *Do*: Request manual compaction.
+    *Assert*: The reply's state shows the paused queue with its message, and the
+    queue still holds it afterwards: compaction does not touch the queue.
+    """
+    # Prepare
+    started = asyncio.Event()
+    release = asyncio.Event()
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_gated_mistral_response(
+                "unreachable", started=started, release=release
+            ),
+            backend_contract_mistral_response("<summary>Interrupted turn</summary>"),
+        ]
+    )
+    session = backend_contract_session
+
+    async def consume_turn() -> None:
+        _ = [event async for event in session.act("first question")]
+
+    turn = asyncio.create_task(consume_turn())
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        queued = await session.enqueue("queued follow-up")
+        await session.interrupt()
+        await asyncio.wait_for(turn, timeout=5)
+    finally:
+        release.set()
+        if not turn.done():
+            turn.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await turn
+    assert session.state.session.status.type == "idle"
+
+    # Do
+    response = SessionCompactResponse.model_validate(
+        await backend_contract_connection.client.request(
+            "session/compact", SessionCompactParams(session_id=session.session_id)
+        )
+    )
+
+    # Assert
+    assert response.summary == "Interrupted turn"
+    assert response.state.turn_queue.paused is True
+    assert [item.id for item in response.state.turn_queue.items] == [queued.id]
+    queue_after = await session.read_turn_queue()
+    assert queue_after.paused is True
+    assert [item.id for item in queue_after.items] == [queued.id]
+
+
+@pytest.mark.asyncio
+async def test_compaction_reply_keeps_a_running_background_process(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    tmp_path: Path,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A finished turn that left a background process running.
+    *Do*: Request manual compaction.
+    *Assert*: The reply's state still shows the running process: compaction
+    does not stop it.
+    """
+    # Prepare
+    compacting = False
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        if compacting:
+            return backend_contract_mistral_response(
+                "<summary>Started the build</summary>"
+            )
+        messages = json.dumps(json.loads(request.content).get("messages", []))
+        if "call_start" in messages:
+            return backend_contract_mistral_response("Started.")
+        return backend_contract_mistral_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_start",
+                    "index": 0,
+                    "function": {
+                        "name": "run_typescript",
+                        "arguments": json.dumps({
+                            "code": (
+                                "async function main() { return tools.process.start("
+                                "{command: 'sleep 30'}); }"
+                            )
+                        }),
+                    },
+                }
+            ],
+        )
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(cwd=str(tmp_path), auto_approve=True),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    session = await connection.host.open_session()
+    try:
+        _ = [event async for event in session.act("run the build in the background")]
+        [running] = session.state.background_processes
+        assert running.status == "running"
+        assert session.state.session.status.type == "idle"
+
+        # Do
+        compacting = True
+        response = SessionCompactResponse.model_validate(
+            await connection.client.request(
+                "session/compact", SessionCompactParams(session_id=session.session_id)
+            )
+        )
+    finally:
+        await session.close()
+        await connection.host.close()
+
+    # Assert
+    assert response.summary == "Started the build"
+    assert [
+        (process.process_id, process.command, process.status)
+        for process in response.state.background_processes
+    ] == [(running.process_id, "sleep 30", "running")]
 
 
 @pytest.mark.asyncio

@@ -668,7 +668,7 @@ expression: reviewable(snapshot)
         "namespace": "agents",
         "name": "spawn"
       },
-      "description": "Create an independent child with fresh conversation and send its first message. This does not block or wait for the agent to complete its instruction. name is a single path segment unique for the lifetime of this Session. A child without config_name does not get your instructions: give it instructions written for its task.",
+      "description": "Create an independent child with fresh conversation and send its first message. This does not block or wait for the agent to complete its task. name is a single path segment unique for the lifetime of this Session. A child without config_name does not get your instructions: give it instructions written for its task.",
       "input_schema": {
         "description": "A generic child, which needs `instructions`, or a child from `config_name`, which has its own.",
         "oneOf": [
@@ -717,6 +717,7 @@ expression: reviewable(snapshot)
               },
               "config_name": {
                 "type": "string",
+                "description": "The `name` of an agent configuration that `tools.agents.list_configs` returns. The child runs with that configuration: its tools and its instructions.",
                 "minLength": 1
               }
             },

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -28,11 +29,333 @@ from vibe.core.tools.builtins.windows_shell import (
     WindowsShellArgs,
     WindowsShellToolConfig,
 )
-from vibe.core.tools.permissions import PermissionContext
+from vibe.core.tools.models import ApprovedRule
+from vibe.core.tools.permissions import PermissionContext, PermissionStore
 from vibe.core.utils import is_windows
 from vibe.core.workspace import Workspace
 from vibe.permissions import PathGrantScope, PermissionScope, path_grant_pattern
 from vibe.utils import paths
+
+
+def _sensitive_windows_tool(
+    kind: str, cwd: Path, permission: ToolPermission = ToolPermission.ALWAYS
+):
+    config = WindowsShellToolConfig(
+        permission=permission,
+        allowlist=[
+            "Get-Content",
+            "Select-String",
+            "gc",
+            "cat",
+            "type",
+            "more",
+            "findstr",
+            "pwsh",
+            "powershell",
+            "cmd",
+            "Invoke-Expression",
+            "iex",
+        ],
+    )
+    tool_type = WindowsShell if kind == "fallback" else ExperimentalWindowsShell
+    return tool_type(config_getter=lambda: config, state=BaseToolState(), cwd=cwd)
+
+
+def _resolve_sensitive_windows(
+    tool: WindowsShell | ExperimentalWindowsShell, command: str
+) -> PermissionContext | None:
+    if isinstance(tool, WindowsShell):
+        return tool.resolve_permission(WindowsShellArgs(command=command))
+    return tool.resolve_permission(ExperimentalBashArgs(command=command))
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize("permission", [ToolPermission.ASK, ToolPermission.ALWAYS])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Content .env",
+        "gc -LiteralPath .env",
+        "cat .env",
+        "type .env",
+        "more .env",
+        "findstr x .env",
+        "Select-String -Pattern x -Path .env",
+        "sls x .env",
+    ],
+)
+def test_windows_sensitive_reader_overrides_command_approval(
+    kind, permission, command, tmp_path
+):
+    tool = _sensitive_windows_tool(kind, tmp_path, permission)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in result.required_permissions
+    )
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "parameter,expected", [("-Path", ".env.a1"), ("-LiteralPath", ".env.a[1]")]
+)
+def test_windows_sensitive_path_grants_match_the_reader_operand(
+    kind, parameter, expected, tmp_path
+):
+    for name in [".env.a[1]", ".env.a1"]:
+        (tmp_path / name).touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, f"Get-Content {parameter} '.env.a[1]'")
+    assert isinstance(result, PermissionContext)
+    files = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [rp.invocation_pattern for rp in files] == [str(tmp_path / expected)]
+    store = PermissionStore()
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="powershell",
+                scope=rp.scope,
+                session_pattern=rp.session_pattern,
+            )
+        )
+    other = ".env.a[1]" if expected == ".env.a1" else ".env.a1"
+    other_read = _resolve_sensitive_windows(tool, f"Get-Content -LiteralPath '{other}'")
+    assert isinstance(other_read, PermissionContext)
+    assert any(
+        not store.covers("powershell", rp) for rp in other_read.required_permissions
+    )
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+def test_windows_dynamic_reader_grants_no_unread_literal_file(kind, tmp_path):
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    command = 'Get-Content ".env.$SUFFIX"'
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert [rp.session_pattern for rp in result.required_permissions] == [command]
+    literal = _resolve_sensitive_windows(
+        tool, "Get-Content -LiteralPath '.env.$SUFFIX'"
+    )
+    assert isinstance(literal, PermissionContext)
+    assert any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in literal.required_permissions
+    )
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize("permission", [ToolPermission.ASK, ToolPermission.ALWAYS])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "& $reader .env",
+        'Invoke-Expression "Get-Content .env"',
+        'iex "Get-Content .env"',
+        'pwsh -Command "Get-Content .env"',
+        'powershell -Command "Get-Content .env"',
+        "cmd /C type .env",
+        "& { Get-Content .env }",
+    ],
+)
+def test_windows_interpreter_grant_keeps_only_the_original_invocation(
+    kind, permission, command, tmp_path
+):
+    tool = _sensitive_windows_tool(kind, tmp_path, permission)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    command_permissions = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.COMMAND_PATTERN
+    ]
+    assert [rp.session_pattern for rp in command_permissions] == [command]
+    store = PermissionStore()
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="powershell",
+                scope=rp.scope,
+                session_pattern=rp.session_pattern,
+            )
+        )
+    same = _resolve_sensitive_windows(tool, command)
+    assert isinstance(same, PermissionContext)
+    assert all(store.covers("powershell", rp) for rp in same.required_permissions)
+    other = _resolve_sensitive_windows(tool, command.replace(".env", ".env.a1"))
+    assert isinstance(other, PermissionContext)
+    assert any(not store.covers("powershell", rp) for rp in other.required_permissions)
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Content .env",
+        "Get-Content -Unknown .env",
+        'Invoke-Expression "Get-Content .env"',
+    ],
+)
+def test_windows_disabled_sensitive_patterns_preserve_auto_approval(
+    kind, command, tmp_path
+):
+    config = WindowsShellToolConfig(
+        permission=ToolPermission.ALWAYS, sensitive_file_patterns=[]
+    )
+    tool_type = WindowsShell if kind == "fallback" else ExperimentalWindowsShell
+    tool = tool_type(config_getter=lambda: config, state=BaseToolState(), cwd=tmp_path)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize("patterns", [[], ["**/.env"]])
+@pytest.mark.parametrize("route", ["file_system.bash", "process.start"])
+@pytest.mark.parametrize(
+    "invocation",
+    [
+        "ambiguous-reader",
+        "opaque-redirect",
+        "outside-interpreter",
+        "dynamic-executable",
+    ],
+)
+async def test_windows_sensitive_analysis_preserves_outside_path_denial(
+    kind, patterns, route, invocation, tmp_path, monkeypatch
+):
+    from tests.conftest import build_test_vibe_config
+    from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
+    from vibe.app_server._unified_permissions import UnifiedPermissionResolver
+    from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.tools.manager import ToolManager
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    file = outside / "ordinary.txt"
+    file.write_text("synthetic outside fixture\n")
+    executable = outside / "pwsh.exe"
+    commands = {
+        "ambiguous-reader": f"Get-Content -Unknown '{file}'",
+        "opaque-redirect": f"iex 'Write-Output fixture' > '{file}'",
+        "outside-interpreter": f"& '{executable}' -Command 'Write-Output fixture'",
+        "dynamic-executable": f"& $reader '{file}'",
+    }
+    tool_type = WindowsShell if kind == "fallback" else ExperimentalWindowsShell
+    orchestrator = FakeConfigOrchestrator(
+        build_test_vibe_config(
+            managed_shell_tools_enabled=kind == "managed",
+            tools={
+                "powershell": {
+                    "permission": "always",
+                    "outside_workdir": "deny",
+                    "sensitive_file_patterns": patterns,
+                }
+            },
+        )
+    )
+    store = PermissionStore()
+    manager = ToolManager(
+        lambda: orchestrator.config,
+        defer_mcp=True,
+        cwd=workspace,
+        harness_files=HarnessFilesManager().for_session(workspace),
+        permission_getter=store.get_tool_permission,
+    )
+    manager._all_tools = {"powershell": tool_type}
+    manager._tool_variants_by_name = {"powershell": [tool_type]}
+    monkeypatch.setattr(manager, "_is_tool_available", lambda cls: cls is tool_type)
+    tool = manager.get("powershell")
+    assert isinstance(tool, (WindowsShell, ExperimentalWindowsShell))
+    required = _resolve_sensitive_windows(tool, commands[invocation])
+    assert isinstance(required, PermissionContext)
+    assert not any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in required.required_permissions
+    )
+    resolver = UnifiedPermissionResolver(manager, store, orchestrator)
+    outcome = await resolver.resolve(route, {"command": commands[invocation]})
+    assert outcome.decision == "deny"
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "command,expected",
+    [
+        ("Get-Content -Path .e*", {".env", ".env.a1", ".env.a[1]"}),
+        ("Get-Content -LiteralPath:.env.a[1]", {".env.a[1]"}),
+        ("Select-String .env.a[1] '.env.a[1]'", {".env.a1"}),
+        ("Select-String -Pattern '.env','x' -LiteralPath .env.a[1]", {".env.a[1]"}),
+        ("Get-Content -Path '.env.a`[1`]'", {".env.a[1]"}),
+        ("Get-Content -Tail 1 -LiteralPath .env", {".env"}),
+        ("Select-String -Pattern '.env' -InputObject '.env.a[1]'", set()),
+        ("Select-String '-Pattern' .env", {".env"}),
+        ("Select-String '-Path' .env", {".env"}),
+        ("Get-Content -Filter '*.txt' -Path .env*", set()),
+        ("Get-Content -Stream alternate -LiteralPath .env", set()),
+        ("Get-Content -Unknown .env", set()),
+        ("Get-Content -LiteralPath '.env.$SUFFIX'", {".env.$SUFFIX"}),
+        ('Get-Content -LiteralPath ".env.`$SUFFIX"', {".env.$SUFFIX"}),
+    ],
+)
+def test_windows_reader_role_binding_does_not_nominate_unread_files(
+    kind, command, expected, tmp_path
+):
+    for name in [".env", ".env.a1", ".env.a[1]", "ordinary.txt"]:
+        (tmp_path / name).touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    files = {
+        rp.invocation_pattern
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    }
+    assert files == {str(tmp_path / name) for name in expected}
+    if any(parameter in command for parameter in ["-Filter", "-Stream", "-Unknown"]):
+        assert result.permission is ToolPermission.ASK
+        assert [rp.session_pattern for rp in result.required_permissions] == [command]
+
+
+@pytest.mark.skipif(
+    not is_windows(), reason="Requires native Windows PowerShell provider semantics"
+)
+@pytest.mark.parametrize(
+    "parameter,expected", [("-Path", ".env.a1"), ("-LiteralPath", ".env.a[1]")]
+)
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+def test_native_powershell_sensitive_grant_matches_the_file_actually_read(
+    kind, parameter, expected, tmp_path
+):
+    for name in [".env.a1", ".env.a[1]"]:
+        (tmp_path / name).write_text(name + "\n")
+    command = f"Get-Content {parameter} '.env.a[1]'"
+    spec = _windows.resolve_powershell_shell(None, None)
+    executed = subprocess.run(
+        [spec, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert executed.stdout.strip() == expected
+    result = _resolve_sensitive_windows(
+        _sensitive_windows_tool(kind, tmp_path), command
+    )
+    assert isinstance(result, PermissionContext)
+    assert [
+        rp.invocation_pattern
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ] == [str(tmp_path / expected)]
 
 
 def test_windows_shell_resolver_prefers_pwsh_then_powershell(monkeypatch):
@@ -1283,3 +1606,233 @@ def test_windows_shell_reads_dev_null_as_a_real_path(command: str):
     assert PermissionScope.OUTSIDE_DIRECTORY in [
         required.scope for required in permission.required_permissions
     ]
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "cd sub",
+        "chdir sub",
+        "sl sub",
+        "Set-Location sub",
+        "Set-Location -LiteralPath sub",
+        "pushd sub",
+        "Push-Location sub",
+        "pushl sub",
+        "popd",
+        "Pop-Location",
+        "popl",
+    ],
+)
+@pytest.mark.parametrize("read", ["Get-Content .env", "cat .e*", "more .env"])
+def test_windows_cwd_reader_approval_has_no_guessed_file_grants(
+    kind, change, read, tmp_path
+):
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    for directory in [tmp_path, sub]:
+        (directory / ".env").touch()
+        (directory / ".env.local").touch()
+    (tmp_path / "notes").write_text("ordinary")
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    command = f"{change}; {read}"
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert not any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in result.required_permissions
+    )
+    exact = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.COMMAND_PATTERN
+        and rp.invocation_pattern == command
+        and rp.session_pattern == command
+        and rp.literal
+    ]
+    assert exact
+    store = PermissionStore()
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="powershell",
+                scope=rp.scope,
+                session_pattern=rp.session_pattern,
+            )
+        )
+    repeated = _resolve_sensitive_windows(tool, command)
+    assert isinstance(repeated, PermissionContext)
+    assert all(store.covers("powershell", rp) for rp in repeated.required_permissions)
+    changed = _resolve_sensitive_windows(tool, f"{change}; Get-Content .env.local")
+    assert isinstance(changed, PermissionContext)
+    assert any(
+        not store.covers("powershell", rp) for rp in changed.required_permissions
+    )
+    direct = _resolve_sensitive_windows(tool, "Get-Content sub/.env")
+    assert isinstance(direct, PermissionContext)
+    assert any(
+        rp.scope is PermissionScope.FILE_PATTERN and not store.covers("powershell", rp)
+        for rp in direct.required_permissions
+    )
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+def test_windows_reader_before_later_cwd_change_keeps_precise_file_grant(
+    kind, tmp_path
+):
+    (tmp_path / ".env").touch()
+    (tmp_path / "sub").mkdir()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, "Get-Content .env; Set-Location sub")
+    assert isinstance(result, PermissionContext)
+    files = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [rp.invocation_pattern for rp in files] == [str(tmp_path / ".env")]
+    tool.config.sensitive_file_patterns.clear()
+    result = _resolve_sensitive_windows(tool, "Set-Location sub; Get-Content .env")
+    assert result is not None and result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "iex $CWD_SCRIPT",
+        "Invoke-Expression $CWD_SCRIPT",
+        "& $CWD_COMMAND child",
+        ". ./change-dir.ps1",
+        "& ./change-dir.ps1",
+    ],
+)
+def test_windows_opaque_parent_cwd_never_grants_unread_session_file(
+    kind, prefix, tmp_path
+):
+    (tmp_path / ".env").touch()
+    (tmp_path / "change-dir.ps1").write_text("Set-Location child\n")
+    (tmp_path / "child").mkdir()
+    (tmp_path / "child" / ".env").touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    command = f"{prefix}; Get-Content .env"
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert not any(
+        rp.scope is PermissionScope.FILE_PATTERN for rp in result.required_permissions
+    )
+    assert any(
+        rp.scope is PermissionScope.COMMAND_PATTERN
+        and rp.invocation_pattern == command
+        and rp.session_pattern == command
+        and rp.literal
+        for rp in result.required_permissions
+    )
+    store = PermissionStore()
+    for rp in result.required_permissions:
+        store.add_rule(
+            ApprovedRule(
+                tool_name="powershell",
+                scope=rp.scope,
+                session_pattern=rp.session_pattern,
+            )
+        )
+    direct = _resolve_sensitive_windows(tool, "Get-Content .env")
+    assert isinstance(direct, PermissionContext)
+    assert any(
+        rp.scope is PermissionScope.FILE_PATTERN and not store.covers("powershell", rp)
+        for rp in direct.required_permissions
+    )
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "iex $CWD_SCRIPT",
+        "pwsh -Command 'Set-Location child'",
+        "powershell -Command 'Set-Location child'",
+    ],
+)
+def test_windows_later_opaque_or_child_cwd_keeps_actual_parent_file_grant(
+    kind, suffix, tmp_path
+):
+    (tmp_path / ".env").touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    command = (
+        f"Get-Content .env; {suffix}"
+        if suffix.startswith("iex")
+        else f"{suffix}; Get-Content .env"
+    )
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    files = [
+        rp
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [rp.invocation_pattern for rp in files] == [str(tmp_path / ".env")]
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "dir .env | type",
+        "Get-ChildItem .env | Get-Content",
+        "Get-Item .env | gc",
+        "'.env' | Get-Content",
+        "dir . | Select-String token",
+        "dir .env | sls token",
+    ],
+)
+def test_windows_piped_reader_requires_the_exact_command(kind, command, tmp_path):
+    """Get-Content and Select-String bind piped files to their path parameters."""
+    (tmp_path / ".env").touch()
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, command)
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ASK
+    assert any(
+        rp.scope is PermissionScope.COMMAND_PATTERN
+        and rp.session_pattern == command
+        and rp.literal
+        for rp in result.required_permissions
+    )
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "Get-Content notes.txt | Select-String token",
+        "gc notes.txt | sls token",
+        "dir | findstr token",
+        "dir .env | sort",
+    ],
+)
+def test_windows_piped_text_does_not_require_sensitive_approval(
+    kind, command, tmp_path
+):
+    """Piped text is searched, not opened, so no file approval is owed."""
+    (tmp_path / ".env").touch()
+    (tmp_path / "notes.txt").write_text("token\n")
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    tool.config.allowlist.extend(["dir", "sort", "sls"])
+    result = _resolve_sensitive_windows(tool, command)
+    assert result is not None
+    assert result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("kind", ["fallback", "managed"])
+def test_windows_sensitive_file_label_names_no_other_shell(kind, tmp_path):
+    tool = _sensitive_windows_tool(kind, tmp_path)
+    result = _resolve_sensitive_windows(tool, "type .env")
+    assert isinstance(result, PermissionContext)
+    assert [
+        rp.label
+        for rp in result.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ] == ["accessing sensitive files"]

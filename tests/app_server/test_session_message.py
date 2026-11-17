@@ -123,3 +123,10 @@ def test_history_shows_what_was_sent_without_what_preparation_added() -> None:
         TextContentBlock(text="Fix the test"),
         TextContentBlock(text=skill),
     ]
+
+
+def test_a_handed_task_says_the_final_reply_goes_back_on_its_own() -> None:
+    text = handed_task_text("parent-1")
+
+    assert "goes back to it on its own" in text
+    assert "report back" not in text

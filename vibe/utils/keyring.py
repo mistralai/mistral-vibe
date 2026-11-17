@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import dataclass
 import os
 import subprocess
@@ -8,7 +9,12 @@ from threading import Lock
 import time
 
 import keyring
-from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
+from keyring.errors import (
+    KeyringError,
+    KeyringLocked,
+    NoKeyringError,
+    PasswordDeleteError,
+)
 
 from vibe.observability.logging import logger
 
@@ -29,6 +35,10 @@ class _ReadFailure:
 
 
 class _KeychainTimeoutError(KeyringError):
+    pass
+
+
+class _SecretServiceLockedError(KeyringLocked):
     pass
 
 
@@ -108,6 +118,46 @@ def _set_password(service: str, username: str, password: str) -> None:
         raise KeyringError("Can't store password in macOS Keychain") from exc
 
 
+def _may_hold_secret_service_item(service: str, username: str) -> bool:
+    # keyring's Secret Service read unlocks its collection before searching,
+    # so a missing key still raises an unlock prompt that can wait forever.
+    if sys.platform != "linux":
+        return True
+    from keyring.backends.SecretService import Keyring as SecretServiceKeyring
+
+    backend = keyring.get_keyring()
+    if not isinstance(backend, SecretServiceKeyring):
+        return True
+    from jeepney.wrappers import DBusErrorResponse
+    import secretstorage
+
+    preferred = getattr(backend, "preferred_collection", None)
+    scheme = backend.schemes[backend.scheme]
+    attributes = {scheme["username"]: username, scheme["service"]: service}
+    try:
+        with closing(secretstorage.dbus_init()) as connection:
+            try:
+                collection = (
+                    secretstorage.Collection(connection)
+                    if preferred is None
+                    else secretstorage.Collection(connection, preferred)
+                )
+            except secretstorage.ItemNotFoundException:
+                # keyring prompts to create a missing default collection, but
+                # raises its own error for a missing preferred one.
+                return preferred is not None
+            if not collection.is_locked():
+                return True
+            # The service-wide search never prompts, but some providers
+            # (KeePassXC) skip locked collections, so a miss stays unknown.
+            items = secretstorage.search_items(connection, attributes)
+            if next(items, None) is not None:
+                return True
+            raise _SecretServiceLockedError("The system keyring is locked")
+    except (secretstorage.SecretStorageException, DBusErrorResponse, OSError):
+        return True
+
+
 def _get_password(service: str, username: str) -> str | None:
     if _should_use_macos_security():
         try:
@@ -128,6 +178,8 @@ def _get_password(service: str, username: str) -> str | None:
         return result.stdout.removesuffix("\n")
 
     try:
+        if not _may_hold_secret_service_item(service, username):
+            return None
         return keyring.get_password(service, username)
     except ImportError as exc:
         raise NoKeyringError("Can't load keyring backend") from exc
@@ -169,13 +221,21 @@ def _get_uncached_password(
     services = (_KEYRING_SERVICE, *_LEGACY_KEYRING_SERVICES)
     if not search_legacy_services:
         services = (_KEYRING_SERVICE,)
+    locked: _SecretServiceLockedError | None = None
     for service in services:
-        api_key = _get_password(service, username)
+        try:
+            api_key = _get_password(service, username)
+        except _SecretServiceLockedError as exc:
+            # Another service name may still match outside the locked collection.
+            locked = exc
+            continue
         if api_key is None:
             continue
         if migrate_legacy and service != _KEYRING_SERVICE:
             _migrate_legacy_password(username, api_key, service)
         return api_key
+    if locked is not None:
+        raise locked
     return None
 
 

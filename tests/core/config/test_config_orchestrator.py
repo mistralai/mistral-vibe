@@ -10,6 +10,7 @@ from typing import Annotated, Any
 from pydantic import Field, ValidationError
 import pytest
 
+from vibe.core.config.builder import InvalidConfigError
 from vibe.core.config.event_bus import EventBus
 from vibe.core.config.layer import (
     ConfigLayer,
@@ -37,6 +38,7 @@ from vibe.core.config.schema import (
     ConfigSchema,
     WithConcatMerge,
     WithReplaceMerge,
+    WithUnionMerge,
 )
 from vibe.core.config.types import (
     ConcurrencyConflictError,
@@ -902,6 +904,33 @@ deprecated_setting = true
     assert orch.config.active_model == "new"
     assert orch.config.tools.disabled_tools == ["python", "node"]
     assert orch.config.tools.enabled_tools == ["read"]
+
+
+@pytest.mark.asyncio
+async def test_set_field_returns_a_nameless_entry_written_meanwhile_as_failure(
+    tmp_working_directory: Path,
+) -> None:
+    class EntriesSchema(ConfigSchema):
+        value: Annotated[str, WithReplaceMerge()] = "default"
+        entries: Annotated[list[dict[str, Any]], WithUnionMerge(merge_key="name")] = (
+            Field(default_factory=list)
+        )
+
+    toml_path = tmp_working_directory / "config.toml"
+    toml_path.write_text('value = "old"\n', encoding="utf-8")
+    user_layer = UserConfigLayer(path=toml_path)
+    orch = await ConfigOrchestrator.create(
+        schema=EntriesSchema,
+        layers=[FakeLayer(name="default", data={"entries": []}), user_layer],
+        default_layer_resolver=lambda: user_layer,
+    )
+    toml_path.write_text('value = "old"\n[[entries]]\n', encoding="utf-8")
+
+    failures = await orch.set_field("/value", "new")
+
+    failure = assert_single_failure(failures, InvalidConfigError)
+    assert "has no 'name'" in str(failure)
+    assert orch.config.value == "old"
 
 
 @pytest.mark.asyncio

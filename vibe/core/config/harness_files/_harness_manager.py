@@ -71,8 +71,14 @@ class HarnessFilesManager:
         return replace(self, trust_store=trust_store)
 
     @property
-    def _effective_cwd(self) -> Path:
-        return self.cwd or Path.cwd()
+    def _effective_cwd(self) -> Path | None:
+        if self.cwd is not None:
+            return self.cwd
+        try:
+            return Path.cwd()
+        except FileNotFoundError:
+            # The process cwd was deleted while Vibe runs: it holds no project files.
+            return None
 
     @property
     def _listed_roots(self) -> list[Path]:
@@ -82,18 +88,25 @@ class HarnessFilesManager:
 
     @property
     def workspace_roots(self) -> list[Path]:
-        cwd = self._effective_cwd.resolve()
+        if (effective := self._effective_cwd) is None:
+            return self._listed_roots
+        cwd = effective.resolve()
         return [cwd, *(root for root in self._listed_roots if root != cwd)]
 
     @property
     def cwd_is_user_config_home(self) -> bool:
         """True when the cwd's ``.vibe`` dir is the user config dir itself."""
-        return (self._effective_cwd / ".vibe").resolve() == VIBE_HOME.path.resolve()
+        cwd = self._effective_cwd
+        return cwd is not None and (cwd / ".vibe").resolve() == VIBE_HOME.path.resolve()
 
     @property
     def project_source_enabled(self) -> bool:
         """True when the project layer is eligible for this cwd."""
-        return "project" in self.sources and not self.cwd_is_user_config_home
+        return (
+            "project" in self.sources
+            and self._effective_cwd is not None
+            and not self.cwd_is_user_config_home
+        )
 
     @property
     def _trusted_workdir(self) -> Path | None:
@@ -101,7 +114,7 @@ class HarnessFilesManager:
         if not self.project_source_enabled:
             return None
         cwd = self._effective_cwd
-        if self.trust_store.is_trusted(cwd) is not True:
+        if cwd is None or self.trust_store.is_trusted(cwd) is not True:
             return None
         return cwd
 

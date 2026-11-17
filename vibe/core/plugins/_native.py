@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 import hashlib
 import json
@@ -50,11 +50,11 @@ from vibe.core.plugins._compatibility import (
     DetectedPluginFormat,
     PluginAdapterDiagnostic,
     PluginFormatAdapter,
+    PluginFormatDetection,
     PluginToolOverride,
     author_display_name,
     detect_plugin_source_format,
     plugin_runtime_state_names,
-    relative_plugin_path,
     typescript_identifier,
 )
 from vibe.core.plugins._content import digest_plugin_tree
@@ -460,6 +460,11 @@ class PluginConfigIssue(BaseModel):
     fatal: bool = False
     source_format: DetectedPluginFormat | None = None
     component: str | None = None
+
+
+def user_facing_issues(issues: Iterable[PluginConfigIssue]) -> list[PluginConfigIssue]:
+    """The issues a user is warned about: ``info`` notes a plugin that loaded."""
+    return [issue for issue in issues if issue.severity != "info"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -875,6 +880,7 @@ class PluginResolver:
             self._reject_builtin_foreign_format(root, detection.source_format)
         adapter = _compatibility_adapter(detection.source_format)
         if adapter is not None and scope is not SkillScope.BUILTIN:
+            self._record_format_selection(detection)
             result = adapter.adapt(
                 root=root, data_root_base=self._plugin_data_root_base(root), scope=scope
             )
@@ -888,13 +894,7 @@ class PluginResolver:
                 root, result.package, result.unsupported_components
             )
 
-        marker_paths = ", ".join(
-            relative_plugin_path(path, root) for path in detection.marker_paths
-        )
-        if detection.source_format is DetectedPluginFormat.AMBIGUOUS:
-            message = f"Multiple plugin formats were detected: {marker_paths}"
-            code = "plugin.compatibility.format_ambiguous"
-        elif detection.source_format is DetectedPluginFormat.OPENCODE:
+        if detection.source_format is DetectedPluginFormat.OPENCODE:
             message = "Executable OpenCode plugins are not imported or evaluated"
             code = "plugin.compatibility.executable_format_unsupported"
         elif detection.source_format is DetectedPluginFormat.UNKNOWN:
@@ -1230,6 +1230,26 @@ class PluginResolver:
                 config_file=definition.source_path,
             )
             for order, definition in enumerate(definitions)
+        )
+
+    def _record_format_selection(self, detection: PluginFormatDetection) -> None:
+        if detection.found_formats == (detection.source_format,):
+            return
+        found = ", ".join(
+            source_format.value for source_format in detection.found_formats
+        )
+        self._issues.append(
+            PluginConfigIssue(
+                file=detection.marker_paths[0],
+                message=(
+                    f"Plugin ships manifests for several formats ({found}); "
+                    f"loaded as {detection.source_format.value}"
+                ),
+                severity="info",
+                code=PluginDiagnosticCode.FORMAT_SELECTED,
+                source_format=detection.source_format,
+                component="manifest",
+            )
         )
 
     def _record_adapter_result(

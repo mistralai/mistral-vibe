@@ -11,9 +11,9 @@ from tests.skills.registry.conftest import make_item
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.skills.manager import SkillManager
-from vibe.core.skills.models import SkillInfo, SkillScope, SkillSource
+from vibe.core.skills.models import ManifestEntry, SkillInfo, SkillScope, SkillSource
 from vibe.core.skills.registry import _manifest, _store
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import SkillManifest
 from vibe.core.trusted_folders import trusted_folders_manager
 
 
@@ -600,6 +600,192 @@ class TestRegistrySkillDiscovery:
         manager = SkillManager(lambda: config)
 
         assert "evil" not in manager.available_skills
+
+    @pytest.mark.asyncio
+    async def test_a_pick_of_a_pinned_skill_replaces_its_pin(self) -> None:
+        await self._pin_materialized(skill_id="cid", name="reg-skill")
+        await _store.materialize(
+            make_item(skill_id="cid", name="reg-skill", version=2), "reg-skill"
+        )
+
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+        manager = SkillManager(
+            lambda: config,
+            session_pins=[ManifestEntry(name="reg-skill", skill_id="cid", version=2)],
+        )
+
+        info = manager.available_skills["reg-skill"]
+        assert info.scope is SkillScope.SESSION
+        assert info.registry is not None
+        assert info.registry.version == 2
+        assert [
+            e.version
+            for e in _manifest.load_sync(_manifest.global_manifest_path()).skills
+        ] == [1]
+
+    @pytest.mark.asyncio
+    async def test_a_session_pin_loads_with_registry_skills_off(self) -> None:
+        """Desktop picks a cloud skill into the session without turning on registry
+        skills; only manifest pins stay behind the flag.
+        """
+        await self._pin_materialized(skill_id="pinned", name="from-manifest")
+        await _store.materialize(make_item(skill_id="cid", name="picked"), "picked")
+        config = build_test_vibe_config(experimental_enable_registry_skills=False)
+
+        skills = SkillManager(
+            lambda: config,
+            session_pins=[ManifestEntry(name="picked", skill_id="cid", version=1)],
+        ).available_skills
+
+        assert skills["picked"].source is SkillSource.REGISTRY
+        assert "from-manifest" not in skills
+
+    @pytest.mark.asyncio
+    async def test_a_session_pick_named_like_a_local_skill_keeps_both(
+        self, skills_dir: Path
+    ) -> None:
+        """Prepare a local `dup` and a cloud skill also named `dup`.
+
+        Do pick the cloud one for the session.
+
+        Assert `/dup` still runs the local skill and `/dup-cloud` the cloud one.
+        """
+        create_skill(skills_dir, "dup", "local one")
+        await _store.materialize(
+            make_item(skill_id="cid", name="dup", description="cloud one"), "dup"
+        )
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+
+        skills = SkillManager(
+            lambda: config,
+            session_pins=[ManifestEntry(name="dup", skill_id="cid", version=1)],
+        ).available_skills
+
+        assert skills["dup"].source is SkillSource.LOCAL
+        assert skills["dup"].description == "local one"
+        assert skills["dup-cloud"].source is SkillSource.REGISTRY
+        assert skills["dup-cloud"].description == "cloud one"
+
+    @pytest.mark.asyncio
+    async def test_a_pick_named_like_a_disabled_local_skill_still_loads(
+        self, skills_dir: Path
+    ) -> None:
+        create_skill(skills_dir, "dup", "local one")
+        await _store.materialize(
+            make_item(skill_id="cid", name="dup", description="cloud one"), "dup"
+        )
+        config = build_test_vibe_config(
+            skill_paths=[skills_dir], disabled_skills=["dup"]
+        )
+
+        skills = SkillManager(
+            lambda: config,
+            session_pins=[ManifestEntry(name="dup", skill_id="cid", version=1)],
+        ).available_skills
+
+        assert "dup" not in skills
+        assert skills["dup-cloud"].description == "cloud one"
+
+    @pytest.mark.asyncio
+    async def test_an_allowlist_naming_a_renamed_pick_still_loads_it(
+        self, skills_dir: Path
+    ) -> None:
+        create_skill(skills_dir, "dup", "local one")
+        await _store.materialize(
+            make_item(skill_id="cid", name="dup", description="cloud one"), "dup"
+        )
+        config = build_test_vibe_config(
+            skill_paths=[skills_dir], enabled_skills=["dup"]
+        )
+
+        skills = SkillManager(
+            lambda: config,
+            session_pins=[ManifestEntry(name="dup", skill_id="cid", version=1)],
+        ).available_skills
+
+        assert skills["dup"].description == "local one"
+        assert skills["dup-cloud"].description == "cloud one"
+
+    @pytest.mark.asyncio
+    async def test_a_session_pick_of_an_installed_cloud_skill_keeps_its_name(
+        self,
+    ) -> None:
+        await self._pin_materialized(skill_id="cid", name="dup", description="older")
+        await _store.materialize(
+            make_item(skill_id="cid", name="dup", version=2, description="newer"), "dup"
+        )
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+
+        skills = SkillManager(
+            lambda: config,
+            session_pins=[ManifestEntry(name="dup", skill_id="cid", version=2)],
+        ).available_skills
+
+        assert skills["dup"].description == "newer"
+        assert "dup-cloud" not in skills
+
+    @pytest.mark.asyncio
+    async def test_a_pick_installed_and_named_like_a_local_skill_stays_reachable(
+        self, skills_dir: Path
+    ) -> None:
+        """Prepare a local `dup`, and the cloud `dup` installed from the manifest.
+
+        Do pick that same cloud skill for the session.
+
+        Assert the local one keeps `/dup` and the pick is reachable as `/dup-cloud`.
+        """
+        create_skill(skills_dir, "dup", "local one")
+        await self._pin_materialized(
+            skill_id="cid", name="dup", description="cloud one"
+        )
+        config = build_test_vibe_config(
+            skill_paths=[skills_dir], experimental_enable_registry_skills=True
+        )
+
+        skills = SkillManager(
+            lambda: config,
+            session_pins=[ManifestEntry(name="dup", skill_id="cid", version=1)],
+        ).available_skills
+
+        assert skills["dup"].source is SkillSource.LOCAL
+        assert skills["dup-cloud"].registry is not None
+        assert skills["dup-cloud"].registry.skill_id == "cid"
+
+    @pytest.mark.asyncio
+    async def test_a_long_clashing_name_still_fits_the_name_rule(
+        self, skills_dir: Path
+    ) -> None:
+        long_name = "a" * 64
+        create_skill(skills_dir, long_name, "local one")
+        await _store.materialize(make_item(skill_id="cid", name=long_name), long_name)
+        config = build_test_vibe_config(skill_paths=[skills_dir])
+
+        skills = SkillManager(
+            lambda: config,
+            session_pins=[ManifestEntry(name=long_name, skill_id="cid", version=1)],
+        ).available_skills
+
+        renamed = "a" * (64 - len("-cloud")) + "-cloud"
+        assert skills[renamed].source is SkillSource.REGISTRY
+
+    @pytest.mark.asyncio
+    async def test_a_pick_is_installed_as_the_session_s_active_skill(self) -> None:
+        """The pin it replaces stays listed, inactive, so a client sees why."""
+        await self._pin_materialized(skill_id="cid", name="dup")
+        await _store.materialize(
+            make_item(skill_id="cid", name="dup", version=2), "dup"
+        )
+        config = build_test_vibe_config(experimental_enable_registry_skills=True)
+
+        installed = SkillManager(
+            lambda: config,
+            session_pins=[ManifestEntry(name="dup", skill_id="cid", version=2)],
+        ).installed_skills()
+
+        assert [(i.info.scope, i.active) for i in installed] == [
+            (SkillScope.GLOBAL, False),
+            (SkillScope.SESSION, True),
+        ]
 
 
 async def _pin(

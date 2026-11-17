@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from vibe.core.experiments import resolve
 from vibe.core.experiments.active import DEFAULT_VARIANTS, ExperimentName
 from vibe.core.experiments.models import EvalResponse
@@ -110,4 +112,77 @@ def test_filter_to_known_drops_unknown_features() -> None:
     })
     assert set(resolve.filter_to_known(r).features) == {
         ExperimentName.SYSTEM_PROMPT.value
+    }
+
+
+def test_system_prompt_behavior_assignment_is_labelled_by_digest() -> None:
+    prompt = "You are a test prompt.\n" * 200
+    r = _resp({
+        ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value: {
+            "defaultValue": "",
+            "rules": [
+                {
+                    "force": prompt,
+                    "tracks": [
+                        {
+                            "experiment": {"key": "exp-key"},
+                            "result": {
+                                "variationId": 1,
+                                "value": prompt,
+                                "inExperiment": True,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    })
+
+    [assignment] = resolve.assignments(r)
+
+    assert assignment.variation_name == resolve.digest(prompt)
+    assert assignment.variation_name.startswith("sha256:")
+    assert len(assignment.variation_name) < 30
+
+
+@pytest.mark.parametrize(
+    ("result", "expected_label"),
+    [({"key": "0", "variationId": 0}, "0"), ({"variationId": 0}, "0")],
+)
+def test_blank_system_prompt_behavior_arm_still_counts_as_an_exposure(
+    result: dict[str, Any], expected_label: str
+) -> None:
+    r = _resp({
+        ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value: {
+            "defaultValue": "",
+            "rules": [
+                {
+                    "force": "",
+                    "tracks": [
+                        {
+                            "experiment": {"key": "exp-key"},
+                            "result": {**result, "value": "", "inExperiment": True},
+                        }
+                    ],
+                }
+            ],
+        }
+    })
+
+    [assignment] = resolve.assignments(r)
+
+    assert assignment.experiment_id == ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value
+    assert assignment.variation_name == expected_label
+
+
+def test_loggable_variants_digest_only_the_system_prompt_behavior() -> None:
+    prompt = "You are a test prompt."
+    variants = {
+        ExperimentName.SYSTEM_PROMPT.value: "cli_ml4_2026-10_v2",
+        ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value: prompt,
+    }
+
+    assert resolve.loggable_variants(variants) == {
+        ExperimentName.SYSTEM_PROMPT.value: "cli_ml4_2026-10_v2",
+        ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value: resolve.digest(prompt),
     }

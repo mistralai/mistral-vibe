@@ -285,7 +285,14 @@ async fn finalize_stopped(
     };
     let (client, session_id) = (client?, session_id?);
     let output = Output::new(format.clone());
-    let finalized = finalize_output(&client, &session_id, turn_id.as_deref(), &output, state);
+    let finalized = finalize_output(
+        &client,
+        &session_id,
+        turn_id.as_deref(),
+        None,
+        &output,
+        state,
+    );
     match tokio::time::timeout_at(grace_ends, finalized).await {
         Ok(Ok(response)) => response,
         // The stop's outcome stands; the output just could not be delivered.

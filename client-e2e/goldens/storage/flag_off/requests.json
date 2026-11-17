@@ -1,0 +1,30 @@
+[
+ {
+  "method": "workspace/prompt/prepare",
+  "params": {
+   "message": "/storage",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "titleContent": null
+  }
+ },
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

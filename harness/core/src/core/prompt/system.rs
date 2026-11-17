@@ -1,7 +1,9 @@
 use crate::core::capabilities;
 use crate::core::config::{HarnessConfig, HarnessConfigUpdate};
 use crate::core::features::background_processes;
+use crate::core::features::model_wait;
 use crate::core::features::skills;
+use crate::core::features::subagents;
 use crate::core::prompt::PromptSettings;
 
 // Pieces of the default guidance in `default_prompts.json`, combined per enabled feature.
@@ -37,6 +39,9 @@ pub(crate) fn configuration_update_changes_system_prompt(
                     .tools
                     .subagents
                     .changes_system_prompt(&settings.tools.subagents)
+                // The background-process section names `wait` only when it is offered.
+                || model_wait::is_offered(&current.settings.tools)
+                    != model_wait::is_offered(&settings.tools)
         })
 }
 
@@ -93,7 +98,10 @@ fn build_generic_system_prompt(config: &HarnessConfig) -> String {
             .command_environment
             .profile()
             .expect("validated background processes have a command environment");
-        sections.push(background_processes::prompt_section(command_profile));
+        sections.push(background_processes::prompt_section(
+            command_profile,
+            model_wait::is_offered(&config.settings.tools),
+        ));
     }
     // An agent that cannot create children reads only the guidance for the tools it has.
     let agent_tools = &config.settings.tools.subagents;
@@ -104,7 +112,18 @@ fn build_generic_system_prompt(config: &HarnessConfig) -> String {
             guidance.push(&prompts.list_configs_guidance);
         }
         guidance.push(&prompts.guidance);
-        sections.push(guidance.join(" "));
+        let mut section = guidance.join(" ");
+        if agent_tools.can_list_configs()
+            && let Some(catalog) = subagents::catalog_prompt_section(
+                &prompts.config_catalog,
+                &prompts.config_catalog_more,
+                config.capabilities.agent_types.iter(),
+            )
+        {
+            section.push_str("\n\n");
+            section.push_str(&catalog);
+        }
+        sections.push(section);
     } else if agent_tools.is_enabled() {
         sections.push(
             config
@@ -168,7 +187,10 @@ fn build_autonomy_prompt(skills: bool, programmatic: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::capabilities::{KnowledgeFolderAccess, KnowledgeFolderDefinition};
+    use crate::core::capabilities::{
+        HarnessCapabilitySet, KnowledgeFolderAccess, KnowledgeFolderDefinition,
+        PluginContextDefinition,
+    };
     use crate::core::testing::*;
     use crate::core::tools::resolved::ResolvedTools;
 
@@ -229,6 +251,53 @@ mod tests {
             without_prompt.contains(&format!("{} {}", prompts.guidance_intro, prompts.guidance))
         );
         assert!(!without_prompt.contains("config"));
+    }
+    #[test]
+    fn agents_guidance_lists_agent_types_only_with_list_configs() {
+        let prompts = PromptSettings::default().agent_tools;
+        let mut with_list_configs = config();
+        with_list_configs.capabilities.agent_types = vec![
+            subagents::AgentTypeDefinition {
+                name: "researcher".to_string(),
+                description: "Looks up prices.".to_string(),
+                path: String::new(),
+            },
+            subagents::AgentTypeDefinition {
+                name: "billing".to_string(),
+                description: "Lists invoices.".to_string(),
+                path: String::new(),
+            },
+        ];
+        with_list_configs.plugins.push(PluginContextDefinition {
+            name: "finance".to_string(),
+            description: "Finance tools.".to_string(),
+            path: "/plugins/finance".to_string(),
+            capabilities: HarnessCapabilitySet {
+                agent_types: vec![subagents::AgentTypeDefinition {
+                    name: "finance:researcher".to_string(),
+                    description: "Research reports.".to_string(),
+                    path: "/plugins/finance/agents/researcher.toml".to_string(),
+                }],
+                ..HarnessCapabilitySet::default()
+            },
+        });
+        let mut without_list_configs = with_list_configs.clone();
+        without_list_configs.settings.tools.subagents = serde_json::from_value(json!({
+            "mode": "enabled",
+            "operations": ["list", "spawn", "send_message", "interrupt"],
+        }))
+        .expect("agent tools without list_configs are valid");
+
+        let with_prompt = build_generic_system_prompt(&with_list_configs);
+        let without_prompt = build_generic_system_prompt(&without_list_configs);
+
+        assert!(with_prompt.contains(&format!(
+            "{}\n\n{}\n- `researcher`: Looks up prices.\n- `billing`: Lists invoices.",
+            prompts.guidance, prompts.config_catalog
+        )));
+        assert!(!without_prompt.contains("`researcher`"));
+        assert!(!with_prompt.contains("finance:researcher"));
+        assert!(!build_generic_system_prompt(&config()).contains(&prompts.config_catalog));
     }
     #[test]
     fn system_prompt_indexes_generic_tool_groups_and_skills() {
@@ -460,23 +529,46 @@ mod tests {
     }
 
     #[test]
-    fn sleep_guidance_is_only_rendered_with_background_processes() {
-        let mut without_background = config();
-        let without_tools = ResolvedTools::compile(&without_background).expect("tools resolve");
-        let without_prompt = build_system_prompt(
-            &without_background,
-            without_tools.tool_group_inventory_prompt_section(),
-        );
+    fn wait_guidance_is_only_rendered_with_background_processes_and_wait() {
+        let prompt = |background: bool, wait: bool| {
+            let mut config = config();
+            if background {
+                config.settings.tools.background_processes = BackgroundProcessMode::Enabled;
+            }
+            if wait {
+                config.settings.tools.model_wait = model_wait::Mode::Enabled {
+                    external_input: true,
+                };
+            }
+            let tools = ResolvedTools::compile(&config).expect("tools resolve");
+            build_system_prompt(&config, tools.tool_group_inventory_prompt_section())
+        };
+        let guidance = "until a process ends, call `wait`";
 
-        without_background.settings.tools.background_processes = BackgroundProcessMode::Enabled;
-        let with_tools = ResolvedTools::compile(&without_background).expect("tools resolve");
-        let with_prompt = build_system_prompt(
-            &without_background,
-            with_tools.tool_group_inventory_prompt_section(),
-        );
+        assert!(!prompt(false, true).contains(guidance));
+        assert!(prompt(true, false).contains("## Background processes"));
+        assert!(!prompt(true, false).contains(guidance));
+        assert!(prompt(true, true).contains(guidance));
+        for (background, wait) in [(false, false), (false, true), (true, false), (true, true)] {
+            assert!(!prompt(background, wait).contains("tools.self.sleep"));
+        }
+    }
 
-        assert!(!without_prompt.contains("tools.self.sleep"));
-        assert!(with_prompt.contains("## Background processes"));
-        assert!(with_prompt.contains("tools.self.sleep"));
+    #[test]
+    fn turning_wait_on_or_off_rebuilds_the_system_prompt() {
+        let mut current = config();
+        current.settings.tools.background_processes = BackgroundProcessMode::Enabled;
+        let mut settings = current.settings.clone();
+        settings.tools.model_wait = model_wait::Mode::Enabled {
+            external_input: true,
+        };
+        let update = HarnessConfigUpdate {
+            settings: Some(settings),
+            ..HarnessConfigUpdate::default()
+        };
+
+        assert!(configuration_update_changes_system_prompt(
+            &current, &update
+        ));
     }
 }

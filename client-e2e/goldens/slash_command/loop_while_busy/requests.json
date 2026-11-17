@@ -37,7 +37,7 @@
  {
   "method": "workspace/prompt/prepare",
   "params": {
-   "message": "/loop",
+   "message": "/loop list",
    "sessionId": "00000000-0000-4000-8000-000000000001",
    "titleContent": null
   }
@@ -62,7 +62,7 @@
      "annotations": {},
      "content": [
       {
-       "text": "/loop",
+       "text": "/loop list",
        "type": "text"
       }
      ],
@@ -77,7 +77,7 @@
  {
   "method": "workspace/prompt/prepare",
   "params": {
-   "message": "/loop",
+   "message": "/loop list",
    "sessionId": "00000000-0000-4000-8000-000000000001",
    "titleContent": null
   }
@@ -92,63 +92,6 @@
     "command_type": "builtin"
    },
    "sessionId": "00000000-0000-4000-8000-000000000001"
-  }
- },
- {
-  "method": "workspace/prompt/prepare",
-  "params": {
-   "message": "/loop list",
-   "sessionId": "00000000-0000-4000-8000-000000000001",
-   "titleContent": null
-  }
- },
- {
-  "method": "session/turn/queue/replace",
-  "params": {
-   "entries": [
-    {
-     "annotations": {},
-     "content": [
-      {
-       "text": "/loop\n\n/loop list",
-       "type": "text"
-      }
-     ],
-     "entryId": "<client-message-id>",
-     "role": "user"
-    }
-   ],
-   "idempotencyKey": "<replacement-idempotency-key-1>",
-   "queueItemId": "00000000-0000-4000-8000-000000000003-2",
-   "sessionId": "00000000-0000-4000-8000-000000000001"
-  }
- },
- {
-  "method": "workspace/prompt/prepare",
-  "params": {
-   "message": "/loop",
-   "sessionId": "00000000-0000-4000-8000-000000000001",
-   "titleContent": null
-  }
- },
- {
-  "method": "telemetry/record",
-  "params": {
-   "correlateLastRequest": false,
-   "name": "vibe.slash_command_used",
-   "properties": {
-    "command": "loop",
-    "command_type": "builtin"
-   },
-   "sessionId": "00000000-0000-4000-8000-000000000001"
-  }
- },
- {
-  "method": "workspace/prompt/prepare",
-  "params": {
-   "message": "/loop list",
-   "sessionId": "00000000-0000-4000-8000-000000000001",
-   "titleContent": null
   }
  },
  {
@@ -167,7 +110,7 @@
      "annotations": {},
      "content": [
       {
-       "text": "/loop\n\n/loop list\n\n/loop cancel",
+       "text": "/loop list\n\n/loop cancel",
        "type": "text"
       }
      ],
@@ -175,7 +118,7 @@
      "role": "user"
     }
    ],
-   "idempotencyKey": "<replacement-idempotency-key-2>",
+   "idempotencyKey": "<replacement-idempotency-key-1>",
    "queueItemId": "00000000-0000-4000-8000-000000000003-2",
    "sessionId": "00000000-0000-4000-8000-000000000001"
   }
@@ -183,7 +126,7 @@
  {
   "method": "workspace/prompt/prepare",
   "params": {
-   "message": "/loop",
+   "message": "/loop list",
    "sessionId": "00000000-0000-4000-8000-000000000001",
    "titleContent": null
   }
@@ -198,14 +141,6 @@
     "command_type": "builtin"
    },
    "sessionId": "00000000-0000-4000-8000-000000000001"
-  }
- },
- {
-  "method": "workspace/prompt/prepare",
-  "params": {
-   "message": "/loop list",
-   "sessionId": "00000000-0000-4000-8000-000000000001",
-   "titleContent": null
   }
  },
  {
@@ -232,7 +167,7 @@
      "annotations": {},
      "content": [
       {
-       "text": "/loop\n\n/loop list\n\n/loop cancel\n\n/loop 90s check build status",
+       "text": "/loop list\n\n/loop cancel\n\n/loop 90s check build status",
        "type": "text"
       }
      ],
@@ -240,7 +175,7 @@
      "role": "user"
     }
    ],
-   "idempotencyKey": "<replacement-idempotency-key-3>",
+   "idempotencyKey": "<replacement-idempotency-key-2>",
    "queueItemId": "00000000-0000-4000-8000-000000000003-2",
    "sessionId": "00000000-0000-4000-8000-000000000001"
   }

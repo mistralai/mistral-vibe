@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from vibe.core.config import ProviderConfig, VibeConfigSchema
+from vibe.core.config import DEFAULT_PROVIDERS, ProviderConfig, VibeConfigSchema
 from vibe.setup.auth.onboarding_context import (
+    CONFIG_ERROR_MODEL_INVALID,
     CUSTOM_CONSOLE_URL_ENV_VAR,
     OnboardingContext,
     _normalize_origin,
@@ -226,45 +227,6 @@ def test_pinned_console_url_from_env_ignores_invalid_values(
     assert pinned_console_url_from_env() is None
 
 
-def test_onboarding_context_load_reads_pinned_console_url_from_env(
-    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
-) -> None:
-    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "https://console.acme.internal")
-    assert (
-        OnboardingContext.load().pinned_console_url == "https://console.acme.internal"
-    )
-
-
-def test_onboarding_context_load_prefers_explicit_pin_over_env(
-    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
-) -> None:
-    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "https://console.acme.internal")
-    context = OnboardingContext.load(
-        pinned_console_url="https://console.other.internal"
-    )
-    assert context.pinned_console_url == "https://console.other.internal"
-
-
-def test_onboarding_context_defaults_to_no_pin(_no_pinned_console_url: None) -> None:
-    assert OnboardingContext.load().pinned_console_url is None
-
-
-def test_onboarding_context_from_config_reads_pinned_console_url_from_env(
-    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
-) -> None:
-    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "https://console.acme.internal")
-    context = OnboardingContext.from_config(VibeConfigSchema.model_construct())
-    assert context.pinned_console_url == "https://console.acme.internal"
-
-
-def test_onboarding_context_load_explicit_none_pin_forces_no_pin(
-    monkeypatch: pytest.MonkeyPatch, _no_pinned_console_url: None
-) -> None:
-    monkeypatch.setenv(CUSTOM_CONSOLE_URL_ENV_VAR, "https://console.acme.internal")
-    context = OnboardingContext.load(pinned_console_url=None)
-    assert context.pinned_console_url is None
-
-
 def _split_provider(browser_base: str | None, api_base: str | None) -> ProviderConfig:
     return ProviderConfig(
         name="acme",
@@ -309,3 +271,17 @@ def test_pinned_console_api_base_returns_none_otherwise(
 ) -> None:
     provider = _split_provider(browser_base, api_base)
     assert pinned_console_api_base(provider, "https://console.acme.internal") is None
+
+
+def test_onboarding_context_from_config_reports_a_reason_when_provider_is_broken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = VibeConfigSchema.model_construct(
+        providers=[],
+        models=[{"name": "orphan", "provider": "ghost", "alias": "orphan"}],
+        active_model="orphan",
+    )
+    context = OnboardingContext.from_config(config)
+
+    assert context.config_error == CONFIG_ERROR_MODEL_INVALID
+    assert context.provider == DEFAULT_PROVIDERS[0]

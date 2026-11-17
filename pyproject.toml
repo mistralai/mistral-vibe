@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "3.1.2"
+version = "3.1.3"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -34,9 +34,11 @@ dependencies = [
     "attrs==26.1.0",
     "authlib==1.9.1",
     "beautifulsoup4==4.14.3",
+    "brotli==1.2.1 ; platform_python_implementation == 'CPython'",
+    "brotlicffi==1.2.1.0 ; platform_python_implementation != 'CPython'",
     "cachetools==7.0.6",
     "certifi==2026.10.19",
-    "cffi==2.0.0 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or platform_python_implementation != 'PyPy' or sys_platform == 'darwin' or sys_platform == 'win32'",
+    "cffi==2.1.1",
     "charset-normalizer==3.4.7",
     "click==8.3.3 ; sys_platform != 'emscripten'",
     "colorama==0.4.6 ; sys_platform == 'win32'",
@@ -48,8 +50,10 @@ dependencies = [
     "giturlparse==0.15.0",
     "google-auth==2.62.0",
     "googleapis-common-protos==1.74.0",
-    "h11==0.16.0 ; sys_platform != 'emscripten'",
+    "h11==0.16.0",
+    "httpcore==1.0.9",
     "httpcore2==2.16.0 ; sys_platform != 'emscripten'",
+    "httpx==0.28.1",
     "httpx2==2.16.0",
     "httpx2-jsfetch==1.0 ; sys_platform == 'emscripten'",
     "humanize==4.16.0",
@@ -68,8 +72,9 @@ dependencies = [
     "markdownify==1.2.3",
     "mcp==2.3.0",
     "mcp-types==2.3.0",
-    "miniaudio==1.71 ; (platform_machine == 'x86_64' and sys_platform == 'linux') or sys_platform == 'darwin' or sys_platform == 'win32'",
+    "miniaudio==1.73",
     "mistralai==3.5.0",
+    "mistralai-vibe-harness==0.1.22",
     "more-itertools==11.0.2",
     "opentelemetry-api==1.45.1",
     "opentelemetry-exporter-http-transport==0.66b1",
@@ -85,56 +90,45 @@ dependencies = [
     "ptyprocess==0.7.0",
     "pyasn1==0.6.5",
     "pyasn1-modules==0.4.2",
-    "pycparser==3.0 ; (implementation_name != 'PyPy' and platform_machine == 'x86_64' and sys_platform == 'linux') or (implementation_name != 'PyPy' and platform_python_implementation != 'PyPy') or (implementation_name != 'PyPy' and sys_platform == 'darwin') or (implementation_name != 'PyPy' and sys_platform == 'win32')",
-    "pydantic==2.13.4",
-    "pydantic-core==2.46.4",
+    "pycparser==3.0 ; implementation_name != 'PyPy'",
+    "pydantic==2.14.3",
+    "pydantic-core==2.50.4",
     "pydantic-settings==2.14.2",
     "pyjwt==2.15.1",
     "python-dateutil==2.9.0.post0",
     "python-dotenv==1.2.2",
     "python-multipart==0.0.32",
-    "pywin32==311 ; sys_platform == 'win32'",
+    "pywin32==312 ; sys_platform == 'win32'",
     "pywin32-ctypes==0.2.3 ; sys_platform == 'win32'",
-    "pywinpty==3.0.5 ; sys_platform == 'win32'",
+    "pywinpty==3.1.2 ; sys_platform == 'win32'",
     "pyyaml==6.0.3",
     "referencing==0.37.0",
     "requests==2.34.2",
     "rfc8785==0.1.4",
-    "rpds-py==0.30.0",
+    "rpds-py==2026.9.1",
     "secretstorage==3.5.0 ; sys_platform == 'linux'",
     "sentry-sdk==2.73.0",
-    "setproctitle==1.3.7",
+    "setproctitle==1.3.8",
     "six==1.17.0",
     "smmap==5.0.3",
     "socksio==1.0.0",
-    "soupsieve==2.9.2",
+    "soupsieve==4.0",
     "sse-starlette==3.4.1",
     "starlette==1.3.1",
+    "structlog==26.1.0",
+    "tenacity==9.2.1",
     "tomli-w==1.2.0",
     "tree-sitter==0.26.0",
     "tree-sitter-bash==0.25.1",
     "truststore==0.10.4",
     "typing-extensions==4.16.0",
-    "typing-inspection==0.4.2",
+    "typing-inspection==0.4.5",
     "urllib3==2.8.0",
-    "uuid-utils==1.0.0",
+    "uuid-utils==1.2.0",
     "uvicorn==0.46.0 ; sys_platform != 'emscripten'",
-    "watchfiles==1.2.0",
+    "watchfiles==1.3.0",
     "websockets==16.0",
 ]
-
-[project.optional-dependencies]
-# miniaudio is a default dependency only on macOS, Windows and x86_64 Linux,
-# where upstream publishes wheels (Windows on ARM64 has none but builds it
-# without trouble), so other platforms never build its sdist by default: it
-# links -ldl unconditionally and fails on OpenBSD. Editor voice features are
-# disabled at runtime when miniaudio is missing; the `voice` extra opts back in,
-# building it from source unless the index has a wheel (the release CI publishes
-# an aarch64 manylinux one to Artifact Registry, see the miniaudio-aarch64 job in
-# vibe-release-internal.yaml). `voice-aarch64` is the same extra, kept for
-# existing installs.
-voice = ["miniaudio>=1.59"]
-voice-aarch64 = ["miniaudio>=1.59"]
 
 [project.urls]
 Homepage = "https://github.com/mistralai/mistral-vibe"
@@ -250,6 +244,9 @@ build = [
 
 [tool.pyright]
 pythonVersion = "3.12"
+# Pydantic 2.14 types TypeAdapter and FieldInfo.annotation with PEP 747
+# TypeForm, which pyright accepts only behind this flag.
+enableExperimentalFeatures = true
 reportMissingTypeStubs = false
 reportPrivateImportUsage = false
 

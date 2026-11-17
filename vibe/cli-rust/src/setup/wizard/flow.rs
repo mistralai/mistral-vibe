@@ -83,7 +83,7 @@ pub async fn run_wizard(
                 state.redraw_pending = true;
             }
             _ = chat_tick.tick() => {
-                if app.view.banner.tick(crate::clock::now()) {
+                if app.view.banner.tick() {
                     state.redraw_pending = true;
                 }
             }

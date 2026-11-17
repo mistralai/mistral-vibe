@@ -1,10 +1,16 @@
-"""Validate an installed Vibe wheel owns both native delivery components."""
+"""Validate an installed Vibe wheel owns both native delivery components.
+
+It also checks that the target runtime dependency installed with it loads its
+native extension in the same process as the bundled Harness.
+"""
 
 from __future__ import annotations
 
 from importlib import metadata
 import os
 from pathlib import Path
+
+import mistralai.vibe.harness.core._native as target_runtime_native
 
 import mistralai_vibe_local_harness._native as harness_native
 import mistralai_vibe_local_harness.protocol as harness_protocol
@@ -27,6 +33,10 @@ def main() -> None:
     if not protocol_path.is_file():
         raise RuntimeError("Harness Python runtime is missing")
 
+    target_native_path = Path(target_runtime_native.__file__ or "")
+    if not target_native_path.is_file():
+        raise RuntimeError("Target runtime native extension is missing")
+
     vibe_module_path = vibe.__file__
     if vibe_module_path is None:
         raise RuntimeError("Vibe package location is unavailable")
@@ -41,6 +51,10 @@ def main() -> None:
     print(f"mistral-vibe {vibe_version}")
     print(f"Harness extension: {native_path.name}")
     print(f"Harness runtime: {protocol_path.name}")
+    print(
+        f"Target runtime {metadata.version('mistralai-vibe-harness')}: "
+        f"{target_native_path.name}"
+    )
     print(f"Rust CLI: {rust_cli_path.name}")
 
 

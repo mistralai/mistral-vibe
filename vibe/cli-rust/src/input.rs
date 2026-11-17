@@ -14,9 +14,9 @@ use crate::quit_manager::QuitConfirmKey;
 use crate::server::Client;
 use crate::utils::input_edit;
 use crate::{
-    agents, chat_input, clipboard, completion_manager, composer_yank, config, config_write,
-    connector_auth, debug_console, feedback, keymap, log_level_picker, mcp, mcp_oauth,
-    message_queue, model_picker, paste_files, paste_image, paste_path, question_input,
+    agents, chat_input, clipboard, completion_manager, composer_stash, composer_yank, config,
+    config_write, connector_auth, debug_console, feedback, keymap, log_level_picker, mcp,
+    mcp_oauth, message_queue, model_picker, paste_files, paste_image, paste_path, question_input,
     reverse_search, rewind, subagents, theme_picker, thinking_picker, turn_summary, voice,
 };
 
@@ -122,7 +122,8 @@ fn is_todo_key(key: &KeyEvent) -> bool {
 
 /// Handle application-level bindings before a modal consumes local keys.
 pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -> Option<bool> {
-    if key.code == KeyCode::BackTab {
+    // Where Tab moves through something, Shift+Tab moves back through it instead.
+    if key.code == KeyCode::BackTab && !crate::focus::tab_navigates(app) {
         agents::cycle(app, client);
         return Some(false);
     }
@@ -167,6 +168,9 @@ pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -
     }
     if is_ctrl_backslash(&key) {
         debug_console::toggle(app, client);
+        return Some(false);
+    }
+    if composer_reachable(app) && crate::tmux_hint::handle_key(app, &key) {
         return Some(false);
     }
     if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -323,6 +327,9 @@ fn handle_key_inner(
             _ => {}
         }
     }
+    if crate::goal::handle_prompt_key(app, client, &key) {
+        return false;
+    }
     // Queue selection locks the input: navigation, removal, edit and escape are
     // intercepted before any editing key (ADR 0013), only where its hints show.
     if app.queue.selected.is_some() && !app.queue.editing && composer_reachable(app) {
@@ -331,6 +338,10 @@ fn handle_key_inner(
     }
     if is_ctrl_r(&key) && !app.queue.editing && !composer_hidden(app) {
         reverse_search::open(app);
+        return false;
+    }
+    if composer_stash::is_stash_key(&key) && !app.queue.editing && !composer_hidden(app) {
+        composer_stash::toggle(app);
         return false;
     }
     // Editing a queued prompt: only Escape is special, the rest edits the text.
@@ -380,6 +391,7 @@ fn handle_key_inner(
     if let Some(action) = keymap::action_for(&key) {
         app.chat_input.scroll = None;
         if matches!(action, chat_input::Action::Undo | chat_input::Action::Redo) {
+            crate::long_paste::dismiss(app);
             crate::composer_history::restore(app, &action);
             return false;
         }
@@ -406,8 +418,6 @@ fn handle_key_inner(
             if action.is_kill() && !removed.is_empty() {
                 app.chat_input.kill_buffer = removed;
             }
-            // Raw-keystroke drops only get image mentions; mixed lists need a bracketed paste.
-            crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
             completion_manager::input_changed(app);
         } else {
             chat_input::apply(
@@ -506,11 +516,15 @@ fn handle_key_inner(
             if completion_manager::accept_on_enter(app) {
                 completion_manager::input_changed(app);
             }
+            let typed = !app.chat_input.full_text().trim().is_empty();
             let exit = submission::submit(app, client, config_tx);
             // `submission` clears the input on submit but does not know about the
             // chat input caret; keep it in bounds so the next render is consistent.
             app.chat_input.cursor = app.chat_input.cursor.min(app.chat_input.input.len());
             app.chat_input.anchor = None;
+            if typed && !exit {
+                composer_stash::pop_after_submit(app);
+            }
             return exit;
         }
         _ => {}
@@ -532,7 +546,7 @@ fn handle_escape(app: &mut App, client: &Arc<Client>) {
         return;
     }
     reset_history_state(app);
-    app.chat_input.clear();
+    crate::composer_history::clear(app);
     completion_manager::input_changed(app);
 }
 
@@ -645,10 +659,14 @@ pub fn handle_mcp_oauth_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) 
     }
 }
 
-/// The `/model` picker owns keys: arrows/jk navigate, Enter saves to config,
-/// `s` keeps the pick for this session only, Esc cancels.
+/// The `/model` picker owns keys: `/` focuses the fuzzy search (typing filters),
+/// arrows/jk navigate, Enter saves to config, `s` keeps the pick for this
+/// session only, Esc leaves search, clears the filter, then cancels.
 /// Unlike the theme picker, navigation does not live-preview.
 pub fn handle_model_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+    if model_picker::handle_search_key(app, &key) {
+        return;
+    }
     match key.code {
         KeyCode::Esc => model_picker::cancel(app),
         KeyCode::Up | KeyCode::Char('k') => model_picker::navigate(app, false),
@@ -773,7 +791,6 @@ fn recall_next(app: &mut App) {
 /// the loaded-entry state.
 fn load_history_entry(app: &mut App, entry: String) {
     crate::long_paste::load_collapsed(app, entry);
-    crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
     park_after_load(app);
 }
 
@@ -842,14 +859,15 @@ fn handle_paste_inner(app: &mut App, text: &str) -> Option<(usize, String, Vec<S
     app.chat_input.normalize_positions();
     app.chat_input.scroll = None;
     reset_history_state(app);
-    // Pasting a collapsed paste again shows it in full instead of adding a copy.
+    // Pasting a collapsed paste or image path again shows it as text instead of adding a copy.
     if crate::long_paste::expand(app, text) {
         completion_manager::input_changed(app);
         return None;
     }
     let names = app.chat_input.mode.names_images();
     if let Some(paths) = paste_path::pasted_image_paths(text).filter(|_| names) {
-        paste_files::insert_images(app, &paths);
+        let span = paste_files::insert_images(app, &paths);
+        crate::long_paste::offer_literal(app, text, span);
         completion_manager::input_changed(app);
         return None;
     }
@@ -878,21 +896,8 @@ fn handle_paste_inner(app: &mut App, text: &str) -> Option<(usize, String, Vec<S
     let start = app.chat_input.cursor;
     input_edit::insert(&mut app.chat_input.input, &mut app.chat_input.cursor, text);
     app.chat_input.sync_mentions_at(start);
-    let input = &app.chat_input.input;
-    let (prefix, suffix) = (
-        input[..start].to_owned(),
-        input[app.chat_input.cursor..].to_owned(),
-    );
-    crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
     completion_manager::input_changed(app);
-    let input = &app.chat_input.input;
-    let kept = input.len() >= prefix.len() + suffix.len()
-        && input.starts_with(&prefix)
-        && input.ends_with(&suffix);
-    (kept && !candidates.is_empty()).then(|| {
-        let raw = input[start..input.len() - suffix.len()].to_owned();
-        (start, raw, candidates)
-    })
+    (!candidates.is_empty()).then(|| (start, text.to_owned(), candidates))
 }
 
 /// Ctrl+C ladder; returns true to exit.
@@ -900,6 +905,10 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
     // The modal hides the composer, so it closes before an unseen draft is cleared or a subagent view arms quit.
     if app.focus() == Focus::ArtifactsModal {
         crate::artifacts_modal::close(app);
+        return false;
+    }
+    if app.focus() == Focus::Loops {
+        crate::loops::close(app);
         return false;
     }
     // The subagent view is checked before touching the input or the queue.
@@ -913,7 +922,7 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
         return false;
     }
     if !app.chat_input.full_text().is_empty() {
-        app.chat_input.clear();
+        crate::composer_history::clear(app);
         reset_history_state(app);
         completion_manager::input_changed(app);
         app.quit.cancel_confirmation();

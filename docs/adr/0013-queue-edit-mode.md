@@ -2,8 +2,9 @@
 
 ## Decision
 
-When an agent turn is active and the app-server prompt queue is non-empty,
-pressing Up enters queue selection mode. The newest queued prompt is
+When the app-server prompt queue is non-empty and either an agent turn is
+active or the server holds the queue paused (after an interrupted or failed
+turn), pressing Up enters queue selection mode. The newest queued prompt is
 highlighted while the input remains focused and locked.
 
 In selection mode:
@@ -27,6 +28,23 @@ queue accepts user turns only.
 When the agent is busy and the queue is empty, Up falls back to normal history
 navigation.
 
+## Paused queue
+
+An interrupt or a failed turn leaves the queue paused, and the user most
+often wants to revise those prompts before releasing them. Queue mode stays
+available there, and the paused queue header names Up next to Enter until
+queue mode opens, where both keys act on the selection. Edits and
+removals keep the queue paused, and an emptied edit never releases it. An empty
+Enter outside queue mode resumes the queue, and so does a new prompt or skill
+typed at the composer, which joins the queue and sends it along.
+
+Up therefore no longer recalls input history while a paused queue holds
+prompts. This is the same precedence as during a turn and only lasts while the
+queue holds prompts, since the server never keeps an empty queue paused. The
+history entries Up would recall first are those queued prompts, and editing a
+recalled copy would enqueue a duplicate. Ctrl+R still searches the whole
+history.
+
 ## Merged delivery
 
 The CLI keeps at most one app-server queue item for everything queued during a
@@ -39,7 +57,9 @@ time — the desktop app keeps turn-by-turn delivery.
 
 Each queued prompt still has its own transcript entry, so queue selection can
 navigate, edit, and remove prompts individually; edit and remove re-`replace`
-the merged item with the remaining prompts. On resume the merged item is one
+the merged item with the remaining prompts. Removing the prompt whose ID keys
+the merged item hands that ID to the oldest remaining prompt first, since the
+server echoes the merged entry under it. On resume the merged item is one
 combined user history entry, so a resumed queue shows the prompts as a single
 combined message.
 

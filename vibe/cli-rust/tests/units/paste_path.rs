@@ -8,7 +8,7 @@ use vibe_rs::app::App;
 use vibe_rs::input;
 use vibe_rs::paste_path::{
     contains_image_path_mention, has_supported_path_root, image_path_mention_on, pasted_image_path,
-    pasted_image_path_on, rewrite_bare_image_paths_in_text, rewrite_bare_image_paths_in_text_on,
+    pasted_image_path_on,
 };
 
 use crate::support::type_text;
@@ -87,42 +87,21 @@ fn leaves_non_images_relative_paths_and_existing_mentions_unchanged() {
 }
 
 #[test]
-fn rewrites_multiple_bare_paths_and_is_idempotent() {
-    let dir = TestDir::new();
-    let first = dir.image("first.png");
-    let second = dir.image("second.webp");
-    let input = format!("compare {} and '{}'", first.display(), second.display());
-    let expected = format!("compare @{} and @{}", first.display(), second.display());
-
-    let rewritten = rewrite_bare_image_paths_in_text(&input);
-    assert_eq!(rewritten, expected);
-    assert_eq!(rewrite_bare_image_paths_in_text(&rewritten), rewritten);
-}
-
-#[test]
-fn leaves_multiline_whole_paste_for_the_full_text_scanner() {
+fn a_multiline_paste_with_prose_is_no_image() {
     let dir = TestDir::new();
     let image = dir.image("shot.png");
     let pasted = format!("{}\nother line", image.display());
 
     assert_eq!(maybe_prepend_at_for_image_path(&pasted), pasted);
-    assert_eq!(
-        rewrite_bare_image_paths_in_text(&pasted),
-        format!("@{}\nother line", image.display())
-    );
 }
 
 #[test]
-fn rewrites_image_paths_without_probing_the_filesystem() {
+fn detects_image_paths_without_probing_the_filesystem() {
     let missing = "/definitely-missing-vibe/image.png";
 
     assert_eq!(
         maybe_prepend_at_for_image_path(missing),
         format!("@{missing}")
-    );
-    assert_eq!(
-        rewrite_bare_image_paths_in_text(&format!("inspect {missing}")),
-        format!("inspect @{missing}"),
     );
 }
 
@@ -152,17 +131,14 @@ fn typed(text: &str) -> String {
 }
 
 #[test]
-fn a_typed_quoted_image_path_becomes_a_mention_once_its_quote_closes() {
-    assert_eq!(typed("'/tmp/vibe/shot.png"), "'/tmp/vibe/shot.png");
-    assert_eq!(typed("'/tmp/vibe/shot.png'"), "@/tmp/vibe/shot.png");
-}
-
-#[test]
-fn a_typed_quoted_image_path_with_spaces_keeps_its_quotes_in_the_mention() {
-    assert_eq!(
-        typed("'/tmp/vibe/has space.png'"),
-        "@'/tmp/vibe/has space.png'"
-    );
+fn typed_image_paths_stay_as_typed() {
+    for text in [
+        "open /tmp/vibe/shot.png",
+        "'/tmp/vibe/has space.png'",
+        "rename /tmp/vibe/shot.png.bak please",
+    ] {
+        assert_eq!(typed(text), text);
+    }
 }
 
 #[test]
@@ -187,10 +163,6 @@ fn recognizes_windows_drive_and_unc_roots_without_host_dependent_paths() {
     assert_eq!(
         maybe_prepend_at_for_image_path_on(unc, true),
         format!("@{unc}")
-    );
-    assert_eq!(
-        rewrite_bare_image_paths_in_text_on(&format!("compare {drive} and {unc}"), true),
-        format!("compare @'{drive}' and @{unc}")
     );
 }
 

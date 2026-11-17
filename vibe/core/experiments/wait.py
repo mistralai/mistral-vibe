@@ -2,9 +2,11 @@
 
 With no cached eval result, a session whose model is not set may be about to
 get it from an experiment: its first turn waits for the eval, for at most
-``EVAL_WAIT_CAP_SECONDS`` from when the session opened. Once an eval fails, or
-is still running when a cap expires, no later session in the process waits:
-the process's ``ExperimentsService`` holds that memory.
+``EVAL_WAIT_CAP_SECONDS`` from when the session opened. A pick of a model the
+config does not offer yet waits for it too, whatever the session's model.
+
+Once an eval fails, or is still running when a cap expires, no later session
+in the process waits: the process's ``ExperimentsService`` holds that memory.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, Any
 
+from vibe.core.config._self_hosted import experiments_allowed
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.experiments._constants import EVAL_WAIT_CAP_SECONDS
 from vibe.core.experiments.cache import load_cached_eval_response
@@ -28,29 +31,29 @@ if TYPE_CHECKING:
 def experiments_eval_runs(
     config: VibeConfigSchema, credentials: PlatformCredentialFactory | None = None
 ) -> bool:
-    """Whether a session on *config* sends an eval: telemetry, the A/B opt-in
-    and a Mistral credential are all needed.
+    """Whether a session on *config* sends an eval: telemetry, the A/B opt-in,
+    a deployment that is not self-hosted and a Mistral credential are all
+    needed.
     """
-    if not (config.enable_telemetry and config.experiments.enable):
+    if not experiments_allowed(config):
         return False
     return mistral_credentials(config, credentials) is not None
 
 
-def experiments_wait_needed(
+def experiments_pending(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
     failures: FetchFailures,
     credentials: PlatformCredentialFactory | None = None,
 ) -> bool:
-    """Whether a session opening on *orchestrator* must hold its first turn for
-    the eval.
+    """Whether the variants of a session opening on *orchestrator* may still
+    change: an eval runs, none failed in this process, and none is held.
 
-    ``active_model`` is empty when nothing pins a model, so the session would
-    run the default model, which the routing experiment may replace.
+    Only a session left on the default model, or a pick of a model the config
+    does not offer yet, has something to wait for: each waiter checks that.
     """
-    config = orchestrator.config
-    if not experiments_eval_runs(config, credentials):
+    if not experiments_eval_runs(orchestrator.config, credentials):
         return False
-    if config.active_model or failures.failed:
+    if failures.failed:
         return False
     return not _loaded_the_cached_eval(orchestrator, credentials)
 

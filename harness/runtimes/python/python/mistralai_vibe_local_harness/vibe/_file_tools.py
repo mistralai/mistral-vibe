@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -306,7 +307,10 @@ def _file_tool_lock(
     if authorized is not None:
         key = str(authorized)
     elif config.sandbox is None:
-        target = Path(str(raw_path)).expanduser()
+        raw = str(raw_path)
+        if os.name == "nt":
+            raw = _sandbox_helper.normalize_windows_drive_path(raw)
+        target = Path(raw).expanduser()
         if not target.is_absolute():
             target = Path(config.workspace.cwd) / target
         key = str(target.resolve())

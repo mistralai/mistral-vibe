@@ -161,11 +161,14 @@ pub fn expand(text: &str, images: &[ImageAttachment]) -> String {
 
 /// Undo `expand` on a prepared prompt: the model reads the placeholders, and
 /// each snapshot of a placeholder's image carries that placeholder as its name.
-/// Placeholders sharing one path (the same file pasted twice) were prepared
-/// once, so the later ones share that snapshot rather than the unsent file.
-pub fn collapse(prepared: &mut PreparedPrompt, text: &str, images: &[ImageAttachment]) {
+/// Placeholders sharing one path share its snapshot; one without any is an error, never its original file.
+pub fn collapse(
+    prepared: &mut PreparedPrompt,
+    text: &str,
+    images: &[ImageAttachment],
+) -> Result<(), String> {
     let mut snapshots: Vec<(&str, ImageAttachment)> = Vec::new();
-    for (label, path) in placeholder_paths(images) {
+    for (label, path) in placeholder_paths(images).filter(|(label, _)| text.contains(label)) {
         if let Some(image) = prepared.images.iter_mut().find(|image| image.alias == path) {
             image.alias = label.to_owned();
             snapshots.push((path, image.clone()));
@@ -173,10 +176,15 @@ pub fn collapse(prepared: &mut PreparedPrompt, text: &str, images: &[ImageAttach
             let mut shared = snapshot.clone();
             shared.alias = label.to_owned();
             prepared.images.push(shared);
+        } else {
+            return Err(format!(
+                "Couldn't attach {label}: {path} is missing or unreadable"
+            ));
         }
     }
     prepared.display_text = text.to_owned();
     prepared.prompt_text = Some(text.to_owned());
+    Ok(())
 }
 
 fn placeholder_paths(images: &[ImageAttachment]) -> impl Iterator<Item = (&str, &str)> {

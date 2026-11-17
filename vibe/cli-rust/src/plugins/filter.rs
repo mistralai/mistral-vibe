@@ -3,21 +3,14 @@
 use crossterm::event::KeyEvent;
 
 use crate::app::App;
-use crate::search_field::{self, Outcome};
+use crate::search_field;
 
 /// Route a key in the list view; false when the list handles it.
 pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if app.plugins.viewing.is_some() {
         return false;
     }
-    match search_field::handle_key(&mut app.plugins.filter, &key) {
-        Outcome::Pass => false,
-        Outcome::Consumed => true,
-        Outcome::Filtered => {
-            super::reset_highlight(app);
-            true
-        }
-    }
+    search_field::handle_key(&mut app.plugins.filter, &key).handled(|| super::reset_highlight(app))
 }
 
 pub fn paste(app: &mut App, text: &str) {

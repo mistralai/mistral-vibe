@@ -78,6 +78,15 @@ def _now_unix_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
+def interrupted_model_wait(
+    action: RustRuntimeBuiltinToolCallAction,
+) -> RustToolSucceededEvent:
+    """A wait cut short by the Session closing answers ``timeout``, as one
+    recovered after a restart does: the model calls ``wait`` again.
+    """
+    return _waited(action, "timeout")
+
+
 def _waited(
     action: RustRuntimeBuiltinToolCallAction,
     reason: Literal["input_available", "timeout"],
@@ -131,4 +140,9 @@ async def execute_self_tool(
         return _failed(action, str(exc))
 
 
-__all__ = ["ModelInputSignal", "execute_model_wait", "execute_self_tool"]
+__all__ = [
+    "ModelInputSignal",
+    "execute_model_wait",
+    "execute_self_tool",
+    "interrupted_model_wait",
+]

@@ -5,6 +5,98 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.3] - 2026-11-17
+
+### Added
+
+- `Ctrl+S` stashes the input box draft, which comes back after you send another message
+- `/goal <objective>` sets a goal Vibe keeps working on across turns until it is done. `/goal edit`, `/goal pause`, `/goal resume` and `/goal clear` manage it
+- `max_goal_token_budget` in `config.toml` caps the token budget a goal may set, and is the budget of a goal set without one
+- The `/model` picker has a `/` fuzzy search row that filters the model list as you type. Arrows and Enter keep working while searching, and `Esc` leaves the search, clears the filter, then closes
+- `vibe -p --thinking LEVEL` sets the model's thinking level for one run, without saving it
+- `/raw [on|off]` shows agent messages as raw Markdown, so a selection copies their source text
+- `pre_llm` hooks run before each call to the model and can stop the turn
+- `post_llm` hooks run after each model response, tool calls included, and can ask the model to try again, within a budget of 3 retries per turn shared with `post_agent` hooks
+- `/loop` on its own opens a loop manager that lists the scheduled loops with their schedule and next run, deletes one with `d`, and adds one from a title, an interval or cron, and instructions with `n`. While the session is idle, the row above the input shows the next scheduled loop and its title
+- Inside tmux with `mouse off`, a startup warning explains how to scroll the conversation, and `Ctrl+N` hides it for good
+- `/trusted-folders` lists trusted and untrusted folders, flips or forgets a decision, and trusts a new folder with path completion
+- The `post_agent` hook payload includes `turn_id` and `response_text`, the turn's final answer
+- `show_dangerous_directory_warning = false` hides the startup warning shown when Vibe runs in the home directory or another risky folder
+
+### Changed
+
+- When Vibe quits, it waits for `session_end` and `notification` hooks still running for 2s at most, instead of 5s
+- A project's `.vibe/config.toml` or an agent profile can turn usage telemetry off but no longer turn it back on: its `enable_telemetry = true` is ignored with a warning
+- `post_agent` hooks now share their 3 retries per turn with `post_llm` hooks. A retry the turn has no step left for fails the turn, naming the hook, instead of an internal error
+- `vibe -p` prints the reason when a hook ends the turn without the model's answer
+- Image paths are only turned into image placeholders when pasted or dropped on their own, never while typing or when recalling a prompt. Pasting a path again right after it became an image placeholder or `@` mention keeps it as plain text
+- Picking a model's default thinking level no longer pins it in your config, so the model follows later changes of that default
+- A pause inside a script the agent runs now reads "Script in progress, next step in 5s" instead of "Sleeping"
+- When your API key does not use your Vibe Pro plan, a box under the banner now says so on every start and explains how to switch keys, and `/whoami` explains it too. The Vibe Pro upgrade offer now shows in its own box under the release notes
+- Vibe no longer shows a warning when a provider's model catalog has no entry for the model or cannot be reached, since it falls back to its built-in model table. The warning is only written to `vibe.log`
+- When you return to an answered question, a green `›` marks the answer you gave
+- On a question you answered with your own text, ←→ keep switching questions and `e` edits the answer
+- After interrupting a turn, ↑ selects the queued messages so you can edit or remove them before sending the queue
+- When your Mistral provider's `api_base` is outside `mistral.ai` and its subdomains (a self-hosted deployment), Vibe no longer contacts Mistral's experiment service and no longer sends crash reports to Mistral, even with telemetry on
+- Voice dictation and read-aloud now use the server of your Mistral provider's `api_base` instead of `api.mistral.ai` (except `api.eu.mistral.ai` and `api.us.mistral.ai`, which keep `api.mistral.ai`), unless `transcribe_providers` or `tts_providers` in your config set another address
+- A model's own `auto_compact_threshold`, such as the one the model catalog sets, now wins over a top-level one, including one from your organization's admin config. To apply one value to every model, an admin adds a `[[models]]` entry per model with its `name`, `provider` and `auto_compact_threshold`
+- The welcome banner cat plays one animation round on start and stops. A click on it replays the round
+- Voice features are now installed by default on ARM64 Linux, so the `voice` and `voice-aarch64` extras are no longer needed
+- Shell commands that read protected files now ask for approval even when the reading command is otherwise allowed, in POSIX shells and PowerShell. When Vibe cannot tell exactly which files a read touches (variables, brace expansion, recursive or piped reads, a change of directory, an interpreter wrapper), the approval covers only that exact command
+- `/resume` shows a `Resuming` spinner while the picked session loads
+- Mistral Large 4 is now the default model. To stay on Mistral Medium 3.5, or if your own Mistral server does not offer Large 4, set `active_model = "mistral-medium-3.5"`
+
+### Fixed
+
+- With tool calls made together, each `pre_tool` hook line shows above its own tool instead of all of them above the first tool
+- Undo now restores a prompt draft cleared with `Ctrl+C` or a double `Esc`
+- Approving permanently no longer fails after the directory Vibe was started in is deleted
+- `vibe.log` no longer reports a model provided by an experiment as unavailable at startup, and reports a model that is really missing only once per process
+- Allowing a tool for the session or permanently now also approves the parallel calls it covers, instead of asking for each one
+- Reaching `max_subagents` no longer blocks new subagents: the one that has waited longest is closed to make room, up to 128 subagents per session
+- On a first run, `--model` naming a model from Mistral's model list no longer fails with "Unknown model" while that list is still loading
+- Installing or upgrading Vibe on Python 3.15 no longer fails building `cffi` or `rpds-py` from source, and the documented install commands now pass `--python 3.14`
+- A pasted image that cannot be attached now shows why, such as a full disk or a missing file, instead of failing with 'Image file is outside the workspace or session attachments'
+- Third-party providers that add `name` to streamed chunks after the first one (such as OVHcloud AI Endpoints) no longer fail every call
+- On Windows, auto-approved file reads and writes on Git Bash paths like `/c/Users/...` no longer land in a stray `C:\c\...` directory
+- Sessions with many images or large tool results no longer become impossible to resume with "stored JSON document is at capacity: runtime-state.json"
+- Smart approve no longer asks for approval on every tool call when the session uses a model that rejects temperature 0, such as some reasoning models
+- Subagents no longer fail with "child Session does not retain the requested generation" when a `pre_agent` hook is configured
+- A subagent's view now names the model its `active_model` selects instead of the main session's model
+- Resuming a session that used many subagents no longer takes minutes to show the prompt
+- First run on Linux without an API key no longer hangs at "Starting the app server…" waiting on a keyring unlock prompt
+- A `VIBE_*` environment variable Vibe cannot use now shows a warning naming the wrong fields, instead of being ignored silently
+- Tool filters naming a former tool, such as `grep` or `web_fetch`, now show a warning saying what replaced it, rather than silently matching nothing
+- The install script and `vibe update` now work behind TLS-inspecting corporate proxies (uv 0.11+): the install script makes uv trust the system certificate store, and `vibe update` does so when `enable_system_trust_store` is on
+- A third-party provider that ends its answer without any content is now retried twice, then fails the turn with a clear error instead of being retried for minutes
+- A folder whose only project config is `.vibe/hooks.toml` or `.vibe/skills.toml` now asks to be trusted, and `vibe -p` warns that it is ignored until `--trust`, instead of skipping it silently
+- On Windows, creating a new file in a git worktree or a repository with `.gitattributes` no longer hangs
+- On Windows, Enter and Ctrl shortcuts keep working after a command run by the agent changes the console's input mode
+- Question tabs wrap onto several rows in narrow terminals instead of being cut off
+- Removing the oldest of several queued messages no longer shows the remaining one twice once it is sent
+- `@` file completion now finds files anywhere in large repositories, not only those sorted among the first 32,000 paths
+- `vibe --setup` onboarding screens no longer go blank in small terminals: the theme picker and the sign-in options render in short terminals, with an enlarge-terminal notice only when nothing fits
+- A trusted folders file that cannot be read or parsed is now kept instead of being reset to empty at startup
+- Plugins are no longer listed under "Not loaded" in `/plugins` by mistake: plugin knowledge no longer fails with a permission error, and plugins that loaded are no longer listed there or warned about at startup because of informational notes
+- A turn that was running while the computer slept now continues after the wake instead of failing with an invalid API key error: it waits up to two minutes for your Mistral sign-in, and retries once with a refreshed one
+- A config list entry missing its `name`, such as an empty `[[mcp_servers]]`, now shows a configuration error saying what to fix instead of an internal error
+- `mistral-large-latest` is treated as the model the Mistral API serves under it, today Mistral Large 4: a 1,048,576-token window, low, medium and high thinking (`off` uses low), and earlier reasoning kept in its requests
+- Payment refusals now say why: a turn refused because the account has no credit left says so instead of a generic backend error, and an HTTP 402 refusal, such as a reached spending limit, shows the reason without the raw error body and no longer offers `/retry`
+- Requests no longer fail with `process() takes no keyword arguments` when an old `brotli` package is installed, as in some conda environments
+- Connectors exposing more than 128 tools now load with all their tools instead of being dropped
+- Moving a local session to another project right after its turn ends no longer fails with "Session is already open"
+- Quitting while the session is still shutting down no longer crashes the app server
+- Plugins that ship manifests for several agents, such as Superpowers, now load instead of being rejected as ambiguous
+- Under OIDC sign-in, model calls now use the session's own organization and workspace instead of the first one your account can reach, which could be an organization without access to the model
+- A model your plan does not include no longer makes every later message fail with "credential was rejected" until a restart
+- When the provider refuses a model call for a reason other than the API key, such as the model not being in your subscription tier, Vibe now shows the provider's reason instead of calling it an invalid API key
+- Pull request status keeps syncing between Vibe sessions on Linux when the file watcher limit is reached
+- Typing `/teleport` or `/remote-project` now shows that the command was removed instead of sending it to the model
+
+### Removed
+
+- The "Hello <name>, how can I help you?" greeting under the startup banner, and its `show_greeting` setting. Configs that still set `show_greeting` load without a warning
+
 ## [3.1.2] - 2026-11-10
 
 ### Added

@@ -2,28 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-import tomllib
-from typing import Any
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, Field, HttpUrl, TypeAdapter, ValidationError
+from pydantic import HttpUrl, TypeAdapter, ValidationError
 
 from vibe.core.config import (
-    DEFAULT_ACTIVE_MODEL_CONFIG,
     DEFAULT_CONSOLE_BASE_URL,
-    DEFAULT_MODELS,
     DEFAULT_PROVIDERS,
     DEFAULT_VIBE_BASE_URL,
-    ModelConfig,
     ProviderConfig,
     VibeConfigSchema,
 )
-from vibe.core.config.harness_files import get_harness_files_manager
-from vibe.core.config.models import normalize_model_configs
 from vibe.observability.logging import logger
 from vibe.setup.auth.browser_sign_in_gateway import normalize_url_origin
-
-_ONBOARDING_LIST_ADAPTER = TypeAdapter(list[Any])
 
 
 def _normalize_origin(value: str) -> str:
@@ -103,6 +94,14 @@ def browser_auth_account_base(browser_base_url: str, api_base_url: str | None) -
 CUSTOM_CONSOLE_URL_ENV_VAR = "VIBE_CUSTOM_CONSOLE_URL"
 
 
+def _find_env_value(name: str) -> str | None:
+    expected_name = name.upper()
+    for env_name, value in os.environ.items():
+        if env_name.upper() == expected_name:
+            return value
+    return None
+
+
 def pinned_console_url_from_env() -> str | None:
     """Administrator-pinned console URL for sign-in (`VIBE_CUSTOM_CONSOLE_URL`).
 
@@ -144,202 +143,16 @@ def pinned_console_api_base(provider: ProviderConfig, pin: str) -> str | None:
     return None
 
 
-def _default_provider_payloads() -> list[dict[str, Any]]:
-    return [provider.model_dump(mode="json") for provider in DEFAULT_PROVIDERS]
-
-
-def _default_model_payloads() -> list[dict[str, Any]]:
-    return [model.model_dump(mode="json") for model in DEFAULT_MODELS]
-
-
-class _OnboardingSnapshot(BaseModel):
-    active_model: str = DEFAULT_ACTIVE_MODEL_CONFIG.alias
-    vibe_base_url: str = DEFAULT_VIBE_BASE_URL
-    console_base_url: str = DEFAULT_CONSOLE_BASE_URL
-    providers: list[Any] = Field(default_factory=_default_provider_payloads)
-    models: list[Any] = Field(default_factory=_default_model_payloads)
-
-
-_ONBOARDING_FIELDS = frozenset(_OnboardingSnapshot.model_fields)
-
-
-def _can_resolve_provider_from_explicit_overrides(
-    explicit_overrides: dict[str, Any],
-) -> bool:
-    return "providers" in explicit_overrides
-
-
-def _find_env_value(name: str) -> str | None:
-    expected_name = name.upper()
-    for env_name, value in os.environ.items():
-        if env_name.upper() == expected_name:
-            return value
-    return None
-
-
-def _find_env_list(name: str) -> list[Any] | None:
-    if not (value := _find_env_value(name)):
-        return None
-    try:
-        return _ONBOARDING_LIST_ADAPTER.validate_json(value)
-    except ValueError:
-        logger.warning("Ignoring unparseable %s environment value", name)
-        return None
-
-
-def _load_onboarding_toml_payload() -> dict[str, Any]:
-    try:
-        harness_files = get_harness_files_manager()
-    except RuntimeError:
-        return {}
-
-    config_file = harness_files.config_file
-    if config_file is None:
-        return {}
-
-    try:
-        with config_file.open("rb") as file:
-            toml_data = tomllib.load(file)
-    except FileNotFoundError:
-        return {}
-    except tomllib.TOMLDecodeError as err:
-        raise RuntimeError(f"Invalid TOML in {config_file}: {err}") from err
-    except OSError as err:
-        raise RuntimeError(f"Cannot read {config_file}: {err}") from err
-
-    payload = {
-        field_name: toml_data[field_name]
-        for field_name in _ONBOARDING_FIELDS
-        if field_name in toml_data
-    }
-    if "models" in payload:
-        payload["models"] = _normalize_onboarding_model_payloads(payload["models"])
-    return payload
-
-
-def _normalize_onboarding_model_payloads(value: Any) -> Any:
-    normalized = normalize_model_configs(value)
-    if isinstance(normalized, dict):
-        return list(normalized.values())
-    return normalized
-
-
-def _load_onboarding_env_payload_for_fields(
-    field_names: frozenset[str],
-) -> dict[str, Any]:
-    payload: dict[str, Any] = {}
-
-    if (
-        "active_model" in field_names
-        and (active_model := _find_env_value("VIBE_ACTIVE_MODEL")) is not None
-    ):
-        payload["active_model"] = active_model
-    if (
-        "providers" in field_names
-        and (providers := _find_env_list("VIBE_PROVIDERS")) is not None
-    ):
-        payload["providers"] = providers
-    if (
-        "models" in field_names
-        and (models := _find_env_list("VIBE_MODELS")) is not None
-    ):
-        payload["models"] = models
-    if (
-        "vibe_base_url" in field_names
-        and (vibe_base_url := _find_env_value("VIBE_VIBE_BASE_URL")) is not None
-    ):
-        payload["vibe_base_url"] = vibe_base_url
-    if (
-        "console_base_url" in field_names
-        and (console_base_url := _find_env_value("VIBE_CONSOLE_BASE_URL")) is not None
-    ):
-        payload["console_base_url"] = console_base_url
-
-    return payload
-
-
-def _explicit_onboarding_overrides(**overrides: Any) -> dict[str, Any]:
-    return {
-        field_name: value
-        for field_name, value in overrides.items()
-        if field_name in _ONBOARDING_FIELDS
-    }
-
-
-def _build_onboarding_snapshot_payload(**overrides: Any) -> dict[str, Any]:
-    explicit_overrides = _explicit_onboarding_overrides(**overrides)
-    payload = _OnboardingSnapshot().model_dump()
-
-    if explicit_overrides.keys() >= _ONBOARDING_FIELDS:
-        payload.update(explicit_overrides)
-        return payload
-
-    try:
-        payload.update(_load_onboarding_toml_payload())
-    except RuntimeError:
-        if not _can_resolve_provider_from_explicit_overrides(explicit_overrides):
-            raise
-    payload.update(
-        _load_onboarding_env_payload_for_fields(
-            _ONBOARDING_FIELDS.difference(explicit_overrides)
-        )
-    )
-    payload.update(explicit_overrides)
-    return payload
-
-
-def _validated_payloads[PayloadConfig: ModelConfig | ProviderConfig](
-    payloads: list[Any], model_type: type[PayloadConfig]
-) -> list[PayloadConfig]:
-    validated_payloads: list[PayloadConfig] = []
-    for payload in payloads:
-        if isinstance(payload, model_type):
-            validated_payloads.append(payload)
-            continue
-        if not isinstance(payload, dict):
-            continue
-        try:
-            validated_payloads.append(model_type.model_validate(payload))
-        except (ValidationError, ValueError):
-            continue
-    return validated_payloads
-
-
-def _resolve_provider(
-    *, active_model: str, snapshot: _OnboardingSnapshot
-) -> ProviderConfig:
-    providers_by_name: dict[str, ProviderConfig] = {}
-    for provider in _validated_payloads(snapshot.providers, ProviderConfig):
-        providers_by_name.setdefault(provider.name, provider)
-
-    models = _validated_payloads(snapshot.models, ModelConfig)
-
-    for model_alias in (active_model, DEFAULT_ACTIVE_MODEL_CONFIG.alias):
-        for model in models:
-            if model.alias != model_alias:
-                continue
-            if provider := providers_by_name.get(model.provider):
-                return provider
-
-    for model in models:
-        if provider := providers_by_name.get(model.provider):
-            return provider
-
-    if len(providers_by_name) == 1:
-        return next(iter(providers_by_name.values()))
-
-    return DEFAULT_PROVIDERS[0]
-
-
-_PINNED_CONSOLE_URL_UNSET: Any = object()
-
-
 @dataclass(frozen=True)
 class OnboardingContext:
     provider: ProviderConfig
     vibe_base_url: str = DEFAULT_VIBE_BASE_URL
     console_base_url: str = DEFAULT_CONSOLE_BASE_URL
     pinned_console_url: str | None = None
+    # Why the provider is the default one, when the config could not resolve
+    # an active provider: protocol surfaces report it instead of silently
+    # answering over the default provider.
+    config_error: str | None = None
 
     @property
     def supports_browser_sign_in(self) -> bool:
@@ -347,45 +160,39 @@ class OnboardingContext:
 
     @classmethod
     def from_config(cls, config: VibeConfigSchema) -> OnboardingContext:
-        try:
-            provider = config.get_active_provider()
-        except ValueError:
-            logger.warning(
-                "Onboarding config could not resolve an active provider; "
-                "falling back to the default provider so setup can open.",
-                exc_info=True,
-            )
-            provider = DEFAULT_PROVIDERS[0]
+        provider, config_error = resolve_active_provider_or_reason(config)
         return cls(
             provider=provider,
             vibe_base_url=config.vibe_base_url,
             console_base_url=config.console_base_url,
             pinned_console_url=pinned_console_url_from_env(),
+            config_error=config_error,
         )
 
-    @classmethod
-    def load(cls, **overrides: Any) -> OnboardingContext:
-        # Sentinel: an explicit pinned_console_url=None forces "no pin" even
-        # when VIBE_CUSTOM_CONSOLE_URL is set.
-        pinned_console_url = overrides.pop(
-            "pinned_console_url", _PINNED_CONSOLE_URL_UNSET
+
+# The machine-readable reason surfaces report for a degraded config, in the
+# app server's snake_case reason vocabulary.
+CONFIG_ERROR_MODEL_INVALID = "model_config_invalid"
+
+
+def resolve_active_provider_or_reason(
+    config: VibeConfigSchema,
+) -> tuple[ProviderConfig, str | None]:
+    """The canonical "which provider is active" rule for the setup wizard and
+    ACP auth: the config's active provider, or the default provider with a
+    machine-readable reason when the config cannot resolve one.
+    """
+    try:
+        return config.get_active_provider(), None
+    except ValueError:
+        logger.warning(
+            "Config could not resolve an active provider; "
+            "falling back to the default provider.",
+            exc_info=True,
         )
-        if pinned_console_url is _PINNED_CONSOLE_URL_UNSET:
-            pinned_console_url = pinned_console_url_from_env()
-        try:
-            snapshot = _OnboardingSnapshot.model_validate(
-                _build_onboarding_snapshot_payload(**overrides)
-            )
-            return cls(
-                provider=_resolve_provider(
-                    active_model=snapshot.active_model, snapshot=snapshot
-                ),
-                vibe_base_url=snapshot.vibe_base_url,
-                console_base_url=snapshot.console_base_url,
-                pinned_console_url=pinned_console_url,
-            )
-        except (RuntimeError, ValidationError, ValueError):
-            logger.warning(
-                "Onboarding config fallback activated; using defaults", exc_info=True
-            )
-            return cls.from_config(VibeConfigSchema.model_construct())
+        return DEFAULT_PROVIDERS[0], CONFIG_ERROR_MODEL_INVALID
+
+
+def resolve_active_provider(config: VibeConfigSchema) -> ProviderConfig:
+    """The active provider, the default when the config cannot resolve one."""
+    return resolve_active_provider_or_reason(config)[0]

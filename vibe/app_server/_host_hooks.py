@@ -47,12 +47,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # How long a closing app server waits for the hooks still running, all together.
-CLOSE_GRACE_S = 5.0
+CLOSE_GRACE_S = 2.0
 # The ``warning`` code of a hook's ``system_message``: the client shows it as the
 # hook's line in the conversation, not among the warnings.
 HOOK_MESSAGE_CODE = "hook_message"
+# The ``warning`` code of a hook the Host fires that failed: the CLI shows it among
+# the warnings, Vibe Desktop as the hook's line in the conversation.
+HOOK_FAILED_CODE = "hook_failed"
 # How long stopping the late ones may take, so the close stays bounded.
-_STOP_TIMEOUT_S = 1.0
+_STOP_TIMEOUT_S = 0.5
 
 # The builtin pre_agent hook that hands a session_start context to the next user
 # message. Bound only on sessions with session_start hooks.

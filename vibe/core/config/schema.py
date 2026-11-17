@@ -68,6 +68,18 @@ class ConfigSchema(BaseModel):
         del layer_data
         return [op]
 
+    def expand_layer_writes(
+        self, operations: Sequence[PatchOp], layer_data: Mapping[str, Any]
+    ) -> list[PatchOp]:
+        """The ops a batch of writes takes in a layer holding ``layer_data``:
+        each write's, in order, by default.
+        """
+        return [
+            mapped
+            for op in operations
+            for mapped in self.expand_layer_write(op, layer_data)
+        ]
+
     def layer_write_op(self, op: PatchOp, layer_data: Mapping[str, Any]) -> PatchOp:
         """The op a write takes in a layer holding ``layer_data``.
 
@@ -84,6 +96,9 @@ class ConfigSchema(BaseModel):
         what it makes of the rest. ``layers`` are (layer name, raw data) pairs
         in stack order.
         """
+
+    def report_load_warnings(self, warnings: Sequence[str]) -> None:
+        """Take what the layers ignored while loading; dropped by default."""
 
     @classmethod
     def validate_merged(

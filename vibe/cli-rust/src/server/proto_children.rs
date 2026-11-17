@@ -44,6 +44,21 @@ impl<'de> Deserialize<'de> for SessionStatus {
     }
 }
 
+/// The model a child's agent type declares (app-server `PublicChildModel`).
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildModel {
+    pub display_name: String,
+    pub thinking: String,
+}
+
+impl ChildModel {
+    /// `name[thinking]`, as the banner names the session's model.
+    pub fn label(&self) -> String {
+        format!("{}[{}]", self.display_name, self.thinking)
+    }
+}
+
 /// A child (subagent) session (app-server `PublicChildSession`). Required fields
 /// have no default, so a malformed child fails its own parse.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
@@ -53,6 +68,9 @@ pub struct PublicChildSession {
     pub name: String,
     pub agent_type: String,
     pub status: SessionStatus,
+    /// The model its agent type declares; `None` runs on the session's.
+    #[serde(default)]
+    pub model: Option<ChildModel>,
     #[serde(default)]
     pub token_usage: TokenUsage,
     #[serde(default)]

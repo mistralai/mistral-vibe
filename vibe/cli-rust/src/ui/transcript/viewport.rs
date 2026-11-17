@@ -28,9 +28,13 @@ pub(super) struct Hitmaps<'a> {
     pub entries: &'a mut Vec<(u16, u16, Option<u16>, String)>,
     pub links: &'a mut Vec<markdown::Link>,
     pub diffs: &'a mut Vec<(u16, u16, u16)>,
+    /// `[top, bottom)` screen rows of `/raw` agent messages.
+    pub raws: &'a mut Vec<(u16, u16)>,
     pub tables: &'a mut Vec<TableCellHit>,
     /// `(index, top, height)` of each painted entry, `top` relative to the viewport top.
     pub rows: &'a mut Vec<(usize, i32, u16)>,
+    /// The banner cat's painted area, for its click-to-replay gesture.
+    pub cat: &'a mut Option<Rect>,
     /// Hang indent cells cut out of the selection highlight, filled only while selecting.
     pub hangs: Option<&'a mut Vec<(u16, u16, u16)>>,
 }
@@ -47,6 +51,8 @@ pub(super) struct Viewport<'a> {
     pub selected: Option<&'a str>,
     pub selected_table: Option<&'a (TableCellKey, usize)>,
     pub paused: bool,
+    /// `/raw`: agent messages show their Markdown source.
+    pub raw: bool,
     pub rewind: Option<&'a str>,
 }
 
@@ -63,8 +69,10 @@ pub(super) fn render(
         entries: hitmap,
         links,
         diffs,
+        raws,
         tables,
         rows,
+        cat,
         mut hangs,
     } = hitmaps;
     let Viewport {
@@ -78,6 +86,7 @@ pub(super) fn render(
         selected,
         selected_table,
         paused,
+        raw,
         rewind,
     } = viewport;
     let viewport_bottom = area.y as i32 + area.height as i32;
@@ -93,6 +102,7 @@ pub(super) fn render(
         banner.lines(),
         false,
         |buffer, rect, offset| {
+            *cat = crate::ui::banner::cat_click_area(rect, offset);
             let promo = markdown::screen_links(banner, false, rect, offset);
             hover(buffer, &promo, mouse_position);
             links.extend(promo);
@@ -131,6 +141,7 @@ pub(super) fn render(
             entry::ExpansionView {
                 entry: entry_expanded,
                 group: group_expanded,
+                raw,
             },
             pulse_frame,
             entry::QueueView {
@@ -187,6 +198,9 @@ pub(super) fn render(
                 if let Some(gutter) = entry::diff_gutter(&value, entry_expanded) {
                     diffs.push((content_top as u16, visible_bottom as u16, gutter));
                 }
+                if entry::is_raw(&value, raw) {
+                    raws.push((content_top as u16, visible_bottom as u16));
+                }
             }
         }
         paint::entry(
@@ -241,7 +255,7 @@ fn place(
                 width: area.width,
                 height,
             };
-            report_overflow(lines, area.width);
+            paint::report_overflow(lines, area.width);
             if prewrapped {
                 let buffer = frame.buffer_mut();
                 for (row, line) in lines
@@ -263,19 +277,6 @@ fn place(
     }
     bottom
 }
-
-#[cfg(debug_assertions)]
-fn report_overflow(lines: &[Line<'static>], width: u16) {
-    for line in lines {
-        let row_width = line.width();
-        if row_width > width as usize {
-            tracing::warn!(row_width, width, row = %line, "transcript row overflows its width");
-        }
-    }
-}
-
-#[cfg(not(debug_assertions))]
-fn report_overflow(_lines: &[Line<'static>], _width: u16) {}
 
 fn fits(lines: &[Line<'static>], width: u16) -> bool {
     width > 0 && lines.iter().all(|line| line.width() <= width as usize)

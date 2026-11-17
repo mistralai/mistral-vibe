@@ -128,6 +128,28 @@ async def test_a_config_that_breaks_a_schema_rule_is_a_configuration_error(
 
 
 @pytest.mark.asyncio
+async def test_an_mcp_server_without_a_name_is_a_configuration_error(
+    write_config: Callable[[str], None], client: AppServerClient
+) -> None:
+    # Prepare
+    write_config("[[mcp_servers]]\n")
+
+    # Do
+    with pytest.raises(AppServerResponseError) as exc_info:
+        await client.request("session/start", SessionStartParams())
+
+    # Assert
+    error = exc_info.value.error
+    assert error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert error.data == {"kind": "configuration"}
+    assert error.message == (
+        "Cannot load the Vibe config. Invalid configuration: an entry of"
+        " mcp_servers from user-toml has no 'name'. Add 'name' to every"
+        " [[mcp_servers]] entry."
+    )
+
+
+@pytest.mark.asyncio
 async def test_listing_sessions_with_a_config_that_breaks_a_schema_rule_is_a_configuration_error(
     write_config: Callable[[str], None], client: AppServerClient
 ) -> None:

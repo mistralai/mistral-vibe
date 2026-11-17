@@ -4,8 +4,8 @@ and how public history shows them.
 The model reads who sent a message from a ``<session_message/>`` block ahead
 of it; clients read the same from a ``vibe.session_message`` display marker,
 and public history drops the block. A task one session hands another carries a
-``<started_by_session>`` block telling the model whom to report back to;
-public history and the session preview drop it.
+``<started_by_session>`` block telling the model its final reply goes back to
+the session that started it; public history and the session preview drop it.
 """
 
 from __future__ import annotations
@@ -69,13 +69,12 @@ def session_message_display(sender: SessionMessageSender) -> UserDisplayContent:
 def handed_task_text(started_by_session_id: str) -> str:
     return (
         f'<started_by_session session_id="{escape(started_by_session_id)}">\n'
-        "Another session started this one and handed it the task above. When "
-        "the task is done, or when you need an answer only that session has, "
-        'report back with `send_to_session` and `delivery: "start_turn"`, '
-        "leaving `session_id` out: it goes to the session that started this "
-        "one. Send a short, self-contained summary of the outcome, not a "
-        "transcript. Do not report back on anything else.\n"
-        "</started_by_session>"
+        "Another session started this one and handed it the task above. Your "
+        "final reply when the turn ends goes back to it on its own, so end "
+        "with a short, self-contained summary of the outcome, not a "
+        "transcript. Use `send_to_session`, leaving `session_id` out, only "
+        "for a question that session alone can answer before you can finish."
+        "\n</started_by_session>"
     )
 
 

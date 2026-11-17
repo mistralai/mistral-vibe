@@ -5,8 +5,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from vibe.core.skills.models import ManifestEntry
 from vibe.core.skills.registry import _manifest
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import SkillManifest
 
 
 def test_upsert_replaces_by_name() -> None:

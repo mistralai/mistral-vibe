@@ -310,3 +310,62 @@ fn a_huge_failure_mounts_capped() {
         )]
     );
 }
+
+#[test]
+fn withdrawing_one_of_several_warnings_keeps_the_others() {
+    let mut app = App::default();
+    notices::warn(&mut app, "first");
+    notices::warn(&mut app, "second");
+
+    assert!(notices::withdraw(&mut app, "first"));
+    assert!(!notices::withdraw(&mut app, "first"));
+
+    assert_eq!(
+        messages(&app),
+        vec![("startup_notices".to_owned(), "- second".to_owned())]
+    );
+}
+
+#[test]
+fn withdrawing_the_last_warning_removes_the_box() {
+    let mut app = App::default();
+    notices::warn(&mut app, "only");
+
+    assert!(notices::withdraw(&mut app, "only"));
+    notices::warn(&mut app, "later");
+
+    assert_eq!(
+        messages(&app),
+        vec![("startup_notices".to_owned(), "- later".to_owned())]
+    );
+}
+
+#[test]
+fn a_closed_box_withdraws_nothing() {
+    let mut app = App::default();
+    notices::warn(&mut app, "startup");
+    notices::close_startup(&mut app);
+
+    assert!(!notices::withdraw(&mut app, "startup"));
+}
+
+#[test]
+fn a_markdown_warning_keeps_its_code_spans_and_skips_a_closed_box() {
+    let mut app = App::default();
+    notices::warn(&mut app, "plain `x`");
+
+    notices::warn_markdown(&mut app, "run `vibe`");
+
+    assert_eq!(
+        messages(&app),
+        vec![(
+            "startup_notices".to_owned(),
+            "- plain \\`x\\`\n- run `vibe`".to_owned()
+        )]
+    );
+    assert!(notices::withdraw(&mut app, "run `vibe`"));
+
+    notices::close_startup(&mut app);
+    notices::warn_markdown(&mut app, "late");
+    assert!(messages(&app).is_empty());
+}

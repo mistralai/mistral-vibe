@@ -19,6 +19,8 @@ pub struct EffectEntry {
     pub detail: Option<EffectSide>,
     #[serde(default)]
     pub state: Option<EffectState>,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
     #[serde(skip)]
     connector_header: OnceLock<Option<connector_web::Header>>,
 }

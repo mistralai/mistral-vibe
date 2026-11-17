@@ -165,7 +165,8 @@ def request_reasoning(
       fit to the model's known levels.
     - Off goes out only where it means something: to a model known to reason, or,
       on effort formats, never to a model whose reasoning is unknown unless the
-      route reasons. A model known to have no reasoning gets no field for off.
+      route reasons. A model known to have no reasoning gets no field for off, and
+      one that always reasons gets its lowest level, as its API refuses off.
     """
     no_reasoning = support is not None and not support.levels
     if requested == REASONING_LOWEST:
@@ -178,6 +179,8 @@ def request_reasoning(
     if setting == REASONING_OFF:
         if no_reasoning:
             return None
+        if support is not None and not support.can_turn_off:
+            return _lowest_reasoning(wire, configured, support)
         if (
             support is None
             and wire in _OFF_NEEDS_KNOWN_REASONING

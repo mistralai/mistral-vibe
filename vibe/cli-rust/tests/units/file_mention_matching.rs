@@ -87,9 +87,15 @@ fn tree_with_a_large_early_directory() -> BTreeMap<String, bool> {
         ("data/zz/last.txt", false),
         ("zebra.txt", false),
     ]);
-    // More entries than the fuzzy scan cap.
+    // More entries than the former 32k fuzzy scan cap, all sorted before `zebra.txt`.
     index.extend((0..40_000).map(|n| (format!("data/{n:05}.bin"), false)));
     index
+}
+
+#[test]
+fn a_fuzzy_query_reaches_entries_sorted_after_a_large_directory() {
+    let found = matching(&tree_with_a_large_early_directory(), "zebra", 10);
+    assert_eq!(found, vec!["@zebra.txt"]);
 }
 
 #[test]
@@ -153,6 +159,19 @@ fn a_partial_path_starting_mid_path_finds_the_nested_file() {
 fn matching_ties_break_alphabetically() {
     let index = paths(&[("z.rs", false), ("a.rs", false)]);
     assert_eq!(matching(&index, ".rs", 10), vec!["@a.rs", "@z.rs"]);
+}
+
+#[test]
+fn a_limited_fuzzy_search_keeps_the_best_matches_in_full_order() {
+    let mut index = paths(&[("ab", true), ("ab-c", false)]);
+    // Enough deeper matches to trim the candidates mid-scan at a limit of 3.
+    index.extend((0..10).map(|n| (format!("x{n}/zzb"), false)));
+    let all = matching(&index, "b", 100);
+    assert_eq!(all.len(), 12, "{all:?}");
+    assert_eq!(all[..2], ["@ab-c", "@ab/"], "a file and a directory tie");
+    for limit in 1..=4 {
+        assert_eq!(matching(&index, "b", limit), all[..limit], "limit {limit}");
+    }
 }
 
 #[test]

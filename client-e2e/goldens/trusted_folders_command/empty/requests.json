@@ -1,0 +1,6 @@
+[
+ {
+  "method": "workspace/trust/folders/list",
+  "params": {}
+ }
+]

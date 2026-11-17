@@ -16,9 +16,9 @@ from vibe.core.platform_auth import (
     PlatformCredentialProvider,
 )
 from vibe.core.skills.manager import SkillManager
-from vibe.core.skills.models import RegistryRef
+from vibe.core.skills.models import ManifestEntry, RegistryRef
 from vibe.core.skills.registry import _eviction, _manifest, _resolved, _store
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import SkillManifest
 from vibe.core.trusted_folders import trusted_folders_manager
 
 

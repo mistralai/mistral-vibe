@@ -7,7 +7,7 @@ A plugin is addressed by its manifest name, which is also what
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence, Set as AbstractSet
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -42,6 +42,7 @@ from vibe.core.plugins import (
     ResolvedPluginSet,
     is_required_plugin,
     set_plugin_enabled,
+    user_facing_issues,
 )
 from vibe.core.skills.models import SkillScope
 
@@ -96,7 +97,7 @@ class LocalPluginsController:
             ],
             issues=[
                 LocalPluginIssue(file=str(issue.file), message=issue.message)
-                for issue in resolution.issues
+                for issue in user_facing_issues(resolution.issues)
             ],
         )
 
@@ -114,11 +115,23 @@ class LocalPluginsController:
                 ProtocolErrorCode.NOT_FOUND, f"No plugin named {params.name!r}"
             )
         toggles = _toggles(orchestrator)
-        _refuse_toggle(plugin, params.enabled, toggles, resolution)
+        turn_off = (
+            _rival_plugins(plugin, resolution)
+            if params.enabled and params.turn_off_collisions
+            else []
+        )
+        _refuse_toggle(
+            plugin,
+            params.enabled,
+            toggles,
+            resolution,
+            turning_off={rival.descriptor.name for rival in turn_off},
+        )
         mutation = await set_plugin_enabled(
             await self._load_orchestrator(self._session_files(None)),
             plugin.descriptor,
             params.enabled,
+            turn_off=[rival.descriptor for rival in turn_off],
         )
         if mutation.failures:
             raise RequestFailure(
@@ -129,7 +142,8 @@ class LocalPluginsController:
         # exactly what was asked, and the refusal above ruled out a collision.
         status: InstalledPluginStatus = "loaded" if params.enabled else "disabled"
         return PluginsLocalSetEnabledResponse(
-            plugin=_summary(replace(plugin, status=status), resolution, toggles)
+            plugin=_summary(replace(plugin, status=status), resolution, toggles),
+            turned_off=[rival.descriptor.name for rival in turn_off],
         )
 
     async def _read(
@@ -149,11 +163,29 @@ class LocalPluginsController:
         return orchestrator, await asyncio.to_thread(resolver.resolve)
 
 
+def _rival_plugins(
+    plugin: InstalledPlugin, resolution: ResolvedPluginSet
+) -> list[InstalledPlugin]:
+    """The plugins on under its namespace that config can turn off.
+
+    Vibe's own plugin stays on whatever config says, so it stays a rival and
+    the toggle is refused. Another locked plugin is off, so it is no rival.
+    """
+    rivals = set(_namespace_rivals(plugin, resolution))
+    return [
+        p
+        for p in resolution.installed
+        if p.descriptor.name in rivals and not is_required_plugin(p.descriptor)
+    ]
+
+
 def _refuse_toggle(
     plugin: InstalledPlugin,
     enabled: bool,
     toggles: PluginToggles,
     resolution: ResolvedPluginSet,
+    *,
+    turning_off: AbstractSet[str] = frozenset(),
 ) -> None:
     name = plugin.descriptor.name
     if toggles.locked(plugin.descriptor):
@@ -167,14 +199,21 @@ def _refuse_toggle(
             f"{name!r} {reason}",
             LocalSkillRefusalData(reason="locked").model_dump(mode="json"),
         )
-    rival = _namespace_rival(plugin, resolution)
-    if enabled and rival is not None:
+    rivals = [
+        rival
+        for rival in _namespace_rivals(plugin, resolution)
+        if rival not in turning_off
+    ]
+    if enabled and rivals:
         namespace = plugin.descriptor.namespace
+        rival = rivals[0]
         raise RequestFailure(
             ProtocolErrorCode.INVALID_PARAMS,
             f"{name!r} shares the namespace {namespace!r} with {rival!r}, which is "
             f"on: turn {rival!r} off first",
-            LocalSkillRefusalData(reason="namespace_collision").model_dump(mode="json"),
+            LocalSkillRefusalData(
+                reason="namespace_collision", collides_with=rivals
+            ).model_dump(mode="json"),
         )
 
 
@@ -200,16 +239,10 @@ def _listed(
     )
 
 
-def _namespace_rival(
-    plugin: InstalledPlugin, resolution: ResolvedPluginSet
-) -> str | None:
-    """Another plugin that is on under the same namespace: both would drop out of sessions."""
-    return next(iter(_namespace_rivals(plugin, resolution)), None)
-
-
 def _namespace_rivals(
     plugin: InstalledPlugin, resolution: ResolvedPluginSet
 ) -> list[str]:
+    """The other plugins on under the same namespace: all would drop out of sessions."""
     return sorted(
         other.descriptor.name
         for other in resolution.installed

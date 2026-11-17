@@ -459,7 +459,8 @@ async def test_a_remove_lands_where_the_field_is_not_where_a_set_would_go(
 
     assert failures == []
     models = _user_models(config_dir)
-    assert "temperature" not in models[_OLD]
+    # The old name's entry held only the temperature: it goes with it.
+    assert _OLD not in models
     assert models[_GLM]["max_output_tokens"] == 99
 
 
@@ -489,7 +490,184 @@ async def test_a_remove_clears_the_field_on_every_entry_of_the_model(
 
     assert failures == []
     models = _user_models(config_dir)
-    assert "temperature" not in models[_OLD]
-    assert "temperature" not in models[_GLM]
+    # Each entry held only the temperature: both go with it.
+    assert _OLD not in models
+    assert _GLM not in models
     assert orchestrator.config.models[_GLM].temperature != 0.7
     assert orchestrator.config.models[_GLM].temperature != 0.9
+
+
+@pytest.mark.asyncio
+async def test_a_remove_keeps_an_entry_the_same_batch_writes_into(
+    config_dir: Path,
+) -> None:
+    """The only setting of an entry is removed, and another written into it,
+    in one batch: the entry stays, with the new setting. Removed whole first, it
+    would leave the write no entry to land in, and fail the batch.
+    """
+    from vibe.core.config.patch import AddOperationPatch, RemoveOperationPatch
+
+    orchestrator = await _orchestrator(config_dir, models={_GLM: {"temperature": 0.7}})
+
+    failures = await orchestrator.apply_patch(
+        [
+            RemoveOperationPatch(
+                path=f"/models/{_GLM}/temperature",
+                target_layer_name=UserConfigLayer.NAME,
+            ),
+            AddOperationPatch(
+                path=f"/models/{_GLM}/thinking",
+                value="low",
+                target_layer_name=UserConfigLayer.NAME,
+            ),
+        ],
+        reason="test remove and set",
+    )
+
+    assert failures == []
+    assert _user_models(config_dir)[_GLM] == {"alias": _GLM, "thinking": "low"}
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_empties_the_models_table_keeps_a_new_one_it_writes(
+    config_dir: Path,
+) -> None:
+    """One batch removes the only setting of the file's only model entry and
+    writes a whole new `models` table: the new table stays. Removing the emptied
+    table after it would silently drop what the batch just wrote.
+    """
+    from vibe.core.config.patch import AddOperationPatch, RemoveOperationPatch
+
+    orchestrator = await _orchestrator(config_dir, models={_GLM: {"temperature": 0.7}})
+    local = {"name": "local-model", "provider": "mistral", "alias": "local"}
+
+    failures = await orchestrator.apply_patch(
+        [
+            RemoveOperationPatch(
+                path=f"/models/{_GLM}/temperature",
+                target_layer_name=UserConfigLayer.NAME,
+            ),
+            AddOperationPatch(
+                path="/models",
+                value={"local": local},
+                target_layer_name=UserConfigLayer.NAME,
+            ),
+        ],
+        reason="test remove and replace the table",
+    )
+
+    assert failures == []
+    assert _user_models(config_dir) == {"local": local}
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_empties_the_models_table_and_removes_it_lands(
+    config_dir: Path,
+) -> None:
+    """One batch removes the only setting of the file's only model entry and
+    the `models` table itself: it lands, with no table left. The table is
+    removed once, by the batch's own op.
+    """
+    from vibe.core.config.patch import RemoveOperationPatch
+
+    orchestrator = await _orchestrator(config_dir, models={_GLM: {"temperature": 0.7}})
+
+    failures = await orchestrator.apply_patch(
+        [
+            RemoveOperationPatch(
+                path=f"/models/{_GLM}/temperature",
+                target_layer_name=UserConfigLayer.NAME,
+            ),
+            RemoveOperationPatch(
+                path="/models", target_layer_name=UserConfigLayer.NAME
+            ),
+        ],
+        reason="test remove the last setting and the table",
+    )
+
+    assert failures == []
+    assert _user_models(config_dir) == {}
+
+
+@pytest.mark.asyncio
+async def test_a_batch_removing_every_setting_of_an_entry_removes_the_entry(
+    config_dir: Path,
+) -> None:
+    """One batch removes both settings of an entry that holds two, next to
+    another entry: the emptied entry goes whole, as one removal leaving it with
+    only its names would, and the other entry stays.
+    """
+    from vibe.core.config.patch import RemoveOperationPatch
+
+    orchestrator = await _orchestrator(
+        config_dir,
+        models={
+            _GLM: {"temperature": 0.7, "max_output_tokens": 99},
+            "local": {"name": "local-model", "provider": "mistral"},
+        },
+    )
+
+    failures = await orchestrator.apply_patch(
+        [
+            RemoveOperationPatch(
+                path=f"/models/{_GLM}/temperature",
+                target_layer_name=UserConfigLayer.NAME,
+            ),
+            RemoveOperationPatch(
+                path=f"/models/{_GLM}/max_output_tokens",
+                target_layer_name=UserConfigLayer.NAME,
+            ),
+        ],
+        reason="test remove every setting of an entry",
+    )
+
+    assert failures == []
+    assert set(_user_models(config_dir)) == {"local"}
+
+
+@pytest.mark.asyncio
+async def test_removing_the_last_entry_whole_leaves_no_models_table(
+    config_dir: Path,
+) -> None:
+    """The file's only model entry, a model it alone defines, is removed whole:
+    the `models` table goes with it, rather than stay as an empty `[models]`.
+    """
+    from vibe.core.config.patch import RemoveOperationPatch
+
+    orchestrator = await _orchestrator(
+        config_dir, models={"local": {"name": "local-model", "provider": "mistral"}}
+    )
+
+    failures = await orchestrator.apply_patch(
+        [
+            RemoveOperationPatch(
+                path="/models/local", target_layer_name=UserConfigLayer.NAME
+            )
+        ],
+        reason="test remove the last entry",
+    )
+
+    assert failures == []
+    config = tomllib.loads((config_dir / "config.toml").read_text(encoding="utf-8"))
+    assert "models" not in config
+
+
+def test_expanding_a_write_leaves_its_ops_as_they_were() -> None:
+    """A write that adds an entry, then removes a field of it, expands the same
+    way every time: the expansion does not change the ops it is given, which
+    the orchestrator expands once to check them and again to save them.
+    """
+    from vibe.core.config.patch import AddOperationPatch, RemoveOperationPatch
+
+    schema = VibeConfigSchema.model_construct()
+    entry = {"alias": "x", "thinking": "high", "temperature": 0.2}
+    ops = [
+        AddOperationPatch(path="/models/x", value=entry),
+        RemoveOperationPatch(path="/models/x/thinking"),
+    ]
+
+    first = schema.expand_layer_writes(ops, {})
+    second = schema.expand_layer_writes(ops, {})
+
+    assert ops[0].value == {"alias": "x", "thinking": "high", "temperature": 0.2}
+    assert first == second

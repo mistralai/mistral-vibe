@@ -28,7 +28,7 @@ fn pin_over(history: Vec<Value>, rows: &[(u16, u16)], position: u16) -> Option<P
         .filter(|&index| transcript.settled_prompt(index).is_some())
         .collect();
     let mut cache = TranscriptCache::default();
-    cache.ensure_context(80, 79, 0, false);
+    cache.ensure_context(80, 79, 0, false, false);
     cache.store_layout(transcript.revision(), 80, 80, entries, None, prompts);
     let layout = cache.layout(transcript.revision(), 80)?;
     pin(layout, &transcript, TOP, position, HEIGHT)

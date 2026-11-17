@@ -456,6 +456,13 @@ class CompletedPublicTurn(SessionProtocolModel):
     reject_reason: str | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # Set only when Core stopped the Turn because the same tool call failed
+    # repeatedly: the text it ended the Turn with, which is the Turn's whole
+    # output. A field of its own, not a ``stop_reason`` value, so a reader that
+    # predates it still loads the Turn. Omitted when unset.
+    repeated_tool_failure: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class FailedPublicTurn(SessionProtocolModel):

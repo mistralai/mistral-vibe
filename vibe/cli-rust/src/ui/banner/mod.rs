@@ -2,8 +2,10 @@
 
 pub mod petit_chat;
 
-use crate::clock::UiInstant;
+#[cfg(test)]
+mod tests;
 
+use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -15,6 +17,10 @@ use petit_chat::{CatVariant, PetitChat};
 
 /// Columns before the info block, the same for every cat variant so the text never moves.
 const CAT_COLS: usize = 14;
+/// The first banner-block row of the cat, under the gap row above it.
+const CAT_FIRST_ROW: u16 = 1;
+/// The cat's screen rows: its 12 dot rows pack four-per-glyph into braille rows.
+const CAT_ROW_COUNT: u16 = 3;
 
 /// The welcome banner: an animated cat beside a static info block.
 #[derive(Default)]
@@ -22,20 +28,22 @@ pub struct Banner {
     chat: PetitChat,
     /// Plan label appended to the model line, from `account/read`.
     plan_title: Option<String>,
-    /// Greeting mounted under the banner, from `identity/read`.
-    greeting: Option<String>,
 }
 
 impl Banner {
     /// Advance the cat animation, returning whether its visible dots changed.
-    pub fn tick(&mut self, now: UiInstant) -> bool {
-        self.chat.tick(now)
+    pub fn tick(&mut self) -> bool {
+        self.chat.tick()
     }
 
-    /// Apply the post-ready account and identity reads.
-    pub fn set_account(&mut self, plan_title: Option<String>, greeting: Option<String>) {
+    /// Replay the cat's animation round, e.g. after a click on it.
+    pub fn restart(&mut self) {
+        self.chat.restart();
+    }
+
+    /// Apply the post-ready account read.
+    pub fn set_account(&mut self, plan_title: Option<String>) {
         self.plan_title = plan_title;
-        self.greeting = greeting;
     }
 
     /// Switch the cat variant based on the active model name.
@@ -50,8 +58,8 @@ impl Banner {
         self.chat.render()
     }
 
-    /// The full banner: the info block beside the cat, or under it when `width` is too narrow.
-    pub fn view(&self, config: &StartupConfig, width: u16) -> LinkedLines {
+    /// The full banner: the info block beside the cat, or under it when `width` is too narrow. `model` replaces the session's.
+    pub fn view(&self, config: &StartupConfig, model: Option<&str>, width: u16) -> LinkedLines {
         // `#banner-container` `padding: 1 1 0 0`: one blank row above the cat.
         let mut lines = LinkedLines::default();
         lines.push_gap();
@@ -63,7 +71,7 @@ impl Banner {
         let cmd = Style::default().fg(theme::secondary());
 
         let model = [
-            Some(config.active_model.as_str()),
+            Some(model.unwrap_or(&config.active_model)),
             self.plan_title.as_deref(),
         ]
         .into_iter()
@@ -101,11 +109,20 @@ impl Banner {
                 lines.push_folded(line, Some(Fold::indented(CAT_COLS as u16)));
             }
         }
-        // `.greeting-message` `margin-top: 1`: one blank row above the greeting.
-        if let Some(greeting) = &self.greeting {
-            lines.push_gap();
-            lines.push(Line::from(Span::styled(greeting.clone(), meta)));
-        }
         lines
     }
+}
+
+/// The cat's click area within a painted banner block: `CAT_COLS` wide, its rows
+/// under the block's leading gap, clipped to the painted like the block itself.
+pub(crate) fn cat_click_area(painted: Rect, scrolled: u16) -> Option<Rect> {
+    let first = scrolled.max(CAT_FIRST_ROW);
+    let last = scrolled
+        .saturating_add(painted.height)
+        .min(CAT_FIRST_ROW + CAT_ROW_COUNT);
+    // A fully clipped cat (scrolled past, or an empty block) has no click area.
+    let height = last.checked_sub(first).filter(|height| *height > 0)?;
+    let y = painted.y + first - scrolled;
+    let width = (CAT_COLS as u16).min(painted.width);
+    Some(Rect::new(painted.x, y, width, height))
 }

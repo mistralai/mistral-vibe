@@ -35,7 +35,7 @@ fn fenced_app(code: &str) -> App {
     let height = markdown::render(&text, WIDTH).len() as u16;
     app.view
         .transcript_cache
-        .ensure_context(WIDTH, WIDTH, 0, false);
+        .ensure_context(WIDTH, WIDTH, 0, false, false);
     app.view.transcript_cache.store_layout(
         app.view.transcript.revision(),
         WIDTH,
@@ -52,7 +52,10 @@ fn fenced_app(code: &str) -> App {
     app.view.selection_region.area = Rect::new(0, 0, WIDTH, 40);
     app.view.selection_region.document = true;
     // The copy selects the message only: the banner sits above it.
-    let banner = app.view.banner.view(&app.session.startup_config, WIDTH);
+    let banner = app
+        .view
+        .banner
+        .view(&app.session.startup_config, None, WIDTH);
     let top = i32::from(banner.lines().len() as u16 + 1);
     app.view.selection_region.end_exclusive = true;
     app.selection.region = Some(Selection {

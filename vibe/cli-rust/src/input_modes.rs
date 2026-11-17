@@ -49,17 +49,31 @@ impl InputMode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ClassifiedInput {
-    SlashCommand { command: &'static str },
-    Skill { command: String, name: String },
-    Bash { command: String },
+    SlashCommand {
+        command: &'static str,
+    },
+    RemovedCommand {
+        command: &'static str,
+        version: &'static str,
+    },
+    Skill {
+        command: String,
+        name: String,
+    },
+    Bash {
+        command: String,
+    },
     EmptyBash,
-    Prompt { text: String },
+    Prompt {
+        text: String,
+    },
 }
 
 pub fn classify(value: &str, skills: &[Skill]) -> ClassifiedInput {
     if let Some(command) = crate::commands::parse(value) {
         return match command {
-            "/loop" => ClassifiedInput::Prompt {
+            // `/loop` alone opens the loop manager; with arguments the model schedules it.
+            "/loop" if value.split_whitespace().nth(1).is_some() => ClassifiedInput::Prompt {
                 text: value.to_owned(),
             },
             _ => ClassifiedInput::SlashCommand { command },
@@ -75,6 +89,9 @@ pub fn classify(value: &str, skills: &[Skill]) -> ClassifiedInput {
                 command: value.to_owned(),
                 name: skill.name.clone(),
             };
+        }
+        if let Some((command, version)) = crate::commands::removed(value) {
+            return ClassifiedInput::RemovedCommand { command, version };
         }
     }
     if let Some(command) = value.strip_prefix('!') {

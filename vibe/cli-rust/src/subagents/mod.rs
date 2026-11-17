@@ -76,6 +76,11 @@ impl Subagents {
         self.sessions.iter().find(|session| session.id == id)
     }
 
+    /// The viewed child's own model label, when its agent type declares one.
+    pub fn viewed_model(&self) -> Option<String> {
+        Some(self.viewed_child()?.model.as_ref()?.label())
+    }
+
     /// The data half of a list refresh: the rows the list renders.
     pub fn list_rows(&mut self) -> Vec<PublicChildSession> {
         self.list.selected_session_id = self.viewed_subagent_id.clone();

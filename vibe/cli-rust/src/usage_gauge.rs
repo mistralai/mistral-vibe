@@ -96,11 +96,12 @@ fn read(app: &mut App, client: &Arc<Client>) {
     });
 }
 
-/// Keep a successful re-read; a failed one, or one whose billing call failed, leaves the last known usage.
+/// Keep a successful re-read and sync the plan offer to it; a failed one, or one whose billing call failed, leaves the last known usage.
 /// A failed read for a model not read yet is asked again shortly by `follow_model`.
 pub fn apply(app: &mut App, read: AccountRead) {
     let Some(mut reads) = read.reads else {
         app.whoami.failed(&read.model, clock::real_now());
+        crate::startup::banners::sync_plan_offer(app);
         return;
     };
     let previous = app
@@ -115,4 +116,5 @@ pub fn apply(app: &mut App, read: AccountRead) {
         }
     }
     app.whoami.store(read.model, reads);
+    crate::startup::banners::sync_plan_offer(app);
 }

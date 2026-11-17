@@ -19,7 +19,7 @@ pub fn route(
     handle(app, key, composer)
 }
 
-/// Whether vim mode reads `key` before the composer: Esc first closes an open completion popup, digits rate feedback.
+/// Whether vim mode reads `key` before the composer: Esc first closes an open completion popup, digits rate feedback and answer the goal resume prompt.
 pub fn owns(app: &App, key: &KeyEvent) -> bool {
     app.vim.enabled
         && crate::input::composer_owns_key(app)
@@ -29,6 +29,7 @@ pub fn owns(app: &App, key: &KeyEvent) -> bool {
         && !(key.code == KeyCode::Esc && crate::completion_manager::is_open(app))
         && !(app.feedback.message == crate::feedback::Message::Prompt
             && matches!(key.code, KeyCode::Char('0'..='3')))
+        && !crate::goal::is_prompt_key(app, key)
 }
 
 /// Take the pending operator when `event` ends it: a key press, a click or a paste, not a mouse move.

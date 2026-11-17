@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum, auto
 import os
 from typing import TYPE_CHECKING, Any, cast
@@ -18,6 +18,7 @@ from vibe.app_server._client_provided_tools import (
     ClientToolResult,
     ClientToolRunner,
 )
+from vibe.app_server._config_changes import ConfigChanges
 from vibe.app_server._connection_protocol import (
     AgentPlugin,
     ClientToolCallerParams,
@@ -30,7 +31,7 @@ from vibe.app_server._credential_selection import (
     select_platform_credentials,
 )
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
-from vibe.app_server._execution import cancel_tasks
+from vibe.app_server._execution import cancel_tasks, raise_if_cancelled
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._imports import ImportsService
@@ -74,6 +75,7 @@ from vibe.app_server._session_lease_subscription import SessionLeaseSubscription
 from vibe.app_server._session_peers import SessionPeerError
 from vibe.app_server._session_spawn import SessionSpawnError
 from vibe.app_server._setup_oidc import SetupOidcHandler
+from vibe.app_server._storage_usage import StorageUsageService, touch_stale_marker
 from vibe.app_server.connector_catalog import ConnectorCatalogService
 from vibe.app_server.events import (
     CallbackRequested,
@@ -101,8 +103,10 @@ from vibe.app_server.protocol import (
     CallbackResultParams,
     ClientCapabilities,
     ClientInfo,
+    ConfigChangedParams,
     ConfigReadParams,
     ConfigReloadParams,
+    ConfigSubscribeParams,
     ConfigWriteParams,
     ContextInjectParams,
     EmptyResponse,
@@ -170,6 +174,9 @@ from vibe.app_server.protocol import (
     SessionStartParams,
     SessionStartResponse,
     SessionTitleUpdateParams,
+    StorageUsageReadParams,
+    StorageUsageRefreshParams,
+    StorageUsageUpdatedParams,
     TransportKind,
     TurnEnqueueParams,
     TurnInterruptParams,
@@ -191,6 +198,7 @@ from vibe.app_server.protocol import (
 )
 from vibe.app_server.transport import ClientLossAwareTransport, JsonRpcTransport
 from vibe.core.platform_auth import PlatformCredentialProvider
+from vibe.core.telemetry.send import TelemetryClient
 from vibe.observability.logging import logger
 from vibe.observability.sentry import (
     capture_sentry_exception,
@@ -281,6 +289,15 @@ class CallbackDelivery:
     answered: bool = False
 
 
+@dataclass(slots=True)
+class CallbackDeliveries:
+    """The client's callback/call requests, and the callbacks sent since its last attach began."""
+
+    requests: dict[int, CallbackDelivery] = field(default_factory=dict)
+    # The re-send after an attach awaits its read, and live delivery runs meanwhile.
+    sent_since_attach: set[str] = field(default_factory=set)
+
+
 @dataclass(frozen=True, slots=True)
 class PendingNotification:
     method: str
@@ -309,6 +326,8 @@ class AppServer:
         connector_catalog_service: ConnectorCatalogService | None = None,
         plugin_catalog_service: PluginCatalogService | None = None,
         imports_service: ImportsService | None = None,
+        storage_usage: StorageUsageService | None = None,
+        config_changes: ConfigChanges | None = None,
         configure_agent_plugins: Callable[
             [list[AgentPlugin], list[ClientToolDefinitionParams], ClientToolRunner],
             None,
@@ -324,7 +343,7 @@ class AppServer:
         self._client_capabilities = ClientCapabilities()
         self._next_request_id = 1
         self._event_watermarks: dict[str, int] = {}
-        self._callback_requests: dict[int, CallbackDelivery] = {}
+        self._callback_deliveries = CallbackDeliveries()
         self._platform_credential_requests: dict[
             int, asyncio.Future[PlatformCredentialsResolveResponse]
         ] = {}
@@ -338,6 +357,9 @@ class AppServer:
         self._leases = SessionLeaseSubscription(self._send_notification)
         # The connection's artifacts/subscribe, until it ends.
         self._unsubscribe_artifacts: Callable[[], None] | None = None
+        # The connection's config/subscribe, until it ends.
+        self._config_changes = config_changes
+        self._unsubscribe_config: Callable[[], None] | None = None
         self._backend_event_task: asyncio.Task[None] | None = None
         self._backend_event_backend: SessionBackend | None = None
         self._serve_task: asyncio.Task[None] | None = None
@@ -362,6 +384,9 @@ class AppServer:
         self._connector_catalog_service = connector_catalog_service
         self._plugin_catalog_service = plugin_catalog_service
         self._imports_service = imports_service
+        self._storage_usage = storage_usage
+        # This connection's storage/usage/updated, from its first storage call.
+        self._stop_storage_updates: Callable[[], None] | None = None
         self._oidc_tenants = oidc_tenants
         self._configure_agent_plugins = configure_agent_plugins
         self._session_backend_host = session_backend_host_factory(self)
@@ -387,7 +412,7 @@ class AppServer:
         return self._client_info if cli_crash_reporting_available() else None
 
     def _gate_crash_reporting(self, read_gate: Callable[[], Awaitable[bool]]) -> None:
-        """Applies the telemetry gate off the request path, in the order asked."""
+        """Applies the crash-report gate off the request path, in the order asked."""
         client = self._crash_reporting_client()
         if client is None:
             return
@@ -410,22 +435,40 @@ class AppServer:
         self._crash_reporting_tasks.add(task)
         task.add_done_callback(self._crash_reporting_tasks.discard)
 
+    def _note_self_hosted_deployment(self) -> None:
+        """Every client, with or without crash reporting, gets the log line."""
+
+        async def note() -> None:
+            try:
+                await self._host_handler.log_self_hosted_services()
+            except Exception:
+                logger.warning("Could not read the deployment's config", exc_info=True)
+
+        task = asyncio.create_task(note())
+        # Cancelled with the crash-reporting gates at shutdown.
+        self._crash_reporting_tasks.add(task)
+        task.add_done_callback(self._crash_reporting_tasks.discard)
+
     def _configure_crash_reporting(self, backend: SessionBackend) -> None:
         """The attached session's config gates reporting, as the TUI's at Ready."""
         if not isinstance(backend, SessionBackendRuntimeView):
             return
         try:
-            enabled = backend.runtime_updated_params().runtime.config.enable_telemetry
+            enabled = (
+                backend.runtime_updated_params().runtime.config.crash_reports_enabled
+            )
         except Exception:
-            logger.warning("Could not read the telemetry gate", exc_info=True)
+            logger.warning("Could not read the crash-report gate", exc_info=True)
             return
         self._gate_crash_reporting(lambda: _resolved(enabled))
 
-    def _report_dispatch_error(self, method: str, exc: Exception) -> None:
+    def _report_dispatch_error(
+        self, method: str, exc: Exception, *, boundary: str = "app_server_dispatch"
+    ) -> None:
         # vibe-acp reports its own failures, including the ones it gets from here.
         if self._crash_reporting_client() is None:
             return
-        tags = {"vibe_boundary": "app_server_dispatch", "app_server_method": method}
+        tags = {"vibe_boundary": boundary, "app_server_method": method}
         fingerprint = None
         if isinstance(exc, SessionBackendError) and (code := _harness_code(exc)):
             tags["harness_code"] = code
@@ -493,6 +536,11 @@ class AppServer:
             await self._forward_backend_event(envelope)
 
     async def _forward_backend_event(self, envelope: SessionBackendEvent) -> None:
+        if (
+            envelope.child_session
+            and not self._client_capabilities.child_session_events
+        ):
+            return
         if isinstance(envelope.event, CallbackRequested):
             await self._deliver_callback(envelope.event.callback)
         elif isinstance(envelope.event, ConnectorAuthorizationRequiredEvent):
@@ -505,7 +553,11 @@ class AppServer:
                     "Session backend event has no Vibe notification mapping"
                 )
             await self._route_notification(envelope.method, envelope.params)
-        if envelope.method == "turn/completed" and envelope.session_id is not None:
+        if (
+            envelope.method == "turn/completed"
+            and envelope.session_id is not None
+            and not envelope.child_session
+        ):
             service = self._connector_catalog_service
             if service is not None:
                 runtime_updated = await service.converge_pending_connector_candidate(
@@ -676,7 +728,7 @@ class AppServer:
                 await self._close_root()
             except BaseException as exc:
                 errors.append(exc)
-            self._callback_requests.clear()
+            self._callback_deliveries.requests.clear()
             self._abandon_client_requests("The app server closed")
             self._abandon_platform_credential_requests("The app server closed")
             self._pending_notifications.clear()
@@ -719,7 +771,7 @@ class AppServer:
                 await self._root.abandon_active_queued_turn_edit()
             except BaseException as exc:
                 errors.append(exc)
-        self._callback_requests.clear()
+        self._callback_deliveries.requests.clear()
         self._abandon_client_requests("The client disconnected")
         self._abandon_platform_credential_requests("The client disconnected")
         self._pending_notifications.clear()
@@ -747,6 +799,8 @@ class AppServer:
         tasks = [task for task in self._request_tasks if task is not current]
         tasks.extend(self._leases.take())
         self._stop_artifact_subscription()
+        self._stop_storage_updates_now()
+        self._stop_config_subscription()
         backend_events = self._backend_event_task
         self._backend_event_task = None
         self._backend_event_backend = None
@@ -766,6 +820,8 @@ class AppServer:
         tasks = [task for task in self._request_tasks if task is not current]
         tasks.extend(self._leases.take())
         self._stop_artifact_subscription()
+        self._stop_storage_updates_now()
+        self._stop_config_subscription()
         backend_events = self._backend_event_task
         self._backend_event_task = None
         self._backend_event_backend = None
@@ -833,6 +889,7 @@ class AppServer:
         self._attaching = True
         self._connection_attached = False
         self._pending_notifications.clear()
+        self._callback_deliveries.sent_since_attach.clear()
 
     async def _finish_attachment(self, attached: bool) -> None:
         if not attached:
@@ -861,7 +918,7 @@ class AppServer:
                 )
             dispatched = await self._dispatch_request(request.method, request.params)
             if dispatched.session_attached:
-                self._validate_open_callback_capabilities()
+                await self._validate_open_callback_capabilities(request.method)
             return dispatched
         except (RequestFailure, SessionBackendError) as exc:
             if isinstance(exc, SessionBackendError) and _is_unexpected(exc):
@@ -915,7 +972,7 @@ class AppServer:
         if dispatched.after_response is not None:
             dispatched.after_response()
         if dispatched.session_attached:
-            await self._redeliver_open_callbacks()
+            await self._redeliver_open_callbacks(request.method)
         if dispatched.runtime_updated and self._root is not None:
             if not isinstance(self._root, SessionBackendRuntimeView):
                 raise RuntimeError(
@@ -964,6 +1021,8 @@ class AppServer:
             return await self._require_imports().read(
                 params.after_event_id, params.wait_ms
             )
+        if method.startswith("storage/usage/"):
+            return await self._dispatch_storage_usage(method, raw_params)
         if self._mcp_catalog_service is not None and self._mcp_catalog_service.handles(
             method
         ):
@@ -986,12 +1045,17 @@ class AppServer:
             )
         if method in {
             "config/schema",
+            "config/telemetry/read",
+            "config/telemetry/update",
             "plugins/local/list",
             "plugins/local/setEnabled",
             "projects/create",
+            "projects/link",
             "projects/list",
             "projects/remove",
             "projects/rename",
+            "projects/retireCloud",
+            "projects/setCloud",
             "session/history/get",
             "setup/status",
             "setup/store-credential",
@@ -1002,10 +1066,15 @@ class AppServer:
             "skills/local/setEnabled",
             "skills/local/write",
             "workspace/git/checkouts",
+            "workspace/git/worktrees/auto/update",
             "workspace/git/worktrees/limit/update",
             "workspace/git/worktrees/list",
             "workspace/git/worktrees/prune",
             "workspace/git/worktrees/remove",
+            "workspace/trust/folders/add",
+            "workspace/trust/folders/inspect",
+            "workspace/trust/folders/list",
+            "workspace/trust/folders/update",
             "workspace/trust/status",
             "workspace/trust/untrustedConfig",
         } or method.startswith("projectLinks/"):
@@ -1027,8 +1096,12 @@ class AppServer:
             )
         if method == "session/delete":
             return await self._delete_session(raw_params)
-        if method in {"session/lease/subscribe", "artifacts/subscribe"}:
-            return await self._subscribe(method)
+        if method in {
+            "session/lease/subscribe",
+            "artifacts/subscribe",
+            "config/subscribe",
+        }:
+            return await self._subscribe(method, raw_params)
         if _omits_session_id(method, raw_params):
             # The attached session, if any, tells the config reads the
             # connection's own session is already fetching what they would.
@@ -1061,12 +1134,18 @@ class AppServer:
             await self._close_root()
         except BaseException as exc:
             errors.append(exc)
+        raise_if_cancelled(errors)
         if len(errors) == 1:
             raise errors[0]
         if errors:
             raise BaseExceptionGroup("App-server session shutdown failed", errors)
 
     async def _delete_session(self, raw_params: dict[str, Any]) -> DispatchResult:
+        result = await self._delete_session_now(raw_params)
+        await asyncio.to_thread(touch_stale_marker)
+        return result
+
+    async def _delete_session_now(self, raw_params: dict[str, Any]) -> DispatchResult:
         params = validate_wire(SessionDeleteParams, raw_params)
         root = self._root
         is_root = root is not None and params.session_id == root.session_id
@@ -1082,7 +1161,7 @@ class AppServer:
                 if backend_events is not None:
                     await cancel_tasks([backend_events], label="deleted session events")
                 self._root = None
-                self._callback_requests.clear()
+                self._callback_deliveries.requests.clear()
                 if self._connector_catalog_service is not None:
                     self._connector_catalog_service.discard_session(params.session_id)
             return DispatchResult(response=response)
@@ -1293,6 +1372,7 @@ class AppServer:
                 raise method_not_found(method)
             params = validate_wire(SessionArchiveParams, raw_params)
             response = await self._session_backend_host.archive(params)
+            await asyncio.to_thread(touch_stale_marker)
         else:
             if not isinstance(self._session_backend_host, SessionBackendHostSeenState):
                 raise method_not_found(method)
@@ -1786,7 +1866,8 @@ class AppServer:
             and self._initialization is InitializationState.INITIALIZE_RECEIVED
         ):
             self._initialization = InitializationState.INITIALIZED
-            self._gate_crash_reporting(self._host_handler.telemetry_enabled)
+            self._note_self_hosted_deployment()
+            self._gate_crash_reporting(self._host_handler.crash_reports_allowed)
             return
         if (
             notification.method == "platformCredentials/invalidated"
@@ -1827,7 +1908,7 @@ class AppServer:
                 "refused" if isinstance(response, JsonRpcErrorResponse) else "answered",
             )
             return
-        callback_route = self._callback_requests.pop(request_id, None)
+        callback_route = self._callback_deliveries.requests.pop(request_id, None)
         if callback_route is None:
             raise JsonRpcProtocolError(
                 f"Response does not match a pending server request: {request_id}"
@@ -1868,14 +1949,25 @@ class AppServer:
         sessionless_notification = (
             self._root is None
             and self._initialization is InitializationState.INITIALIZED
-            and isinstance(params, MCPAuthUrlParams | ImportJobUpdatedParams)
+            and isinstance(
+                params,
+                MCPAuthUrlParams | ImportJobUpdatedParams | StorageUsageUpdatedParams,
+            )
         )
         if not self._connection_attached and not sessionless_notification:
             return
         await self._send_notification(method, params)
 
-    async def _subscribe(self, method: str) -> DispatchResult:
-        """The connection's subscriptions to changes of stored sessions."""
+    async def _subscribe(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult:
+        """The connection's subscriptions to changes of stored sessions, and of
+        the config a new session would run.
+        """
+        if method == "config/subscribe":
+            validate_wire(ConfigSubscribeParams, raw_params)
+            self._subscribe_config_changes()
+            return DispatchResult(EmptyResponse())
         host = self._session_backend_host
         if method == "session/lease/subscribe" and isinstance(
             host, SessionBackendHostLeaseWatch
@@ -1886,10 +1978,54 @@ class AppServer:
         ):
             self._stop_artifact_subscription()
             self._unsubscribe_artifacts = host.subscribe_artifacts(
-                self._send_artifact_update
+                self._send_notification_soon
             )
             return DispatchResult(EmptyResponse())
         raise method_not_found(method)
+
+    def _stop_storage_updates_now(self) -> None:
+        stop = self._stop_storage_updates
+        self._stop_storage_updates = None
+        if stop is not None:
+            stop()
+
+    async def _dispatch_storage_usage(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult:
+        service = self._storage_usage
+        if service is None:
+            raise method_not_found(method)
+        if self._stop_storage_updates is None:
+            self._stop_storage_updates = service.listen(
+                self._route_notification, self._storage_telemetry
+            )
+        if method == "storage/usage/read":
+            validate_wire(StorageUsageReadParams, raw_params)
+            return DispatchResult(await service.read())
+        if method == "storage/usage/refresh":
+            params = validate_wire(StorageUsageRefreshParams, raw_params)
+            return DispatchResult(await service.refresh(params))
+        raise method_not_found(method)
+
+    async def _storage_telemetry(self) -> TelemetryClient:
+        return await self._host_handler.setup_telemetry(self._initialized_client_info())
+
+    def _subscribe_config_changes(self) -> None:
+        if self._config_changes is None:
+            raise method_not_found("config/subscribe")
+        if self._unsubscribe_config is not None:
+            return
+        self._unsubscribe_config = self._config_changes.subscribe(
+            lambda: self._send_notification_soon(
+                "config/changed", ConfigChangedParams()
+            )
+        )
+
+    def _stop_config_subscription(self) -> None:
+        unsubscribe = self._unsubscribe_config
+        self._unsubscribe_config = None
+        if unsubscribe is not None:
+            unsubscribe()
 
     def _stop_artifact_subscription(self) -> None:
         unsubscribe = self._unsubscribe_artifacts
@@ -1897,7 +2033,7 @@ class AppServer:
         if unsubscribe is not None:
             unsubscribe()
 
-    def _send_artifact_update(self, method: str, params: ProtocolModel) -> None:
+    def _send_notification_soon(self, method: str, params: ProtocolModel) -> None:
         task = asyncio.create_task(self._send_notification(method, params))
         self._request_tasks.add(task)
         task.add_done_callback(self._request_tasks.discard)
@@ -1919,12 +2055,18 @@ class AppServer:
         transport = self._transport
         if transport is None or not self._connection_attached or self._attaching:
             return
+        deliveries = self._callback_deliveries
+        if callback.callback_id in deliveries.sent_since_attach:
+            # The re-send after an attach and live delivery overlap, in either
+            # order: the client already has it.
+            return
         callback_kind = callback.detail.kind
         if callback_kind not in self._client_capabilities.callback_kinds:
             raise RuntimeError(f"Client does not support {callback_kind} callbacks")
+        deliveries.sent_since_attach.add(callback.callback_id)
         request_id = self._next_request_id
         self._next_request_id += 1
-        self._callback_requests[request_id] = CallbackDelivery(
+        deliveries.requests[request_id] = CallbackDelivery(
             session_id=callback.session_id, callback_id=callback.callback_id
         )
         params = CallbackCallParams(callback=callback)
@@ -1936,7 +2078,7 @@ class AppServer:
                 "params": params.model_dump(mode="json", by_alias=True),
             })
         except Exception:
-            self._callback_requests.pop(request_id, None)
+            self._callback_deliveries.requests.pop(request_id, None)
             self._disconnect_current_client()
 
     async def _publish_callback(self, callback: PublicCallbackEntry) -> None:
@@ -1947,7 +2089,7 @@ class AppServer:
         await self._deliver_callback(callback)
 
     def _mark_callback_answered(self, callback_id: str) -> None:
-        for delivery in self._callback_requests.values():
+        for delivery in self._callback_deliveries.requests.values():
             if delivery.callback_id == callback_id:
                 delivery.answered = True
 
@@ -1967,24 +2109,45 @@ class AppServer:
         await root.announce_running_turn()
         await self._flush_backend_events(root)
 
-    async def _redeliver_open_callbacks(self) -> None:
-        root = self._root
-        if not isinstance(root, SessionBackendOpenCallbacks):
-            return
-        for callback in root.open_callbacks():
-            if not isinstance(callback.state, OpenCallbackState):
+    async def _redeliver_open_callbacks(self, attach_method: str) -> None:
+        callbacks = await self._read_open_callbacks(attach_method)
+        supported = set(self._client_capabilities.callback_kinds)
+        # _deliver_callback skips one already sent live while the read was in flight.
+        for callback in callbacks or []:
+            # The check refuses such a client, unless it could not read the
+            # callbacks or this one opened since: the client cannot answer it,
+            # so it is rejected, as a refused delivery is.
+            if callback.detail.kind not in supported:
+                await self._reject_undeliverable_callback(callback)
                 continue
             await self._deliver_callback(callback)
 
-    def _validate_open_callback_capabilities(self) -> None:
-        root = self._root
-        if not isinstance(root, SessionBackendOpenCallbacks):
+    async def _reject_undeliverable_callback(
+        self, callback: PublicCallbackEntry
+    ) -> None:
+        kind = callback.detail.kind
+        logger.warning(
+            "Rejecting callback %s: the client does not support %s",
+            callback.callback_id,
+            kind,
+        )
+        try:
+            await self._reject_callback(
+                callback.session_id,
+                callback.callback_id,
+                f"The client does not support {kind} callbacks",
+            )
+        except Exception:
+            # It may have closed since the read; the client stays attached.
+            logger.warning(
+                "Could not reject callback %s", callback.callback_id, exc_info=True
+            )
+
+    async def _validate_open_callback_capabilities(self, attach_method: str) -> None:
+        callbacks = await self._read_open_callbacks(attach_method)
+        if callbacks is None:
             return
-        required = {
-            callback.detail.kind
-            for callback in root.open_callbacks()
-            if isinstance(callback.state, OpenCallbackState)
-        }
+        required = {callback.detail.kind for callback in callbacks}
         missing = sorted(required - set(self._client_capabilities.callback_kinds))
         if not missing:
             return
@@ -1993,6 +2156,31 @@ class AppServer:
             f"Client does not support open callback kinds: {', '.join(missing)}",
             data=cast(JsonValue, {"missingCallbackKinds": missing}),
         )
+
+    async def _read_open_callbacks(
+        self, attach_method: str
+    ) -> list[PublicCallbackEntry] | None:
+        """The open callbacks an attach checks and sends, or None if unreadable.
+
+        A failed read must not lock the client out of its Session: it still
+        attaches and can answer, and callbacks that open later reach it live.
+        """
+        root = self._root
+        if not isinstance(root, SessionBackendOpenCallbacks):
+            return None
+        try:
+            callbacks = await root.read_open_callbacks()
+        except Exception as exc:
+            logger.warning("Could not read the open callbacks", exc_info=exc)
+            self._report_dispatch_error(
+                attach_method, exc, boundary="app_server_open_callbacks"
+            )
+            return None
+        return [
+            callback
+            for callback in callbacks
+            if isinstance(callback.state, OpenCallbackState)
+        ]
 
     def client_info(self) -> ClientInfo:
         return self._initialized_client_info()

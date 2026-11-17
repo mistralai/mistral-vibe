@@ -24,6 +24,9 @@ pub mod debug_console;
 pub mod feedback_bar;
 pub mod footer_fit;
 pub mod footer_gauge;
+pub mod goal_edit;
+pub mod goal_panel;
+pub mod goal_row;
 pub mod highlight;
 pub(crate) mod hint_line;
 pub mod jump_to_bottom;
@@ -32,6 +35,7 @@ mod list_hover;
 pub mod list_scroll;
 pub mod loading;
 pub mod log_level_picker;
+pub mod loops;
 pub mod markdown;
 pub mod mcp;
 pub mod mcp_oauth;
@@ -56,6 +60,8 @@ pub mod scrollbar;
 pub(crate) mod search_field;
 pub mod selection;
 pub mod skills_browser;
+pub mod storage_panel;
+pub mod storage_rows;
 mod styled_text;
 pub mod subagent_list;
 pub mod tab_cells;
@@ -69,6 +75,8 @@ mod trust_folders_layout;
 mod trust_folders_paint;
 pub(crate) mod trust_folders_selection;
 mod trust_folders_text;
+pub mod trusted_folders;
+pub mod trusted_folders_add;
 pub(crate) mod visual_lines;
 pub mod voice_app;
 
@@ -118,8 +126,10 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::BranchApp => branch_app::draw(app, f, area),
         Focus::ProxySetup => proxy_setup::draw(app, f, area),
         Focus::ResumePicker => resume_picker::draw(app, f, area),
+        Focus::Storage => storage_panel::draw(app, f, area),
         Focus::Mcp => mcp::draw(app, f, area),
         Focus::Plugins => plugins::draw(app, f, area),
+        Focus::TrustedFolders => trusted_folders::draw(app, f, area),
         Focus::Skills => skills_browser::draw(app, f, area),
         Focus::ContextApp => context_app::draw(app, f, area),
         Focus::McpOAuth => mcp_oauth::draw(app, f, area),
@@ -130,6 +140,8 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::LogLevelPicker => log_level_picker::draw(app, f, area),
         Focus::ThinkingPicker => thinking_picker::draw(app, f, area),
         Focus::ArtifactsModal => artifacts_modal::draw(app, f, area),
+        Focus::Loops => loops::draw(app, f, area),
+        Focus::Goal => goal_panel::draw(app, f, area),
         Focus::Config => {
             draw_base(app, f, area);
             config::draw(app, f, area);
@@ -169,16 +181,21 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     } else {
         input_box_height(app, area.width, area.height)
     };
-    let chunks = Layout::vertical([
+    let rows = Layout::vertical([
         Constraint::Min(1),                             // #chat — height: 1fr
         Constraint::Length(loading_height),             // #loading-area — height: auto
         Constraint::Length(popup_height),               // #completion-popup — height: auto, max 12
+        Constraint::Length(goal_row::height(app)),      // pinned goal line
         Constraint::Length(todo::row_height(app)),      // pinned todo line — height: 1
         Constraint::Length(input_height),               // #input-box (grows with rendered rows)
         Constraint::Length(subagent_list::height(app)), // #subagent-list — under the input
         Constraint::Length(1),                          // #bottom-bar — height: auto
     ])
     .split(area);
+    // The goal line is last here so the shared indices hold.
+    let chunks = [
+        rows[0], rows[1], rows[2], rows[4], rows[5], rows[6], rows[7], rows[3],
+    ];
 
     app.view.input_area = chunks[4];
     // A child view swaps the rendered transcript in the same scroll region.
@@ -230,6 +247,7 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
         completion_popup::draw(app, f, chunks[2]);
     }
     todo::draw_row(app, f, chunks[3]);
+    goal_row::draw(app, f, chunks[7]);
     if input_height > 0 {
         crate::mouse::register_region(app, chunks[4], crate::mouse::MouseTarget::Composer);
         app.view.cursor_position = chat_input::draw(app, f, chunks[4]);

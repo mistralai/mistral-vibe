@@ -4,9 +4,11 @@ import asyncio
 import base64
 from collections.abc import AsyncIterator, Callable
 import contextlib
+import importlib
 import json
 from pathlib import Path
 import tomllib
+from typing import Any
 
 import httpx
 import pytest
@@ -23,7 +25,10 @@ from vibe.app_server.protocol import (
     ConfigWriteOpWire,
     ModelConfigWriteParams,
     ProtocolErrorCode,
+    RuntimeMutationStatus,
+    RuntimeUpdatedParams,
     SessionOptions,
+    SessionReadParams,
 )
 from vibe.app_server.session import AppServerSession
 from vibe.core.config import VibeConfigSchema
@@ -442,6 +447,256 @@ async def test_a_model_picked_mid_turn_is_pinned_by_the_turn_queued_behind_it(
 
 @pytest.mark.both_paths
 @pytest.mark.asyncio
+async def test_a_model_picked_mid_turn_runs_the_next_turn(
+    config_dir: Path,
+    session_api_path: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A session running a turn.
+    *Do*: Pick another model while the turn runs, let it end, then send the
+    next prompt.
+    *Assert*: The pick waits for the turn to end, is announced, and the next
+    turn runs on it. On the Session API path the Runtime's end-of-turn call and
+    the ``turn_terminated`` event both settle it: whichever comes first lands it
+    through ``config/write``, and the other finds nothing parked.
+    """
+    config_writes = _record_config_writes(monkeypatch)
+    models = await _pick_a_model_mid_turn(
+        config_dir,
+        backend_contract_mistral_api,
+        backend_contract_mistral_response,
+        backend_contract_gated_mistral_response,
+        process_services,
+    )
+
+    assert models[0] != "alternate-model"
+    assert models[1:] == ["alternate-model"]
+    assert len(config_writes) == (1 if session_api_path else 0)
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_model_picked_mid_turn_lands_when_the_turn_terminated_event_arrives(
+    config_dir: Path,
+    session_api_path: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A session on the Session API path whose Runtime does not call
+    the app server back when a turn ends, as the target runtime will not.
+    *Do*: Pick another model while a turn runs, let it end, then send the next
+    prompt.
+    *Assert*: The ``turn_terminated`` event lands the pick through
+    ``config/write`` and announces it, so the next turn runs on it.
+    """
+    if not session_api_path:
+        pytest.skip("Only the Session API path has a turn_terminated event")
+    from mistralai_vibe_local_harness.vibe import UnifiedHarnessSessionBackend
+
+    monkeypatch.setattr(
+        UnifiedHarnessSessionBackend,
+        "configure_turn_settlement",
+        lambda _self, _settle: None,
+    )
+    config_writes = _record_config_writes(monkeypatch)
+    models = await _pick_a_model_mid_turn(
+        config_dir,
+        backend_contract_mistral_api,
+        backend_contract_mistral_response,
+        backend_contract_gated_mistral_response,
+        process_services,
+    )
+
+    assert models[0] != "alternate-model"
+    assert models[1:] == ["alternate-model"]
+    assert len(config_writes) == 1
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_turn_ends_while_a_move_holds_the_configuration(
+    config_dir: Path,
+    session_api_path: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    process_services: ProcessServices,
+    opened_backends: list[Any],
+) -> None:
+    """*Prepare*: A session running a turn, with a model picked during it.
+    *Do*: Hold the configuration the way a worktree move does, let the turn
+    end, and read the session while still holding it, as the move does.
+    *Assert*: The client hears the turn end and the read answers: the event
+    stream does not wait for the configuration, which the read waits on. Once
+    the configuration is free, the pick lands once and the next turn runs on it.
+    """
+    config_writes = _record_config_writes(monkeypatch)
+    _add_alternate_model(config_dir)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    models: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        models.append(json.loads(request.content)["model"])
+        if len(models) == 1:
+            return backend_contract_gated_mistral_response(
+                "first", started=started, release=release
+            )
+        return backend_contract_mistral_response("second")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    session = await connection.host.open_session()
+    turn: asyncio.Task[None] | None = None
+    try:
+
+        async def consume_turn() -> None:
+            _ = [event async for event in session.act("first")]
+
+        turn = asyncio.create_task(consume_turn())
+        await asyncio.wait_for(started.wait(), timeout=5)
+        status = await session.resources.config.write_model(model_alias="alternate")
+        assert status == RuntimeMutationStatus.PENDING
+        (backend,) = opened_backends
+
+        # Do
+        async with backend._deferred.exclusive():
+            release.set()
+            await asyncio.wait_for(asyncio.shield(turn), timeout=5)
+            read = await asyncio.wait_for(
+                backend.read(SessionReadParams(session_id=session.session_id)),
+                timeout=5,
+            )
+        _ = [event async for event in session.act("second")]
+    finally:
+        release.set()
+        if turn is not None and not turn.done():
+            turn.cancel()
+            with contextlib.suppress(BaseException):
+                await turn
+        await session.close()
+
+    # Assert
+    assert read.state.session.id == session.session_id
+    assert models[0] != "alternate-model"
+    assert models[1:] == ["alternate-model"]
+    assert len(config_writes) == (1 if session_api_path else 0)
+
+
+def _add_alternate_model(config_dir: Path) -> None:
+    """Add a model with the alias ``alternate`` to the user config."""
+    # GitPython's first import puts its executable in the environment for a
+    # moment; a derivation taken then differs by more than the model, which
+    # sends the switch past ``config/write``. Imported first, so it cannot.
+    importlib.import_module("vibe.core.git.repository")
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["models"].append({
+        "name": "alternate-model",
+        "provider": "mistral",
+        "alias": "alternate",
+    })
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+def _record_config_writes(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """The ``config/write`` requests the Session API accepted."""
+    from mistralai_vibe_local_harness.vibe._session_api_transport import (
+        LocalSessionApiTransport,
+    )
+
+    writes: list[object] = []
+    request = LocalSessionApiTransport.request
+
+    async def recording(
+        self: LocalSessionApiTransport, method: str, params: Any, result_type: Any
+    ) -> Any:
+        response = await request(self, method, params, result_type)
+        if method == "app_server/session/config/write":
+            writes.append(params)
+        return response
+
+    monkeypatch.setattr(LocalSessionApiTransport, "request", recording)
+    return writes
+
+
+async def _pick_a_model_mid_turn(
+    config_dir: Path,
+    mistral_api: respx.Route,
+    mistral_response: Callable[[str], httpx.Response],
+    gated_mistral_response: Callable[..., httpx.Response],
+    process_services: ProcessServices,
+) -> list[str]:
+    """Pick ``alternate`` during a turn, then run one more as soon as the
+    client hears it ended; the models asked.
+
+    Fails unless ``runtime/updated`` announces the pick once the turn ends.
+    """
+    _add_alternate_model(config_dir)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    models: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        models.append(json.loads(request.content)["model"])
+        if len(models) == 1:
+            return gated_mistral_response("first", started=started, release=release)
+        return mistral_response("second")
+
+    mistral_api.mock(side_effect=respond)
+    connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    session = await connection.host.open_session()
+    announced = asyncio.Event()
+    dispatch = connection.client._dispatch
+
+    async def record(message: dict[str, Any]) -> None:
+        if message.get("method") == "runtime/updated":
+            runtime = RuntimeUpdatedParams.model_validate(message["params"]).runtime
+            if runtime.config.active_model.alias == "alternate":
+                announced.set()
+        await dispatch(message)
+
+    connection.client._dispatch = record  # type: ignore[method-assign]
+    try:
+
+        async def consume_turn() -> None:
+            _ = [event async for event in session.act("first")]
+
+        turn = asyncio.create_task(consume_turn())
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            status = await session.resources.config.write_model(model_alias="alternate")
+            assert status == RuntimeMutationStatus.PENDING
+            # Parked: nothing announces it before the turn ends.
+            assert not announced.is_set()
+        finally:
+            release.set()
+            await turn
+        _ = [event async for event in session.act("second")]
+        await asyncio.wait_for(announced.wait(), timeout=5)
+    finally:
+        await session.close()
+    return models
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
 async def test_removed_session_active_model_falls_back_to_default(
     config_dir: Path,
     tmp_path: Path,
@@ -719,6 +974,11 @@ async def test_agent_uninstall_switches_away_from_the_active_agent(
     assert resources.agents.active.name != "lean"
 
 
+# A small model's window: its compaction threshold (16,384 tokens) still fits
+# the generated system prompt and tool catalog (about 10,100 tokens), and the
+# image message below does not fit it.
+_CRAMPED_WINDOW = 32_768
+
 # A valid 1x1 PNG: the Harness reads the file's dimensions to cost the image.
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
@@ -762,7 +1022,7 @@ async def test_a_refused_model_pick_leaves_the_session_and_config_on_the_old_mod
             "provider": "mistral",
             "alias": "cramped",
             "supports_images": True,
-            "max_context_length": 16_384,
+            "max_context_length": _CRAMPED_WINDOW,
         },
     ]
     config["active_model"] = "roomy"
@@ -803,7 +1063,7 @@ async def test_a_refused_model_pick_leaves_the_session_and_config_on_the_old_mod
                 # The session is pinned to its model by now, so a hand edit
                 # reaches it by shrinking that model rather than naming another.
                 edited = tomllib.loads(config_file.read_text(encoding="utf-8"))
-                edited["models"][0]["max_context_length"] = 16_384
+                edited["models"][0]["max_context_length"] = _CRAMPED_WINDOW
                 config_file.write_text(tomli_w.dumps(edited), encoding="utf-8")
                 await session.resources.config.reload()
         await session.enqueue("still here?")

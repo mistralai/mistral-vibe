@@ -29,6 +29,20 @@ pub enum Outcome {
     Filtered,
 }
 
+impl Outcome {
+    /// Whether the search took the key, running `filtered` when the query changed.
+    pub fn handled(self, filtered: impl FnOnce()) -> bool {
+        match self {
+            Self::Pass => false,
+            Self::Consumed => true,
+            Self::Filtered => {
+                filtered();
+                true
+            }
+        }
+    }
+}
+
 /// Route a key: the list keeps ↑↓, PageUp/PageDown and Enter even while the field is focused.
 pub fn handle_key(search: &mut Search, key: &KeyEvent) -> Outcome {
     if !search.focused {

@@ -130,11 +130,14 @@ class OrgConfigService:
             clock=clock,
         )
 
-    def on_changed(self, callback: Callable[[OrgConfigKey], None]) -> None:
+    def on_changed(
+        self, callback: Callable[[OrgConfigKey], None]
+    ) -> Callable[[], None]:
         """The first place an org-config change is observable process-wide,
-        before any session loads it at its next turn boundary.
+        before any session loads it at its next turn boundary. Returns the
+        function that stops the callback.
         """
-        self._cache.on_changed(callback)
+        return self._cache.on_changed(callback)
 
     @staticmethod
     def key_for(

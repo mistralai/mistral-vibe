@@ -161,21 +161,25 @@ fn handle_input_event(
                 | Focus::VoiceApp
                 | Focus::BranchApp
                 | Focus::ResumePicker
+                | Focus::Storage
                 | Focus::McpOAuth
                 | Focus::ConnectorAuth
                 | Focus::Rewind
                 | Focus::ThemePicker
-                | Focus::ModelPicker
                 | Focus::LogLevelPicker
                 | Focus::ThinkingPicker
                 | Focus::ArtifactsModal
                 | Focus::ContextApp => {}
+                Focus::Loops => crate::loops::paste(app, &text),
+                Focus::Goal => crate::goal::paste(app, &text),
                 Focus::Question => crate::question_input::handle_paste(app, text),
                 Focus::ProxySetup => crate::proxy_setup::paste(app, &text),
                 Focus::Config => config::handle_paste(app, text),
                 Focus::ReleaseNotes => crate::release_notes::paste(app, &text),
                 Focus::Mcp => crate::mcp::search::paste(app, &text),
+                Focus::ModelPicker => crate::model_picker::paste_search(app, &text),
                 Focus::Plugins => crate::plugins::paste(app, &text),
+                Focus::TrustedFolders => crate::trusted_folders::paste(app, client, &text),
                 Focus::Skills => crate::skills_browser::paste(app, client, &text),
                 Focus::SubagentList | Focus::Composer => input::handle_paste(app, text),
             }
@@ -240,8 +244,10 @@ fn dispatch_key(
         Focus::BranchApp => crate::branch_app::handle_key(app, key),
         Focus::ProxySetup => crate::proxy_setup::handle_key(app, client, key),
         Focus::ResumePicker => crate::resume_picker::handle_key(app, client, key),
+        Focus::Storage => crate::storage_panel::handle_key(app, client, key),
         Focus::Mcp => input::handle_mcp_key(app, client, key),
         Focus::Plugins => crate::plugins::handle_key(app, client, key),
+        Focus::TrustedFolders => crate::trusted_folders::handle_key(app, client, key),
         Focus::Skills => crate::skills_browser::handle_key(app, client, key),
         Focus::ContextApp => crate::context_app::handle_key(app, key),
         Focus::McpOAuth => input::handle_mcp_oauth_key(app, client, key),
@@ -252,6 +258,8 @@ fn dispatch_key(
         Focus::LogLevelPicker => input::handle_log_level_key(app, client, key),
         Focus::ThinkingPicker => input::handle_thinking_key(app, client, key),
         Focus::ArtifactsModal => input::handle_artifacts_modal_key(app, key),
+        Focus::Loops => crate::loops::handle_key(app, client, key),
+        Focus::Goal => crate::goal::handle_key(app, client, key),
         Focus::SubagentList | Focus::Composer => {
             return crate::vim::route(app, key, vim_pending, |app, key| {
                 input::handle_key(app, client, config_tx, key)

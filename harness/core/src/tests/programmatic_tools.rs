@@ -335,10 +335,10 @@ fn programmatic_pre_tool_skip_without_visible_reason_keeps_the_generic_message()
 ///
 /// *Prepare*: A programmatic provided tool is checkpointed while its pre-tool hook is pending.
 /// *Do*: Restore the session and continue the hook with arguments that violate its configured schema.
-/// *Assert*: The restored catalog rejects the rewrite exactly and preserves both pending state and checkpoint semantics.
+/// *Assert*: The restored catalog finds the rewrite invalid: Core warns, and the program reads the failure instead of a tool result.
 ///
 #[test]
-fn restored_programmatic_provided_tool_uses_its_resolved_input_schema() {
+fn restored_programmatic_provided_tool_hook_arguments_use_its_resolved_input_schema() {
     // Prepare
     let mut config = config();
     crate::core::testing::add_always_hook(&mut config, HookPoint::PreToolCall);
@@ -383,11 +383,9 @@ fn restored_programmatic_provided_tool_uses_its_resolved_input_schema() {
     let decoded = decode_checkpoint(&encoded).expect("checkpoint decodes");
     let mut restored =
         HarnessSession::restore(config, decoded, 0).expect("provided-tool hook restores");
-    let before_inspection = inspection_value(&restored);
-    let before_checkpoint = checkpoint_value(&restored);
 
     // Do
-    let rejected = serde_json::to_value(restored.apply(input(
+    let failed = accepted_value(restored.apply(input(
         1,
         json!({
             "type": "hook_completed",
@@ -400,16 +398,41 @@ fn restored_programmatic_provided_tool_uses_its_resolved_input_schema() {
                 },
             },
         }),
-    )))
-    .expect("rejection serializes");
+    )));
 
     // Assert
+    let message = "A pre_tool_call hook returned arguments for `calendar.find_event` that do \
+                   not satisfy its input schema: the array value is not of type \"object\". The tool did not run.";
+    let observations = failed["transition"]["observations"]
+        .as_array()
+        .expect("observations are an array");
+    assert_eq!(observations.len(), 3);
+    assert_eq!(observations[0]["type"], "warning");
+    assert_eq!(observations[0]["code"], "pre_tool_call_arguments_invalid");
+    assert_eq!(observations[0]["message"], message);
     assert_eq!(
-        rejected["rejection"]["error"]["message"],
-        "pre-tool hook arguments do not satisfy the original tool schema: [] is not of type \"object\""
+        observations[0]["details"]["hook_binding_ids"],
+        json!(["test-hook-0-PreToolCall"])
     );
-    assert_eq!(inspection_value(&restored), before_inspection);
-    assert_eq!(checkpoint_value(&restored), before_checkpoint);
+    assert_eq!(observations[1]["type"], "tool_result_committed");
+    assert_eq!(
+        observations[1]["call"]["arguments"],
+        json!({"query": "planning"})
+    );
+    assert_eq!(
+        observations[1]["result"]["error"]["code"],
+        "pre_tool_call_arguments_invalid"
+    );
+    assert_eq!(observations[2]["type"], "tool_execution_finished");
+    assert_eq!(observations[2]["call_id"], "program-restored-provided-hook");
+    let program_result = observations[2]["result"]["content"][0]["text"]
+        .as_str()
+        .expect("the program result is text");
+    assert!(program_result.contains("\"code\":\"pre_tool_call_arguments_invalid\""));
+    assert_eq!(
+        failed["transition"]["next"]["directives"][0]["action"]["type"],
+        "llm_call"
+    );
 }
 
 ///

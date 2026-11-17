@@ -10,6 +10,7 @@ use super::gateway::{
     default_gateway_message, Update, UpdateGateway, UpdateGatewayError, UpdateSource,
 };
 use super::version::parse_version;
+use crate::utils::tls::apply_uv_tls_trust;
 
 /// How long a stored check stays fresh.
 pub const UPDATE_CACHE_TTL_SECONDS: i64 = 24 * 60 * 60;
@@ -470,6 +471,7 @@ pub async fn spawn_update_command(
         shell_command
     };
     plain_output_env(&mut spawned);
+    apply_uv_tls_trust(&mut spawned);
     let child = match spawned
         .env("HOMEBREW_NO_AUTO_UPDATE", "1")
         .stdin(Stdio::null())

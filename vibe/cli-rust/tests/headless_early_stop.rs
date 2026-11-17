@@ -33,6 +33,7 @@ fn options() -> HeadlessOptions {
         output_dir: None,
         system_prompt: None,
         model: None,
+        thinking: None,
         agent: None,
         auto_approve: false,
         enabled_tools: Vec::new(),

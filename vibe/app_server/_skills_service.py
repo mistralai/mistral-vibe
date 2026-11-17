@@ -44,6 +44,7 @@ from vibe.app_server.protocol import (
     SkillsListParams,
     SkillsListResponse,
     SkillsRemoveParams,
+    SkillsSessionImportResponse,
     SkillsSetAliasParams,
     SkillsSetEnabledParams,
     SkillsSetLatestParams,
@@ -56,7 +57,7 @@ from vibe.app_server.protocol import (
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.platform_auth import PlatformCredentialFactory
-from vibe.core.skills.models import SkillScope
+from vibe.core.skills.models import ManifestEntry, SkillScope
 from vibe.core.skills.registry import (
     RegistrySkillsError,
     check_new_versions,
@@ -65,6 +66,7 @@ from vibe.core.skills.registry import (
     get_skill_body,
     get_skill_details,
     has_registry_endpoint,
+    import_session_skill,
     import_skill,
     list_catalog,
     list_skill_versions,
@@ -74,6 +76,7 @@ from vibe.core.skills.registry import (
     set_skill_latest,
     set_skill_version,
 )
+from vibe.observability.logging import logger
 
 __all__ = ["SkillsController", "SkillsHost"]
 
@@ -106,6 +109,11 @@ class SkillsHost(Protocol):
         """Project roots a scoped install may write into."""
         ...
 
+    @property
+    def sandboxed(self) -> bool:
+        """A sandboxed session runs only the skills copied in as it opened."""
+        ...
+
     def require_idle(self) -> None:
         """Raise if a mutation would land mid-turn."""
         ...
@@ -124,9 +132,32 @@ class SkillsHost(Protocol):
         """
         ...
 
+    @property
+    def session_skill_pins(self) -> tuple[ManifestEntry, ...]:
+        """The registry skills picked for this session only."""
+        ...
+
+    async def save_session_skill_pins(self, pins: tuple[ManifestEntry, ...]) -> None:
+        """Keep ``pins`` for the session and its next open; ``refresh`` applies them."""
+        ...
+
     async def refresh(self) -> RuntimeSnapshot:
         """Re-read the workspace after a mutation and return the new snapshot."""
         ...
+
+
+def _loaded_pick(runtime: RuntimeSnapshot, entry: ManifestEntry) -> str | None:
+    return next(
+        (
+            skill.name
+            for skill in runtime.skills
+            if skill.scope == "session"
+            and skill.registry is not None
+            and skill.registry.skill_id == entry.skill_id
+            and skill.registry.version == entry.version
+        ),
+        None,
+    )
 
 
 class SkillsController:
@@ -308,6 +339,8 @@ class SkillsController:
 
     async def _import(self, params: SkillsImportParams) -> RuntimeMutationResponse:
         self._begin_mutation(params.session_id)
+        if params.scope == "session":
+            return await self._import_for_session(params)
         try:
             await import_skill(
                 self._host.config,
@@ -321,6 +354,51 @@ class SkillsController:
         except RegistrySkillsError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
         return await self._refreshed()
+
+    async def _import_for_session(
+        self, params: SkillsImportParams
+    ) -> SkillsSessionImportResponse:
+        if self._host.sandboxed:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                "a sandboxed session cannot pick a skill for itself",
+            )
+        try:
+            entry = await import_session_skill(
+                self._host.config,
+                params.skill_id,
+                version=params.version,
+                alias=params.alias,
+                credentials=self._host.credentials,
+            )
+        except RegistrySkillsError as exc:
+            raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, exc.reason) from exc
+        before = self._host.session_skill_pins
+        kept = tuple(pin for pin in before if pin.skill_id != entry.skill_id)
+        await self._host.save_session_skill_pins((*kept, entry))
+        try:
+            runtime = await self._host.refresh()
+            loaded = _loaded_pick(runtime, entry)
+            if loaded is None:
+                raise RequestFailure(
+                    ProtocolErrorCode.INVALID_PARAMS,
+                    f"skill {entry.name!r} did not load in this session: the"
+                    " configuration filters it out or it could not be read",
+                )
+        except BaseException:
+            await self._restore_session_skill_pins(before)
+            raise
+        return SkillsSessionImportResponse(runtime=runtime, skill_name=loaded)
+
+    async def _restore_session_skill_pins(
+        self, pins: tuple[ManifestEntry, ...]
+    ) -> None:
+        """A refused or failed pick leaves the session on the picks it had."""
+        await self._host.save_session_skill_pins(pins)
+        try:
+            await self._host.refresh()
+        except Exception:
+            logger.exception("Failed to reload the session's skills after a pick")
 
     async def _set_version(
         self, params: SkillsSetVersionParams

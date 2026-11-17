@@ -147,7 +147,7 @@ fn shifted_entries_keep_their_cached_heights() {
     let mut transcript = loaded();
     let rev = transcript.entry(1).unwrap().rev;
     let mut cache = TranscriptCache::default();
-    cache.ensure_context(80, 79, 0, false);
+    cache.ensure_context(80, 79, 0, false, false);
     let geometry = EntryGeometry {
         height: 7,
         prewrapped: false,

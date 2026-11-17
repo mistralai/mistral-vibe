@@ -12,8 +12,9 @@ mod welcome;
 
 use std::borrow::Cow;
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::Style;
+use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -88,4 +89,16 @@ pub fn draw(app: &mut App, wizard: &mut OnboardingState, f: &mut Frame, area: Re
         Screen::BrowserSignIn => browser_sign_in::draw(app, wizard, f, area, &chat_frame),
         Screen::ApiKey => api_key::draw(app, wizard, f, area, &chat_frame),
     }
+}
+
+/// The fallback when a screen cannot fit: a wrapped, centered notice instead
+/// of a blank screen.
+fn draw_too_small(f: &mut Frame, area: Rect) {
+    let notice = Paragraph::new("Enlarge terminal to continue")
+        .style(crate::ui::theme::muted_style())
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true });
+    let height = (notice.line_count(area.width) as u16).min(area.height);
+    let y = area.y + (area.height - height) / 2;
+    f.render_widget(notice, Rect::new(area.x, y, area.width, height));
 }
