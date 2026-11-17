@@ -1,6 +1,7 @@
 //! Crash reporting. Mirrors `vibe/observability/sentry.py`.
 //!
-//! The config gate (`enableTelemetry`) only arrives over the wire at Ready, so
+//! The config gate (`crashReportsEnabled`: telemetry on and a deployment that is
+//! not self-hosted) only arrives over the wire at Ready, so
 //! the startup window before it — spawn, handshake, startup failure — is
 //! covered by an explicit operator opt-in: `init_pre_ready` binds a client only
 //! when `SENTRY_DSN` is set, so default runs (compiled-in DSN `None`) stay

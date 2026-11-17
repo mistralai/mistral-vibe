@@ -144,6 +144,73 @@ fn compaction_action_ids_are_deterministic_opaque_uuids() {
     assert_ne!(first_fallback_action_id, first_retry_action_id);
 }
 
+/// The IDs of the first completion and the first compaction that sessions with
+/// one exchange under `config` request.
+fn first_action_ids(config: &HarnessConfig) -> (String, String) {
+    let history = vec![Message::user_text("hello"), assistant_text("hi")];
+    let mut turn = HarnessSession::create_with_history(config.clone(), history.clone())
+        .expect("session creates");
+    let mut compacting =
+        HarnessSession::create_with_history(config.clone(), history).expect("session creates");
+    let started = accepted_value(turn.apply(input(1, user_message("turn-1", "again", "queue"))));
+    let compacted = accepted_value(compacting.apply(input(1, compact(""))));
+    (
+        dispatched_action_id(&started).to_string(),
+        dispatched_action_id(&compacted).to_string(),
+    )
+}
+
+///
+/// *Prepare*: Sessions with one exchange for the same task: one without an action ID namespace, and two under different namespaces.
+/// *Do*: Read the first completion and compaction Action IDs of each, and of a namespaced session restored from its checkpoint.
+/// *Assert*: Without a namespace the IDs are the ones Core derives from the task alone; each namespace gives both Actions IDs of their own, and the restored session keeps its namespace's IDs.
+///
+#[test]
+fn an_action_id_namespace_sets_completion_and_compaction_ids_apart() {
+    // Prepare
+    let plain = config();
+    let mut first = config();
+    first.action_id_namespace = Some("first".to_string());
+    let mut second = config();
+    second.action_id_namespace = Some("second".to_string());
+    let created = HarnessSession::create_with_history(
+        first.clone(),
+        vec![Message::user_text("hello"), assistant_text("hi")],
+    )
+    .expect("session creates");
+    let checkpoint = checkpoint_value(&created).to_string();
+    let restore = || {
+        let decoded = decode_checkpoint(&checkpoint).expect("checkpoint decodes");
+        HarnessSession::restore(first.clone(), decoded, 0).expect("checkpoint restores")
+    };
+    let mut restored = restore();
+    let mut restored_compacting = restore();
+
+    // Do
+    let plain_ids = first_action_ids(&plain);
+    let first_ids = first_action_ids(&first);
+    let second_ids = first_action_ids(&second);
+    let restored_started =
+        accepted_value(restored.apply(input(1, user_message("turn-1", "again", "queue"))));
+    let restored_compacted = accepted_value(restored_compacting.apply(input(1, compact(""))));
+
+    // Assert
+    let ids = [&plain_ids, &first_ids, &second_ids]
+        .iter()
+        .flat_map(|(completion, compaction)| [completion, compaction])
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(ids.len(), 6);
+    assert_eq!(
+        plain_ids,
+        (
+            "ba634eef-6950-5db5-880c-0232c9092e39".to_string(),
+            "7263eb7e-99c0-5390-8068-3aff9aa472e5".to_string()
+        )
+    );
+    assert_eq!(dispatched_action_id(&restored_started), first_ids.0);
+    assert_eq!(dispatched_action_id(&restored_compacted), first_ids.1);
+}
+
 ///
 /// *Prepare*: A manual compaction checkpoint in the shape earlier releases captured while resending the in-context request: attempt 1 and no request kind.
 /// *Do*: Restore it, resynchronize the pending Action, and return an invalid summary.

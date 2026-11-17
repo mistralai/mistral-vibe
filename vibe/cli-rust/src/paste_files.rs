@@ -18,6 +18,7 @@ urls.js.map((url) => url.path.js).join("\n")"#;
 
 /// Check an inserted path list on a blocking job; it stays as typed without a job slot.
 pub fn request_probe(app: &mut App, start: usize, raw: String, candidates: Vec<String>) {
+    crate::long_paste::await_probe(app, &raw, start);
     let fallback = Event::Probed {
         start,
         raw: raw.clone(),
@@ -28,7 +29,9 @@ pub fn request_probe(app: &mut App, start: usize, raw: String, candidates: Vec<S
         raw,
         paths: paste_path::paths_resolve(&candidates, |path| path.exists()).then_some(candidates),
     };
-    spawn_job(app, job, fallback);
+    if !spawn_job(app, job, fallback) {
+        app.chat_input.expandable_paste = None;
+    }
 }
 
 /// Run `job` on a bounded blocking slot and deliver its event; false without a slot.
@@ -48,9 +51,9 @@ pub(crate) fn spawn_job(
     true
 }
 
-/// Swap the inserted paste, if still in the composer, for its resolved mentions:
-/// image placeholders and `@path` mentions.
+/// Swap the inserted paste, if still in the composer, for its resolved mentions.
 pub fn apply_probed(app: &mut App, start: usize, raw: &str, paths: Option<Vec<String>>) {
+    let fresh = crate::long_paste::end_probe(app, raw, start);
     let Some(paths) = paths.filter(|_| !input::composer_hidden(app)) else {
         return;
     };
@@ -82,11 +85,12 @@ pub fn apply_probed(app: &mut App, start: usize, raw: &str, paths: Option<Vec<St
     app.chat_input.cursor = shift(app.chat_input.cursor, replaced);
     app.chat_input.anchor = app.chat_input.anchor.map(|pos| shift(pos, replaced));
     app.chat_input.sync_mentions_at(start);
-    add_mentions(
-        app,
-        start + replacement.find(&joined).unwrap_or_default(),
-        &tokens,
-    );
+    crate::long_paste::shift_offer(app, replaced);
+    let at = start + replacement.find(&joined).unwrap_or_default();
+    add_mentions(app, at, &tokens);
+    if fresh {
+        crate::long_paste::offer_literal(app, raw, (start, start + replacement.len()));
+    }
     completion_manager::input_changed(app);
     app.chat_input
         .record_edit(before, true, crate::clock::now());
@@ -131,9 +135,8 @@ pub fn apply_image_files(app: &mut App, paths: Vec<PathBuf>) {
     completion_manager::input_changed(app);
 }
 
-/// Insert `paths` at the caret, replacing the selection, as `[Image #N]`
-/// placeholder mentions, or as raw paths where the mode names no images.
-pub fn insert_images(app: &mut App, paths: &[String]) {
+/// Insert `paths` at the caret as `[Image #N]` mentions, or raw where the mode names no images; returns the inserted span.
+pub fn insert_images(app: &mut App, paths: &[String]) -> (usize, usize) {
     app.chat_input.widen_selection();
     let input = &app.chat_input;
     let at = input
@@ -158,6 +161,7 @@ pub fn insert_images(app: &mut App, paths: &[String]) {
     if names {
         add_mentions(app, start, &tokens);
     }
+    (at, app.chat_input.cursor)
 }
 
 /// Track space-separated `tokens` starting at byte `start` as mentions.

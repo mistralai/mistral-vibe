@@ -10,8 +10,9 @@ mod effect_body;
 mod loop_prompt;
 mod message;
 mod notice;
+mod raw;
 mod reasoning;
-mod startup;
+pub(super) mod startup;
 mod status;
 mod user;
 mod user_text;
@@ -34,7 +35,7 @@ pub(super) use user_text::sticky;
 pub(super) struct QueueView {
     /// Whether this prompt is the queue-mode highlight.
     pub selected: bool,
-    /// Whether the server is holding the queue until the user resumes it.
+    /// Whether the header names the paused queue's shortcuts (held, queue mode closed).
     pub paused: bool,
 }
 
@@ -42,6 +43,8 @@ pub(super) struct QueueView {
 pub(super) struct ExpansionView {
     pub entry: bool,
     pub group: bool,
+    /// `/raw`: an agent message shows its Markdown source.
+    pub raw: bool,
 }
 
 pub(super) struct RenderedEntry {
@@ -146,8 +149,12 @@ pub(super) fn render(
     use crate::server::HistoryEntry as H;
     if let H::Message(value) = entry.entry {
         let (selected, expanded) = (queue.selected || rewind, expansion.entry);
-        let mut rendered =
-            message::render(entry, value, width, selected, expanded, pulse_frame, cache);
+        let view = message::MessageView {
+            selected,
+            expanded,
+            raw: expansion.raw,
+        };
+        let mut rendered = message::render(entry, value, width, view, pulse_frame, cache);
         if entry.queue_header {
             let mut header = LinkedLines::default();
             push_queue_header(&mut header, width, queue.paused);
@@ -236,6 +243,11 @@ pub(super) fn render(
     }
     lines.append(content);
     RenderedEntry::owned(lines)
+}
+
+/// Whether this entry paints a `/raw` agent message.
+pub(super) fn is_raw(entry: &TranscriptEntry<'_>, raw: bool) -> bool {
+    raw && matches!(entry.entry, crate::server::HistoryEntry::Message(message) if message.role == "assistant")
 }
 
 /// Gutter width of the edit diff this entry paints, or `None` when it paints none.

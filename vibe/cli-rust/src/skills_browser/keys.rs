@@ -49,7 +49,7 @@ fn list_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         }
         KeyCode::Char(' ') => list::toggle(app, client),
         KeyCode::Char('d') => list::remove(app, client, armed),
-        KeyCode::Tab => {
+        KeyCode::Tab | KeyCode::BackTab => {
             let other = state.tab.other();
             list::open_tab(state, other);
         }

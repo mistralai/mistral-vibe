@@ -78,30 +78,24 @@ fn mount_whats_new(app: &mut App, seen: Option<&str>, promo_eligible: bool) {
         id: new_message_id(),
         body,
         promo: promo_eligible,
+        offer_id: None,
     };
-    local::add_whats_new(
-        &mut app.view.transcript,
-        &whats_new.id,
-        &whats_new.text(None),
-    );
+    local::add_whats_new(&mut app.view.transcript, &whats_new.id, &whats_new.text());
     app.session.whats_new = Some(whats_new);
 }
 
-/// The mounted what's-new entry and the parts its text is rebuilt from.
+/// The mounted what's-new entry, and the upgrade offer box mounted under it.
 pub struct WhatsNew {
     pub id: String,
     pub body: String,
     pub promo: bool,
+    pub offer_id: Option<String>,
 }
 
 impl WhatsNew {
-    /// The body, then the plan offer, then the promo suffix.
-    fn text(&self, plan_offer: Option<&str>) -> String {
+    /// The body, then the promo suffix.
+    fn text(&self) -> String {
         let mut text = self.body.clone();
-        if let Some(cta) = plan_offer {
-            text.push_str("\n\n");
-            text.push_str(cta);
-        }
         if self.promo {
             text.push_str(&promo_whats_new_suffix());
         }
@@ -109,34 +103,75 @@ impl WhatsNew {
     }
 }
 
-/// Rebuild the mounted what's-new text with the account's plan offer: the
-/// account read lands after the body mounts.
-pub fn show_plan_offer(app: &mut App, account: &Value) {
-    let (Some(whats_new), Some(cta)) = (&app.session.whats_new, plan_offer_cta(account)) else {
+/// Sync the upgrade box under what's-new with the active model's account read; the switch offer renders under the banner.
+pub fn sync_plan_offer(app: &mut App) {
+    let upgrade = active_offer(app).filter(|offer| !offer.switch_key);
+    let Some(whats_new) = &mut app.session.whats_new else {
         return;
     };
-    local::set_text(
-        &mut app.view.transcript,
-        &whats_new.id,
-        &whats_new.text(Some(&cta)),
-    );
+    let transcript = &mut app.view.transcript;
+    match (whats_new.offer_id.take(), upgrade) {
+        (Some(id), Some(offer)) => {
+            local::set_text(transcript, &id, &offer.text);
+            whats_new.offer_id = Some(id);
+        }
+        (None, Some(offer)) => {
+            let id = new_message_id();
+            local::add_plan_offer(transcript, &id, &offer.text);
+            whats_new.offer_id = Some(id);
+        }
+        (Some(id), None) => transcript.remove(&id),
+        (None, None) => {}
+    }
 }
 
-/// The what's-new call to action for `AccountView.planOffer`, if any.
-fn plan_offer_cta(account: &Value) -> Option<String> {
+/// The plan offer of the active model's account read, if it was read.
+fn active_offer(app: &App) -> Option<PlanOffer> {
+    let reads = app.whoami.hit(crate::usage_gauge::account_model(app))?;
+    plan_offer(&reads.account)
+}
+
+/// The switch offer of the active model's account read, shown under the banner.
+pub fn switch_key_offer(app: &App) -> Option<String> {
+    active_offer(app)
+        .filter(|offer| offer.switch_key)
+        .map(|offer| offer.text)
+}
+
+/// The title of the boxes the plan offers show in.
+pub const PLAN_OFFER_TITLE: &str = "Vibe Pro plan";
+
+/// `AccountView.planOffer` as a call to action.
+pub struct PlanOffer {
+    pub switch_key: bool,
+    pub text: String,
+}
+
+/// The call to action for `AccountView.planOffer`, if any.
+pub fn plan_offer(account: &Value) -> Option<PlanOffer> {
     let offer = account.get("planOffer")?;
     let url = offer.get("url")?.as_str()?;
-    Some(match offer.get("kind").and_then(Value::as_str) {
-        Some("switch_api_key") => format!("### Switch to your [Vibe Pro API key]({url})"),
-        _ => format!("### Unlock more with Vibe - [Upgrade to Vibe Pro]({url})"),
-    })
+    let switch_key = offer.get("kind").and_then(Value::as_str) == Some("switch_api_key");
+    let text = if switch_key {
+        format!(
+            "You have Vibe Pro, but this API key does not use it.\n\n\
+             To use your plan, quit and run `vibe --setup`, then choose **Launch browser** \
+             and sign in. Or copy your [Vibe Pro API key]({url}), choose **Use an API key** \
+             and paste it."
+        )
+    } else {
+        format!("Unlock more with Vibe - [Upgrade to Vibe Pro]({url})")
+    };
+    Some(PlanOffer { switch_key, text })
 }
 
-/// The first submit removes the what's-new body, so it does not stay pinned
-/// below the conversation it started.
+/// The first submit drops the what's-new body and its offer box, so neither stays pinned below the conversation.
 pub fn dismiss_whats_new(app: &mut App) {
     if let Some(whats_new) = app.session.whats_new.take() {
         app.view.transcript.remove(&whats_new.id);
+        if let Some(offer_id) = &whats_new.offer_id {
+            app.view.transcript.remove(offer_id);
+        }
     }
 }
 

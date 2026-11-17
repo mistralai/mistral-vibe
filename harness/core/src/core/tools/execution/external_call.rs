@@ -1,7 +1,10 @@
 use crate::core::action_id;
+use crate::core::error::CoreError;
 use crate::core::features::permissions::GrantKey;
 use crate::core::features::programmatic_tool_calling::ProgrammaticName;
-use crate::core::hooks::{HookCall, HookPoint, hook_action_id, post_tool_call_warning};
+use crate::core::hooks::{
+    HookCall, HookPoint, hook_action_id, invalid_pre_tool_call_arguments, post_tool_call_warning,
+};
 use crate::core::step_protocol::{Action, Observation};
 use crate::core::tools::external::ExternalToolCall;
 use crate::core::wire::tool::ToolResult;
@@ -28,11 +31,16 @@ pub(crate) enum ExternalCallStage {
         grant_key: GrantKey,
         name: ApprovalName,
     },
-    Pending,
+    Pending {
+        /// Host time of the step that dispatched the tool Action. Checkpoints
+        /// that did not record it restore without it.
+        dispatched_at_unix_ms: Option<u64>,
+    },
     AwaitingPostHook {
         hook_action_id: String,
         hook_binding_ids: Vec<String>,
         result: ToolResult,
+        duration_ms: u64,
     },
 }
 
@@ -69,10 +77,12 @@ impl PendingExternalCall {
         }
     }
 
-    pub(crate) fn pending(call: ExternalToolCall) -> Self {
+    pub(crate) fn pending(call: ExternalToolCall, dispatched_at_unix_ms: Option<u64>) -> Self {
         Self {
             call,
-            stage: ExternalCallStage::Pending,
+            stage: ExternalCallStage::Pending {
+                dispatched_at_unix_ms,
+            },
         }
     }
 
@@ -123,11 +133,12 @@ impl PendingExternalCall {
                     ApprovalName::Programmatic(name) => name.display_name(),
                 },
             ),
-            ExternalCallStage::Pending => Action::external_tool(&self.call, turn_id),
+            ExternalCallStage::Pending { .. } => Action::external_tool(&self.call, turn_id),
             ExternalCallStage::AwaitingPostHook {
                 hook_action_id,
                 hook_binding_ids,
                 result,
+                duration_ms,
             } => Action::Hook {
                 effect_id: hook_action_id.clone(),
                 turn_id: turn_id.to_string(),
@@ -135,6 +146,7 @@ impl PendingExternalCall {
                 call: HookCall::PostToolCall {
                     tool_call: (&self.call).into(),
                     tool_result: result.clone(),
+                    duration_ms: *duration_ms,
                 },
             },
         }
@@ -148,7 +160,7 @@ impl PendingExternalCall {
             ExternalCallStage::AwaitingApproval {
                 approval_action_id, ..
             } => approval_action_id,
-            ExternalCallStage::Pending => &self.call.action_id,
+            ExternalCallStage::Pending { .. } => &self.call.action_id,
         }
     }
 
@@ -159,6 +171,29 @@ impl PendingExternalCall {
             ExternalCallStage::AwaitingPostHook { .. } => Some(HookSide::Post),
             _ => None,
         }
+    }
+
+    /// The failed result and the warning for arguments from the awaited
+    /// pre-tool-call hooks that do not satisfy the tool's input schema.
+    pub(crate) fn invalid_pre_hook_arguments(
+        &self,
+        detail: &str,
+        turn_id: &str,
+    ) -> Result<(ToolResult, Observation), CoreError> {
+        let ExternalCallStage::AwaitingPreHook {
+            hook_binding_ids, ..
+        } = &self.stage
+        else {
+            return Err(CoreError::invariant(
+                "hook arguments arrived for a call that awaits no pre-tool hook",
+            ));
+        };
+        Ok(invalid_pre_tool_call_arguments(
+            turn_id,
+            &self.call,
+            hook_binding_ids,
+            detail,
+        ))
     }
 
     /// The warning for the result that the awaited post-tool-call hook
@@ -180,7 +215,7 @@ impl PendingExternalCall {
     }
 
     pub(crate) fn awaits_tool(&self, action_id: &str) -> bool {
-        matches!(self.stage, ExternalCallStage::Pending) && self.action_id() == action_id
+        matches!(self.stage, ExternalCallStage::Pending { .. }) && self.action_id() == action_id
     }
 
     pub(crate) fn awaits_approval(&self, action_id: &str) -> bool {
@@ -188,8 +223,13 @@ impl PendingExternalCall {
             && self.action_id() == action_id
     }
 
-    pub(crate) fn send(&mut self, call: ExternalToolCall, turn_id: &str) -> Action {
-        *self = Self::pending(call);
+    pub(crate) fn send(
+        &mut self,
+        call: ExternalToolCall,
+        now_unix_ms: u64,
+        turn_id: &str,
+    ) -> Action {
+        *self = Self::pending(call, Some(now_unix_ms));
         self.action(turn_id)
     }
 
@@ -208,12 +248,21 @@ impl PendingExternalCall {
         &mut self,
         hook_binding_ids: Vec<String>,
         result: ToolResult,
+        now_unix_ms: u64,
         turn_id: &str,
     ) -> Action {
+        // A call restored without its dispatch time reports no duration.
+        let duration_ms = match self.stage {
+            ExternalCallStage::Pending {
+                dispatched_at_unix_ms: Some(dispatched_at_unix_ms),
+            } => now_unix_ms.saturating_sub(dispatched_at_unix_ms),
+            _ => 0,
+        };
         self.stage = ExternalCallStage::AwaitingPostHook {
             hook_action_id: hook_action_id(&self.call.action_id, HookPoint::PostToolCall),
             hook_binding_ids,
             result,
+            duration_ms,
         };
         self.action(turn_id)
     }

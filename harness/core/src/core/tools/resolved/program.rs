@@ -195,12 +195,11 @@ impl AcceptedProgramGroups {
             callable.push(CallableProgramGroup {
                 namespace: subagents::NAMESPACE.to_string(),
                 prompt: PromptContribution::DedicatedSection,
-                search_description: config
-                    .settings
-                    .prompts
-                    .agent_tools
-                    .search_description
-                    .clone(),
+                search_description: agent_search_description(
+                    &config.settings.prompts.agent_tools,
+                    config.settings.tools.subagents.can_spawn(),
+                )
+                .to_string(),
                 connector_icon_url: configured_icon(&provided_groups, subagents::NAMESPACE),
                 tools: subagent_program_tools(
                     &config.settings.tools.subagents,
@@ -226,7 +225,6 @@ impl AcceptedProgramGroups {
                         command_environment,
                         &group.name,
                         &group.description,
-                        &config.settings.prompts.agent_tools.search_description,
                     ),
                     connector_icon_url: group.icon_url.clone(),
                     tools,
@@ -414,11 +412,18 @@ fn configured_icon(groups: &[&ToolGroupDefinition], namespace: &str) -> Option<S
         .and_then(|group| group.icon_url.clone())
 }
 
+fn agent_search_description(prompts: &subagents::Prompts, can_spawn: bool) -> &str {
+    if can_spawn {
+        &prompts.search_description
+    } else {
+        &prompts.messaging_search_description
+    }
+}
+
 fn search_description(
     environment: CommandEnvironment,
     namespace: &str,
     provided_description: &str,
-    agent_description: &str,
 ) -> String {
     match namespace {
         file_system::NAMESPACE => return file_system::search_description(environment),
@@ -426,7 +431,6 @@ fn search_description(
             return background_processes::SEARCH_DESCRIPTION.to_string();
         }
         SELF_NAMESPACE => SELF_SEARCH_DESCRIPTION,
-        subagents::NAMESPACE => agent_description,
         _ => provided_description,
     }
     .to_string()

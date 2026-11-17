@@ -64,48 +64,7 @@ impl CheckpointNotifications {
         let mut received_tail_started = false;
         let mut ready_for_model = None;
         for entry in self.0 {
-            match entry {
-                entry @ (CheckpointNotificationState::Pending { .. }
-                | CheckpointNotificationState::Ready { .. }) => {
-                    if received_tail_started {
-                        return Err(
-                            "pending checkpoint notifications must precede received entries"
-                                .to_string(),
-                        );
-                    }
-                    let entry_ready = matches!(&entry, CheckpointNotificationState::Ready { .. });
-                    let (notification, position) = match entry {
-                        CheckpointNotificationState::Pending {
-                            notification,
-                            preceding_steers,
-                        }
-                        | CheckpointNotificationState::Ready {
-                            notification,
-                            preceding_steers,
-                        } => (notification, preceding_steers.unwrap_or(pending_steers)),
-                        CheckpointNotificationState::Received { .. } => unreachable!(),
-                    };
-                    let notification = notification.restore();
-                    if ready_for_model
-                        .replace(entry_ready)
-                        .is_some_and(|ready| ready != entry_ready)
-                    {
-                        return Err(
-                            "checkpoint cannot mix pending and ready notifications".to_string()
-                        );
-                    }
-                    if !received_ids.insert(notification.id.clone()) {
-                        return Err(format!(
-                            "checkpoint contains duplicate notification ID {:?}",
-                            notification.id
-                        ));
-                    }
-                    received_order.push(notification.id.clone());
-                    pending.push(AdmittedNotification {
-                        notification,
-                        preceding_steers: position,
-                    });
-                }
+            let (notification, position, entry_ready) = match entry {
                 CheckpointNotificationState::Received { id } => {
                     received_tail_started = true;
                     if !received_ids.insert(id.clone()) {
@@ -114,8 +73,48 @@ impl CheckpointNotifications {
                         ));
                     }
                     received_order.push(id);
+                    continue;
                 }
+                CheckpointNotificationState::Pending {
+                    notification,
+                    preceding_steers,
+                } => (
+                    notification,
+                    preceding_steers.unwrap_or(pending_steers),
+                    false,
+                ),
+                CheckpointNotificationState::Ready {
+                    notification,
+                    preceding_steers,
+                } => (
+                    notification,
+                    preceding_steers.unwrap_or(pending_steers),
+                    true,
+                ),
+            };
+            if received_tail_started {
+                return Err(
+                    "pending checkpoint notifications must precede received entries".to_string(),
+                );
             }
+            let notification = notification.restore();
+            if ready_for_model
+                .replace(entry_ready)
+                .is_some_and(|ready| ready != entry_ready)
+            {
+                return Err("checkpoint cannot mix pending and ready notifications".to_string());
+            }
+            if !received_ids.insert(notification.id.clone()) {
+                return Err(format!(
+                    "checkpoint contains duplicate notification ID {:?}",
+                    notification.id
+                ));
+            }
+            received_order.push(notification.id.clone());
+            pending.push(AdmittedNotification {
+                notification,
+                preceding_steers: position,
+            });
         }
         NotificationState::try_from_parts_with_delivery(
             pending,

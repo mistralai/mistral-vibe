@@ -10,11 +10,11 @@ use crate::transcript::local;
 
 use super::{drop_item, replacement, requests};
 
-#[derive(Clone, Copy)]
 pub enum ReplacementOutcome {
     Replaced,
     Consumed,
-    Failed,
+    /// The reason to show, when better than the generic notice.
+    Failed(Option<String>),
 }
 
 pub enum QueueEvent {
@@ -157,9 +157,9 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
                     app.queue.steer_after_replace = false;
                     consume_group(app, client, &server_message_id, &delivered);
                 }
-                ReplacementOutcome::Failed => {
+                ReplacementOutcome::Failed(reason) => {
                     app.queue.steer_after_replace = false;
-                    show_replacement_error(app);
+                    show_replacement_error(app, reason.as_deref());
                     if app.queue.is_consumed(&server_message_id) {
                         consume_group(app, client, &server_message_id, &delivered);
                     }
@@ -200,8 +200,12 @@ pub(super) fn settle_completion(app: &mut App) {
     }
 }
 
-fn show_replacement_error(app: &mut App) {
-    crate::notices::inline(app, Severity::Error, "Failed to update queued message");
+fn show_replacement_error(app: &mut App, reason: Option<&str>) {
+    let message = reason.map_or_else(
+        || "Failed to update queued message".to_owned(),
+        |reason| format!("Failed to update queued message: {reason}"),
+    );
+    crate::notices::inline(app, Severity::Error, &message);
 }
 
 /// Copy unsent revisions away from a consumed server queue item.

@@ -20,9 +20,11 @@ mod permissions;
 mod post_tool_results;
 mod program_timing;
 mod recovery;
+mod repeated_tool_failure;
 mod runtime_driver;
 mod steering;
 mod tool_argument_validation;
+mod tool_duration;
 mod turn_lifecycle;
 
 use runtime_driver::*;

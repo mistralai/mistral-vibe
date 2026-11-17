@@ -70,6 +70,7 @@ from vibe.core.plugins import (
     resolve_plugin_path,
     retain_pinned_tools,
     snapshot_bytes,
+    user_facing_issues,
     validate_resolved_plugin_snapshot,
 )
 from vibe.core.skills.models import SkillInfo, SkillScope
@@ -779,7 +780,7 @@ def plugin_issues(plugins: SessionPlugins) -> list[ConfigIssue]:
     return [
         ConfigIssue(file=str(issue.file), message=issue.message)
         for issue in sorted(
-            plugins.issues,
+            user_facing_issues(plugins.issues),
             key=lambda item: (str(item.file), item.code or "", item.message),
         )
     ]
@@ -1258,7 +1259,7 @@ def _core_knowledge(
     return grouped
 
 
-def _plugin_agent_sources(
+def plugin_agent_sources(
     definitions: Iterable[PluginAgentDefinition],
 ) -> list[AgentTypeSource]:
     # The plugin spelling of an agent file, in the shape the shared resolver reads.
@@ -1287,7 +1288,7 @@ def _core_agents(
 ) -> Mapping[str, list[RustAgentTypeDefinition]]:
     """Group plugin agent types by owning plugin."""
     by_plugin: dict[str, list[AgentTypeSource]] = defaultdict(list)
-    for source in _plugin_agent_sources(definitions):
+    for source in plugin_agent_sources(definitions):
         by_plugin[source.owner].append(source)
     # A plugin whose every agent was dropped keeps no entry at all, and a plugin
     # that declared none never had one. Callers read this per plugin and take a
@@ -1315,7 +1316,7 @@ def declared_agent_types(
     definitions: Iterable[PluginAgentDefinition], tools: AgentToolCatalogue
 ) -> ResolvedAgentTypes:
     """The bindings behind a plugin's agent types, and the ones rejected."""
-    return resolve_agent_types(_plugin_agent_sources(definitions), tools)
+    return resolve_agent_types(plugin_agent_sources(definitions), tools)
 
 
 def _accept[T](model: type[T], plugin: str, **fields: object) -> T | None:

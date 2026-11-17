@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::core::config::{HarnessConfig, ToolGroupDefinition};
 use crate::core::features::skills::SkillDefinition;
 use crate::core::features::subagents;
+use crate::core::helpers::escape_xml;
 use crate::core::hooks::HookPoint;
 use crate::core::hooks::HookToolKey;
 
@@ -27,6 +28,16 @@ pub(crate) struct HarnessCapabilitySet {
     pub agent_types: Vec<subagents::AgentTypeDefinition>,
     #[serde(default)]
     pub hook_bindings: Vec<HookBinding>,
+    /// The Runtime can ask the user to sign in to sources the Session needs, so
+    /// Core offers `builtin.auth.request_sign_in`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sign_in: bool,
+    /// The Runtime can list the sources the user has not signed in to, so Core
+    /// also offers `builtin.auth.list_unauthenticated_sources`. Read only with
+    /// `sign_in`. Set when no notice names those sources, as when a Session
+    /// takes all of the user's connectors.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub list_unauthenticated_sources: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -103,6 +114,19 @@ impl HarnessConfig {
     pub(crate) fn skills(&self) -> impl Iterator<Item = &SkillDefinition> {
         self.capability_sets()
             .flat_map(|capabilities| capabilities.skills.iter())
+    }
+
+    /// Whether a capability set offers the sign-in tools.
+    pub(crate) fn offers_sign_in(&self) -> bool {
+        self.capability_sets()
+            .any(|capabilities| capabilities.sign_in)
+    }
+
+    /// Whether a capability set offering the sign-in also offers the list of the
+    /// sources the user has not signed in to.
+    pub(crate) fn offers_sign_in_list(&self) -> bool {
+        self.capability_sets()
+            .any(|capabilities| capabilities.sign_in && capabilities.list_unauthenticated_sources)
     }
 
     pub(crate) fn agent_types(&self) -> impl Iterator<Item = &subagents::AgentTypeDefinition> {
@@ -439,15 +463,6 @@ fn validate_text(value: &str, field: &str) -> Result<(), String> {
         return Err(format!("{field} must not be empty"));
     }
     Ok(())
-}
-
-fn escape_xml(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
 }
 
 #[cfg(test)]

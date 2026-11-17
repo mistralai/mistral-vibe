@@ -28,6 +28,8 @@ pub struct ModelPick {
     /// The model it resolves to, whose `/models/<alias>/thinking` is written.
     pub target: String,
     pub scope: Scope,
+    /// Whether a search query filtered the list when the model was picked.
+    pub searched: bool,
 }
 
 impl Default for ThinkingPicker {
@@ -150,8 +152,7 @@ pub fn select(app: &mut App, client: &Arc<Client>, scope: Scope) {
         saved["reasoningEffort"] = json!(level);
     }
     let all_saved = scope == Scope::Saved && pick.as_ref().is_none_or(|p| p.scope == Scope::Saved);
-    let selections =
-        model_selection::picks(app, pick.as_ref().map(|p| p.alias.as_str()), Some(&level));
+    let selections = model_selection::picks(app, pick.as_ref(), Some(&level));
     let (reason, what) = match &pick {
         Some(pick) => (
             "app-server config update",
@@ -174,7 +175,7 @@ pub fn select(app: &mut App, client: &Arc<Client>, scope: Scope) {
 pub fn commit_model(app: &mut App, client: &Arc<Client>, pick: &ModelPick) {
     let what = format!("model {}", model_label(pick));
     let saved = (pick.scope == Scope::Saved).then(|| json!({"modelAlias": pick.alias}));
-    let selections = model_selection::picks(app, Some(&pick.alias), None);
+    let selections = model_selection::picks(app, Some(pick), None);
     commit(
         app,
         client,

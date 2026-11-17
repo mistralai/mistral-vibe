@@ -58,8 +58,11 @@ def build_acp_agent_loop(
     *,
     environ_before_dotenv_load: dict[str, str] | None = None,
 ) -> VibeAcpAgentLoop:
+    async def context_loader() -> OnboardingContext:
+        return OnboardingContext(provider=provider)
+
     return VibeAcpAgentLoop(
-        onboarding_context_loader=lambda: OnboardingContext(provider=provider),
+        onboarding_context_loader=context_loader,
         environ_before_dotenv_load=environ_before_dotenv_load,
     )
 
@@ -84,6 +87,7 @@ class TestACPAuthStatus:
             "signOutAvailable": False,
             "customDomain": None,
             "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -93,7 +97,7 @@ class TestACPAuthStatus:
         monkeypatch.delenv(DEFAULT_MISTRAL_API_ENV_KEY, raising=False)
         loads = 0
 
-        def counting_loader() -> OnboardingContext:
+        async def counting_loader() -> OnboardingContext:
             nonlocal loads
             loads += 1
             return OnboardingContext(provider=build_mistral_provider())
@@ -121,6 +125,7 @@ class TestACPAuthStatus:
             "signOutAvailable": True,
             "customDomain": None,
             "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -145,6 +150,7 @@ class TestACPAuthStatus:
             "signOutAvailable": True,
             "customDomain": None,
             "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -162,6 +168,7 @@ class TestACPAuthStatus:
             "signOutAvailable": False,
             "customDomain": None,
             "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -180,6 +187,7 @@ class TestACPAuthStatus:
             "signOutAvailable": False,
             "customDomain": None,
             "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -200,6 +208,7 @@ class TestACPAuthStatus:
             "signOutAvailable": True,
             "customDomain": None,
             "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -219,6 +228,7 @@ class TestACPAuthStatus:
             "signOutAvailable": False,
             "customDomain": None,
             "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio
@@ -237,6 +247,7 @@ class TestACPAuthStatus:
             "signOutAvailable": False,
             "customDomain": None,
             "customDomainLocked": False,
+            "configError": None,
         }
 
 
@@ -264,6 +275,7 @@ class TestACPAuthSignOut:
             "signOutAvailable": False,
             "customDomain": None,
             "customDomainLocked": False,
+            "configError": None,
         }
 
     @pytest.mark.asyncio

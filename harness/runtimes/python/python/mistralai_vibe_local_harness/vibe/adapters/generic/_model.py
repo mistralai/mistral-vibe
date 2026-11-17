@@ -104,7 +104,8 @@ class LLMMessage(BaseModel):
         """Accumulate a streamed chunk. Careful: this is not commutative!"""
         if self.role != other.role:
             raise ValueError("Can't accumulate messages with different roles")
-        if self.name != other.name:
+        # A chunk without `name` has not given it yet; it does not name another sender.
+        if self.name is not None and other.name is not None and self.name != other.name:
             raise ValueError("Can't accumulate messages with different names")
         if self.tool_call_id != other.tool_call_id:
             raise ValueError("Can't accumulate messages with different tool_call_ids")
@@ -152,7 +153,7 @@ class LLMMessage(BaseModel):
             reasoning_content=reasoning_content,
             reasoning_payloads=reasoning_payloads,
             tool_calls=list(tool_calls_map.values()) or None,
-            name=self.name,
+            name=self.name if self.name is not None else other.name,
             tool_call_id=self.tool_call_id,
         )
 

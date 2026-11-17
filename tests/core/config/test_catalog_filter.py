@@ -17,7 +17,7 @@ from vibe.core.config import (
 )
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.model_catalog import apply_model_catalog
-from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
+from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG, DEFAULT_MODELS
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
 
@@ -151,7 +151,7 @@ async def test_hiding_every_model_leaves_the_built_in_models(config_dir: Path) -
         {"hide": [_LARGE, _GLM, _FLASH, _DEVSTRAL]}, config_dir=config_dir, models=[]
     )
 
-    assert list(config.models) == [DEFAULT_ACTIVE_MODEL_CONFIG.alias]
+    assert list(config.models) == [model.alias for model in DEFAULT_MODELS]
     assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
 
 

@@ -66,6 +66,14 @@ fn undo_reverts_one_normal_command_or_insert_session() {
 }
 
 #[test]
+fn undo_after_insert_mode_restores_the_draft_ctrl_c_cleared() {
+    let mut insert = app(Mode::Insert, "", 0);
+    type_keys(&mut insert, "hello");
+    send_key(&mut insert, ctrl('c'));
+    assert_eq!(type_keys(&mut insert, "⎋u").0, "hello");
+}
+
+#[test]
 fn undo_reverts_a_change_with_the_text_typed_after_it() {
     assert_eq!(run("hello world", 0, "cwhi⎋u").0, "hello world");
     assert_eq!(run("hello world", 0, "Chi⎋u").0, "hello world");

@@ -46,6 +46,18 @@ pub(crate) fn direct_tool_key(
         .map(|(_, target)| target.hook_tool_key())
 }
 
+/// The call that a pre-tool-call hook's arguments make.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum EffectiveCall {
+    Valid(ExternalToolCall),
+    /// The arguments do not satisfy the tool's input schema; `detail` says
+    /// where.
+    Invalid {
+        detail: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ResolvedTools {
     top_level_tools: Vec<ToolDefinition>,
@@ -167,7 +179,7 @@ impl ResolvedTools {
         &self,
         original: &ExternalToolCall,
         arguments: Value,
-    ) -> Result<ExternalToolCall, CoreError> {
+    ) -> Result<EffectiveCall, CoreError> {
         self.contracts.resolve_effective_call(original, arguments)
     }
 

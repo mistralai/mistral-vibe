@@ -267,6 +267,8 @@ fn awaiting_state(compaction: Option<CompactionFixturePhase>) -> HarnessState {
         model_input_ready: false,
         output_limit_retries: 0,
         output_type: None,
+        delivered_steering: 0,
+        input_reduced: false,
     });
     // An earlier reply measured the estimate as short by a quarter.
     state.estimate_correction =
@@ -308,6 +310,8 @@ fn pre_agent_hook_state() -> HarnessState {
         model_input_ready: false,
         output_limit_retries: 0,
         output_type: None,
+        delivered_steering: 0,
+        input_reduced: false,
     });
     state
 }
@@ -346,6 +350,8 @@ fn completion_hook_state(point: HookPoint) -> HarnessState {
         model_input_ready: false,
         output_limit_retries: 0,
         output_type: None,
+        delivered_steering: 0,
+        input_reduced: false,
     });
     state
 }
@@ -397,6 +403,8 @@ fn tool_batch_state() -> HarnessState {
         model_input_ready: false,
         output_limit_retries: 0,
         output_type: None,
+        delivered_steering: 0,
+        input_reduced: false,
     });
     state
 }
@@ -432,6 +440,8 @@ fn skill_read_state() -> HarnessState {
         model_input_ready: false,
         output_limit_retries: 0,
         output_type: None,
+        delivered_steering: 0,
+        input_reduced: false,
     });
     state
 }
@@ -491,11 +501,10 @@ fn direct_pending_execution() -> ToolExecution {
     let call_id = "direct-pending";
     ToolExecution {
         call: model_tool_call(call_id, "read_file", json!({ "path": "pending.txt" })),
-        state: ToolExecutionState::Direct(PendingExternalCall::pending(external_read_call(
-            call_id,
-            ToolOrigin::TopLevel,
-            "pending.txt",
-        ))),
+        state: ToolExecutionState::Direct(PendingExternalCall::pending(
+            external_read_call(call_id, ToolOrigin::TopLevel, "pending.txt"),
+            None,
+        )),
     }
 }
 
@@ -504,19 +513,22 @@ fn direct_skill_pending_execution() -> ToolExecution {
     let arguments = json!({ "name": "zeta-review" });
     ToolExecution {
         call: model_tool_call(call_id, "skill", arguments.clone()),
-        state: ToolExecutionState::Direct(PendingExternalCall::pending(ExternalToolCall {
-            action_id: crate::core::tools::external::effect_id_for_operation(
-                ToolOrigin::TopLevel,
-                call_id,
-            ),
-            call_id: call_id.to_string(),
-            origin: ToolOrigin::TopLevel,
-            call: ExternalTool::RuntimeBuiltin {
-                name: skills::ToolName::Read.runtime_tool(),
-                invocation_name: "skill".to_string(),
-                arguments,
+        state: ToolExecutionState::Direct(PendingExternalCall::pending(
+            ExternalToolCall {
+                action_id: crate::core::tools::external::effect_id_for_operation(
+                    ToolOrigin::TopLevel,
+                    call_id,
+                ),
+                call_id: call_id.to_string(),
+                origin: ToolOrigin::TopLevel,
+                call: ExternalTool::RuntimeBuiltin {
+                    name: skills::ToolName::Read.runtime_tool(),
+                    invocation_name: "skill".to_string(),
+                    arguments,
+                },
             },
-        })),
+            None,
+        )),
     }
 }
 
@@ -530,6 +542,7 @@ fn direct_post_hook_execution() -> ToolExecution {
                 hook_action_id: hook_action_id(&call.action_id, HookPoint::PostToolCall),
                 hook_binding_ids: vec!["hook-direct-post".to_string()],
                 result: successful_tool_result("raw direct result"),
+                duration_ms: 0,
             },
             call,
         }),
@@ -618,7 +631,7 @@ fn program_execution(message_count: usize) -> ToolExecution {
             id: pending_call.call_id.clone(),
             function: program_function("read_file", json!({ "path": "pending.txt" })),
             pending: Box::new(PendingProgramOperation {
-                external: PendingExternalCall::pending(pending_call),
+                external: PendingExternalCall::pending(pending_call, None),
                 requested_sleep_seconds: None,
             }),
         },
@@ -634,6 +647,7 @@ fn program_execution(message_count: usize) -> ToolExecution {
                         ),
                         hook_binding_ids: vec!["hook-program-post".to_string()],
                         result: successful_tool_result("raw program result"),
+                        duration_ms: 0,
                     },
                     call: post_call,
                 },

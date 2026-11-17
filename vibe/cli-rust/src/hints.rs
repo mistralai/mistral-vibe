@@ -9,6 +9,7 @@ pub type Hint = (&'static str, &'static str);
 pub mod key {
     pub const NAV: &str = "↑↓/jk";
     pub const ARROWS: &str = "↑↓";
+    pub const UP: &str = "↑";
     pub const LEFT_RIGHT: &str = "←→";
     pub const LEFT_ESC: &str = "←/Esc";
     pub const RIGHT: &str = "→";
@@ -16,14 +17,20 @@ pub mod key {
     pub const ENTER_S: &str = "Enter/s";
     pub const SPACE: &str = "Space";
     pub const SPACE_ENTER: &str = "Space/Enter";
+    pub const YES_ENTER: &str = "y/Enter";
+    pub const NO_ESC: &str = "n/Esc";
     pub const ESC: &str = "Esc";
     pub const ESC_CTRL_C: &str = "Esc/Ctrl+C";
     pub const TAB: &str = "Tab";
+    /// Moves between a form's fields; Shift+Tab, implicit, moves back.
+    pub const ARROWS_TAB: &str = "↑↓/Tab";
     pub const SEARCH: &str = "/";
     pub const BACKSPACE: &str = "Backspace";
     pub const BACKSPACE_CTRL_C: &str = "Backspace/Ctrl+C";
     pub const CTRL_C: &str = "Ctrl+C";
     pub const CTRL_J: &str = "Ctrl+J";
+    pub const CTRL_N: &str = "Ctrl+N";
+    pub const SHIFT_ARROWS: &str = "Shift+↑↓";
     pub const CTRL_R: &str = "Ctrl+R";
     pub const CTRL_S: &str = "Ctrl+S";
     pub const CTRL_BACKSLASH: &str = "Ctrl+\\";
@@ -71,6 +78,8 @@ pub mod action {
     pub const CONFIRM: &str = "confirm";
     pub const PREVIOUS: &str = "previous";
     pub const NEXT: &str = "next";
+    pub const NEW: &str = "new";
+    pub const CREATE: &str = "create";
     pub const SCROLL: &str = "scroll";
     pub const SUBMIT: &str = "submit";
     pub const CONTINUE: &str = "continue";
@@ -83,14 +92,30 @@ pub mod action {
     pub const DISCARD: &str = "discard";
     pub const SUBMIT_AS_NEW: &str = "submit as new";
     pub const ADD: &str = "add";
+    pub const COMPLETE: &str = "complete";
+    pub const TRUST: &str = "trust";
+    pub const UNTRUST: &str = "untrust";
+    pub const FORGET: &str = "forget";
     pub const CHANGE: &str = "change";
     pub const PIN: &str = "pin";
     pub const UNPIN: &str = "unpin";
     pub const SHOW: &str = "show";
     pub const HIDE: &str = "hide";
+    pub const PAUSE: &str = "pause";
+    pub const RESUME: &str = "resume";
+    pub const CLEAR: &str = "clear";
+    pub const RESTORE_STASH: &str = "restore stash";
+    pub const SWITCH_FIELD: &str = "switch field";
     pub const SWITCH_TAB: &str = "switch tab";
     pub const OPEN_CHECK: &str = "open check";
     pub const FIX: &str = "ask agent to fix";
+    pub const DETAILS: &str = "details";
+    pub const REVIEW: &str = "review";
+    pub const ARCHIVE: &str = "archive";
+    pub const UNARCHIVE: &str = "unarchive";
+    pub const ALL: &str = "all";
+    pub const SORT_SIZE: &str = "sort: size";
+    pub const SORT_DATE: &str = "sort: date";
 }
 
 pub const NAVIGATE: Hint = (key::NAV, action::NAVIGATE);

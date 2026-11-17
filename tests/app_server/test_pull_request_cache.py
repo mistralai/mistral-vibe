@@ -5,6 +5,8 @@ from contextlib import suppress
 from pathlib import Path
 
 import pytest
+import watchfiles
+from watchfiles._rust_notify import WatchfilesRustInternalError
 
 from vibe.app_server import _pull_request_cache as cache_module
 from vibe.app_server._pull_request_cache import (
@@ -454,10 +456,28 @@ async def test_each_owner_hears_its_sessions_once(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failed_starts", [0, 1], ids=["watch starts", "watch fails to start once"]
+)
 async def test_a_read_by_another_process_reaches_the_owners(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed_starts: int
 ) -> None:
     directory = tmp_path / "pull-requests"
+    real_awatch = watchfiles.awatch
+
+    # Linux inotify limit reached: the watcher cannot be created.
+    async def awatch(*args, **kwargs):
+        nonlocal failed_starts
+        if failed_starts:
+            failed_starts -= 1
+            raise WatchfilesRustInternalError(
+                "Error creating recommended watcher: Too many open files (os error 24)"
+            )
+        async for changes in real_awatch(*args, **kwargs):
+            yield changes
+
+    monkeypatch.setattr(watchfiles, "awatch", awatch)
+    monkeypatch.setattr(cache_module, "_WATCH_RETRY_INITIAL_SECONDS", 0.0)
 
     def write(state: str) -> None:
         now = cache_module._now_iso()

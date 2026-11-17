@@ -8,7 +8,7 @@ use super::{
 };
 
 use crate::core::model_context::ModelContext;
-use crate::core::step_protocol::{Observation, Outcome, WarningCode};
+use crate::core::step_protocol::{CompletionActionKind, Observation, Outcome, WarningCode};
 use crate::core::wire::completion::{CompletionCandidate, TokenUsage};
 use crate::core::wire::message::StoredMessage;
 use crate::core::wire::tool::ProtocolError;
@@ -110,6 +110,17 @@ impl PendingCompaction {
         &self.projection
     }
 
+    /// How this pending compaction appears as the kind of a completion
+    /// action.
+    pub(crate) fn completion_action_kind(&self) -> CompletionActionKind {
+        CompletionActionKind::Compaction {
+            compaction_id: self.compaction_id.to_string(),
+            trigger: self.trigger(),
+            attempt: self.attempt(),
+            request: self.projection.request_kind(),
+        }
+    }
+
     fn observed_turn_id(&self) -> Option<String> {
         self.in_turn_identity()
             .map(|(turn_id, _)| turn_id.to_string())
@@ -129,9 +140,12 @@ fn compaction_action_id(compaction_id: &str, projection_attempt: u32) -> String 
 }
 
 impl CompactionContinuation {
-    fn into_resolution(self, outcome: Outcome) -> CompactionResolution {
+    fn into_resolution(self, outcome: Outcome, input_reduced: bool) -> CompactionResolution {
         match self {
-            Self::InTurn { .. } => CompactionResolution::ContinueTurn { outcome },
+            Self::InTurn { .. } => CompactionResolution::ContinueTurn {
+                outcome,
+                input_reduced,
+            },
             Self::BetweenTurns { .. } => CompactionResolution::ReturnIdle { outcome },
         }
     }
@@ -140,6 +154,9 @@ impl CompactionContinuation {
 pub(crate) enum CompactionResolution {
     ContinueTurn {
         outcome: Outcome,
+        /// The rebuild showed the Turn's input only inside its reduced view, not as a
+        /// message of its own.
+        input_reduced: bool,
     },
     ReturnIdle {
         outcome: Outcome,
@@ -202,6 +219,13 @@ fn compacted(
     usage: Option<TokenUsage>,
 ) -> CompactionAttemptResolution {
     let mut outcome = Outcome::quiet();
+    // A reduction often shrinks only earlier Turns' replies; the Turn's input, its steering
+    // and its own replies may be lost as messages of their own only when one of them was
+    // reduced.
+    let input_reduced = rebuilt
+        .reduction
+        .as_ref()
+        .is_some_and(|reduction| reduction.turn_message_reduced);
     context.replace_with_compacted(rebuilt.messages);
     outcome.observe(Observation::ContextCompacted {
         turn_id: pending.observed_turn_id(),
@@ -222,7 +246,9 @@ fn compacted(
         ));
     }
     CompactionAttemptResolution::Compacted(Box::new(
-        pending.into_continuation().into_resolution(outcome),
+        pending
+            .into_continuation()
+            .into_resolution(outcome, input_reduced),
     ))
 }
 

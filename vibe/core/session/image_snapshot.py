@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import mimetypes
+import os
 from pathlib import Path
+import tempfile
 
 from vibe.core.types import FileImageSource, ImageAttachment, InlineImageSource
 from vibe.utils.images import IMAGE_EXTENSIONS, MAX_IMAGE_BYTES
@@ -32,9 +35,33 @@ def _persist(data: bytes, *, ext: str, session_dir: Path) -> Path:
 
     digest = hashlib.sha1(data, usedforsecurity=False).hexdigest()
     dest = attachments_dir / f"{digest}{ext}"
-    if not dest.exists():
-        dest.write_bytes(data)
+    if _holds(dest, data):
+        return dest.resolve()
+    # Written aside, synced, then renamed, so neither a failed write nor a
+    # crash leaves a damaged image under the digest name for later reuse.
+    fd, name = tempfile.mkstemp(dir=attachments_dir, prefix=f".{dest.name}.")
+    tmp = Path(name)
+    try:
+        with open(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, dest)
+    except BaseException as e:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        # Windows refuses to replace a file another process holds open; one
+        # already holding these exact bytes is as good.
+        if not isinstance(e, OSError) or not _holds(dest, data):
+            raise
     return dest.resolve()
+
+
+def _holds(dest: Path, data: bytes) -> bool:
+    try:
+        return dest.read_bytes() == data
+    except OSError:
+        return False
 
 
 def snapshot_image(
@@ -70,8 +97,13 @@ def snapshot_image(
             mime_type=mime_type,
         )
 
+    try:
+        path = _persist(data, ext=ext, session_dir=session_dir)
+    except OSError as e:
+        raise ImageSnapshotError(
+            f"Couldn't save it to the session: {e.strerror or e}"
+        ) from e
+
     return ImageAttachment(
-        source=FileImageSource(path=_persist(data, ext=ext, session_dir=session_dir)),
-        alias=alias,
-        mime_type=mime_type,
+        source=FileImageSource(path=path), alias=alias, mime_type=mime_type
     )

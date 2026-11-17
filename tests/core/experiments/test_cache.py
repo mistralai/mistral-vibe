@@ -18,10 +18,16 @@ def _response() -> EvalResponse:
     })
 
 
-def _config(*, enable_telemetry: bool = True, enable_experiments: bool = True) -> Any:
+def _config(
+    *,
+    enable_telemetry: bool = True,
+    enable_experiments: bool = True,
+    api_base: str = "https://api.mistral.ai/v1",
+) -> Any:
     config = MagicMock()
     config.enable_telemetry = enable_telemetry
     config.experiments.enable = enable_experiments
+    config.get_mistral_provider.return_value = MagicMock(api_base=api_base)
     return config
 
 
@@ -82,9 +88,20 @@ def test_store_is_noop_when_no_mistral_provider(
     assert not EXPERIMENT_EVAL_CACHE_FILE.path.exists()
 
 
+def test_store_is_noop_on_a_self_hosted_deployment() -> None:
+    config = _config(api_base="https://api.asml.example/v1")
+
+    cache.store_cached_eval_response(config, _response())
+
+    assert not EXPERIMENT_EVAL_CACHE_FILE.path.exists()
+    assert cache.load_cached_eval_response(config) is None
+
+
 def test_store_and_load_use_hashed_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     config = _config()
-    config.get_mistral_provider.return_value = MagicMock(api_key_env_var="EVAL_KEY")
+    config.get_mistral_provider.return_value = MagicMock(
+        api_key_env_var="EVAL_KEY", api_base="https://api.mistral.ai/v1"
+    )
     monkeypatch.setenv("EVAL_KEY", "fake-key")
 
     cache.store_cached_eval_response(config, _response())

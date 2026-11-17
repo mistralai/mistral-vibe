@@ -8,12 +8,12 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 _NON_NAME_CHARS = re.compile(r"[^a-z0-9]+")
 # Mirror SkillMetadata.name's max_length so a sanitized name always validates.
-_MAX_NAME_LEN = 64
+MAX_SKILL_NAME_LEN = 64
 
 
 def sanitize_skill_name(raw: str) -> str | None:
     collapsed = _NON_NAME_CHARS.sub("-", raw.strip().lower()).strip("-")
-    collapsed = collapsed[:_MAX_NAME_LEN].rstrip("-")
+    collapsed = collapsed[:MAX_SKILL_NAME_LEN].rstrip("-")
     return collapsed or None
 
 

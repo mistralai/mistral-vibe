@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Set as AbstractSet
 import functools
+import glob
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal, get_args
@@ -15,9 +16,13 @@ from vibe.core.tools.builtins._shell_command_policy import (
     git_repository_requires_approval,
     path_candidates,
 )
-from vibe.core.tools.builtins._shell_permission_analysis import analyze_shell_command
+from vibe.core.tools.builtins._shell_permission_analysis import (
+    analyze_shell_command,
+    shell_read_commands,
+)
 from vibe.core.tools.builtins.bash import (
     BashToolConfig,
+    _collect_sensitive_files,
     _expand_guardrail_commands,
     _git_repository_permission_pattern,
     _split_command_tokens,
@@ -295,6 +300,7 @@ def _collect_outside_paths(
     scratchpad_dir: Path | None,
     path_commands: Collection[str] = _PATH_COMMANDS,
     case_sensitive_commands: bool = True,
+    grep_pattern_may_be_omitted: bool = False,
     supplied_cwd: str | None = None,
 ) -> dict[str, str]:
     """Each outside path, resolved, mapped to the spelling the call supplied."""
@@ -304,14 +310,16 @@ def _collect_outside_paths(
     ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
         paths[str(command_cwd)] = supplied_cwd or str(command_cwd)
 
-    for part in command_parts:
+    for part in _expand_guardrail_commands(command_parts):
         tokens = _split_command_tokens(part)
-        command = tokens[0] if tokens else None
+        command = Path(tokens[0]).name if tokens else None
         if not command:
             continue
         command_name = command if case_sensitive_commands else command.lower()
         for token in path_candidates(
-            tokens, inspect_positional_paths=command_name in path_commands
+            tokens,
+            inspect_positional_paths=command_name in path_commands,
+            grep_pattern_may_be_omitted=grep_pattern_may_be_omitted,
         ):
             if not _looks_like_path(token, command_cwd) or is_stream_device_path(token):
                 continue
@@ -657,6 +665,15 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
             supplied_pattern=supplied,
         )
 
+    @staticmethod
+    def _build_sensitive_file_permission(path: str) -> RequiredPermission:
+        return RequiredPermission(
+            scope=PermissionScope.FILE_PATTERN,
+            invocation_pattern=path,
+            session_pattern=glob.escape(path),
+            label="accessing sensitive files",
+        )
+
     def _find_denylist_match(self, command: str) -> str | None:
         return next(
             (
@@ -749,11 +766,14 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
     def _is_unconditionally_allowed(
         self,
         command_parts: list[str],
+        sensitive_files: set[str],
         required_context_permissions: list[RequiredPermission] | None = None,
         *,
         dynamic_paths: AbstractSet[str] = frozenset(),
     ) -> bool:
         if any(self._is_sensitive(part) for part in command_parts):
+            return False
+        if sensitive_files:
             return False
         if required_context_permissions:
             return False
@@ -767,6 +787,7 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         self,
         command_parts: list[str],
         outside_paths: Mapping[str, str],
+        sensitive_files: set[str],
         *,
         include_allowlisted: bool = False,
     ) -> list[RequiredPermission]:
@@ -821,6 +842,8 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
 
         for path, supplied in sorted(outside_paths.items()):
             required.append(self._build_outside_directory_permission(path, supplied))
+        for path in sorted(sensitive_files):
+            required.append(self._build_sensitive_file_permission(path))
 
         return required
 
@@ -851,16 +874,27 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
             command_cwd=command_cwd,
             workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
+            grep_pattern_may_be_omitted=analysis.requires_approval,
             supplied_cwd=cwd,
         )
         outside_paths = ungranted_paths(
             outside_paths, self.config.allowlist, self.workspace
         )
+        sensitive_files = _collect_sensitive_files(
+            shell_read_commands(command),
+            command_cwd=command_cwd,
+            sensitive_patterns=self.config.sensitive_file_patterns,
+            scratchpad_dir=self.scratchpad_dir,
+            grep_pattern_may_be_omitted=analysis.requires_approval,
+        )
         context_required = required_context_permissions or []
         commands_cleared = (
-            self._is_unconditionally_allowed(command_parts, context_required)
+            self._is_unconditionally_allowed(
+                command_parts, sensitive_files.files, context_required
+            )
             and not guardrail_permission
             and not analysis.requires_approval
+            and not sensitive_files.requires_exact_command
         )
         if commands_cleared and not outside_paths:
             return PermissionContext(permission=ToolPermission.ALWAYS)
@@ -868,20 +902,29 @@ class _BashPermissionMixin[ConfigT: BashToolConfig]:
         # Cleared commands leave only the outside paths to answer for.
         scoped_parts, include_allowlisted = (
             ([], False)
-            if commands_cleared
+            if commands_cleared or sensitive_files.requires_exact_command
             else scoped_command_parts(analysis, command_parts)
         )
         required = self._build_required_permissions(
-            scoped_parts, outside_paths, include_allowlisted=include_allowlisted
+            scoped_parts,
+            outside_paths,
+            sensitive_files.files,
+            include_allowlisted=include_allowlisted,
         )
         if guardrail_permission:
             required.extend(guardrail_permission.required_permissions)
-        if needs_exact_command_scope(analysis, required):
+        if sensitive_files.requires_exact_command or needs_exact_command_scope(
+            analysis, required
+        ):
             required.append(
                 self._build_command_required_permission(
                     invocation_pattern=command,
                     session_pattern=command,
-                    label=analysis.approval_label,
+                    label=(
+                        "dynamic sensitive-file read (bash)"
+                        if sensitive_files.requires_exact_command
+                        else analysis.approval_label
+                    ),
                     literal=True,
                 )
             )

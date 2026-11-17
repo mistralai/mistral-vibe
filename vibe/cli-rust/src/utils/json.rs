@@ -42,3 +42,16 @@ pub fn lenient_opt<'de, D: Deserializer<'de>, T: DeserializeOwned>(
             .collect(),
     ))
 }
+
+/// A `session/updated` patch's `replace` ops as (path, value), a missing value read as null.
+pub fn replace_ops(ops: &Value) -> impl Iterator<Item = (&str, &Value)> {
+    ops.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|op| op.get("op") == Some(&Value::String("replace".into())))
+        .filter_map(|op| {
+            op.get("path")
+                .and_then(Value::as_str)
+                .map(|path| (path, op.get("value").unwrap_or(&Value::Null)))
+        })
+}

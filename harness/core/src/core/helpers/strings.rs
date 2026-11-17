@@ -10,8 +10,8 @@ pub(crate) fn normalized_similarity_score(left: &str, right: &str) -> f64 {
     if left.contains(&right) || right.contains(&left) {
         return 0.9;
     }
-    let max_len = left.len().max(right.len());
-    1.0 - levenshtein_distance(&left, &right) as f64 / max_len as f64
+    let max_len = left.chars().count().max(right.chars().count());
+    1.0 - edit_distance(&left, &right) as f64 / max_len as f64
 }
 
 fn normalize_for_similarity(value: &str) -> String {
@@ -22,18 +22,22 @@ fn normalize_for_similarity(value: &str) -> String {
         .collect()
 }
 
-fn levenshtein_distance(left: &str, right: &str) -> usize {
-    let mut previous = (0..=right.len()).collect::<Vec<_>>();
-    for (left_index, left_byte) in left.bytes().enumerate() {
-        let mut diagonal = previous[0];
-        previous[0] = left_index + 1;
-        for (right_index, right_byte) in right.bytes().enumerate() {
-            let insert_cost = previous[right_index + 1] + 1;
-            let delete_cost = previous[right_index] + 1;
-            let replace_cost = diagonal + usize::from(left_byte != right_byte);
-            diagonal = previous[right_index + 1];
-            previous[right_index + 1] = insert_cost.min(delete_cost).min(replace_cost);
+/// Levenshtein distance over Unicode scalar values. Normalized similarity
+/// values are ASCII, so for them this counts bytes and scalar values alike.
+pub(crate) fn edit_distance(left: &str, right: &str) -> usize {
+    let right: Vec<char> = right.chars().collect();
+    let mut previous: Vec<usize> = (0..=right.len()).collect();
+    for (row, left_char) in left.chars().enumerate() {
+        let mut current = vec![row + 1];
+        for (column, right_char) in right.iter().enumerate() {
+            let substitution = previous[column] + usize::from(left_char != *right_char);
+            current.push(
+                substitution
+                    .min(previous[column + 1] + 1)
+                    .min(current[column] + 1),
+            );
         }
+        previous = current;
     }
     previous[right.len()]
 }

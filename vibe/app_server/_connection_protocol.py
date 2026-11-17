@@ -113,6 +113,9 @@ class ClientCapabilities(ProtocolModel):
     session_peer_restore: bool = False
     session_peer_mark_seen: bool = False
     agent_worktrees: bool = False
+    # Stream each child session's own events, so the client can keep a replica
+    # of it as it does of the root.
+    child_session_events: bool = False
     disabled_notifications: list[str] = Field(default_factory=list)
     platform_credentials: PlatformCredentialsCapability | None = None
     agent_plugins: list[AgentPlugin] = Field(default_factory=list)
@@ -195,6 +198,10 @@ class PlatformCredentialsSnapshot(ProtocolModel):
     audience: Annotated[str, Field(min_length=1)]
     expires_at: Annotated[StrictInt, Field(gt=0, le=253_402_300_799_999)]
     revision: Annotated[str, Field(min_length=1)]
+    # The tenant an ID token's model requests belong to. The Desktop knows it
+    # from its session; omitted when it does not, or for access tokens.
+    organization_id: Annotated[str, Field(min_length=1)] | None = None
+    workspace_id: Annotated[str, Field(min_length=1)] | None = None
 
 
 class PlatformCredentialsUnavailable(ProtocolModel):

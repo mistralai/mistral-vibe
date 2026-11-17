@@ -167,15 +167,6 @@ impl Step {
             TurnOutcome::Failed { .. } | TurnOutcome::Interrupted { .. } => None,
         }
     }
-
-    /// Why the turn produced no answer, for the paths that record a reason.
-    pub(crate) fn rejection_reason(&self) -> Option<&str> {
-        match turn_outcome(&self.state)? {
-            TurnOutcome::Rejected { reason } => Some(reason),
-            TurnOutcome::Interrupted { reason } => reason.as_deref(),
-            TurnOutcome::Completed { .. } | TurnOutcome::Failed { .. } => None,
-        }
-    }
 }
 
 /// The turn's terminal outcome, or `None` while it is still running.
@@ -285,10 +276,12 @@ pub(crate) fn test_usage() -> TokenUsage {
 pub(crate) fn config() -> HarnessConfig {
     HarnessConfig {
         task_id: "task".to_string(),
+        action_id_namespace: None,
         system_instructions: "system".to_string(),
         settings: HarnessSettings {
             turn: TurnSettings {
                 max_iterations: Some(8),
+                max_identical_tool_failures: None,
                 output_limit_recovery: Default::default(),
             },
             context: ContextSettings {

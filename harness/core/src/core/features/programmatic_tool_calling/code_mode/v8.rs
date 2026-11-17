@@ -1,10 +1,19 @@
+use std::alloc::Layout;
+use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::sync::Arc;
+use std::sync::Condvar;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::sync::Once;
+use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use deno_ast::EmitOptions;
 use deno_ast::MediaType;
@@ -51,12 +60,144 @@ const MAX_HEAP_BYTES: usize = 16 * 1024 * 1024;
 /// representation. The source embeds every replayed tool result. A larger
 /// source cannot fit in the heap, so it fails before an isolate is created.
 pub(crate) const MAX_SOURCE_BYTES: usize = MAX_HEAP_BYTES;
-/// How far the near-heap-limit callback raises the heap limit each time it
-/// runs. After one raise, V8 can allocate the source string and the parser's
-/// copy of its largest string literal before it checks the limit again, so a
-/// raise must hold about twice `MAX_SOURCE_BYTES`. Four times leaves the same
-/// amount again as margin.
-const HEAP_LIMIT_HEADROOM_BYTES: usize = 4 * MAX_SOURCE_BYTES;
+/// Size of the largest object V8 allocates in one step on a 64-bit host: a
+/// fixed array at its maximum capacity of 2^27 elements, or a two-byte string
+/// at `v8::String::MAX_LENGTH`.
+const MAX_V8_OBJECT_BYTES: usize = 1024 * 1024 * 1024;
+/// How far the near-heap-limit callback raises the heap limit, once per
+/// isolate. V8 aborts the process when the raise does not bring the limit
+/// above the heap, so the raise must hold the most the heap can exceed the
+/// limit by.
+///
+/// V8 always accepts the first large object in the young generation, whatever
+/// the limit, so one allocation can exceed the limit by `MAX_V8_OBJECT_BYTES`.
+/// One builtin call can keep two such objects alive: `Array.prototype.fill`
+/// on an array at maximum capacity copies its elements into a new store of
+/// another element kind while the old one is still reachable. Separately,
+/// after one raise, V8 can allocate the source string and the parser's copy of
+/// its largest string literal before it checks the limit again, which takes
+/// about twice `MAX_SOURCE_BYTES`. The raise covers two of the largest objects
+/// plus four times `MAX_SOURCE_BYTES`. It only permits growth:
+/// the first raise also stops the program, so the heap grows past the original
+/// limit only by what is already allocated when termination takes effect.
+const HEAP_LIMIT_HEADROOM_BYTES: usize = 2 * MAX_V8_OBJECT_BYTES + 4 * MAX_SOURCE_BYTES;
+/// Most memory one program can hold in `ArrayBuffer` backing stores, which
+/// include typed arrays and `DataView`s. V8 allocates backing stores outside
+/// its heap, so the heap limit does not cover them.
+const MAX_ARRAY_BUFFER_BYTES: usize = MAX_HEAP_BYTES;
+/// Alignment of every backing store, matching what `malloc` guarantees on
+/// 64-bit hosts so that any typed array view is aligned.
+const ARRAY_BUFFER_ALIGNMENT: usize = 16;
+/// Most isolates that exist in the process at once, across every session.
+///
+/// One isolate can take about `MAX_HEAP_BYTES + HEAP_LIMIT_HEADROOM_BYTES`
+/// before it stops, and sessions evaluate programs on concurrent threads, so
+/// this bounds the transient memory of all evaluations together to this many
+/// times that amount, a little over 2 GiB. The large object is already
+/// allocated when V8 reports the heap limit, so the bound has to apply before
+/// an isolate exists.
+///
+/// Evaluations wait for each other instead of running in parallel. Most finish
+/// in milliseconds; one that runs until `DEFAULT_TIMEOUT` delays the others by
+/// at most that long.
+const MAX_LIVE_ISOLATES: usize = 1;
+/// Longest time an evaluation waits for an isolate permit. Each permit is held
+/// for at most one execution deadline plus isolate setup and disposal, so a
+/// wait this long means several programs ahead of it each ran until their
+/// deadline. A waiting evaluation keeps its host thread, so the wait is
+/// bounded too.
+const ISOLATE_PERMIT_WAIT: Duration = Duration::from_secs(10);
+
+static ISOLATE_PERMITS: IsolatePermits =
+    IsolatePermits::new(MAX_LIVE_ISOLATES, ISOLATE_PERMIT_WAIT);
+
+/// Counting semaphore that limits how many isolates exist at once.
+///
+/// Waiters are served in arrival order, so a stream of short evaluations
+/// cannot starve an earlier one.
+struct IsolatePermits {
+    limit: usize,
+    wait_timeout: Duration,
+    state: Mutex<PermitState>,
+    released: Condvar,
+}
+
+struct PermitState {
+    live: usize,
+    next_ticket: u64,
+    waiting: VecDeque<u64>,
+}
+
+/// One live isolate's share of `IsolatePermits`. Dropping it, including
+/// during a panic, returns the permit.
+struct IsolatePermit<'p> {
+    permits: &'p IsolatePermits,
+}
+
+impl IsolatePermits {
+    const fn new(limit: usize, wait_timeout: Duration) -> Self {
+        Self {
+            limit,
+            wait_timeout,
+            state: Mutex::new(PermitState {
+                live: 0,
+                next_ticket: 0,
+                waiting: VecDeque::new(),
+            }),
+            released: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> Result<IsolatePermit<'_>, String> {
+        let deadline = Instant::now() + self.wait_timeout;
+        let mut state = self.state();
+        let ticket = state.next_ticket;
+        state.next_ticket += 1;
+        state.waiting.push_back(ticket);
+        loop {
+            if state.waiting.front() == Some(&ticket) && state.live < self.limit {
+                state.waiting.pop_front();
+                state.live += 1;
+                // The next waiter may also fit under the limit.
+                self.released.notify_all();
+                return Ok(IsolatePermit { permits: self });
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                state.waiting.retain(|waiting| *waiting != ticket);
+                // This waiter may have been first in line.
+                self.released.notify_all();
+                return Err(format!(
+                    "TypeScript execution waited {:?} for an isolate; the process runs at most {} at once",
+                    self.wait_timeout, self.limit
+                ));
+            }
+            state = self
+                .released
+                .wait_timeout(state, deadline - now)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    #[cfg(test)]
+    fn live(&self) -> usize {
+        self.state().live
+    }
+
+    fn state(&self) -> MutexGuard<'_, PermitState> {
+        // Every update leaves the state consistent before code that could
+        // panic runs, so a poisoned lock is still safe to use.
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Drop for IsolatePermit<'_> {
+    fn drop(&mut self) {
+        self.permits.state().live -= 1;
+        self.permits.released.notify_all();
+    }
+}
 
 struct HeapLimitMonitor {
     limit_reached: AtomicBool,
@@ -105,15 +246,135 @@ unsafe extern "C" fn terminate_on_near_heap_limit(
     // reads `isolate_handle` and writes `limit_reached`; the write is sound
     // through a shared reference because it is an `AtomicBool`.
     let monitor = unsafe { &*data.cast::<HeapLimitMonitor>() };
-    monitor.limit_reached.store(true, Ordering::SeqCst);
+    let already_raised = monitor.limit_reached.swap(true, Ordering::SeqCst);
     // During disposal the handle no longer refers to a live isolate, and this
     // call does nothing.
     monitor.isolate_handle.terminate_execution();
 
-    // V8 aborts the process when the raised limit still cannot fit the
-    // allocation in flight. Termination stops the program at its next interrupt
-    // check, so the headroom is short-lived.
+    // Termination stops the program at its next interrupt check, so one raise
+    // is enough for a program that stops there. Builtins called from
+    // straight-line code run no interrupt check, so such a program can keep
+    // allocating large objects. Raising again for it would let one program
+    // take unbounded host memory. The limit stays instead, and V8 aborts the
+    // process with the heap bounded by one raise.
+    if already_raised {
+        return current_heap_limit;
+    }
     current_heap_limit.saturating_add(HEAP_LIMIT_HEADROOM_BYTES)
+}
+
+/// Allocation budget for the `ArrayBuffer` backing stores of one isolate.
+///
+/// An allocation that would take the total above the budget fails. V8 then
+/// collects garbage and retries, which frees unreachable buffers. When those
+/// retries do not free enough, V8 runs its last-resort collection, which calls
+/// the near-heap-limit callback and stops the program, so the run ends with the
+/// same result as one that reached the heap limit, even when the program
+/// catches the `RangeError` that follows.
+struct ArrayBufferBudget {
+    allocated_bytes: AtomicUsize,
+}
+
+impl ArrayBufferBudget {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            allocated_bytes: AtomicUsize::new(0),
+        })
+    }
+
+    fn allocator(self: &Arc<Self>) -> v8::UniqueRef<v8::Allocator> {
+        static VTABLE: v8::RustAllocatorVtable<ArrayBufferBudget> = v8::RustAllocatorVtable {
+            allocate: allocate_array_buffer,
+            allocate_uninitialized: allocate_uninitialized_array_buffer,
+            free: free_array_buffer,
+            drop: drop_array_buffer_budget,
+        };
+        // SAFETY: the allocator owns one strong reference to the budget and
+        // releases it in `drop_array_buffer_budget`, so the budget outlives
+        // every allocator call, including frees of backing stores that
+        // outlive the isolate.
+        unsafe { v8::new_rust_allocator(Arc::into_raw(Arc::clone(self)), &VTABLE) }
+    }
+
+    fn reserve(&self, len: usize) -> bool {
+        self.allocated_bytes
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |allocated| {
+                allocated
+                    .checked_add(len)
+                    .filter(|total| *total <= MAX_ARRAY_BUFFER_BYTES)
+            })
+            .is_ok()
+    }
+
+    fn release(&self, len: usize) {
+        self.allocated_bytes.fetch_sub(len, Ordering::SeqCst);
+    }
+}
+
+fn array_buffer_layout(len: usize) -> Option<Layout> {
+    // A zero-sized allocation is not allowed, so an empty buffer takes one
+    // byte.
+    Layout::from_size_align(len.max(1), ARRAY_BUFFER_ALIGNMENT).ok()
+}
+
+fn allocate_array_buffer_with(
+    budget: &ArrayBufferBudget,
+    len: usize,
+    allocate: unsafe fn(Layout) -> *mut u8,
+) -> *mut c_void {
+    let Some(layout) = array_buffer_layout(len) else {
+        return std::ptr::null_mut();
+    };
+    if !budget.reserve(len) {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `layout` has a non-zero size.
+    let data = unsafe { allocate(layout) };
+    if data.is_null() {
+        budget.release(len);
+    }
+    data.cast()
+}
+
+unsafe extern "C" fn allocate_array_buffer(budget: &ArrayBufferBudget, len: usize) -> *mut c_void {
+    allocate_array_buffer_with(budget, len, std::alloc::alloc_zeroed)
+}
+
+unsafe extern "C" fn allocate_uninitialized_array_buffer(
+    budget: &ArrayBufferBudget,
+    len: usize,
+) -> *mut c_void {
+    allocate_array_buffer_with(budget, len, std::alloc::alloc)
+}
+
+unsafe extern "C" fn free_array_buffer(budget: &ArrayBufferBudget, data: *mut c_void, len: usize) {
+    if data.is_null() {
+        return;
+    }
+    let Some(layout) = array_buffer_layout(len) else {
+        return;
+    };
+    // SAFETY: V8 frees a backing store with the length it was allocated with,
+    // so `data` came from `allocate_array_buffer_with` with this layout.
+    unsafe { std::alloc::dealloc(data.cast(), layout) };
+    budget.release(len);
+}
+
+unsafe extern "C" fn drop_array_buffer_budget(budget: *const ArrayBufferBudget) {
+    // SAFETY: `budget` is the strong reference passed to `new_rust_allocator`
+    // in `ArrayBufferBudget::allocator`, and V8 drops the allocator once.
+    drop(unsafe { Arc::from_raw(budget) });
+}
+
+/// Programs only compute and call tools, so they never need WebAssembly code.
+/// Refusing it keeps V8's Wasm compilers out of reach of model-written code:
+/// `new WebAssembly.Module` throws a `CompileError`, and `WebAssembly.compile`
+/// and `WebAssembly.instantiate` with bytes reject with one.
+unsafe extern "C" fn refuse_wasm_code_generation(
+    _context: v8::Local<v8::Context>,
+    _source: v8::Local<v8::String>,
+) -> bool {
+    false
 }
 
 struct ExecutionWatchdog {
@@ -176,12 +437,25 @@ macro_rules! v8_exception_result {
 }
 
 pub(super) fn evaluate(request: EvaluationRequest<'_>) -> Result<TypeScriptRunResult, String> {
-    run_typescript_with_timeout(request, DEFAULT_TIMEOUT)
+    run_typescript_with_permits(request, DEFAULT_TIMEOUT, &ISOLATE_PERMITS)
 }
 
+#[cfg(test)]
 fn run_typescript_with_timeout(
     request: EvaluationRequest<'_>,
     timeout: Duration,
+) -> Result<TypeScriptRunResult, String> {
+    run_typescript_with_permits(request, timeout, &ISOLATE_PERMITS)
+}
+
+/// Runs a program in fresh isolates, one per validation replay. Each isolate
+/// holds a permit from `permits` from before it is created until it is
+/// disposed. The wait for a permit does not count toward `timeout`, which
+/// bounds only execution.
+fn run_typescript_with_permits(
+    request: EvaluationRequest<'_>,
+    timeout: Duration,
+    permits: &IsolatePermits,
 ) -> Result<TypeScriptRunResult, String> {
     let transpiled = match transpile(&request.partial_evaluation.code) {
         Ok(code) => code,
@@ -198,8 +472,15 @@ fn run_typescript_with_timeout(
         }
 
         initialize_v8();
-        let params = v8::CreateParams::default().heap_limits(INITIAL_HEAP_BYTES, MAX_HEAP_BYTES);
-        let isolate = v8::Isolate::new(params);
+        // Declared before the isolate so that it is dropped after the isolate
+        // is disposed.
+        let _permit = permits.acquire()?;
+        let array_buffer_budget = ArrayBufferBudget::new();
+        let params = v8::CreateParams::default()
+            .heap_limits(INITIAL_HEAP_BYTES, MAX_HEAP_BYTES)
+            .array_buffer_allocator(array_buffer_budget.allocator());
+        let mut isolate = v8::Isolate::new(params);
+        isolate.set_allow_wasm_code_generation_callback(refuse_wasm_code_generation);
         let isolate_handle = isolate.thread_safe_handle();
         let heap_limit_monitor = HeapLimitMonitor {
             limit_reached: AtomicBool::new(false),
@@ -209,11 +490,11 @@ fn run_typescript_with_timeout(
         let _watchdog = ExecutionWatchdog::start(isolate_handle, timeout);
         let result = execute(isolate.isolate_mut(), &source);
         let stopped = isolate.isolate_mut().remove_slot::<StoppedProgram>();
-        let heap_limit_reached = isolate.limit_reached();
+        let memory_limit_reached = isolate.limit_reached();
         if let Some(StoppedProgram(result)) = stopped {
             return Ok(result);
         }
-        if heap_limit_reached {
+        if memory_limit_reached {
             return Ok(memory_limit_result(evaluation.tool_state));
         }
         let result = result?;
@@ -440,6 +721,19 @@ fn ajv_error_details(
 
 fn initialize_v8() {
     INITIALIZE_V8.call_once(|| {
+        // Programs never use WebAssembly, and a Wasm memory is reserved
+        // outside the V8 heap, so the heap limit does not bound it. With a
+        // limit of zero pages no Wasm memory can hold any bytes. V8 reads
+        // flags once at initialization and applies them to every isolate in
+        // the process; this module creates all of them and none runs Wasm.
+        v8::V8::set_flags_from_string("--wasm-max-mem-pages=0");
+        // A program's `ArrayBuffer` budget is reused once its unreachable
+        // buffers are freed. V8 frees them on a background thread by default,
+        // so a garbage collection can return before the budget is back, and
+        // the next allocation near the limit fails although the program holds
+        // little. Freeing them during the collection makes the budget
+        // available as soon as V8 retries the allocation.
+        v8::V8::set_flags_from_string("--no-concurrent-array-buffer-sweeping");
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
@@ -626,6 +920,21 @@ fn execute(isolate: &mut v8::OwnedIsolate, source: &str) -> Result<TypeScriptRun
     v8::tc_scope!(let try_catch, scope);
 
     let global = context.global(try_catch);
+    let Some(webassembly) = v8::String::new(try_catch, "WebAssembly") else {
+        return Ok(error_result(
+            "V8Error",
+            "could not allocate the WebAssembly binding name",
+        ));
+    };
+    // The global is the only reference to the WebAssembly namespace that
+    // scripts can reach, so deleting it before any script runs removes
+    // `WebAssembly.Memory` and the rest of the API for good.
+    if global.delete(try_catch, webassembly.into()) != Some(true) {
+        return Ok(error_result(
+            "V8Error",
+            "could not remove the WebAssembly binding",
+        ));
+    }
     let Some(name) = v8::String::new(try_catch, "__harnessStopAtBudget") else {
         return Ok(error_result(
             "V8Error",
@@ -1476,6 +1785,45 @@ const RUNTIME_TEMPLATE: &str = r#"
   globalThis.clearInterval = function () { throw new Error("clearInterval() is not supported in the sandbox because timers are disabled."); };
   globalThis.clearImmediate = function () {};
   globalThis.eval = function () { throw new Error("eval() is not supported in the sandbox. Write your logic directly in the main function instead."); };
+  // V8 reserves resizable and growable buffers outside the ArrayBuffer
+  // allocator, so the memory budget cannot bound them. Each buffer constructor
+  // is replaced by a proxy that refuses `maxByteLength` and forwards only the
+  // length. The proxy is installed as both the global and
+  // `prototype.constructor`, so user code never receives the original
+  // constructor. The handler has no prototype and the trap uses captured
+  // builtins, so user code that patches `Object.prototype` or `Reflect` cannot
+  // observe the proxy target.
+  const __reflectConstruct = Reflect.construct;
+  const __TypeError = TypeError;
+  function __withoutMaxByteLength(original, name) {
+    const guarded = new Proxy(original, {
+      __proto__: null,
+      construct(target, args, newTarget) {
+        const options = args[1];
+        if (Object(options) === options && options.maxByteLength !== undefined) {
+          throw new __TypeError(`${name} maxByteLength is not supported in the sandbox.`);
+        }
+        return __reflectConstruct(target, [args[0]], newTarget);
+      },
+    });
+    Object.defineProperty(original.prototype, "constructor", {
+      value: guarded,
+      writable: true,
+      enumerable: false,
+      configurable: true,
+    });
+    return guarded;
+  }
+  Object.defineProperty(globalThis, "ArrayBuffer", {
+    value: __withoutMaxByteLength(ArrayBuffer, "ArrayBuffer"),
+    writable: true,
+    enumerable: false,
+    configurable: true,
+  });
+  if (typeof SharedArrayBuffer === "function") {
+    __withoutMaxByteLength(SharedArrayBuffer, "SharedArrayBuffer");
+    delete globalThis.SharedArrayBuffer;
+  }
 
   const __userProgram = __USER_PROGRAM__;
   const __AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -3602,6 +3950,119 @@ async function main() {
         }
     }
 
+    /// *Prepare*: A program that looks for WebAssembly on the global object.
+    /// *Do*: Evaluate it.
+    /// *Assert*: No WebAssembly binding is reachable.
+    #[test]
+    fn hides_webassembly_from_programs() {
+        let source = r#"
+async function main() {
+  return {
+    type: typeof WebAssembly,
+    own: Object.getOwnPropertyNames(globalThis).includes("WebAssembly"),
+    property: globalThis.WebAssembly === undefined,
+  };
+}
+"#;
+
+        let result = run(&partial(source), &[], "run");
+
+        let TypeScriptRunResult::CodeResult {
+            result: CodeResult::Success { value },
+            ..
+        } = result
+        else {
+            panic!("expected the program to return, got {result:?}");
+        };
+        assert_eq!(
+            value,
+            json!({"type": "undefined", "own": false, "property": true})
+        );
+    }
+
+    /// *Prepare*: A program that commits 256 MiB of WebAssembly memory.
+    /// *Do*: Evaluate it, then evaluate an ordinary program.
+    /// *Assert*: The first fails without allocating; the second still returns.
+    #[test]
+    fn webassembly_memory_cannot_allocate_host_memory() {
+        let probe = r#"
+async function main() {
+  const memory = new WebAssembly.Memory({ initial: 4096 });
+  new Uint8Array(memory.buffer).fill(1);
+  return memory.buffer.byteLength;
+}
+"#;
+
+        let probed = run(&partial(probe), &[], "run");
+        let ordinary = run(
+            &partial("async function main() { return 1 + 1; }"),
+            &[],
+            "run",
+        );
+
+        let TypeScriptRunResult::CodeResult {
+            result: CodeResult::Error { error },
+            ..
+        } = probed
+        else {
+            panic!("expected the probe to fail, got {probed:?}");
+        };
+        assert_eq!(error["name"], "ReferenceError", "{error}");
+        assert_eq!(error["message"], "WebAssembly is not defined", "{error}");
+        let TypeScriptRunResult::CodeResult {
+            result: CodeResult::Success { value },
+            ..
+        } = ordinary
+        else {
+            panic!("expected the ordinary program to return, got {ordinary:?}");
+        };
+        assert_eq!(value, json!(2));
+    }
+
+    /// *Prepare*: An isolate configured like a program's, with the
+    /// WebAssembly namespace still bound to its context.
+    /// *Do*: Create a Wasm memory, a shared Wasm memory, and compile a module.
+    /// *Assert*: Memories cannot hold a page and compilation is refused.
+    #[test]
+    fn webassembly_stays_inert_when_its_namespace_is_reachable() {
+        initialize_v8();
+        let mut isolate = v8::Isolate::new(Default::default());
+        isolate.set_allow_wasm_code_generation_callback(refuse_wasm_code_generation);
+        let source = r#"
+(function () {
+  function attempt(operation) {
+    try {
+      operation();
+      return "allowed";
+    } catch (error) {
+      return error.name;
+    }
+  }
+  const emptyModule = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+  return JSON.stringify({
+    memory: attempt(() => new WebAssembly.Memory({ initial: 1 })),
+    shared: attempt(() => new WebAssembly.Memory({ initial: 1, maximum: 65536, shared: true })),
+    module: attempt(() => new WebAssembly.Module(emptyModule)),
+  });
+})();
+"#;
+
+        let value = {
+            v8::scope!(let scope, &mut isolate);
+            let context = v8::Context::new(scope, Default::default());
+            let scope = &mut v8::ContextScope::new(scope, context);
+            let source = v8::String::new(scope, source).expect("source fits in V8");
+            let script = v8::Script::compile(scope, source, None).expect("source compiles");
+            let value = script.run(scope).expect("script returns");
+            value.to_rust_string_lossy(scope)
+        };
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&value).expect("script returns JSON"),
+            json!({"memory": "RangeError", "shared": "RangeError", "module": "CompileError"})
+        );
+    }
+
     #[test]
     fn direct_non_idempotent_builtins_create_replayable_internal_steps() {
         let source = r#"
@@ -4390,6 +4851,357 @@ async function main() {
                 ..
             } if value == json!(42)
         ));
+    }
+
+    #[rstest::rstest]
+    #[case::one_large_string("return \"ab\".repeat(2 ** 27).toUpperCase().length;")]
+    #[case::one_large_array("return new Array(2 ** 25).fill(1.5).length;")]
+    #[case::doubling_string(
+        "let text = \"x\".repeat(1024); for (;;) { text = (text + text).toLowerCase(); }"
+    )]
+    #[case::growing_arrays(
+        "const chunks = []; for (;;) { chunks.push(new Array(2 ** 20).fill(chunks.length + 0.5)); }"
+    )]
+    #[case::one_large_array_buffer("return new ArrayBuffer(2 ** 31).byteLength;")]
+    #[case::one_large_typed_array("return new Float64Array(2 ** 28).length;")]
+    #[case::caught_array_buffer_failure(
+        "try { new ArrayBuffer(2 ** 31); } catch { return \"caught\"; }"
+    )]
+    #[case::growing_array_buffers(
+        "const buffers = []; for (;;) { buffers.push(new Uint8Array(2 ** 20)); }"
+    )]
+    #[case::allocation_after_a_caught_array_buffer_failure(
+        "try { new ArrayBuffer(2 ** 31); } catch {} return new Uint8Array(16).length;"
+    )]
+    #[case::small_buffer_once_the_budget_is_full(
+        "const keep = new Uint8Array(16 * 2 ** 20); return new Uint8Array(8).buffer.byteLength;"
+    )]
+    #[case::small_view_once_the_budget_is_full(
+        "const keep = new Uint8Array(16 * 2 ** 20); return new DataView(new Uint8Array(8).buffer).byteLength;"
+    )]
+    #[case::random_values_once_the_budget_is_full(
+        "const keep = new Uint8Array(16 * 2 ** 20); return crypto.getRandomValues(new Uint8Array(8)).length;"
+    )]
+    #[case::allocation_after_a_caught_failure_within_the_budget(
+        "const keep = new Uint8Array(12 * 2 ** 20); try { new Uint8Array(8 * 2 ** 20); } catch {} return keep.length + new Uint8Array(2 ** 20).length;"
+    )]
+    fn an_allocation_far_beyond_the_memory_limit_stops_only_the_program(#[case] body: &str) {
+        // Prepare
+        let program = partial(&format!("async function main() {{ {body} }}"));
+
+        // Do
+        let result = run_typescript_with_timeout(
+            build_request(&program, &[], "run"),
+            Duration::from_secs(10),
+        );
+        let subsequent_result = run(
+            &partial("async function main() { return 42; }"),
+            &[],
+            "after-memory-limit",
+        );
+
+        // Assert
+        assert!(
+            matches!(
+                &result,
+                Ok(TypeScriptRunResult::CodeResult {
+                    result: CodeResult::Error { error },
+                    ..
+                }) if error["name"] == "MemoryLimitError"
+            ),
+            "expected a MemoryLimitError result, got {result:?}"
+        );
+        assert!(matches!(
+            subsequent_result,
+            TypeScriptRunResult::CodeResult {
+                result: CodeResult::Success { value },
+                ..
+            } if value == json!(42)
+        ));
+    }
+
+    #[rstest::rstest]
+    #[case::resizable_array_buffer(
+        "const b = new ArrayBuffer(0, { maxByteLength: 2 ** 31 }); b.resize(256 * 1024 * 1024); new Uint8Array(b).fill(1); return b.byteLength;",
+        "ArrayBuffer maxByteLength is not supported in the sandbox."
+    )]
+    #[case::array_buffer_from_its_prototype(
+        "const b = new ArrayBuffer.prototype.constructor(0, { maxByteLength: 2 ** 31 }); return b.resizable;",
+        "ArrayBuffer maxByteLength is not supported in the sandbox."
+    )]
+    #[case::array_buffer_from_an_instance(
+        "const b = new (new Uint8Array(1).buffer.constructor)(0, { maxByteLength: 2 ** 31 }); return b.resizable;",
+        "ArrayBuffer maxByteLength is not supported in the sandbox."
+    )]
+    #[case::growable_shared_array_buffer(
+        "const b = new SharedArrayBuffer(0, { maxByteLength: 2 ** 31 }); b.grow(256 * 1024 * 1024); new Uint8Array(b).fill(1); return b.byteLength;",
+        "SharedArrayBuffer is not defined"
+    )]
+    fn refuses_buffers_that_grow_outside_the_memory_limit(
+        #[case] body: &str,
+        #[case] expected_message: &str,
+    ) {
+        // Prepare
+        let program = partial(&format!("async function main() {{ {body} }}"));
+
+        // Do
+        let result = run(&program, &[], "run");
+        let subsequent_result = run(
+            &partial("async function main() { return new ArrayBuffer(8, {}).byteLength; }"),
+            &[],
+            "after-refusal",
+        );
+
+        // Assert
+        assert!(
+            matches!(
+                &result,
+                TypeScriptRunResult::CodeResult {
+                    result: CodeResult::Error { error },
+                    ..
+                } if error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(expected_message))
+            ),
+            "expected an error containing {expected_message:?}, got {result:?}"
+        );
+        assert!(matches!(
+            subsequent_result,
+            TypeScriptRunResult::CodeResult {
+                result: CodeResult::Success { value },
+                ..
+            } if value == json!(8)
+        ));
+    }
+
+    #[test]
+    fn reuses_the_array_buffer_budget_of_unreachable_buffers() {
+        // Prepare
+        let program = partial(
+            "async function main() { let total = 0; for (let i = 0; i < 64; i++) { total += new Uint8Array(4 * 1024 * 1024).fill(1)[0]; } return total; }",
+        );
+
+        // Do
+        let result = run(&program, &[], "run");
+
+        // Assert
+        assert!(
+            matches!(
+                &result,
+                TypeScriptRunResult::CodeResult {
+                    result: CodeResult::Success { value },
+                    ..
+                } if *value == json!(64)
+            ),
+            "expected the program to succeed, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn reuses_the_array_buffer_budget_of_unreachable_buffers_near_the_limit() {
+        // Prepare
+        let program = partial(
+            "async function main() { let total = 0; for (let i = 0; i < 300; i++) { total += new Uint8Array(15 * 2 ** 20).length > 0 ? 1 : 0; } return total; }",
+        );
+
+        for attempt in 1..=20 {
+            // Do
+            let result = run(&program, &[], "run");
+
+            // Assert
+            assert!(
+                matches!(
+                    &result,
+                    TypeScriptRunResult::CodeResult {
+                        result: CodeResult::Success { value },
+                        ..
+                    } if *value == json!(300)
+                ),
+                "expected attempt {attempt} to succeed, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_programs_never_hold_more_isolates_than_the_limit() {
+        // Prepare
+        let permits = IsolatePermits::new(2, Duration::from_secs(10));
+        let program = partial(
+            "async function main() { let n = 0; for (let i = 0; i < 2e7; i++) { n += i; } return 1; }",
+        );
+        let finished = AtomicBool::new(false);
+
+        // Do
+        let (results, highest_live) = thread::scope(|scope| {
+            let sampler = scope.spawn(|| {
+                let mut highest = 0;
+                while !finished.load(Ordering::SeqCst) {
+                    highest = highest.max(permits.live());
+                    thread::yield_now();
+                }
+                highest
+            });
+            let evaluations = (0..6)
+                .map(|_| {
+                    scope.spawn(|| {
+                        run_typescript_with_permits(
+                            build_request(&program, &[], "run"),
+                            DEFAULT_TIMEOUT,
+                            &permits,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            let results = evaluations
+                .into_iter()
+                .map(|handle| handle.join().expect("evaluation thread panicked"))
+                .collect::<Vec<_>>();
+            finished.store(true, Ordering::SeqCst);
+            (results, sampler.join().expect("sampler thread panicked"))
+        });
+
+        // Assert
+        assert!(results.iter().all(Result::is_ok), "{results:?}");
+        assert_eq!(highest_live, 2);
+        assert_eq!(permits.live(), 0);
+    }
+
+    #[test]
+    fn concurrent_programs_beyond_the_isolate_limit_wait_for_a_permit() {
+        // Prepare
+        let permits = IsolatePermits::new(1, Duration::from_secs(10));
+        let program = partial("async function main() { return 42; }");
+
+        // Do
+        let results = thread::scope(|scope| {
+            let handles = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        run_typescript_with_permits(
+                            build_request(&program, &[], "run"),
+                            DEFAULT_TIMEOUT,
+                            &permits,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("evaluation thread panicked"))
+                .collect::<Vec<_>>()
+        });
+
+        // Assert
+        for result in results {
+            assert!(matches!(
+                result,
+                Ok(TypeScriptRunResult::CodeResult {
+                    result: CodeResult::Success { value },
+                    ..
+                }) if value == json!(42)
+            ));
+        }
+        assert_eq!(permits.live(), 0);
+    }
+
+    #[test]
+    fn a_program_that_cannot_get_a_permit_in_time_is_rejected_without_running() {
+        // Prepare
+        let permits = IsolatePermits::new(1, Duration::from_millis(50));
+        let held = permits.acquire().expect("the first permit is free");
+        let program = partial("async function main() { return 42; }");
+
+        // Do
+        let result = run_typescript_with_permits(
+            build_request(&program, &[], "run"),
+            DEFAULT_TIMEOUT,
+            &permits,
+        );
+        drop(held);
+        let after_release = run_typescript_with_permits(
+            build_request(&program, &[], "run"),
+            DEFAULT_TIMEOUT,
+            &permits,
+        );
+
+        // Assert
+        assert_eq!(
+            result.unwrap_err(),
+            "TypeScript execution waited 50ms for an isolate; the process runs at most 1 at once"
+        );
+        assert!(after_release.is_ok());
+        assert_eq!(permits.live(), 0);
+    }
+
+    #[rstest::rstest]
+    #[case::normal_completion("async function main() { return 42; }", Duration::from_secs(2))]
+    #[case::memory_limit(
+        "async function main() { return JSON.parse(JSON.stringify({ value: \"x\".repeat(8 * 1024 * 1024) })); }",
+        Duration::from_secs(2)
+    )]
+    #[case::timeout("async function main() { while (true) {} }", Duration::from_millis(25))]
+    #[case::syntax_error("async function main( {", Duration::from_secs(2))]
+    fn every_program_outcome_returns_its_isolate_permit(
+        #[case] source: &str,
+        #[case] timeout: Duration,
+    ) {
+        // Prepare
+        let permits = IsolatePermits::new(1, Duration::from_millis(50));
+        let program = partial(source);
+
+        // Do
+        let _ = run_typescript_with_permits(build_request(&program, &[], "run"), timeout, &permits);
+
+        // Assert
+        assert_eq!(permits.live(), 0);
+        assert!(permits.acquire().is_ok());
+    }
+
+    #[test]
+    fn a_program_stopped_at_its_time_budget_returns_its_isolate_permit() {
+        // Prepare
+        let permits = IsolatePermits::new(1, Duration::from_millis(50));
+        let source = "async function main() { await tools.test.echo({}); while (true) { try { Date.now(); } catch (_) {} } }";
+        let first = pending(run(&partial(source), &[tool("echo")], "run"));
+        let resolved = resolve_all(first, &[json!({"ok": true})]);
+        let budget_error = json!({"name": "ProgramBudgetExceeded", "message": "stopped"});
+
+        // Do
+        let result = run_typescript_with_permits(
+            EvaluationRequest {
+                budget_error: Some(budget_error.clone()),
+                ..build_request(&resolved, &[tool("echo")], "run")
+            },
+            DEFAULT_TIMEOUT,
+            &permits,
+        );
+
+        // Assert
+        assert!(matches!(
+            result,
+            Ok(TypeScriptRunResult::CodeResult {
+                result: CodeResult::Error { error },
+                ..
+            }) if error == budget_error
+        ));
+        assert_eq!(permits.live(), 0);
+    }
+
+    #[test]
+    fn a_panic_while_holding_a_permit_returns_it() {
+        // Prepare
+        let permits = IsolatePermits::new(1, Duration::from_millis(50));
+
+        // Do
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _permit = permits.acquire().expect("the permit is free");
+            panic!("evaluation failed");
+        }));
+
+        // Assert
+        assert!(panicked.is_err());
+        assert_eq!(permits.live(), 0);
+        assert!(permits.acquire().is_ok());
     }
 
     #[test]

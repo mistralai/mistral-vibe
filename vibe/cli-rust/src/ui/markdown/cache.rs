@@ -42,6 +42,20 @@ impl MarkdownCache {
         })
     }
 
+    /// Cache rows the builder already wrapped to `width` (`/raw` messages), painted without re-wrapping.
+    pub fn prepare_wrapped(
+        &mut self,
+        entry: usize,
+        revision: u64,
+        width: u16,
+        theme: usize,
+        build: impl FnOnce() -> LinkedLines,
+    ) -> Arc<PreparedMarkdown> {
+        self.get_or_build(entry, revision, width, theme, || {
+            PreparedMarkdown::from_wrapped(build(), width)
+        })
+    }
+
     /// Cache non-markdown entry rows and their links (effect result bodies) under the same key and bounds.
     pub fn prepare_lines(
         &mut self,

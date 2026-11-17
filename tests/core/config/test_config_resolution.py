@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-import json
 from pathlib import Path
 import ssl
 import tomllib
@@ -27,6 +26,7 @@ from vibe.core.config import (
 )
 from vibe.core.config._migration import BASH_READ_ONLY_MIGRATION, migrate_config_layers
 from vibe.core.config.builder import ConfigBuilder as _LayeredConfigBuilder
+from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import (
     HarnessFilesManager,
     init_harness_files_manager,
@@ -1320,7 +1320,8 @@ class TestMistralBrowserAuthConfig:
             == DEFAULT_MISTRAL_BROWSER_AUTH_API_BASE_URL
         )
 
-    def test_legacy_explicit_mistral_provider_backfills_browser_auth_urls_without_changing_backend(
+    @pytest.mark.asyncio
+    async def test_legacy_explicit_mistral_provider_backfills_browser_auth_urls_without_changing_backend(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv("VIBE_HOME", str(tmp_path))
@@ -1351,7 +1352,9 @@ class TestMistralBrowserAuthConfig:
         reset_harness_files_manager()
         init_harness_files_manager("user")
 
-        context = OnboardingContext.load()
+        context = OnboardingContext.from_config(
+            (await build_default_orchestrator()).config
+        )
 
         assert context.provider.name == "mistral"
         assert context.provider.backend.value == "generic"
@@ -1458,325 +1461,6 @@ class TestMistralBrowserAuthConfig:
 
 
 class TestOnboardingContextResolution:
-    def test_load_uses_explicit_overrides_when_harness_manager_is_uninitialized(
-        self,
-    ) -> None:
-        reset_harness_files_manager()
-
-        context = OnboardingContext.load(
-            active_model="custom-model",
-            providers=[_custom_provider_payload()],
-            models=[_custom_model_payload()],
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_uses_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        reset_harness_files_manager()
-        monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
-        monkeypatch.setenv("VIBE_VIBE_BASE_URL", "https://env-vibe.example.com")
-        monkeypatch.setenv(
-            "VIBE_PROVIDERS",
-            json.dumps([
-                {
-                    "name": "env-provider",
-                    "api_base": "https://env.example/v1",
-                    "api_key_env_var": "ENV_API_KEY",
-                }
-            ]),
-        )
-        monkeypatch.setenv(
-            "VIBE_MODELS",
-            json.dumps([
-                {"name": "env-model", "provider": "env-provider", "alias": "env-model"}
-            ]),
-        )
-
-        context = OnboardingContext.load()
-
-        assert context.provider.name == "env-provider"
-        assert context.provider.api_key_env_var == "ENV_API_KEY"
-        assert context.vibe_base_url == "https://env-vibe.example.com"
-
-    def test_load_prefers_explicit_overrides_over_toml_and_env(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        with config_file.open("wb") as file:
-            tomli_w.dump(
-                {
-                    "active_model": "toml-model",
-                    "providers": [
-                        {
-                            "name": "toml-provider",
-                            "api_base": "https://toml.example/v1",
-                            "api_key_env_var": "TOML_API_KEY",
-                        }
-                    ],
-                    "models": [
-                        {
-                            "name": "toml-model",
-                            "provider": "toml-provider",
-                            "alias": "toml-model",
-                        }
-                    ],
-                },
-                file,
-            )
-        monkeypatch.setenv("VIBE_ACTIVE_MODEL", "env-model")
-        monkeypatch.setenv(
-            "VIBE_PROVIDERS",
-            json.dumps([
-                {
-                    "name": "env-provider",
-                    "api_base": "https://env.example/v1",
-                    "api_key_env_var": "ENV_API_KEY",
-                }
-            ]),
-        )
-        monkeypatch.setenv(
-            "VIBE_MODELS",
-            json.dumps([
-                {"name": "env-model", "provider": "env-provider", "alias": "env-model"}
-            ]),
-        )
-
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-
-        context = OnboardingContext.load(
-            active_model="custom-model",
-            providers=[_custom_provider_payload()],
-            models=[_custom_model_payload()],
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_accepts_typed_provider_and_model_overrides(self) -> None:
-        context = OnboardingContext.load(
-            active_model="custom-model",
-            providers=[_custom_provider(api_key_env_var="CUSTOM_API_KEY")],
-            models=[_custom_model()],
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_preserves_explicit_overrides_when_onboarding_toml_is_invalid(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("invalid = [", encoding="utf-8")
-
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-
-        context = OnboardingContext.load(
-            active_model="custom-model",
-            providers=[_custom_provider_payload()],
-            models=[_custom_model_payload()],
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_preserves_explicit_provider_and_model_overrides_when_toml_is_invalid(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("invalid = [", encoding="utf-8")
-
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-
-        context = OnboardingContext.load(
-            providers=[_custom_provider_payload()],
-            models=[_custom_model_payload(alias="devstral-2")],
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_ignores_an_unparseable_env_list_and_keeps_toml_config(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        with (tmp_path / "config.toml").open("wb") as file:
-            tomli_w.dump(
-                {
-                    "active_model": "custom-model",
-                    "providers": [_custom_provider_payload()],
-                    "models": [_custom_model_payload()],
-                },
-                file,
-            )
-        monkeypatch.setenv("VIBE_MODELS", "mistral-large-latest,mistral-medium-latest")
-        monkeypatch.setenv("VIBE_PROVIDERS", "mistral")
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-
-        with caplog.at_level("WARNING"):
-            context = OnboardingContext.load()
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-        assert "Ignoring unparseable VIBE_MODELS environment value" in caplog.text
-        assert "mistral-large-latest" not in caplog.text
-
-    def test_load_preserves_explicit_provider_override_when_toml_is_invalid(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("invalid = [", encoding="utf-8")
-
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-
-        context = OnboardingContext.load(
-            active_model="custom-model", providers=[_custom_provider_payload()]
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_preserves_explicit_overrides_when_onboarding_env_is_invalid(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        reset_harness_files_manager()
-        monkeypatch.setenv("VIBE_PROVIDERS", "not-json")
-
-        context = OnboardingContext.load(
-            active_model="custom-model",
-            providers=[_custom_provider_payload()],
-            models=[_custom_model_payload()],
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_preserves_explicit_provider_override_when_onboarding_env_is_invalid(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        reset_harness_files_manager()
-        monkeypatch.setenv("VIBE_MODELS", "not-json")
-
-        context = OnboardingContext.load(
-            active_model="custom-model", providers=[_custom_provider_payload()]
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_uses_valid_active_provider_when_unrelated_provider_is_malformed(
-        self,
-    ) -> None:
-        context = OnboardingContext.load(
-            active_model="custom-model",
-            providers=[
-                _custom_provider_payload(),
-                {"name": "broken-provider", "backend": "mistral"},
-            ],
-            models=[_custom_model_payload()],
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_uses_valid_active_provider_when_unrelated_model_is_malformed(
-        self,
-    ) -> None:
-        context = OnboardingContext.load(
-            active_model="custom-model",
-            providers=[_custom_provider_payload()],
-            models=[
-                _custom_model_payload(),
-                {"name": "broken-model", "alias": "broken-model"},
-            ],
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_uses_single_valid_provider_when_no_matching_model_exists(
-        self,
-    ) -> None:
-        context = OnboardingContext.load(
-            active_model="custom-model", providers=[_custom_provider_payload()]
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.provider.api_key_env_var == "CUSTOM_API_KEY"
-
-    def test_load_preserves_browser_sign_in_for_valid_active_provider_with_unrelated_invalid_entry(
-        self,
-    ) -> None:
-        context = OnboardingContext.load(
-            active_model="custom-model",
-            providers=[
-                _custom_provider_payload(
-                    browser_auth_base_url="https://custom.example/sign-in",
-                    browser_auth_api_base_url="https://custom.example/api",
-                    backend="mistral",
-                ),
-                {"name": "broken-provider", "backend": "mistral"},
-            ],
-            models=[_custom_model_payload()],
-        )
-
-        assert context.provider.name == "custom-provider"
-        assert context.supports_browser_sign_in is True
-
-    def test_load_falls_back_when_active_provider_is_invalid(self) -> None:
-        context = OnboardingContext.load(
-            active_model="custom-model",
-            providers=[{"name": "custom-provider", "backend": "mistral"}],
-            models=[_custom_model_payload()],
-        )
-
-        assert context.provider.name == "mistral"
-
-    def test_load_falls_back_when_no_valid_provider_model_pair_exists(self) -> None:
-        context = OnboardingContext.load(
-            active_model="broken-model",
-            providers=[{"name": "broken-provider", "backend": "mistral"}],
-            models=[{"name": "broken-model", "alias": "broken-model"}],
-        )
-
-        assert context.provider.name == "mistral"
-
-    def test_load_falls_back_when_onboarding_toml_is_invalid(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setenv("VIBE_HOME", str(tmp_path))
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("invalid = [", encoding="utf-8")
-
-        reset_harness_files_manager()
-        init_harness_files_manager("user")
-
-        context = OnboardingContext.load()
-
-        assert context.provider.name == "mistral"
-
-    def test_load_ignores_unparseable_onboarding_env_providers(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        reset_harness_files_manager()
-        monkeypatch.setenv("VIBE_PROVIDERS", "not-json")
-
-        context = OnboardingContext.load()
-
-        assert context.provider.name == "mistral"
-
     def test_from_config_falls_back_when_active_provider_is_missing(
         self, make_config: Callable[..., VibeConfigSchema]
     ) -> None:
@@ -1865,16 +1549,16 @@ class TestCompactionModel:
 
 class TestActiveModelValidation:
     def test_unknown_active_model_falls_back_to_default(
-        self, build_config: ConfigBuilder, caplog: pytest.LogCaptureFixture
+        self, build_config: ConfigBuilder
     ) -> None:
-        with caplog.at_level("WARNING"):
-            cfg = build_config(active_model="does-not-exist")
+        cfg = build_config(active_model="does-not-exist")
 
         assert cfg.active_model == ""
         assert cfg.get_active_model().alias == cfg.resolve_default_model_alias()
-        assert "Model 'does-not-exist' is not available" in caplog.text
         assert len(cfg.validation_warnings) == 1
-        assert "does-not-exist" in cfg.validation_warnings[0]
+        assert cfg.validation_warnings[0].startswith(
+            "Model 'does-not-exist' is not available"
+        )
 
     def test_known_active_model_is_not_overridden(
         self, build_config: ConfigBuilder

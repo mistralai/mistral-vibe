@@ -180,15 +180,31 @@ impl PendingWrite {
         if utf16_len(&self.serialized) <= HARD_INLINE_CHARACTER_LIMIT {
             return self.original_result;
         }
-        let receipt = build_write_error_message(
-            error,
-            &self.relative_path,
-            &self.serialized,
-            &self.tool_name,
-            self.limits,
-            &self.type_definition,
-        );
+        let receipt = self.write_error_message(error);
         replace_result(self.original_result, receipt)
+    }
+
+    /// Formats the receipt returned when a tool output exceeded the filesystem
+    /// threshold, could not be saved, and also exceeds the hard inline safety
+    /// limit, so it cannot be returned inline either.
+    fn write_error_message(&self, error: &ProtocolError) -> String {
+        [
+            format_system_tag(&format!(
+                "The {} tool output was too large ({} characters, filesystem threshold is {}){FAILED_SAVE_TO}{}{FAILED_SAVE_END}\nThe output also exceeds the hard inline safety limit of {HARD_INLINE_CHARACTER_LIMIT} characters. {}\nError: {}",
+                self.tool_name,
+                utf16_len(&self.serialized),
+                self.limits.max_output,
+                self.relative_path,
+                excerpt_note(HARD_INLINE_CHARACTER_LIMIT),
+                error.message
+            )),
+            format_truncated_output(&self.serialized, HARD_INLINE_CHARACTER_LIMIT),
+            format!("<output-type>{}</output-type>", self.type_definition),
+            format_system_tag(
+                "Recovery: Retry the tool with narrower parameters, or ask for a summarized/filtered result. The full content was not saved.",
+            ),
+        ]
+        .join("\n")
     }
 }
 
@@ -354,15 +370,60 @@ fn replace_result(original: ToolResult, message: String) -> ToolResult {
     }
 }
 
-/// The words before the path in a saved output's closing reminder.
+/// The words around the path in a saved output's closing reminder.
 const SAVED_TO: &str = "Remember: The full content was saved to ";
+const SAVED_TO_END: &str = ".\n";
 
 /// The file a saved tool output was written to, read back from the result
 /// text Core wrote for it, or `None` for any other text.
 pub(crate) fn saved_output_path(text: &str) -> Option<&str> {
+    // The reminder closes the receipt, after the excerpt of the tool's output, so the last match
+    // is Core's own.
     let start = text.rfind(SAVED_TO)? + SAVED_TO.len();
-    let length = text[start..].find(".\n")?;
+    let length = text[start..].find(SAVED_TO_END)?;
     Some(&text[start..start + length]).filter(|path| !path.is_empty())
+}
+
+/// How Core's notice that it saved a tool output opens, before the file's path.
+const SAVED_OPENING: &str = "The tool output is large. To preserve your context window, it was saved to the file system under ";
+
+/// The words around the path in Core's notice that saving a tool output failed.
+const FAILED_SAVE_TO: &str = ", but saving it to ";
+const FAILED_SAVE_END: &str = " failed.";
+
+/// The file a large-output receipt names, whether Core saved the output there or the save
+/// failed, or `None` for any other text. Core names the file in the first line of the notice
+/// that opens the receipt, so a tool's text that only quotes a receipt names none.
+fn receipt_path(text: &str) -> Option<&str> {
+    // `format_system_tag` opens the notice.
+    let first_line = text.strip_prefix("<system>")?.split('\n').next()?;
+    let path = match first_line.strip_prefix(SAVED_OPENING) {
+        Some(rest) => rest.strip_suffix('.')?,
+        None => first_line
+            .split_once(FAILED_SAVE_TO)?
+            .1
+            .strip_suffix(FAILED_SAVE_END)?,
+    };
+    Some(path).filter(|path| !path.is_empty())
+}
+
+/// Whether the model reads the same in two tool-result blocks. A receipt names the file of its
+/// own call, wherever it occurs, so two calls that returned the same large output differ only
+/// there: receipts are compared without their file.
+pub(crate) fn same_for_the_model(a: &ContentBlock, b: &ContentBlock) -> bool {
+    if a == b {
+        return true;
+    }
+    let (ContentBlock::Text(a), ContentBlock::Text(b)) = (a, b) else {
+        return false;
+    };
+    let (Some(a_path), Some(b_path)) = (receipt_path(&a.text), receipt_path(&b.text)) else {
+        return false;
+    };
+    // Core writes a receipt as plain text: `replace_result` builds it with `ContentBlock::text`.
+    a.annotations == b.annotations
+        && a.meta == b.meta
+        && a.text.split(a_path).eq(b.text.split(b_path))
 }
 
 fn build_saved_output_message(
@@ -373,7 +434,7 @@ fn build_saved_output_message(
 ) -> String {
     [
         format_system_tag(&format!(
-            "The tool output is large. To preserve your context window, it was saved to the file system under {file_path}.\nOutput size: {} characters\nMax size before saving: {} characters\n{}",
+            "{SAVED_OPENING}{file_path}.\nOutput size: {} characters\nMax size before saving: {} characters\n{}",
             utf16_len(serialized),
             limits.max_output,
             excerpt_note(limits.model_visible_output)
@@ -381,33 +442,8 @@ fn build_saved_output_message(
         format_truncated_output(serialized, limits.model_visible_output),
         format!("<output-type>{type_definition}</output-type>"),
         format_system_tag(&format!(
-            "{SAVED_TO}{file_path}.\nRead the JSON's inferred type definition from the <output-type> tag first. To see an omitted part, extract the field you need with `jq` and search or slice it with `grep`, or page through the file with `read_file` using `offset` and `limit`."
+            "{SAVED_TO}{file_path}{SAVED_TO_END}Read the JSON's inferred type definition from the <output-type> tag first. To see an omitted part, extract the field you need with `jq` and search or slice it with `grep`, or page through the file with `read_file` using `offset` and `limit`."
         )),
-    ]
-    .join("\n")
-}
-
-fn build_write_error_message(
-    error: &ProtocolError,
-    file_path: &str,
-    serialized: &str,
-    tool_name: &str,
-    limits: CharacterLimits,
-    type_definition: &str,
-) -> String {
-    [
-        format_system_tag(&format!(
-            "The {tool_name} tool output was too large ({} characters, filesystem threshold is {}), but saving it to {file_path} failed.\nThe output also exceeds the hard inline safety limit of {HARD_INLINE_CHARACTER_LIMIT} characters. {}\nError: {}",
-            utf16_len(serialized),
-            limits.max_output,
-            excerpt_note(HARD_INLINE_CHARACTER_LIMIT),
-            error.message
-        )),
-        format_truncated_output(serialized, HARD_INLINE_CHARACTER_LIMIT),
-        format!("<output-type>{type_definition}</output-type>"),
-        format_system_tag(
-            "Recovery: Retry the tool with narrower parameters, or ask for a summarized/filtered result. The full content was not saved.",
-        ),
     ]
     .join("\n")
 }

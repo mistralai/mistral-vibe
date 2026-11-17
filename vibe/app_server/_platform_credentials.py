@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 import json
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
+import uuid
 
 from vibe.app_server._connection_protocol import (
     PlatformCredentialsKind,
@@ -27,8 +28,10 @@ from vibe.core.platform_auth import (
     PlatformCredentialSnapshot,
     PlatformCredentialTarget,
 )
+from vibe.observability.logging import logger
 from vibe.setup.auth._oidc_config import OidcError, registered_web_origin
 from vibe.setup.auth._oidc_tenant import (
+    OidcDiscoveryFailed,
     OidcTenantResolver,
     OidcUnauthorized,
     TenantSelection,
@@ -60,14 +63,21 @@ class ConnectionPlatformCredentialProvider:
         self._generation = 0
         self._principal: str | None = None
         self._user: str | None = None
+        # The user a discovery is in flight for, before it is committed to
+        # ``_user``. Logout during that wait must be able to drop its result.
+        self._discovery_user: str | None = None
 
     def invalidate(self) -> None:
         self._generation += 1
         self._principal = None
-        if self._user is not None:
-            # A logout or account switch may change the user's memberships.
-            self._tenants.invalidate(self._user)
-            self._user = None
+        # A logout or account switch may change the user's memberships.
+        stale = {
+            user for user in (self._user, self._discovery_user) if user is not None
+        }
+        self._user = None
+        self._discovery_user = None
+        for user in stale:
+            self._tenants.invalidate(user)
 
     def has_credential(self) -> bool:
         # Desktop owns the session: only a resolution can tell.
@@ -133,7 +143,7 @@ class ConnectionPlatformCredentialProvider:
             )
         ):
             return PlatformCredentialRequired(reason="invalid")
-        tenant = await self._tenant(audience, resolved.token, generation)
+        tenant = await self._tenant(audience, resolved.token, generation, resolved)
         if not isinstance(tenant, tuple):
             return await self._without_tenant(tenant, target, resolved.revision)
         tenant_headers, principal = tenant
@@ -162,7 +172,11 @@ class ConnectionPlatformCredentialProvider:
         return await self._resolve(target, rejected_revision=revision)
 
     async def _tenant(
-        self, audience: str, id_token: str, generation: int
+        self,
+        audience: str,
+        id_token: str,
+        generation: int,
+        resolved: PlatformCredentialsSnapshot,
     ) -> (
         tuple[dict[str, str], str | None]
         | PlatformCredentialRequired
@@ -179,6 +193,7 @@ class ConnectionPlatformCredentialProvider:
             _client_id(claims.get("aud")),
             claims.get("sub"),
         )
+        selection = _tenant_selection(resolved)
         if not (
             isinstance(issuer, str)
             and isinstance(subject, str)
@@ -186,17 +201,29 @@ class ConnectionPlatformCredentialProvider:
             and subject
         ):
             return PlatformCredentialRequired(reason="invalid")
-        # The CLI's tenant overrides are CLI configuration: never Desktop's.
         user = f"{issuer}\0{client_id}\0{subject}"
+        self._discovery_user = user
         try:
-            tenant = await self._tenants.resolve(
-                audience, user, id_token, TenantSelection()
-            )
+            tenant = await self._tenants.resolve(audience, user, id_token, selection)
         except OidcUnauthorized:
             return "unauthorized"
-        except OidcError:
-            return PlatformCredentialRequired(reason="reauthentication_required")
-        if generation != self._generation:
+        except OidcError as exc:
+            # Discovery that got no answer is not a refusal: the network may be
+            # down, or the computer just woke. Signing in again would not help.
+            return PlatformCredentialRequired(
+                reason=(
+                    "transient"
+                    if isinstance(exc, OidcDiscoveryFailed)
+                    else "reauthentication_required"
+                )
+            )
+        # A logout during discovery does not cache the answer, but still
+        # returns it to whoever was waiting, including a caller that joined
+        # after the logout. That answer belongs to the previous session.
+        if generation != self._generation or (
+            not selection.organization_id
+            and self._tenants.cached(audience, user, selection) is None
+        ):
             return PlatformCredentialRequired(reason="reauthentication_required")
         self._user = user
         self._principal = tenant_principal(
@@ -207,6 +234,70 @@ class ConnectionPlatformCredentialProvider:
             tenant=tenant,
         )
         return tenant.headers, self._principal
+
+
+def _tenant_selection(resolved: PlatformCredentialsSnapshot) -> TenantSelection:
+    """Which tenant ID-token requests belong to, most explicit first.
+
+    An operator's env override wins -- any component of it: a workspace-only
+    override goes to discovery filtered to that workspace, so its own
+    organization answers and the pair cannot disagree. Then the tenant the
+    Desktop named from its own session, unless it is malformed, in which case
+    the override or discovery decides rather than failing the session.
+    Without an override or a named tenant, the resolver's discovery picks one
+    -- which for a user in more than one organization is the first workspace in
+    the list, not necessarily the organization they work in.
+    """
+    override = TenantSelection.from_env()
+    if (
+        override.organization_id
+        or override.workspace_id
+        or resolved.organization_id is None
+    ):
+        if (override.organization_id or override.workspace_id) and (
+            resolved.organization_id is not None
+        ):
+            logger.warning(
+                "OIDC tenant override (organization=%r, workspace=%r) shadows "
+                "the tenant the Desktop named (organization=%r)",
+                override.organization_id,
+                override.workspace_id,
+                resolved.organization_id,
+            )
+        else:
+            logger.debug(
+                "OIDC tenant selection from the environment override "
+                "(organization=%r, workspace=%r)",
+                override.organization_id,
+                override.workspace_id,
+            )
+        return override
+    try:
+        organization_id = str(uuid.UUID(resolved.organization_id))
+    except ValueError:
+        logger.warning(
+            "Desktop named organization %r, which is not a UUID; "
+            "falling back to workspace discovery",
+            resolved.organization_id,
+        )
+        return override
+    workspace_id = ""
+    if resolved.workspace_id:
+        try:
+            workspace_id = str(uuid.UUID(resolved.workspace_id))
+        except ValueError:
+            logger.warning(
+                "Desktop named workspace %r, which is not a UUID; "
+                "keeping the organization alone",
+                resolved.workspace_id,
+            )
+    logger.debug(
+        "OIDC tenant selection from the Desktop-named session "
+        "(organization=%s, workspace=%r)",
+        organization_id,
+        workspace_id,
+    )
+    return TenantSelection(organization_id=organization_id, workspace_id=workspace_id)
 
 
 def _unverified_claims(token: str) -> dict[str, Any]:

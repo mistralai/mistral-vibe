@@ -73,7 +73,6 @@ impl Startup {
             startup_cache,
             config: ConfigRead {
                 enable_update_checks: false,
-                show_greeting: false,
                 ..ConfigRead::default()
             },
             state: json!({"eventId": 0, "session": {"id": "session"}}),

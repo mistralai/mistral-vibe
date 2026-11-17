@@ -63,3 +63,18 @@ async fn exit_still_exits_while_a_shell_command_runs() {
         "no cannot-be-queued rejection is shown"
     );
 }
+
+#[tokio::test]
+async fn a_removed_command_reports_its_removal_while_a_shell_command_runs() {
+    let mut app = shell_running_app();
+
+    assert!(!submit_text(&mut app, "/teleport"));
+
+    assert_eq!(app.chat_input.full_text(), "/teleport");
+    assert_eq!(app.chat_input.cursor, "teleport".len());
+    assert!(app.queue.is_empty(), "nothing reaches the turn queue");
+    assert_eq!(
+        notice_text(&app),
+        Some("/teleport was removed in Vibe 3.1.1.")
+    );
+}

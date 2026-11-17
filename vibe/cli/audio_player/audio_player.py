@@ -34,10 +34,7 @@ DEFAULT_SAMPLE_WIDTH = 2  # 16-bit = 2 bytes
 def check_audio_available() -> str | None:
     """Return an error string if miniaudio is unavailable, else None."""
     if not ma:
-        return (
-            "miniaudio is not installed or no audio backend is available "
-            "(install the 'miniaudio' package)."
-        )
+        return "miniaudio failed to import or no audio backend is available."
     try:
         devices = ma.Devices()
         playbacks = devices.get_playbacks()

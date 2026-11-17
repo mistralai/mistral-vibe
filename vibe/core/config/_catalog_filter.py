@@ -13,7 +13,7 @@ from typing import Any, Final
 from pydantic import ValidationError
 
 from vibe.core.config._model_aliases import CATALOG_LAYER, build_alias_index
-from vibe.core.config.models import ModelConfig
+from vibe.core.config.models import ModelConfig, normalize_model_configs
 from vibe.observability.logging import logger
 
 # The key the GrowthBook layer carries the parsed filter under. Not a setting:
@@ -21,6 +21,7 @@ from vibe.observability.logging import logger
 CATALOG_FILTER_KEY: Final = "model_catalog_filter"
 # The GrowthBook layer's name; imported, its module would import this one back.
 _GROWTHBOOK_LAYER: Final = "growthbook"
+_DEFAULT_LAYER: Final = "default"
 
 # Not `max_context_length`: the window is a fact of the model the catalog
 # owns, and a wrong one would compact every session of a cohort too early.
@@ -144,6 +145,31 @@ def with_catalog_filter(
         return layers
     return [
         (name, _apply_catalog_filter(data, spec) if name == CATALOG_LAYER else data)
+        for name, data in layers
+    ]
+
+
+def with_remote_models(
+    layers: list[tuple[str, dict[str, Any]]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """``layers`` with the catalog filtered, and without the built-in models
+    while the catalog or a GrowthBook model flag lists models.
+    """
+    layers = with_catalog_filter(layers)
+    if not any(
+        isinstance(models := normalize_model_configs(data.get("models")), Mapping)
+        and bool(models)
+        for name, data in layers
+        if name in {CATALOG_LAYER, _GROWTHBOOK_LAYER}
+    ):
+        return layers
+    return [
+        (
+            name,
+            {key: value for key, value in data.items() if key != "models"}
+            if name == _DEFAULT_LAYER
+            else data,
+        )
         for name, data in layers
     ]
 

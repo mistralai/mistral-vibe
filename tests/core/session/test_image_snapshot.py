@@ -57,6 +57,112 @@ def test_snapshot_image_inlines_when_session_dir_is_none(tmp_path: Path) -> None
     assert att.mime_type == "image/png"
 
 
+def test_snapshot_image_reports_a_session_dir_it_cannot_write(tmp_path: Path) -> None:
+    src = tmp_path / "screenshot.png"
+    src.write_bytes(PNG_BYTES)
+    session_dir = tmp_path / "session"
+    session_dir.write_bytes(b"")
+
+    with pytest.raises(ImageSnapshotError, match="Couldn't save it to the session"):
+        snapshot_image(src, alias="screenshot.png", session_dir=session_dir)
+
+
+def test_snapshot_image_leaves_no_partial_file_when_the_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "screenshot.png"
+    src.write_bytes(PNG_BYTES)
+    session_dir = tmp_path / "session"
+
+    def disk_full(_fd: int) -> None:
+        raise OSError(28, "No space left on device", "/session/attachments/.x.tmp")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("os.fsync", disk_full)
+        with pytest.raises(ImageSnapshotError) as raised:
+            snapshot_image(src, alias="screenshot.png", session_dir=session_dir)
+
+    assert str(raised.value) == (
+        "Couldn't save it to the session: No space left on device"
+    )
+    assert list((session_dir / "attachments").iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "leftover", [PNG_BYTES[:4], bytes(len(PNG_BYTES))], ids=["truncated", "zeroed"]
+)
+def test_snapshot_image_rewrites_a_damaged_leftover(
+    tmp_path: Path, leftover: bytes
+) -> None:
+    src = tmp_path / "screenshot.png"
+    src.write_bytes(PNG_BYTES)
+    session_dir = tmp_path / "session"
+    digest = hashlib.sha1(PNG_BYTES, usedforsecurity=False).hexdigest()
+    damaged = session_dir / "attachments" / f"{digest}.png"
+    damaged.parent.mkdir(parents=True)
+    damaged.write_bytes(leftover)
+
+    att = snapshot_image(src, alias="screenshot.png", session_dir=session_dir)
+
+    assert isinstance(att.source, FileImageSource)
+    assert att.source.path.read_bytes() == PNG_BYTES
+    assert [p.name for p in damaged.parent.iterdir()] == [damaged.name]
+
+
+def test_snapshot_image_keeps_a_complete_copy_it_cannot_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "screenshot.png"
+    src.write_bytes(PNG_BYTES)
+    session_dir = tmp_path / "session"
+
+    def held_open_by_another_writer(_src: object, dst: Path) -> None:
+        Path(dst).write_bytes(PNG_BYTES)
+        raise PermissionError(13, "Access is denied")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("os.replace", held_open_by_another_writer)
+        att = snapshot_image(src, alias="screenshot.png", session_dir=session_dir)
+
+    assert isinstance(att.source, FileImageSource)
+    assert att.source.path.read_bytes() == PNG_BYTES
+    assert [p.name for p in att.source.path.parent.iterdir()] == [att.source.path.name]
+
+
+def test_snapshot_image_reports_a_damaged_copy_it_cannot_replace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "screenshot.png"
+    src.write_bytes(PNG_BYTES)
+    session_dir = tmp_path / "session"
+
+    def held_open_while_damaged(_src: object, dst: Path) -> None:
+        Path(dst).write_bytes(bytes(len(PNG_BYTES)))
+        raise PermissionError(13, "Access is denied")
+
+    with monkeypatch.context() as patched:
+        patched.setattr("os.replace", held_open_while_damaged)
+        with pytest.raises(ImageSnapshotError, match="Access is denied"):
+            snapshot_image(src, alias="screenshot.png", session_dir=session_dir)
+
+
+def test_snapshot_image_lets_an_interrupt_through_even_with_a_complete_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src = tmp_path / "screenshot.png"
+    src.write_bytes(PNG_BYTES)
+    session_dir = tmp_path / "session"
+
+    def interrupted_after_another_writer(_src: object, dst: Path) -> None:
+        Path(dst).write_bytes(PNG_BYTES)
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr("os.replace", interrupted_after_another_writer)
+        with pytest.raises(KeyboardInterrupt):
+            snapshot_image(src, alias="screenshot.png", session_dir=session_dir)
+
+
 def test_snapshot_image_rejects_non_image_extension(tmp_path: Path) -> None:
     src = tmp_path / "readme.txt"
     src.write_bytes(b"hi")

@@ -426,12 +426,32 @@ def test_a_level_outside_the_known_levels_runs_when_the_config_lists_none() -> N
 
 @pytest.mark.parametrize("name", ["mistral-large-4", "mistral-large-4-0"])
 def test_mistral_large_4_offers_the_levels_its_api_takes(name: str) -> None:
-    """*Prepare*: Mistral Large 4 with no level set in its config.
+    """*Prepare*: Mistral Large 4, under each id the API serves it, with no level set
+    in its config.
     *Do*: Compile the picker's levels.
     *Assert*: The picker offers low, medium and high, the efforts the API takes.
     """
     # Do
     route = compile_agent_route_facts(_provider(), _model(name))
+
+    # Assert
+    assert route.thinking_levels == ("low", "medium", "high")
+
+
+def test_mistral_large_latest_offers_the_levels_of_the_model_its_card_names(
+    catalogue: _CountingFetcher,
+) -> None:
+    """*Prepare*: The latest alias, whose card names Mistral Large 4.
+    *Do*: Compile the session's facts, then the picker's levels.
+    *Assert*: The picker offers low, medium and high, Mistral Large 4's efforts.
+    """
+    # Prepare
+    catalogue.entry = CatalogueEntry(name="mistral-large-4")
+    model = _model("mistral-large-latest")
+
+    # Do
+    compile_session_model_facts(_keyed_provider(), model, model)
+    route = compile_agent_route_facts(_keyed_provider(), model)
 
     # Assert
     assert route.thinking_levels == ("low", "medium", "high")
@@ -724,6 +744,7 @@ def test_a_saved_catalogue_answer_round_trips_and_a_bad_one_is_ignored(
             context_window=131_072,
             max_output_tokens=8_192,
             input_modalities=_TEXT_ONLY,
+            name="m-2604",
             reasoning=ReasoningSupport(
                 ("low", "turbo", "high"),
                 can_turn_off=True,

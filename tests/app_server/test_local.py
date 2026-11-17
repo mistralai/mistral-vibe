@@ -24,6 +24,8 @@ from vibe.app_server.protocol import (
     SessionOptions,
     WorkspaceGitCheckoutsParams,
     WorkspaceGitCheckoutsResponse,
+    WorkspaceWorktreeAutoUpdateParams,
+    WorkspaceWorktreeAutoUpdateResponse,
     WorkspaceWorktreeLimitUpdateParams,
     WorkspaceWorktreeLimitUpdateResponse,
     WorkspaceWorktreeListParams,
@@ -620,6 +622,31 @@ async def test_passive_host_updates_worktree_limit(
     assert response.limit == 0
     assert response.failures == []
     assert "worktree_limit = 0" in (config_dir / "config.toml").read_text()
+
+
+@pytest.mark.asyncio
+async def test_passive_host_updates_auto_worktree(
+    config_dir: Path, process_services: ProcessServices
+) -> None:
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)),
+        org_config=process_services.org_config,
+        worktrees=process_services.worktrees,
+        experiments=process_services.experiments,
+        model_catalog=process_services.model_catalog,
+    )
+
+    result = await handler.dispatch(
+        "workspace/git/worktrees/auto/update",
+        WorkspaceWorktreeAutoUpdateParams(auto=True).model_dump(
+            mode="json", by_alias=True
+        ),
+    )
+
+    response = cast(WorkspaceWorktreeAutoUpdateResponse, result.response)
+    assert response.auto is True
+    assert response.failures == []
+    assert "auto_worktree = true" in (config_dir / "config.toml").read_text()
 
 
 @pytest.mark.asyncio

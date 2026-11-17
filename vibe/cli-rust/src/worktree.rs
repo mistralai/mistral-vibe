@@ -120,20 +120,6 @@ pub fn track_state(app: &mut App, state: &PublicSessionState) -> bool {
     moved
 }
 
-/// A `session/updated` JSON patch's `replace` ops as (path, value): the shape
-/// every worktree move arrives in, with a missing value read as null.
-pub fn replace_ops(ops: &Value) -> impl Iterator<Item = (&str, &Value)> {
-    ops.as_array()
-        .into_iter()
-        .flatten()
-        .filter(|op| op.get("op") == Some(&Value::String("replace".into())))
-        .filter_map(|op| {
-            op.get("path")
-                .and_then(Value::as_str)
-                .map(|path| (path, op.get("value").unwrap_or(&Value::Null)))
-        })
-}
-
 /// Apply a `session/updated` patch: the move to the worktree arrives as
 /// `/cwd` and `/worktree` replaces on one notification, so a session quit
 /// before its first turn still follows the move and knows its worktree.
@@ -144,7 +130,7 @@ pub fn replace_ops(ops: &Value) -> impl Iterator<Item = (&str, &Value)> {
 /// tracking rather than being clobbered by it.
 pub fn track_patch(app: &mut App, patch: &Value) {
     let mut cwd: Option<String> = None;
-    for (path, value) in replace_ops(patch) {
+    for (path, value) in crate::utils::json::replace_ops(patch) {
         match path {
             "/cwd" => {
                 if let Some(value) = value.as_str() {

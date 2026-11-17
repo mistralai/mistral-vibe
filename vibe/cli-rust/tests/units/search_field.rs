@@ -58,6 +58,19 @@ fn escape_leaves_the_field_then_clears_the_filter_then_passes() {
 }
 
 #[test]
+fn handled_runs_the_filter_hook_only_when_the_query_changed() {
+    for (outcome, handled, ran) in [
+        (Outcome::Pass, false, false),
+        (Outcome::Consumed, true, false),
+        (Outcome::Filtered, true, true),
+    ] {
+        let mut hook = false;
+        assert_eq!(outcome.handled(|| hook = true), handled);
+        assert_eq!(hook, ran);
+    }
+}
+
+#[test]
 fn hints_follow_the_search_state() {
     let list = [
         ("↑↓/jk", "navigate"),

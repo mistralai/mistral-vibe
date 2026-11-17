@@ -10,7 +10,7 @@ use crate::server::Client;
 use crate::{
     agents, approval, connector_auth, debug_console, feedback, log_level_picker, mcp, mcp_oauth,
     message_queue, model_picker, older_history, paste_image, question_app, resume_picker, rewind,
-    subagents, theme_picker, thinking_picker, turn_summary, usage_gauge,
+    storage_panel, subagents, theme_picker, thinking_picker, turn_summary, usage_gauge,
 };
 
 /// Room for every answer in flight at once; senders await rather than drop.
@@ -38,6 +38,7 @@ ui_events! {
     Thinking(thinking_picker::Event),
     Agents(agents::Event),
     Resume(resume_picker::Event),
+    Storage(storage_panel::Event),
     Rewind(rewind::Event),
     Mcp(mcp::Event),
     McpOAuth(mcp_oauth::Event),
@@ -52,6 +53,8 @@ ui_events! {
     OlderHistory(older_history::Event),
     DebugConsole(debug_console::Event),
     Account(usage_gauge::AccountRead),
+    Loops(crate::loops::Event),
+    Goal(crate::goal::Event),
 }
 
 /// Run `task` off the main thread and hand its answer back, holding the app busy until it lands.
@@ -78,6 +81,7 @@ pub fn apply(app: &mut App, client: &Arc<Client>, event: UiEvent) {
         UiEvent::Feedback(event) => feedback::apply_event(app, event),
         UiEvent::Narrator(event) => turn_summary::apply_event(app, event),
         UiEvent::Resume(event) => resume_picker::apply_event(app, client, event),
+        UiEvent::Storage(event) => storage_panel::apply_event(app, client, event),
         UiEvent::Queue(event) => {
             if let Some(session) = message_queue::apply_event(app, client, event) {
                 feedback::maybe_show(app, client, Some(session));
@@ -90,5 +94,7 @@ pub fn apply(app: &mut App, client: &Arc<Client>, event: UiEvent) {
         UiEvent::OlderHistory(event) => older_history::apply_event(app, event),
         UiEvent::DebugConsole(event) => debug_console::apply_event(app, client, event),
         UiEvent::Account(read) => usage_gauge::apply(app, read),
+        UiEvent::Loops(event) => crate::loops::apply_event(app, event),
+        UiEvent::Goal(event) => crate::goal::apply_event(app, event),
     }
 }

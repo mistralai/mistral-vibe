@@ -8,12 +8,14 @@ use crate::skill::Skill;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Feature {
     PrMonitoring,
+    StorageUsage,
 }
 
 impl Feature {
     pub fn is_on(self, app: &App) -> bool {
         match self {
             Self::PrMonitoring => app.artifacts_modal.enabled,
+            Self::StorageUsage => app.storage.enabled,
         }
     }
 }
@@ -30,6 +32,8 @@ pub struct Command {
     pub arguments: &'static str,
     /// Hidden from help and completion while this feature is off; typing it still runs it.
     pub requires: Option<Feature>,
+    /// While `requires` is off, typing it sends a plain prompt instead.
+    pub prompt_when_off: bool,
 }
 
 const fn cmd(
@@ -44,6 +48,7 @@ const fn cmd(
         waits_for_jobs: false,
         arguments: "",
         requires: None,
+        prompt_when_off: false,
     }
 }
 
@@ -65,6 +70,15 @@ impl Command {
             ..self
         }
     }
+
+    /// `requires`, and typed while off it is a plain prompt.
+    const fn flagged(self, feature: Feature) -> Self {
+        Self {
+            requires: Some(feature),
+            prompt_when_off: true,
+            ..self
+        }
+    }
 }
 
 const COMMANDS: &[Command] = &[
@@ -75,6 +89,7 @@ const COMMANDS: &[Command] = &[
     cmd(&["/reload"], "Reload configuration, agent instructions, and skills from disk", false),
     cmd(&["/clear", "/new"], "Start a new conversation. Optionally pass a prompt to seed it.", false).args("[prompt]"),
     cmd(&["/copy"], "Copy the last agent message to the clipboard", true),
+    cmd(&["/raw"], "Show agent messages as raw Markdown for easier copying", true).args("[on|off]"),
     cmd(&["/log"], "Show path to current interaction log file", true),
     cmd(&["/log-level"], "Change the log level for this session or persist it to config.toml.", true).after_jobs(),
     cmd(&["/debug"], "Toggle debug console", true),
@@ -91,7 +106,10 @@ const COMMANDS: &[Command] = &[
     cmd(&["/whoami"], "Display the Mistral signed-in user, workspace, and plan", true),
     cmd(&["/proxy-setup"], "Configure proxy and SSL certificate settings", true).after_jobs(),
     cmd(&["/resume", "/continue"], "Browse, resume, or delete saved sessions", false),
+    cmd(&["/storage"], "See how much disk Vibe uses and archive or delete old sessions", true)
+        .flagged(Feature::StorageUsage),
     cmd(&["/rename"], "Rename the current session", true).args("<title>"),
+    cmd(&["/goal"], "Set or view a goal Vibe keeps working on", true).args("[<objective>|edit|pause|resume|clear]"),
     cmd(&["/pr"], "Show this session's pull requests and merge requests", true)
         .requires(Feature::PrMonitoring),
     cmd(&["/mcp", "/connectors"], "Display available MCP servers and connectors. Pass a name to list tools; subcommands: add <url> [--transport http|streamable-http], status, login <alias>, logout <alias>", false)
@@ -99,13 +117,14 @@ const COMMANDS: &[Command] = &[
     cmd(&["/plugins"], "Display the plugins this session is running", false),
     cmd(&["/reload-plugins"], "Re-pin this session's plugins and report what changed", false),
     cmd(&["/skills"], "Browse and manage skills", false),
+    cmd(&["/trusted-folders"], "Browse trusted and untrusted folders, toggle or forget one", true),
     cmd(&["/voice"], "Configure voice settings", true).after_jobs(),
     cmd(&["/leanstall"], "Install the Lean 4 agent (leanstral)", false),
     cmd(&["/unleanstall"], "Uninstall the Lean 4 agent", false),
     cmd(&["/rewind"], "Rewind to a previous message (or press Esc twice)", false),
     cmd(&["/branch", "/fork"], "Fork the current conversation into a new resumable session, leaving this session unchanged. Resume the copy with `vibe --resume <id>`.", true).after_jobs(),
     cmd(&["/retry"], "Retry a failed or interrupted response; optionally pass additional instructions", false).args("[instructions]"),
-    cmd(&["/loop"], "Schedule a recurring prompt: /loop [schedule] [prompt]", false).args("[schedule] [prompt]"),
+    cmd(&["/loop"], "Manage scheduled loops, or schedule one: /loop [schedule] [prompt]", true).args("[schedule] [prompt]"),
     cmd(&["/data-retention"], "Show data retention information", true),
     cmd(&["/release-notes", "/whatsnew"], "Browse the release notes of every Vibe version", true),
     cmd(&["/theme"], "Select theme", true).after_jobs(),
@@ -126,6 +145,26 @@ fn available() -> impl Iterator<Item = &'static Command> {
 /// The commands help and completion offer: those whose feature is on.
 fn offered(on: impl Fn(Feature) -> bool) -> impl Iterator<Item = &'static Command> {
     available().filter(move |command| command.requires.is_none_or(&on))
+}
+
+/// Removed slash commands and the version that removed them.
+const REMOVED: &[(&str, &str)] = &[("/teleport", "3.1.1"), ("/remote-project", "3.1.1")];
+
+/// The removed slash command `input` starts with, and the version that removed it.
+pub fn removed(input: &str) -> Option<(&'static str, &'static str)> {
+    let word = input.split_whitespace().next()?;
+    REMOVED
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(word))
+        .copied()
+}
+
+/// Whether typing this canonical alias runs it: false for a `flagged` command whose feature is off.
+pub fn runs(label: &str, on: impl Fn(Feature) -> bool) -> bool {
+    available()
+        .find(|command| command.aliases[0] == label)
+        .and_then(|command| command.requires.filter(|_| command.prompt_when_off))
+        .is_none_or(on)
 }
 
 /// Whether a built-in command with this canonical alias is registered.
@@ -197,9 +236,9 @@ pub fn builtin(on: impl Fn(Feature) -> bool) -> Vec<(String, String)> {
 
 /// The full popup entry list, expanding aliases into individual entries,
 /// merging with skills as `/name`, sorted by name then description. A skill
-/// named like a built-in is left out, since typing its name runs the built-in.
+/// named like a built-in is left out while typing its name runs the built-in.
 pub fn entries(skills: &[Skill], on: impl Fn(Feature) -> bool) -> Vec<CompletionEntry> {
-    let mut out: Vec<CompletionEntry> = offered(on)
+    let mut out: Vec<CompletionEntry> = offered(&on)
         .flat_map(|command| {
             command
                 .aliases
@@ -215,7 +254,8 @@ pub fn entries(skills: &[Skill], on: impl Fn(Feature) -> bool) -> Vec<Completion
         .collect();
     out.extend(skills.iter().filter_map(|skill| {
         let label = format!("/{}", skill.name);
-        parse(&label).is_none().then(|| CompletionEntry {
+        let shadowed = parse(&label).is_some_and(|command| runs(command, &on));
+        (!shadowed).then(|| CompletionEntry {
             label,
             description: skill.description.clone(),
             origin: Some(skill.origin),

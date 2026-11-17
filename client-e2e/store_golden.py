@@ -55,7 +55,9 @@ def main() -> None:
         if not scenario.has_expectations() and not captured.requests:
             print(f"  FAIL {name}: {ASSERTS_NOTHING}")
             continue
-        normalized = [normalize_snapshot(s) for s in captured.snapshots]
+        normalized = [
+            normalize_snapshot(s, scenario.keep_braille) for s in captured.snapshots
+        ]
         path = store_golden(name, normalized, captured.requests)
         print(
             f"  stored {name}: {len(captured.snapshots)} snapshot(s), "

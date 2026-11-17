@@ -13,13 +13,13 @@ from vibe.core.config import (
 )
 from vibe.core.llm.completion import CompletionTransport, complete_once
 from vibe.core.llm.model_probe import MODEL_AVAILABILITY, PROBE_TIMEOUT_SECONDS
+from vibe.core.llm.utility_credentials import UtilityCredentials, holds_credential
 from vibe.core.telemetry.build_metadata import build_request_metadata
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext, TelemetryCallType
 from vibe.core.types import LLMMessage, Role
 from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
-from vibe.utils.api_keys import resolve_api_key
 
 # One small model under two names, in preference order: the name the Mistral API
 # meters for this CLI, then the public one self-hosted deployments serve. Aliases
@@ -56,16 +56,21 @@ __all__ = [
 
 
 def select_utility_model(
-    config: VibeConfigSchema, *, feature: UtilityFeature | None = None
+    config: VibeConfigSchema,
+    *,
+    feature: UtilityFeature | None = None,
+    credentials: UtilityCredentials | None = None,
 ) -> tuple[ModelConfig, ProviderConfig]:
     """The model and provider for a utility completion.
 
     In order: the model ``[utility_models]`` names for ``feature``, a fast Mistral
     model the deployment is known to serve, then the session's active model.
+    ``credentials`` is the connection's (see ``UtilityCredentials``); without
+    it, a fast model is used only with an API key.
     """
     if feature is not None and (override := config.get_utility_model(feature)):
         return override, config.get_provider_for_model(override)
-    if discovered := _discovered_fast_model(config):
+    if discovered := _discovered_fast_model(config, credentials):
         return discovered
     active = config.get_active_model()
     return active, config.get_provider_for_model(active)
@@ -89,10 +94,12 @@ async def ensure_utility_models_probed(
     *,
     features: tuple[UtilityFeature, ...] = tuple(UtilityFeature),
     timeout_seconds: float | None = None,
+    credentials: UtilityCredentials | None = None,
 ) -> None:
     """Learn whether a fast model is served, before routes are derived.
 
     Runs at session open: never raises, never takes over twice its budget.
+    Asks with the connection's ``credentials`` when given.
     """
     if os.environ.get(_DISABLE_MODEL_PROBE_ENV_VAR) == "1":
         return
@@ -100,7 +107,9 @@ async def ensure_utility_models_probed(
     try:
         # Caps a source that overruns its budget.
         async with asyncio.timeout(budget * 2):
-            await _ensure_probed(config, features=features, budget=budget)
+            await _ensure_probed(
+                config, features=features, budget=budget, credentials=credentials
+            )
     except Exception:
         logger.warning(
             "Fast-model availability check failed; "
@@ -110,7 +119,11 @@ async def ensure_utility_models_probed(
 
 
 async def _ensure_probed(
-    config: VibeConfigSchema, *, features: tuple[UtilityFeature, ...], budget: float
+    config: VibeConfigSchema,
+    *,
+    features: tuple[UtilityFeature, ...],
+    budget: float,
+    credentials: UtilityCredentials | None,
 ) -> None:
     if all(config.get_utility_model(feature) for feature in features):
         return
@@ -121,7 +134,10 @@ async def _ensure_probed(
     if not candidates:
         return
     await MODEL_AVAILABILITY.ensure_first_available(
-        provider=provider, models=candidates, timeout_seconds=budget
+        provider=provider,
+        models=candidates,
+        timeout_seconds=budget,
+        credentials=credentials,
     )
 
 
@@ -139,6 +155,7 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
     launch_context: LaunchContext | None = None,
     session_id: str | None = None,
     telemetry: TelemetryClient | None = None,
+    credentials: UtilityCredentials | None = None,
 ) -> str | None:
     """Run a single completion for a background nicety.
 
@@ -151,20 +168,23 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
     give it the same attribution the session's own calls carry. A telemetry
     client, when given, also emits one ``vibe.request_sent`` event for the call.
 
+    ``credentials`` is the connection's (see ``UtilityCredentials``): the
+    request then sends what the session's model calls send, the connection's
+    sign-in included. Without it, the provider's API key.
+
     ``skip_if_no_key`` returns None before any network setup when the selected
-    provider declares an API-key env var that is unset. It's for callers on a
-    latency-sensitive path with a ready fallback (e.g. worktree naming at
-    startup); leave it False so a missing key surfaces as a real backend failure
-    instead of a silent no-op. A keyless local provider (empty ``api_key_env_var``,
-    e.g. llama-server) is never skipped, since it needs no key to reach.
+    provider has no credential to send: no API key and no sign-in. It's for
+    callers on a latency-sensitive path with a ready fallback (e.g. worktree
+    naming at startup); leave it False so a missing credential surfaces as a
+    real backend failure instead of a silent no-op. A keyless local provider
+    (empty ``api_key_env_var``, e.g. llama-server) is never skipped, since it
+    needs no key to reach.
     """
     call_type = _call_type(feature, call_type)
-    model, provider = select_utility_model(config, feature=feature)
-    if (
-        skip_if_no_key
-        and provider.api_key_env_var
-        and not resolve_api_key(provider.api_key_env_var)
-    ):
+    model, provider = select_utility_model(
+        config, feature=feature, credentials=credentials
+    )
+    if skip_if_no_key and not holds_credential(provider, credentials):
         return None
 
     def report_request(reasoning_effort: str) -> None:
@@ -197,6 +217,9 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
             retry_budget_s=retry_budget_seconds,
         ),
         on_request=report_request,
+        credentials=None
+        if credentials is None
+        else credentials.for_provider(provider.name),
     )
     return result.text
 
@@ -217,19 +240,21 @@ def _call_type(
 
 
 def _discovered_fast_model(
-    config: VibeConfigSchema,
+    config: VibeConfigSchema, credentials: UtilityCredentials | None
 ) -> tuple[ModelConfig, ProviderConfig] | None:
     """The first fast candidate the deployment serves; keyless providers qualify."""
     provider = config.get_mistral_provider()
     if provider is None:
         return None
-    if provider.api_key_env_var and not resolve_api_key(provider.api_key_env_var):
+    if not holds_credential(provider, credentials):
         return None
     assume_first = _is_public_mistral_api(provider.api_base)
     for index, candidate in enumerate(FAST_MODEL_CANDIDATES):
         if not _fast_model_allowed(config, candidate):
             continue
-        known = MODEL_AVAILABILITY.peek(provider=provider, model=candidate)
+        known = MODEL_AVAILABILITY.peek(
+            provider=provider, model=candidate, credentials=credentials
+        )
         if known:
             return candidate, provider
         if known is None and index == 0 and assume_first:

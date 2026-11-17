@@ -7,7 +7,7 @@ use ratatui::Frame;
 use super::theme;
 use crate::hints::{self, action, key, Hint};
 
-/// Hints shared by the `/model` and `/thinking` pickers.
+/// The `/thinking` picker's hints.
 pub(crate) const PICK_HINTS: &[Hint] = &[
     hints::NAVIGATE,
     (key::ENTER, action::SAVE),

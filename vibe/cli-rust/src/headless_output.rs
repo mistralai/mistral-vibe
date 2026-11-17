@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::cli::OutputFormat;
 use crate::run_export::RunWarning;
-use crate::server::HistoryEntry;
+use crate::server::{is_discarded_draft, HistoryEntry};
 use crate::transcript::apply_json_patch;
 
 const MAX_TRACKED_ENTRIES: usize = 512;
@@ -82,7 +82,12 @@ impl Output {
     /// Emit the final output and return the turn's answer. Returns the I/O
     /// error instead of panicking so the caller can still run session/stop
     /// cleanup on a closed pipe.
-    pub fn finalize(&self, history: Value, turn_id: Option<&str>) -> io::Result<Option<String>> {
+    pub fn finalize(
+        &self,
+        history: Value,
+        turn_id: Option<&str>,
+        hook_answer: Option<&str>,
+    ) -> io::Result<Option<String>> {
         match self.format {
             OutputFormat::Streaming => Ok(None),
             OutputFormat::Json if history.is_array() => {
@@ -91,7 +96,10 @@ impl Output {
             }
             OutputFormat::Json => Ok(None),
             OutputFormat::Text | OutputFormat::Silent => {
-                let text = last_assistant_text(&turn_entries(&history, turn_id));
+                let text = match hook_answer {
+                    Some(answer) => Some(answer.to_owned()).filter(|answer| !answer.is_empty()),
+                    None => last_assistant_text(&turn_entries(&history, turn_id)),
+                };
                 if let (OutputFormat::Text, Some(text)) = (&self.format, &text) {
                     write_line(text)?;
                 }
@@ -150,13 +158,11 @@ pub fn denied_tool_warning(entry: &Value) -> Option<RunWarning> {
 /// `\n\n`, like the server's `PublicMessageEntry.text` property.
 pub fn last_assistant_text(history: &Value) -> Option<String> {
     history.as_array()?.iter().rev().find_map(|entry| {
-        // A draft a post_agent hook rejected: shown while it streamed, never the answer.
-        let retried =
-            entry["outcome"]["type"] == "discarded" && entry["outcome"]["cause"] == "retry";
+        let discarded = is_discarded_draft(entry);
         let HistoryEntry::Message(message) = HistoryEntry::from_value(entry) else {
             return None;
         };
         let text = message.text("\n\n");
-        (message.role == "assistant" && !retried && !text.trim().is_empty()).then_some(text)
+        (message.role == "assistant" && !discarded && !text.trim().is_empty()).then_some(text)
     })
 }

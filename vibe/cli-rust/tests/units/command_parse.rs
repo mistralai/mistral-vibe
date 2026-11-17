@@ -76,6 +76,7 @@ fn commands_a_turn_never_reads_run_while_busy_and_the_others_wait_for_idle() {
         "/status",
         "/whoami",
         "/copy",
+        "/raw",
         "/log",
         "/debug",
         "/rename",

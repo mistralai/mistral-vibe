@@ -59,7 +59,6 @@ from mistralai_vibe_local_harness.protocol import (
     RustPostLlmCallHookAction,
     RustPostLlmCallHookResult,
     RustPostToolCallHookAction,
-    RustPostToolCallHookInput,
     RustPostToolCallHookResult,
     RustPostToolCallOutput,
     RustPreAgentTurnContinue,
@@ -934,9 +933,8 @@ def _continue_hook_pipeline(  # noqa: PLR0911 - one return per hook kind
         return (
             action.model_copy(
                 update={
-                    "input": RustPostToolCallHookInput(
-                        tool_call=action.input.tool_call,
-                        tool_result=result.output.tool_result,
+                    "input": action.input.model_copy(
+                        update={"tool_result": result.output.tool_result}
                     )
                 }
             ),

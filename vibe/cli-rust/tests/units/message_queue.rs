@@ -273,7 +273,10 @@ async fn resume_releases_a_paused_queue() {
 fn is_available_gates_on_status_and_a_non_empty_queue() {
     let mut app = with_status(Status::Ready);
     app.queue.items = vec![item("a", "first", None)];
-    assert!(!mq::is_available(&app), "Ready never opens queue mode");
+    assert!(
+        !mq::is_available(&app),
+        "an unpaused Ready never opens queue mode"
+    );
     app.session.status = Status::Generating {
         since: vibe_rs::clock::now(),
     };
@@ -284,6 +287,12 @@ fn is_available_gates_on_status_and_a_non_empty_queue() {
     app.queue.items = vec![item("a", "first", None)];
     app.session.status = Status::Starting;
     assert!(mq::is_available(&app));
+
+    app.session.status = Status::Ready;
+    app.queue.paused = true;
+    assert!(mq::is_available(&app), "a held queue opens on Ready");
+    app.session.status = Status::Failed;
+    assert!(!mq::is_available(&app), "a failed session never opens it");
 }
 
 #[test]

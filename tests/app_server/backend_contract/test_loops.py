@@ -128,6 +128,86 @@ async def test_loop_resource_returns_typed_validation_errors(
     assert "Invalid interval" in exc_info.value.error.message
 
 
+@pytest.mark.asyncio
+async def test_loop_resource_creates_a_cron_schedule(
+    backend_contract_session: AppServerSession,
+) -> None:
+    """*Prepare*: An attached session with no scheduled loops.
+    *Do*: Create a loop from a five-field cron expression.
+    *Assert*: The loop keeps the cron, has no interval, and runs in the future.
+    """
+    # Prepare / Do
+    loop = await backend_contract_session.resources.loops.create(
+        None, "Weekday review\nReview CI.", cron="0 9 * * 1-5"
+    )
+
+    # Assert
+    assert loop.cron == "0 9 * * 1-5"
+    assert loop.interval_seconds is None
+    assert loop.next_fire_at > time.time()
+    assert await backend_contract_session.resources.loops.list() == [loop]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cron", "message"),
+    [
+        ("every morning", "Cron must be a standard 5-field expression."),
+        ("0 0 31 2 *", "Invalid cron expression `0 0 31 2 *`"),
+    ],
+)
+async def test_loop_resource_refuses_an_invalid_cron_readably(
+    backend_contract_session: AppServerSession, cron: str, message: str
+) -> None:
+    """*Prepare*: An attached session accepting loop resource requests.
+    *Do*: Create a loop from an invalid or impossible cron expression.
+    *Assert*: The request fails with a readable invalid-params message, creating nothing.
+    """
+    # Prepare / Do
+    with pytest.raises(AppServerResponseError) as exc_info:
+        await backend_contract_session.resources.loops.create(None, "prompt", cron=cron)
+
+    # Assert
+    assert exc_info.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert exc_info.value.error.message.startswith(message)
+    assert "validation error" not in exc_info.value.error.message
+    assert await backend_contract_session.resources.loops.list() == []
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_loop_mutations_reach_the_subscribed_session_state(
+    backend_contract_session: AppServerSession,
+) -> None:
+    """*Prepare*: An attached session subscribed to its events.
+    *Do*: Create a loop and delete it, then create two and clear them.
+    *Assert*: The client's session state follows each change without a re-read.
+    """
+    session = backend_contract_session
+    loops = session.resources.loops
+
+    async def reported(count: int) -> None:
+        while len(session.state.session.loops) != count:
+            await asyncio.sleep(0.01)
+
+    # Prepare
+    events = asyncio.create_task(anext(session.events()))
+    try:
+        # Do / Assert
+        loop = await loops.create("10m", "Build watch\nCheck the build.")
+        await asyncio.wait_for(reported(1), timeout=5)
+        assert session.state.session.loops == [loop]
+        await loops.delete(loop.id)
+        await asyncio.wait_for(reported(0), timeout=5)
+        await loops.create("10m", "Build watch\nCheck the build.")
+        await loops.create("1h", "Review\nReview the PRs.")
+        await asyncio.wait_for(reported(2), timeout=5)
+        assert await loops.clear() == 2
+        await asyncio.wait_for(reported(0), timeout=5)
+    finally:
+        events.cancel()
+
+
 @pytest.mark.both_paths
 @pytest.mark.asyncio
 async def test_loop_schedule_survives_resume_from_a_new_host(

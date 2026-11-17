@@ -48,8 +48,8 @@ class MissingAPIKeyError(RuntimeError):
         if keyring_error:
             message = (
                 f"Can't read {env_key} from the system keyring for {provider_name} "
-                f"provider ({keyring_error}). Approve the keyring prompt or set "
-                f"the {env_key} environment variable"
+                f"provider ({keyring_error}). Unlock the system keyring or approve "
+                f"its prompt, or set the {env_key} environment variable"
             )
         super().__init__(message)
         self.env_key = env_key
@@ -519,6 +519,15 @@ def refuse_zero_auto_compact_threshold(value: Any) -> Any:
     return value
 
 
+class ModelRequirement(BaseModel):
+    """What the user needs before a turn can run on a model, in the model
+    catalog's ``requires`` shape. Any other kind fails validation, so a model
+    locked in a way this client cannot upsell is never listed.
+    """
+
+    kind: Literal["higher_plan"]
+
+
 class ModelConfig(BaseModel):
     name: str
     provider: str
@@ -565,6 +574,10 @@ class ModelConfig(BaseModel):
     # Token count before automatic compaction. None takes the global setting,
     # or else the default for the model's window.
     auto_compact_threshold: int | None = Field(default=None, gt=0)
+    # Set when the user's plan cannot run the model: it is listed so the picker
+    # can upsell it, but no turn starts on it and it is never the default. Only
+    # the model catalog and GrowthBook set it (``VibeConfigSchema.prepare_layers``).
+    requires: ModelRequirement | None = None
     _default_alias_to_name = model_validator(mode="before")(_default_alias_to_name)
     _refuse_zero_threshold = field_validator("auto_compact_threshold", mode="before")(
         refuse_zero_auto_compact_threshold
@@ -577,12 +590,12 @@ class ModelConfig(BaseModel):
         # distinct from unset, which keeps the five. The catalog mapping relies
         # on the distinction (unspecified vs explicitly none). Duplicates are
         # dropped in first-seen order: the picker renders one row per level.
-        return list(dict.fromkeys(map(_standard_case, value))) or ["off"]
+        return list(dict.fromkeys(map(standard_thinking_level, value))) or ["off"]
 
     @field_validator("thinking", mode="after")
     @classmethod
     def _thinking_in_standard_case(cls, value: ThinkingLevel) -> ThinkingLevel:
-        return _standard_case(value)
+        return standard_thinking_level(value)
 
     @property
     def default_thinking(self) -> ThinkingLevel:
@@ -616,7 +629,7 @@ class ModelConfig(BaseModel):
         return set(self.thinking_levels) != set(DEFAULT_THINKING_LEVELS)
 
 
-def _standard_case(level: ThinkingLevel) -> ThinkingLevel:
+def standard_thinking_level(level: ThinkingLevel) -> ThinkingLevel:
     """A standard word in any case is the standard level, as the harness reads it;
     a model's own level keeps its case.
     """

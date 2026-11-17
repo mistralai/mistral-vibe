@@ -70,6 +70,7 @@ impl RunSpec {
             output_dir: params.output_dir.as_deref().map(resolve),
             system_prompt: None,
             model: None,
+            thinking: None,
             agent: params.agent,
             auto_approve: params.auto_approve,
             enabled_tools: params.enabled_tools.unwrap_or_default(),

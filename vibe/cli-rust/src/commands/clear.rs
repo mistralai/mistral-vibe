@@ -83,6 +83,7 @@ fn reset_transcript(app: &mut App) {
     app.view.transcript.clear();
     crate::notices::clear(app);
     app.todo_tracker.clear();
+    crate::goal::adopt(app, None, false);
     app.queue.clear();
     app.view.transcript_cache.invalidate_layouts();
     app.view.scroll = 0;

@@ -382,9 +382,10 @@ Vibe also detects and adapts plugins authored for other agents:
 | Kimi Code | `kimi.plugin.json` or `.kimi-plugin/plugin.json` | skills, MCP servers, hooks |
 | OpenCode | `.opencode/` directory | skills only (executable modules unsupported) |
 
-If markers for more than one format are present, the plugin is rejected as
-ambiguous. Native Agent Plugins 1.0 (a valid `plugin.json` with the correct
-`$schema`) always takes precedence.
+Native Agent Plugins 1.0 (a valid `plugin.json` with the correct `$schema`)
+always takes precedence. A folder with markers for several foreign formats
+loads as the first one in the table order above (Claude Code, Codex, Kimi Code,
+OpenCode); `/plugins` shows the format used in the plugin's detail.
 
 When creating a new plugin, always use the native Agent Plugins 1.0 format.
 

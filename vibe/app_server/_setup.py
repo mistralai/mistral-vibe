@@ -43,6 +43,7 @@ from vibe.setup.auth.api_key_persistence import (
     persist_provider_credentials,
     resolve_api_key_provider,
 )
+from vibe.setup.auth.onboarding_context import resolve_active_provider
 from vibe.utils.api_keys import resolve_api_key, uses_cli_oidc_credential
 
 if TYPE_CHECKING:
@@ -188,16 +189,8 @@ class SetupRequestHandler:
 
 
 def _seed_provider(config: VibeConfigSchema) -> ProviderConfig:
-    """The wizard's provider, mirroring ``OnboardingContext.from_config``."""
-    try:
-        return config.get_active_provider()
-    except ValueError:
-        logger.warning(
-            "Setup config could not resolve an active provider; "
-            "falling back to the default provider so setup can open.",
-            exc_info=True,
-        )
-        return DEFAULT_PROVIDERS[0]
+    """The wizard's provider: the canonical rule `OnboardingContext` uses."""
+    return resolve_active_provider(config)
 
 
 def _provider_view(provider: ProviderConfig) -> SetupProviderView:

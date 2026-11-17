@@ -21,6 +21,7 @@ fn mount_whats_new(app: &mut App, id: &str) {
         id: id.to_owned(),
         body: "body".to_owned(),
         promo: false,
+        offer_id: None,
     });
 }
 

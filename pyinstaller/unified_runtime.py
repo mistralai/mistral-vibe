@@ -7,6 +7,11 @@ through this helper unconditionally, and the build fails when it cannot be
 collected, so a packaging error can never produce a binary that silently falls
 back to the legacy harness.
 
+The target runtime — the ``mistralai.vibe.harness`` package and its native
+``core._native`` extension — ships next to it while the app server moves to the
+Session API. No module imports it statically yet, so the helper collects it
+too, and the build fails when it or its native extension is missing.
+
 On Windows the helper also collects ``winpty`` (pywinpty), which the Runtime
 and the managed shell load through ``importlib.import_module`` and PyInstaller
 therefore cannot discover. A Windows build without it fails instead of
@@ -22,6 +27,8 @@ from typing import Any, NoReturn
 _RUNTIME_PACKAGE = "mistralai_vibe_local_harness"
 _RUNTIME_NATIVE = f"{_RUNTIME_PACKAGE}._native"
 _RUNTIME_VIBE = f"{_RUNTIME_PACKAGE}.vibe"
+_TARGET_RUNTIME_PACKAGE = "mistralai.vibe.harness"
+_TARGET_RUNTIME_NATIVE = f"{_TARGET_RUNTIME_PACKAGE}.core._native"
 _WINDOWS_PTY_PACKAGE = "winpty"
 
 
@@ -76,6 +83,19 @@ def require_unified_runtime() -> None:
         )
 
 
+def require_target_runtime() -> None:
+    """Fail the build unless the target runtime and its native extension load."""
+    try:
+        import_module(_TARGET_RUNTIME_NATIVE)
+    except Exception as exc:
+        raise UnifiedRuntimeRequiredError(
+            f"Every frozen Vibe executable must bundle the target runtime, but "
+            f"importing {_TARGET_RUNTIME_NATIVE!r} failed: {type(exc).__name__}: "
+            f"{exc}. It ships in the mistralai-vibe-harness dependency; install "
+            f"it with 'uv sync --no-dev --group build' and rebuild."
+        ) from exc
+
+
 def require_windows_pty() -> None:
     try:
         import_module(_WINDOWS_PTY_PACKAGE)
@@ -90,8 +110,9 @@ def require_windows_pty() -> None:
 def collect_unified_runtime(
     platform: str = sys.platform,
 ) -> tuple[list[Any], list[Any], list[Any]]:
-    """Collect the Runtime, its native extension, and winpty on Windows, or fail."""
+    """Collect both runtimes, their native extensions, and winpty on Windows, or fail."""
     require_unified_runtime()
+    require_target_runtime()
     if platform == "win32":
         require_windows_pty()
     # PyInstaller is only importable in a packaging environment
@@ -100,12 +121,15 @@ def collect_unified_runtime(
         collect_all,
     )
 
-    runtime = collect_all(_RUNTIME_PACKAGE)
-    if platform != "win32":
-        return runtime
-    windows_pty = collect_all(_WINDOWS_PTY_PACKAGE)
-    return (
-        runtime[0] + windows_pty[0],
-        runtime[1] + windows_pty[1],
-        runtime[2] + windows_pty[2],
-    )
+    packages = [_RUNTIME_PACKAGE, _TARGET_RUNTIME_PACKAGE]
+    if platform == "win32":
+        packages.append(_WINDOWS_PTY_PACKAGE)
+    datas: list[Any] = []
+    binaries: list[Any] = []
+    hidden_imports: list[Any] = []
+    for package in packages:
+        package_datas, package_binaries, package_hidden_imports = collect_all(package)
+        datas += package_datas
+        binaries += package_binaries
+        hidden_imports += package_hidden_imports
+    return datas, binaries, hidden_imports

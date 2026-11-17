@@ -86,9 +86,10 @@ for an update it does not need to act on. The other session knows the message \
 comes from this one, so write only the message itself, self-contained, without \
 saying who sends it. It returns once the message is delivered, not when it is \
 answered: tell the user it was sent. Leave `session_id` out to message the \
-session that started this one. A session this one started reports back \
-with its own message, which arrives as a new turn here, so do not read it \
-over and over to wait for it. Never send a message to this session itself. \
+session that started this one. When a turn this session started there ends, \
+its final reply comes back here on its own, so do not read it over and over \
+to wait for it, and do not send your own final reply back with this tool. \
+Never send a message to this session itself. \
 After {MAX_SESSION_HOPS} messages and starts between sessions in a row \
 without the user writing, sending is refused until the user writes: tell the \
 user instead. One turn sends at most {MAX_TURN_STARTED_SESSIONS} 'start_turn' \

@@ -107,6 +107,39 @@ def test_the_default_gets_the_thinking_written_with_it() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("level", "default_thinking", "expected"),
+    [
+        ("low", "high", [("set", "low")]),
+        ("low", None, [("set", "low")]),
+        ("high", "high", [("remove", None)]),
+    ],
+    ids=["not-the-default", "no-default", "the-default"],
+)
+def test_a_level_equal_to_the_default_is_not_saved(
+    level: str, default_thinking: str | None, expected: list[tuple[str, str | None]]
+) -> None:
+    """*Prepare*: A model whose default level is high, or that has none.
+    *Do*: Pick a level.
+    *Assert*: Only a level other than the default is saved; the default removes
+    the level instead, so one saved earlier does not stay in force over it.
+    """
+    config = build_test_vibe_config(
+        models=[ModelConfig(name="model-a", provider="mistral", alias="alpha")],
+        active_model="alpha",
+    )
+
+    ops = model_config_write_ops(
+        config,
+        model_alias=None,
+        reasoning_effort=level,
+        default_thinking=default_thinking,
+    )
+
+    assert [(op.op, op.value) for op in ops] == expected
+    assert all(op.path == "/models/alpha/thinking" for op in ops)
+
+
 @pytest.mark.asyncio
 async def test_a_profile_owned_model_is_not_session_writable() -> None:
     """*Prepare*: A session on a model an agent profile declares, as Lean does.

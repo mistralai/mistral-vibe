@@ -14,7 +14,7 @@ use crate::transcript::local;
 
 mod field;
 mod input;
-pub use field::Field;
+pub use field::{Field, MAX_INPUT_BYTES};
 pub use input::{copy_selection, handle_key, paste, press};
 
 pub const SAVED_MESSAGE: &str = "Proxy settings saved. Restart the CLI for changes to take effect.";

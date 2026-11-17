@@ -28,7 +28,17 @@ class DetectedPluginFormat(StrEnum):
     KIMI_CODE = "kimi_code"
     OPENCODE = "opencode"
     UNKNOWN = "unknown"
-    AMBIGUOUS = "ambiguous"
+
+
+# Ranked by how much each adapter keeps of a package published for several
+# agents. Kimi follows Codex because it prepends its `skillInstructions`, which
+# name Kimi's tools, to every skill.
+_FOREIGN_FORMAT_PREFERENCE = (
+    DetectedPluginFormat.CLAUDE_CODE,
+    DetectedPluginFormat.CODEX,
+    DetectedPluginFormat.KIMI_CODE,
+    DetectedPluginFormat.OPENCODE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +46,7 @@ class PluginFormatDetection:
     source_format: DetectedPluginFormat
     marker_paths: tuple[Path, ...]
     unsupported_schema: str | None = None
+    found_formats: tuple[DetectedPluginFormat, ...] = ()
 
 
 _UNIVERSAL_RUNTIME_STATE_NAMES = frozenset({".git"})
@@ -167,16 +178,18 @@ def detect_plugin_source_format(root: Path) -> PluginFormatDetection:
         (DetectedPluginFormat.OPENCODE, marker) for marker in _opencode_markers(root)
     )
 
-    formats = {source_format for source_format, _ in markers}
-    if len(formats) > 1:
+    found = tuple(
+        source_format
+        for source_format in _FOREIGN_FORMAT_PREFERENCE
+        if any(found_format is source_format for found_format, _ in markers)
+    )
+    if found:
         return PluginFormatDetection(
-            source_format=DetectedPluginFormat.AMBIGUOUS,
-            marker_paths=tuple(marker for _, marker in markers),
-        )
-    if markers:
-        return PluginFormatDetection(
-            source_format=markers[0][0],
-            marker_paths=tuple(marker for _, marker in markers),
+            source_format=found[0],
+            marker_paths=tuple(
+                marker for source_format, marker in markers if source_format is found[0]
+            ),
+            found_formats=found,
         )
     return PluginFormatDetection(
         source_format=DetectedPluginFormat.UNKNOWN,
@@ -231,15 +244,6 @@ def resolve_declared_path(root: Path, value: str) -> Path:
     if not resolved.is_relative_to(root):
         raise ValueError("declared path must resolve inside the plugin root")
     return resolved
-
-
-def relative_plugin_path(path: Path, root: Path) -> str:
-    try:
-        relative = path.relative_to(root)
-    except ValueError:
-        return "<outside-plugin>"
-    value = relative.as_posix()
-    return value if value else "."
 
 
 def _read_schema_id(path: Path) -> str | None:

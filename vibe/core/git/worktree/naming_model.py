@@ -6,6 +6,7 @@ from pathlib import Path
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.llm.utility_completion import run_utility_completion
+from vibe.core.llm.utility_credentials import UtilityCredentialsFactory
 from vibe.core.prompts import UtilityPrompt
 from vibe.core.telemetry.types import LaunchContext
 from vibe.observability.logging import logger
@@ -19,15 +20,21 @@ _MAX_TOKENS = 24
 
 
 async def suggest_worktree_name(
-    prompt: str | None, *, cwd: Path, launch_context: LaunchContext | None = None
+    prompt: str | None,
+    *,
+    cwd: Path,
+    launch_context: LaunchContext | None = None,
+    credentials: UtilityCredentialsFactory | None = None,
 ) -> str | None:
     """Ask a small model to name a worktree after the session's first message.
 
     ``launch_context`` stamps the request with the calling client's entrypoint
     so the ``worktree_title`` call is attributed rather than anonymous.
+    ``credentials`` builds the connection's credentials for the loaded config,
+    so a signed-in connection names without an API key.
 
     Returns None whenever a name cannot be produced -- no prompt, no provider,
-    no API key, too slow, or any failure at all. Naming is a nicety and the
+    no credential, too slow, or any failure at all. Naming is a nicety and the
     caller always holds a deterministic fallback, so this must never be the
     reason a session fails to start.
     """
@@ -35,7 +42,9 @@ async def suggest_worktree_name(
         return None
     try:
         async with asyncio.timeout(_TOTAL_TIMEOUT_SECONDS):
-            return await _complete(prompt, cwd=cwd, launch_context=launch_context)
+            return await _complete(
+                prompt, cwd=cwd, launch_context=launch_context, credentials=credentials
+            )
     except TimeoutError:
         logger.debug("Worktree name suggestion timed out")
         return None
@@ -45,7 +54,11 @@ async def suggest_worktree_name(
 
 
 async def _complete(
-    prompt: str, *, cwd: Path, launch_context: LaunchContext | None
+    prompt: str,
+    *,
+    cwd: Path,
+    launch_context: LaunchContext | None,
+    credentials: UtilityCredentialsFactory | None,
 ) -> str | None:
     # Scoped to the session cwd so a trusted project config is read from the
     # repo being worked in, matching HostRequestHandler._load_orchestrator.
@@ -65,10 +78,11 @@ async def _complete(
         # good enough to not be worth spending one on.
         retry_budget_seconds=0,
         # Naming runs on the session-start path with a deterministic name ready;
-        # a keyless provider should fall back at once instead of burning the
-        # budget on setup that can only fail.
+        # a provider without a credential should fall back at once instead of
+        # burning the budget on setup that can only fail.
         skip_if_no_key=True,
         call_type="worktree_title",
         launch_context=launch_context,
+        credentials=None if credentials is None else credentials(orchestrator),
     )
     return content or None

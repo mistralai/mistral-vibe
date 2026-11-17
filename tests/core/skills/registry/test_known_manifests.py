@@ -11,9 +11,9 @@ import respx
 
 from tests.conftest import build_test_vibe_config
 from tests.skills.registry.conftest import catalog_lists, clean_up, make_item
-from vibe.core.skills.models import SkillScope
+from vibe.core.skills.models import ManifestEntry, SkillScope
 from vibe.core.skills.registry import _known_manifests, _manifest, _service, _store
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import SkillManifest
 
 _URL = "https://api.mistral.ai/v1/skills"
 

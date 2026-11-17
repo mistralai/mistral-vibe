@@ -1,4 +1,4 @@
-"""Turning tmux's `mouse` on while in the Ctrl+G editor turns mouse reports on when the TUI resumes."""
+"""Turning tmux's `mouse` on in the Ctrl+G editor turns mouse reports on and drops the mouse-off warning."""
 
 from __future__ import annotations
 
@@ -28,4 +28,6 @@ env = {
     "VISUAL": "sh -c 'echo 1 > \"$VIBE_HOME/tmux_mouse\"' editor",
 }
 mouse_tracking = True
+request_methods = {"telemetry/record"}
 timeline: Timeline = ["x", _CTRL_G]
+screen_excludes = ("tmux has mouse off",)

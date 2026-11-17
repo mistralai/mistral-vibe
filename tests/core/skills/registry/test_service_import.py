@@ -18,9 +18,10 @@ from tests.skills.registry.test_service import (
     _skill_payload,
 )
 from vibe.core.skills.manager import SkillManager
+from vibe.core.skills.models import ManifestEntry
 from vibe.core.skills.parser import parse_skill_markdown
 from vibe.core.skills.registry import _manifest, _resolved, _service, _store
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import SkillManifest
 
 
 @pytest.mark.asyncio
@@ -212,6 +213,45 @@ async def test_import_skill_custom_alias(monkeypatch: pytest.MonkeyPatch) -> Non
     assert entry.version == "stable"
     # A custom alias records where it resolved so discovery can find it offline.
     assert _resolved.get("cid", "stable") == 5
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_session_import_pins_the_fetched_version_and_writes_no_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(_service, "_resolve_endpoint", _endpoint)
+    respx.get(f"{_URL}/cid").mock(
+        return_value=httpx.Response(200, json=_skill_payload("cid", "sk", version=4))
+    )
+
+    entry = await _service.import_session_skill(_config(), "cid")
+
+    assert (entry.name, entry.version) == ("sk", 4)
+    assert await _store.is_materialized("cid", 4)
+    assert not _manifest.global_manifest_path().exists()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_session_import_uses_the_connections_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[object] = []
+
+    def endpoint(config: Any, credentials: Any = None) -> _service._Endpoint:
+        seen.append(credentials)
+        return _endpoint(config)
+
+    monkeypatch.setattr(_service, "_resolve_endpoint", endpoint)
+    respx.get(f"{_URL}/cid").mock(
+        return_value=httpx.Response(200, json=_skill_payload("cid", "sk"))
+    )
+    sign_in: Any = object()
+
+    await _service.import_session_skill(_config(), "cid", credentials=sign_in)
+
+    assert seen == [sign_in]
 
 
 @pytest.mark.asyncio

@@ -39,6 +39,7 @@ def read_provider_failure(error: BaseException) -> ProviderFailure:
         retryable=not context_overflow and _is_retryable(error, response),
         stalled=isinstance(error, StreamStalledError),
         unusable_tool_calls=isinstance(error, UnusableToolCalls),
+        empty_response=isinstance(error, EmptyProviderResponse),
         context_overflow=context_overflow,
         category=_category(error, response),
         label=type(error).__name__ if response is None else f"HTTP {response.status}",
@@ -67,6 +68,12 @@ class ProviderFailure:
     A model that does this can do it again on every attempt, and each attempt
     resends the whole context, so the retry policy limits how often it is
     retried.
+    """
+    empty_response: bool
+    """Whether the provider finished the stream without sending any content.
+
+    A provider that rejects a setting of the request answers empty every time,
+    so the retry policy limits how often it is retried.
     """
     context_overflow: bool
     """Whether the provider rejected the prompt as over the model's context window.
@@ -104,6 +111,10 @@ class ProviderStreamError(RuntimeError):
 
 class IncompleteProviderStream(RuntimeError):
     """A response stream that ended before the provider marked it finished."""
+
+
+class EmptyProviderResponse(RuntimeError):
+    """A response stream the provider marked finished before sending any content."""
 
 
 class UnusableToolCalls(RuntimeError):
@@ -207,7 +218,11 @@ def _is_retryable(error: BaseException, response: ProviderErrorResponse | None) 
     if response is not None:
         return response.status in _RETRYABLE_STATUSES
     if isinstance(
-        error, StreamStalledError | IncompleteProviderStream | UnusableToolCalls
+        error,
+        StreamStalledError
+        | IncompleteProviderStream
+        | EmptyProviderResponse
+        | UnusableToolCalls,
     ):
         return True
     # A rejected certificate is the one deterministic TLS fault: every attempt
@@ -334,6 +349,7 @@ def _response_body(error: BaseException) -> str | None:
 
 
 __all__ = [
+    "EmptyProviderResponse",
     "IncompleteProviderStream",
     "MissingTokenUsage",
     "ProviderErrorResponse",

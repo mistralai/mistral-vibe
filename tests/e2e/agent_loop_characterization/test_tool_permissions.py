@@ -17,8 +17,8 @@ from tests.e2e.agent_loop_characterization.support import (
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
-    wait_for_main_screen,
     wait_for_rendered_text,
+    wait_for_session_ready,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -107,7 +107,7 @@ def test_write_file_approval_creates_file_and_rejection_leaves_file_absent(
         child,
         captured,
     ):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Create the approved file")
         child.send("\r")
 
@@ -179,7 +179,7 @@ def test_allow_for_session_reuses_bash_permission_without_prompting_again(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Run the first shell command")
         child.send("\r")
 

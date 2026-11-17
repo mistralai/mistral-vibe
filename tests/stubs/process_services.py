@@ -13,14 +13,17 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from vibe.app_server._background_worker import BackgroundWorker
+from vibe.app_server._config_changes import ConfigChanges
 from vibe.app_server._experiments_service import ExperimentsService
 from vibe.app_server._mcp_discovery_service import MCPDiscoveryService
+from vibe.app_server._missing_model_warnings import MissingModelWarnings
 from vibe.app_server._model_catalog_service import ModelCatalogService
 from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigService
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._skill_shadows import ShadowWarnings
 from vibe.app_server._skill_store_cleanup import SkillStoreCleanup
+from vibe.app_server._storage_usage import StorageUsageService
 from vibe.app_server._worktree_housekeeping import WorktreeHousekeeping
 from vibe.app_server.connector_catalog import SharedConnectorCatalog
 from vibe.core.config.admin_config import ManagedConfig, ManagedConfigResult
@@ -138,8 +141,11 @@ def fake_process_services(
         experiments=experiments or ExperimentsService(),
         mcp_discovery=MCPDiscoveryService(),
         skill_shadows=ShadowWarnings(),
+        missing_models=MissingModelWarnings(),
         skill_store=SkillStoreCleanup(background),
         open_sessions=OpenSessions(),
+        storage_usage=StorageUsageService(background),
+        config_changes=ConfigChanges(),
         # Looked up per fetch, so a test can patch the server's answers.
         model_catalog=ModelCatalogService(
             fetch=lambda api_base, credentials: catalog_server.fetch(

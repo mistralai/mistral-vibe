@@ -248,8 +248,9 @@ async def classify_tool_call(
     classifier to run. It defaults to the model classifier.
     """
     factory = classifier_factory or default_tool_risk_classifier
-    # Classify at temperature 0 with the least reasoning the classifier model takes;
-    # thinking="off" leaves a model with unknown levels without a reasoning field.
+    temperature, top_p = _classifier_sampling(config.active_model, classify_model)
+    # Classify with the least reasoning the classifier model takes; thinking="off"
+    # leaves a model with unknown levels without a reasoning field.
     # config.model is re-derived from active_model, so model= alone is ignored.
     classifier = factory(
         replace(
@@ -257,9 +258,9 @@ async def classify_tool_call(
             active_model=replace(
                 config.active_model,
                 model=classify_model,
-                temperature=0.0,
+                temperature=temperature,
                 thinking="off",
-                top_p=None,
+                top_p=top_p,
                 max_output_tokens=None,
                 reasoning=_classifier_reasoning(config.active_model, classify_model),
                 request_thinking=REASONING_LOWEST,
@@ -333,6 +334,18 @@ def _classifier_reasoning(
         return session.reasoning
     known = find_known_model(classify_model)
     return None if known is None else known.reasoning
+
+
+def _classifier_sampling(
+    session: LocalModelRoute, classify_model: str
+) -> tuple[float, float | None]:
+    # Greedy sampling keeps verdicts stable, but some reasoning models reject any
+    # temperature other than their own. On the session's model the classifier
+    # reuses the session's temperature and top_p, which that model already
+    # accepts; another model samples greedily.
+    if classify_model == session.model:
+        return session.temperature, session.top_p
+    return 0.0, None
 
 
 def _error_reason(error: BaseException, described: str) -> str:

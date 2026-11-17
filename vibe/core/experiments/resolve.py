@@ -9,11 +9,32 @@ orchestration (``manager``) concerns live elsewhere.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+import hashlib
 import json
 
 from vibe.core.experiments.active import DEFAULT_VARIANTS, ExperimentName
 from vibe.core.experiments.models import EvalResponse, FeatureDefinition, TrackData
 from vibe.core.telemetry.types import ExperimentAssignment
+
+# Experiments whose value is a whole document: logs and telemetry carry a
+# digest of it, not the text.
+_DIGESTED_EXPERIMENTS = frozenset({ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value})
+
+
+def digest(value: str) -> str:
+    """A short, stable label for a document-sized variant value."""
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def loggable_variants(variants: Mapping[str, object]) -> dict[str, object]:
+    """``variants`` with each document-sized value replaced by its digest."""
+    return {
+        name: digest(value)
+        if name in _DIGESTED_EXPERIMENTS and isinstance(value, str) and value
+        else value
+        for name, value in variants.items()
+    }
 
 
 def filter_to_known(response: EvalResponse) -> EvalResponse:
@@ -70,7 +91,9 @@ def assignments(response: EvalResponse | None) -> list[ExperimentAssignment]:
             for track in rule.tracks:
                 if not track.result.inExperiment:
                     continue
-                variation_name = _variant_label(feature, track)
+                variation_name = _variant_label(
+                    feature, track, digested=feature_key in _DIGESTED_EXPERIMENTS
+                )
                 if not variation_name:
                     continue
                 by_experiment[feature_key] = ExperimentAssignment(
@@ -86,13 +109,20 @@ def assignments(response: EvalResponse | None) -> list[ExperimentAssignment]:
     return list(by_experiment.values())
 
 
-def _variant_label(feature: FeatureDefinition, track: TrackData) -> str:
-    value = track.result.value
-    if value is not None:
-        return value if isinstance(value, str) else json.dumps(value)
-    resolved = feature.resolved_value()
-    if resolved is not None:
-        return resolved if isinstance(resolved, str) else json.dumps(resolved)
+def _variant_label(
+    feature: FeatureDefinition, track: TrackData, *, digested: bool = False
+) -> str:
+    for value in (track.result.value, feature.resolved_value()):
+        if value is None:
+            continue
+        label = value if isinstance(value, str) else json.dumps(value)
+        if not digested:
+            return label
+        if label:
+            return digest(label)
+        # A blank document is the arm that keeps the shipped text: name it by
+        # its GrowthBook variation, so it still counts as an exposure.
+        break
     if track.result.key is not None:
         return track.result.key
     if track.result.variationId is not None:

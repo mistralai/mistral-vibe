@@ -6,7 +6,7 @@ from pydantic import BeforeValidator, Field, ValidationError
 import pytest
 
 from tests.stubs.fake_raw_layer import FakeRawLayer
-from vibe.core.config.builder import ConfigBuilder, ConfigMergeError
+from vibe.core.config.builder import ConfigBuilder, ConfigMergeError, InvalidConfigError
 from vibe.core.config.models import normalize_model_configs
 from vibe.core.config.schema import (
     ConfigFragment,
@@ -388,6 +388,26 @@ async def test_invalid_mcp_server_table_reports_actionable_config_error() -> Non
     assert str(exc_info.value) == (
         "Invalid configuration: mcp_servers from user-toml must be a list, not a "
         "dictionary. Use [[mcp_servers]] instead of [mcp_servers.<name>]."
+    )
+
+
+@pytest.mark.asyncio
+async def test_union_entry_without_merge_key_reports_config_error() -> None:
+    class McpSchema(ConfigSchema):
+        mcp_servers: Annotated[
+            list[dict[str, Any]], WithUnionMerge(merge_key="name")
+        ] = Field(default_factory=list)
+
+    builder = ConfigBuilder(McpSchema)
+    builder.add_layer(FakeRawLayer(name="defaults", data={"mcp_servers": []}))
+    builder.add_layer(FakeRawLayer(name="project-toml", data={"mcp_servers": [{}]}))
+
+    with pytest.raises(InvalidConfigError) as exc_info:
+        await builder.build()
+
+    assert str(exc_info.value) == (
+        "Invalid configuration: an entry of mcp_servers from project-toml has no "
+        "'name'. Add 'name' to every [[mcp_servers]] entry."
     )
 
 

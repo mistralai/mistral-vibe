@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+import logging
 from pathlib import Path
 import tomllib
 from types import SimpleNamespace
@@ -97,6 +98,55 @@ async def test_the_user_config_gates_crash_reporting_once_initialized(
     assert reports.inits == expected
 
 
+@pytest.mark.parametrize(
+    ("api_base", "expected"),
+    [
+        ("https://api.mistral.ai/v1", [True]),
+        ("https://api.customer.mistral.ai/v1", [True]),
+        ("https://api.asml.example/v1", [False]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_self_hosted_deployment_never_reports_crashes(
+    api_base: str,
+    expected: list[bool],
+    config_dir: Path,
+    process_services: ProcessServices,
+    reports: _Reports,
+) -> None:
+    _set_telemetry(config_dir, enabled=True)
+    _set_mistral_api_base(config_dir, api_base)
+
+    async with _connect("cli", process_services) as (_, server):
+        await _settle(server)
+
+    assert reports.inits == expected
+
+
+@pytest.mark.parametrize("dsn_handed", [True, False])
+@pytest.mark.asyncio
+async def test_every_client_logs_a_self_hosted_deployment(
+    dsn_handed: bool,
+    config_dir: Path,
+    process_services: ProcessServices,
+    reports: _Reports,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Desktop hands no crash-report DSN: the line must not depend on it.
+    _hand_dsn(monkeypatch, handed=dsn_handed)
+    _set_mistral_api_base(config_dir, "https://api.asml.example/v1")
+
+    with caplog.at_level(logging.WARNING, logger="vibe"):
+        async with _connect("desktop", process_services) as (_, server):
+            await _settle(server)
+
+    assert (
+        "Self-hosted deployment (api.asml.example): "
+        "experiments and crash reports are off"
+    ) in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_the_attached_session_config_has_the_last_word(
     config_dir: Path, process_services: ProcessServices, reports: _Reports
@@ -125,7 +175,7 @@ async def test_closing_cancels_every_pending_gate(
         await release.wait()
         return True
 
-    monkeypatch.setattr(HostRequestHandler, "telemetry_enabled", slow_read)
+    monkeypatch.setattr(HostRequestHandler, "crash_reports_allowed", slow_read)
 
     async with _connect("cli", process_services) as (_, server):
         startup_gate = server._crash_reporting_task
@@ -257,13 +307,25 @@ async def _connect(
 
 
 async def _settle(server: AppServer) -> None:
-    if server._crash_reporting_task is not None:
-        await server._crash_reporting_task
+    if pending := set(server._crash_reporting_tasks):
+        await asyncio.wait(pending)
 
 
 def _set_telemetry(config_dir: Path, *, enabled: bool) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text()) | {"enable_telemetry": enabled}
+    config_file.write_text(tomli_w.dumps(config))
+
+
+def _set_mistral_api_base(config_dir: Path, api_base: str) -> None:
+    config_file = config_dir / "config.toml"
+    provider = {
+        "name": "mistral",
+        "api_base": api_base,
+        "api_key_env_var": "MISTRAL_API_KEY",
+        "backend": "mistral",
+    }
+    config = tomllib.loads(config_file.read_text()) | {"providers": [provider]}
     config_file.write_text(tomli_w.dumps(config))
 
 
@@ -274,7 +336,7 @@ class _Root:
         self._enable_telemetry = enable_telemetry
 
     def runtime_updated_params(self) -> Any:
-        config = SimpleNamespace(enable_telemetry=self._enable_telemetry)
+        config = SimpleNamespace(crash_reports_enabled=self._enable_telemetry)
         return SimpleNamespace(runtime=SimpleNamespace(config=config))
 
     async def subscribe(self, params: object) -> SessionEventSubscription:

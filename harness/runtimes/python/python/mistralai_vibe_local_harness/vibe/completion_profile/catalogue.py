@@ -186,7 +186,8 @@ class AnthropicCatalogueFetcher:
 
 
 def mistral_catalogue_entry(body: object) -> CatalogueEntry:
-    """Map a Mistral model card: `max_context_length` and `capabilities.vision`.
+    """Map a Mistral model card: `max_context_length`, `capabilities.vision` and the
+    `name` of the model an alias serves, which picks its known-models row.
 
     A card whose `capabilities.reasoning` is false names a model without reasoning,
     which rejects every `reasoning_effort`. A true one gives no levels, so they
@@ -198,6 +199,7 @@ def mistral_catalogue_entry(body: object) -> CatalogueEntry:
         context_window=_int_or_none(data.get("max_context_length")),
         input_modalities=_modalities(_bool_or_none(capabilities.get("vision"))),
         reasoning=NO_REASONING if capabilities.get("reasoning") is False else None,
+        name=_str_or_none(data.get("name")),
     )
 
 
@@ -383,6 +385,7 @@ def _checked_entry(
             input_modalities=raw.input_modalities,
             reasoning=raw.reasoning,
             structured_output=raw.structured_output,
+            name=raw.name,
         ),
         warnings,
     )
@@ -462,3 +465,7 @@ def _int_or_none(value: object) -> int | None:
 
 def _bool_or_none(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None

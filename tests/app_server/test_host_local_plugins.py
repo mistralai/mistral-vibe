@@ -262,9 +262,80 @@ async def test_a_plugin_sharing_the_namespace_of_one_that_is_on_stays_off(
         "reports-old": ["reports-old:inspect-data", "reports-old:prepare-report"],
     }
     assert caught.value.code is ProtocolErrorCode.INVALID_PARAMS
-    assert cast(dict[str, Any], caught.value.data)["reason"] == "namespace_collision"
+    assert cast(dict[str, Any], caught.value.data) == {
+        "reason": "namespace_collision",
+        "collidesWith": ["reports"],
+    }
     assert "'reports'" in str(caught.value)
     assert _user_disabled(config_dir) == ["reports-old"]
+
+
+@pytest.mark.asyncio
+async def test_turning_a_plugin_on_can_turn_off_the_ones_under_its_namespace(
+    config_dir: Path,
+) -> None:
+    _mount(config_dir / "plugins" / "reports", name="reports", namespace="shared")
+    _mount(
+        config_dir / "plugins" / "reports-old",
+        name="reports-old",
+        namespace="shared",
+        default_enabled=False,
+    )
+    _mount(config_dir / "plugins" / "other", name="other", namespace="elsewhere")
+    config = config_dir / "config.toml"
+    config.write_text('disabled_plugins = ["reports-old"]\n' + config.read_text())
+    handler = _handler()
+
+    result = await handler.dispatch(
+        "plugins/local/setEnabled",
+        {"name": "reports-old", "enabled": True, "turnOffCollisions": True},
+    )
+    response = cast(PluginsLocalSetEnabledResponse, result.response)
+    listed = {
+        p.name: (p.enabled, p.collides_with) for p in (await _list(handler)).plugins
+    }
+
+    assert response.turned_off == ["reports"]
+    assert (response.plugin.enabled, response.plugin.collides_with) == (True, [])
+    assert listed == {
+        "other": (True, []),
+        "reports": (False, []),
+        "reports-old": (True, []),
+    }
+    assert _user_disabled(config_dir) == ["reports"]
+    assert _user_enabled(config_dir) == ["reports-old"]
+
+
+@pytest.mark.asyncio
+async def test_turning_a_plugin_on_turns_off_an_off_by_default_one_it_collides_with(
+    config_dir: Path,
+) -> None:
+    _mount(
+        config_dir / "plugins" / "reports",
+        name="reports",
+        namespace="shared",
+        default_enabled=False,
+    )
+    _mount(
+        config_dir / "plugins" / "reports-old",
+        name="reports-old",
+        namespace="shared",
+        default_enabled=False,
+    )
+    config = config_dir / "config.toml"
+    config.write_text('enabled_plugins = ["reports"]\n' + config.read_text())
+    handler = _handler()
+
+    result = await handler.dispatch(
+        "plugins/local/setEnabled",
+        {"name": "reports-old", "enabled": True, "turnOffCollisions": True},
+    )
+
+    assert cast(PluginsLocalSetEnabledResponse, result.response).turned_off == [
+        "reports"
+    ]
+    assert _user_enabled(config_dir) == ["reports-old"]
+    assert _user_disabled(config_dir) == ["reports"]
 
 
 @pytest.mark.asyncio
@@ -411,6 +482,24 @@ async def test_reports_a_plugin_that_fails_to_resolve(config_dir: Path) -> None:
 
     assert listed.plugins == []
     assert any(issue.file.startswith(str(broken)) for issue in listed.issues)
+
+
+@pytest.mark.asyncio
+async def test_a_plugin_shipping_several_formats_lists_without_issues(
+    config_dir: Path,
+) -> None:
+    root = config_dir / "plugins" / "superpowers"
+    skill = root / "skills" / "brainstorming" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: brainstorming\ndescription: Explore.\n---\n\nb\n")
+    for marker in (".claude-plugin", ".codex-plugin"):
+        (root / marker).mkdir()
+        (root / marker / "plugin.json").write_text(json.dumps({"name": "superpowers"}))
+
+    listed = await _list(_handler())
+
+    assert [plugin.name for plugin in listed.plugins] == ["superpowers"]
+    assert listed.issues == []
 
 
 @pytest.mark.asyncio

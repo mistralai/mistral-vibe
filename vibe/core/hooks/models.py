@@ -25,6 +25,8 @@ class HookType(StrEnum):
     NOTIFICATION = auto()
     SESSION_START = auto()
     SESSION_END = auto()
+    PRE_LLM = auto()
+    POST_LLM = auto()
 
 
 # Where a failing hook may block instead of letting things through.
@@ -32,6 +34,8 @@ STRICT_HOOK_TYPES = frozenset({
     HookType.PRE_TOOL,
     HookType.POST_TOOL,
     HookType.PRE_AGENT,
+    HookType.PRE_LLM,
+    HookType.POST_LLM,
 })
 
 # Hooks the app server fires itself, outside the engine's turn.

@@ -1,9 +1,10 @@
-//! Swapping the picker's preview against the transcript Esc restores.
+//! Swapping the picker's preview against the transcript Esc restores, and the resume in flight.
 
-use crate::app::App;
+use crate::app::{App, Status};
 use crate::commands::submission;
 use crate::server::PublicSessionState;
 use crate::transcript::local;
+use crate::ui::loading::RESUMING_LOADING_STATUS;
 
 /// Re-anchor an open picker on the session the handshake finally started: it
 /// becomes what Esc restores, while the preview stays on screen. Loading it
@@ -15,13 +16,35 @@ pub fn rebase(app: &mut App, state: &PublicSessionState) {
     app.view.transcript.restore(preview);
 }
 
+/// Mark a resume in flight; the loading row shows it while `spinning` holds.
+pub(super) fn start_resume(app: &mut App) {
+    app.resume_picker.resuming = true;
+    // Esc must cancel the resume, not first drop the current session's delete feedback.
+    app.resume_picker.delete_confirm = None;
+    // An idle row restarts its animation sized to `Resuming`; startup and a background
+    // command keep the label they return to.
+    if spinning(app) && app.session.status == Status::Ready && !app.view.command_loading {
+        app.restart_loading();
+        app.view.loading.set_label(RESUMING_LOADING_STATUS);
+    }
+}
+
+/// Whether the loading row shows `Resuming`: a turn, a shell command or a failure keeps its own row.
+pub(crate) fn spinning(app: &App) -> bool {
+    app.resume_picker.resuming
+        && app.session.shell_operation_id.is_none()
+        && matches!(app.session.status, Status::Ready | Status::Starting)
+}
+
+/// A resume or delete in flight owns the picker: its rows ignore clicks.
+pub(crate) fn frozen(app: &App) -> bool {
+    app.resume_picker.resuming || app.resume_picker.deleting.is_some()
+}
+
 /// Settle an in-flight resume exactly once; false means it was cancelled and its
 /// answer must be dropped.
 pub(super) fn finish_resume(app: &mut App) -> bool {
-    if !std::mem::take(&mut app.resume_picker.resuming) {
-        return false;
-    }
-    true
+    std::mem::take(&mut app.resume_picker.resuming)
 }
 
 pub(super) fn scroll_to_bottom(app: &mut App) {

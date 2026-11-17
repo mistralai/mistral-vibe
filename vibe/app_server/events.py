@@ -172,6 +172,8 @@ type AppServerEvent = (
 )
 
 _STREAMING_TEXT_PATHS = {"/content/0/text", "/text", "/state/outputText"}
+# Session keys clients follow as a whole list: a change travels as one `replace`.
+SESSION_WHOLE_KEYS = ("loops",)
 # Keep retired IDs for as long as the server keeps retired enqueue retries.
 _RETIRED_QUEUE_ITEM_HISTORY_SIZE = 256
 
@@ -221,6 +223,7 @@ def reconcile_snapshot(
                 patch=make_json_patch(
                     previous.session.model_dump(mode="json", by_alias=True),
                     current.session.model_dump(mode="json", by_alias=True),
+                    whole_keys=SESSION_WHOLE_KEYS,
                 ),
             )
         )

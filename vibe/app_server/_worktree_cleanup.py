@@ -13,6 +13,7 @@ import threading
 from typing import Any
 
 from vibe.app_server._background_worker_process import Job, JobSet
+from vibe.app_server._storage_usage.files import touch_stale_marker
 from vibe.core.git.worktree import (
     BrokenCheckoutError,
     BrokenCheckouts,
@@ -76,12 +77,16 @@ class WorktreeCleanup:
     def prune(
         self, limit: int, *, trust_store: TrustedFoldersManager | None = None
     ) -> int:
-        return ManagedWorktree.prune(
+        removed = ManagedWorktree.prune(
             limit,
             self._session_finished,
             trust_store=(trust_store or self._trust_store).for_session(),
             broken=self.broken,
         )
+        if removed:
+            # A scan that still counted the folders now reads stale.
+            touch_stale_marker()
+        return removed
 
     def wait_idle(self, timeout: float) -> bool:
         with self._condition:
@@ -161,6 +166,9 @@ class WorktreeCleanup:
         if release is None:
             return True
         logger.info("Reap of worktree %s finished: %s", managed.root, release.outcome)
+        if release.outcome is WorktreeReleaseOutcome.REMOVED:
+            # A scan that still counted the folder now reads stale.
+            touch_stale_marker()
         # Only a failed snapshot can succeed on retry.
         return release.outcome is not WorktreeReleaseOutcome.KEPT_DIRTY
 

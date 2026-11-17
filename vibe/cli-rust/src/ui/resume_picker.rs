@@ -161,11 +161,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
 }
 
 fn relative_time(timestamp: u64) -> String {
-    let now = crate::utils::replay_now_ms().unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |value| value.as_millis() as u64)
-    });
+    let now = crate::utils::now_ms();
     let seconds = now.saturating_sub(timestamp) / 1_000;
     match seconds {
         0..=59 => "just now".into(),

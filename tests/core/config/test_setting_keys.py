@@ -110,6 +110,23 @@ def test_tool_paths_left_in_a_config_is_flagged_as_no_longer_used() -> None:
     assert _issues({"tool_paths": []}) == {}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [True, False])
+async def test_the_removed_greeting_setting_loads_without_a_notice(value: bool) -> None:
+    config = await _supplied({"strict_config": True, "show_greeting": value})
+
+    assert not config.validation_warnings
+    for layer in ("user-toml", "project-toml", "agent-profile"):
+        assert _issues({"show_greeting": value}, layer=layer) == {}
+
+
+def test_config_json_schema_accepts_the_removed_greeting_setting() -> None:
+    show_greeting = config_json_schema(VibeConfigSchema)["properties"]["show_greeting"]
+
+    assert show_greeting["deprecated"] is True
+    assert show_greeting["type"] == "boolean"
+
+
 def test_effective_settings_raise_no_issue() -> None:
     assert not _issues({
         "active_model": "devstral",
@@ -125,6 +142,58 @@ def test_builtin_agent_profiles_raise_no_issue() -> None:
 
 def test_layers_vibe_writes_are_not_checked() -> None:
     assert not _issues({"not_a_setting": 1}, layer="growthbook")
+
+
+def test_tool_filters_naming_retired_tools_are_flagged() -> None:
+    issues = find_unused_keys(
+        VibeConfigSchema,
+        [
+            (
+                "user-toml",
+                {
+                    "enabled_tools": ["read_file", "bash_output"],
+                    "disabled_tools": ["web_search", "web_search", "Web_Fetch"],
+                },
+            )
+        ],
+    )
+
+    assert [issue.describe() for issue in issues] == [
+        "`bash_output` in `enabled_tools` matches no tool (background processes"
+        " follow the `bash` tool)",
+        "`web_search` in `disabled_tools` matches no tool (the web is searched by"
+        " `connector_web_search_web_search`)",
+        "`Web_Fetch` in `disabled_tools` matches no tool (pages are fetched by"
+        " `connector_web_search_open_url`)",
+    ]
+
+
+@pytest.mark.parametrize("server", ["Web", "-web"])
+def test_tool_filters_naming_an_mcp_tool_are_not_flagged(server: str) -> None:
+    issues = find_unused_keys(
+        VibeConfigSchema,
+        [
+            ("user-toml", {"mcp_servers": [{"name": server, "transport": "stdio"}]}),
+            ("overrides", {"disabled_tools": ["web_fetch"]}),
+        ],
+    )
+
+    assert issues == []
+
+
+@pytest.mark.asyncio
+async def test_strict_config_only_warns_about_tool_filters_naming_retired_tools() -> (
+    None
+):
+    config = await _supplied({"strict_config": True, "disabled_tools": ["grep"]})
+
+    [warning] = config.validation_warnings
+    assert "`grep` in `disabled_tools` matches no tool" in warning
+
+
+@pytest.mark.parametrize("layer", ["admin", "growthbook", "agent-profile"])
+def test_tool_filters_vibe_or_an_admin_writes_are_not_checked(layer: str) -> None:
+    assert not _issues({"disabled_tools": ["web_fetch"]}, layer=layer)
 
 
 def test_notice_names_the_layer_and_caps_the_list() -> None:

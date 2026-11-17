@@ -138,6 +138,7 @@ fn session_start_params_serialize_history_limit() {
         agent_config: Default::default(),
         history_limit: HISTORY_LIMIT,
         model: None,
+        reasoning_effort: None,
         session_only: false,
         kind: None,
     };

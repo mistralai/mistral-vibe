@@ -50,6 +50,21 @@ pub fn since(at: UiInstant) -> Duration {
     now().duration_since(at)
 }
 
+/// UI time since the clock started: under replay, how far scenarios advanced it.
+pub fn uptime() -> Duration {
+    now().0.saturating_duration_since(*START)
+}
+
+/// Unix seconds now; under replay, the frozen wall clock plus the UI time scenarios advanced (`utils::now_ms` stays frozen).
+pub fn unix_now_seconds() -> f64 {
+    if let Some(ms) = crate::utils::replay_now_ms() {
+        return ms as f64 / 1000.0 + uptime().as_secs_f64();
+    }
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0.0, |since| since.as_secs_f64())
+}
+
 /// Now for timeouts, pacing, coalescing windows and metrics, which follow the machine.
 #[allow(clippy::disallowed_methods)]
 pub fn real_now() -> Instant {

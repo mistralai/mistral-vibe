@@ -2,7 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent};
 
-use super::{current_question, other_option_idx, other_text};
+use super::{current_question, is_other_selected, other_option_idx, other_text};
 use crate::app::App;
 use crate::chat_input::apply;
 use crate::keymap;
@@ -23,6 +23,56 @@ pub struct OtherField {
 const PASTE_LINE_BREAKS: [char; 9] = [
     '\r', '\u{b}', '\u{c}', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2028}', '\u{2029}',
 ];
+
+/// The single-select question was answered in the free-text field, which still holds that answer.
+pub fn holds_answer(app: &App) -> bool {
+    let idx = app.question_app.current_question_idx;
+    !current_question(app).multi_select
+        && app
+            .question_app
+            .answers
+            .get(&idx)
+            .is_some_and(|(answer, is_other)| *is_other && answer == other_text(app, idx).trim())
+}
+
+/// The focused free-text row shows its submitted answer read-only, so ←→ switch questions.
+pub fn other_locked(app: &App) -> bool {
+    is_other_selected(app) && !app.question_app.other_unlocked && holds_answer(app)
+}
+
+/// The focused free-text row takes typing: it is not showing a locked answer.
+pub fn other_typing(app: &App) -> bool {
+    is_other_selected(app) && !other_locked(app)
+}
+
+/// The focused free-text row edits a submitted answer, unlocked or changed: Esc restores it.
+pub fn other_editing(app: &App) -> bool {
+    let idx = app.question_app.current_question_idx;
+    is_other_selected(app)
+        && !current_question(app).multi_select
+        && matches!(app.question_app.answers.get(&idx), Some((_, true)))
+        && other_typing(app)
+}
+
+/// Unlock the submitted answer for editing, the caret at its end.
+pub fn edit_other(app: &mut App) {
+    app.question_app.other_unlocked = true;
+    app.question_app.other_cursor = other_text(app, app.question_app.current_question_idx).len();
+}
+
+/// Restore the submitted answer being edited and lock its row again; `false` when not editing.
+pub fn discard_other_edit(app: &mut App) -> bool {
+    if !other_editing(app) {
+        return false;
+    }
+    let state = &mut app.question_app;
+    let idx = state.current_question_idx;
+    let answer = state.answers[&idx].0.clone();
+    state.other_cursor = answer.len();
+    state.other_texts.insert(idx, answer);
+    state.other_unlocked = false;
+    true
+}
 
 /// Edit the focused free-text field; `false` leaves the key to the option navigation.
 pub fn handle_other_key(app: &mut App, key: KeyEvent) -> bool {

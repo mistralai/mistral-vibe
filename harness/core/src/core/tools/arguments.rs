@@ -4,7 +4,7 @@
 use serde_json::Value;
 use serde_json::json;
 
-use crate::core::helpers::schema_error_detail;
+use crate::core::helpers::{schema_error_detail, schema_error_detail_without_value};
 use crate::core::tools::external::RuntimeBuiltinToolName;
 
 /// What the model reads before a JSON Schema rejection of a direct call.
@@ -37,6 +37,16 @@ impl ArgumentsRejection<'_> {
             Self::Schema { error, .. } => schema_error_detail(schema, error),
             Self::Domain(message) => message.clone(),
             Self::InvalidSchema(error) => format!("invalid Core-owned JSON Schema: {error}"),
+        }
+    }
+
+    /// The rejection as one line of text that quotes none of the rejected
+    /// values, for arguments that a hook rather than the model wrote. A tool's
+    /// own sentence for a schema error can quote them, so it is not used.
+    pub(crate) fn detail_without_values(&self, schema: &Value) -> String {
+        match self {
+            Self::Schema { error, .. } => schema_error_detail_without_value(schema, error),
+            rejection => rejection.detail(schema),
         }
     }
 }

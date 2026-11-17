@@ -433,6 +433,21 @@ async def test_a_followed_session_holds_the_versions_it_loads_until_it_stops() -
     assert held_versions() == set()
 
 
+@pytest.mark.asyncio
+async def test_a_session_holds_what_it_loads_with_registry_skills_off() -> None:
+    """Its own cloud picks load without registry skills on, and nothing syncs."""
+    refresh = _fetches()
+    session = _Session(registry=False, refresh=refresh)
+
+    session.sync.start()
+    await _settled(session.sync)
+    held = held_versions()
+    await asyncio.gather(*filter(None, [session.sync.stop()]))
+
+    assert held == {("id-deploy", 1)}
+    refresh.assert_not_awaited()
+
+
 class _NewestFirst(ThreadPoolExecutor):
     """Worker threads at their least kind to order: a job runs only when the test says,
     the newest first.
@@ -574,3 +589,27 @@ async def test_a_cleanup_that_raises_is_logged_and_the_roots_stay_synced(
 
     assert "Failed to clear unused registry skill versions" in caplog.text
     assert _synced_roots(refresh) == [(_REPO,)]
+
+
+@pytest.mark.asyncio
+async def test_with_registry_skills_off_a_session_still_clears_unused_versions_once() -> (
+    None
+):
+    """Its cloud picks still fetch into the store, so the store is still cleaned."""
+    refresh = _fetches()
+    held_at_cleanup: list[set[tuple[str, int]]] = []
+    cleanup = AsyncMock(
+        side_effect=lambda *_, **__: held_at_cleanup.append(held_versions())
+    )
+    session = _Session(registry=False, refresh=refresh, cleanup=cleanup)
+
+    session.sync.start()
+    await _settled(session.sync)
+    session.sync.follow()
+    await _settled(session.sync)
+
+    refresh.assert_not_awaited()
+    assert [call.args for call in cleanup.await_args_list] == [
+        (session.config, (_REPO,))
+    ]
+    assert held_at_cleanup == [{("id-deploy", 1)}]

@@ -393,20 +393,19 @@ fn direct_tool_hooks_commit_only_the_transformed_result() {
 ///
 /// *Prepare*: A direct filesystem call is waiting on a pre-tool hook.
 /// *Do*: Continue the hook with arguments that violate the original Core-owned schema.
-/// *Assert*: The serialized command is rejected with the existing exact error and the pending hook remains unchanged.
+/// *Assert*: Core warns with the hook bindings, commits a failure the model reads, never runs the tool, and continues the Turn.
 ///
 #[test]
-fn invalid_pre_tool_hook_arguments_preserve_the_pending_call() {
+fn invalid_pre_tool_hook_arguments_fail_the_call_and_continue_the_turn() {
     // Prepare
     let (mut session, hook_action_id) = pending_direct_pre_hook(
         config_with_direct_tool_hooks(),
         "turn-invalid-hook-arguments",
         "call-invalid-hook-arguments",
     );
-    let before = inspection_value(&session);
 
     // Do
-    let rejected = serde_json::to_value(session.apply(input(
+    let failed = accepted_value(session.apply(input(
         3,
         json!({
             "type": "hook_completed",
@@ -419,33 +418,62 @@ fn invalid_pre_tool_hook_arguments_preserve_the_pending_call() {
                 },
             },
         }),
-    )))
-    .expect("rejection serializes");
-    let after = inspection_value(&session);
+    )));
 
     // Assert
+    let message = "A pre_tool_call hook returned arguments for `file_system.read_file` that do \
+                   not satisfy its input schema: the array value is not of type \"object\". The tool did not run.";
+    let observations = failed["transition"]["observations"]
+        .as_array()
+        .expect("observations are an array");
+    assert_eq!(observations.len(), 3);
     assert_eq!(
-        rejected,
+        observations[0],
         json!({
-            "type": "rejected",
-            "rejection": {
-                "code": "invalid_command",
-                "error": {
-                    "code": "invalid_command",
-                    "message": "pre-tool hook arguments do not satisfy the original tool schema: [] is not of type \"object\"",
-                    "retryable": false,
-                    "details": null,
-                },
+            "type": "warning",
+            "turn_id": "turn-invalid-hook-arguments",
+            "code": "pre_tool_call_arguments_invalid",
+            "message": message,
+            "details": {
+                "call_id": "call-invalid-hook-arguments",
+                "tool": "file_system.read_file",
+                "hook_binding_ids": ["pre-tool"],
             },
         })
     );
-    assert_eq!(after, before);
+    assert_eq!(observations[1]["type"], "tool_result_committed");
+    assert_eq!(observations[1]["call_id"], "call-invalid-hook-arguments");
+    assert_eq!(observations[1]["call"]["arguments"]["path"], "original.txt");
+    assert_eq!(
+        observations[1]["result"],
+        json!({
+            "type": "failure",
+            "content": [{"type": "text", "text": message}],
+            "error": {
+                "code": "pre_tool_call_arguments_invalid",
+                "message": message,
+                "retryable": false,
+                "details": null,
+            },
+        })
+    );
+    assert_eq!(observations[2]["type"], "tool_execution_finished");
+    assert_eq!(observations[2]["result"], observations[1]["result"]);
+    let action = &failed["transition"]["next"]["directives"][0]["action"];
+    assert_eq!(action["type"], "llm_call");
+    let model_input =
+        serde_json::to_string(&action["model_input"]).expect("model input serializes");
+    assert!(model_input.contains("The tool did not run."));
+    let serialized = serde_json::to_string(&failed).expect("transition serializes");
+    assert!(!serialized.contains("runtime_builtin_tool_call"));
+    assert_eq!(failed["transition"]["turn"]["status"], "running");
 }
 
 ///
 /// *Prepare*: A provided direct tool with a Core-tracked input schema is waiting on a pre-tool hook.
 /// *Do*: Continue the hook with arguments that violate that configured schema.
-/// *Assert*: The provided-tool contract is resolved from the session catalog and rejected without advancing the call.
+/// *Assert*: The provided-tool contract is resolved from the session catalog, the call fails without running,
+/// and neither the failure nor the warning quotes the rejected value.
 ///
 #[test]
 fn invalid_provided_tool_hook_arguments_use_the_resolved_catalog() {
@@ -489,10 +517,9 @@ fn invalid_provided_tool_hook_arguments_use_the_resolved_catalog() {
         }),
     )));
     let hook_action_id = dispatched_action_id(&hook_pending).to_string();
-    let before = inspection_value(&session);
 
     // Do
-    let rejected = serde_json::to_value(session.apply(input(
+    let failed = accepted_value(session.apply(input(
         3,
         json!({
             "type": "hook_completed",
@@ -501,19 +528,29 @@ fn invalid_provided_tool_hook_arguments_use_the_resolved_catalog() {
                 "hook": "pre_tool_call",
                 "output": {
                     "type": "continue",
-                    "effective_arguments": [],
+                    "effective_arguments": {"query": ["sk-live-secret"]},
                 },
             },
         }),
-    )))
-    .expect("rejection serializes");
+    )));
 
     // Assert
+    let observations = &failed["transition"]["observations"];
+    assert_eq!(observations[0]["type"], "warning");
+    assert_eq!(observations[0]["details"]["tool"], "calendar.find_event");
+    assert_eq!(observations[1]["type"], "tool_result_committed");
     assert_eq!(
-        rejected["rejection"]["error"]["message"],
-        "pre-tool hook arguments do not satisfy the original tool schema: [] is not of type \"object\""
+        observations[1]["result"]["error"]["message"],
+        "A pre_tool_call hook returned arguments for `calendar.find_event` that do not \
+         satisfy its input schema: at /query: the array value is not of type \"string\". The tool did not \
+         run."
     );
-    assert_eq!(inspection_value(&session), before);
+    let serialized = serde_json::to_string(&failed).expect("transition serializes");
+    assert!(!serialized.contains("sk-live-secret"));
+    assert_eq!(
+        failed["transition"]["next"]["directives"][0]["action"]["type"],
+        "llm_call"
+    );
 }
 
 ///

@@ -4,8 +4,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 
-use crate::selection::cells::{is_blank, skip_blanks_right, word_end, word_start};
+use crate::selection::cells::is_blank;
 use crate::selection::region::RowSpan;
+use crate::selection::row_ranges::{gutter_at, in_raw};
+use crate::selection::snap::snap;
 use crate::selection::Granularity;
 use crate::ui::theme;
 
@@ -23,12 +25,12 @@ const EDGE: [&str; 5] = ["─", "┌", "┐", "└", "┘"];
 const RAIL: &str = "│";
 
 /// A row under the selection: its selectable body `[lo, hi]` and clipped `[x0, x1]`.
-struct Row {
-    y: u16,
-    lo: u16,
-    hi: u16,
-    x0: u16,
-    x1: u16,
+pub(super) struct Row {
+    pub y: u16,
+    pub lo: u16,
+    pub hi: u16,
+    pub x0: u16,
+    pub x1: u16,
 }
 
 /// The selection endpoints and how the region maps them onto rows.
@@ -46,6 +48,7 @@ pub fn resolve(
     buf: &Buffer,
     chat: Rect,
     gutters: &[(u16, u16, u16)],
+    raw: &[(u16, u16)],
     copy_blank_rows: bool,
 ) -> Vec<RowSpan> {
     let (anchor, head) = span.selection;
@@ -61,11 +64,11 @@ pub fn resolve(
                 span,
                 gutter_at(gutters, span.0),
                 copy_blank_rows,
-                span_chrome,
+                span_chrome && !in_raw(raw, span.0),
             )
         })
         .collect();
-    snap(buf, rows, granularity)
+    snap(buf, rows, granularity, |y| in_raw(raw, y))
 }
 
 /// Inclusive per-row flow-selection spans `(y, x0, x1)`, clamped to `chat`.
@@ -101,14 +104,6 @@ fn flow(
             )
         })
         .collect()
-}
-
-/// The diff gutter width covering screen row `y`, or 0 outside an edit-diff view.
-fn gutter_at(gutters: &[(u16, u16, u16)], y: u16) -> u16 {
-    gutters
-        .iter()
-        .find(|(top, bottom, _)| y >= *top && y < *bottom)
-        .map_or(0, |(_, _, gutter)| *gutter)
 }
 
 /// Clip one flow span to the row's selectable body, dropping pure-chrome rows.
@@ -271,27 +266,5 @@ fn content_end(buf: &Buffer, first_x: u16, last_x: u16, y: u16, boxed: bool) -> 
     end
 }
 
-/// Widen the outer ends to whole words or whole rows.
-fn snap(buf: &Buffer, mut rows: Vec<Row>, granularity: Granularity) -> Vec<RowSpan> {
-    let last = match (granularity, rows.len()) {
-        (Granularity::Char, _) | (_, 0) => return finish(rows),
-        (_, len) => len - 1,
-    };
-    if granularity == Granularity::Paragraph {
-        let first = &mut rows[0];
-        first.x0 = skip_blanks_right(buf, first.lo, first.hi, first.y);
-        rows[last].x1 = rows[last].hi;
-        return finish(rows);
-    }
-    let start = &mut rows[0];
-    start.x0 = word_start(buf, start.x0, start.lo, start.y);
-    let end = &mut rows[last];
-    end.x1 = word_end(buf, end.x1, end.hi, end.y);
-    finish(rows)
-}
-
-fn finish(rows: Vec<Row>) -> Vec<RowSpan> {
-    rows.into_iter()
-        .map(|row| (row.y, row.x0, row.x1))
-        .collect()
-}
+#[cfg(test)]
+mod tests;

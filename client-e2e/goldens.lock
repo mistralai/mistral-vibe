@@ -47,13 +47,11 @@ artifacts/pr_states adec382b867e
 
 artifacts/same_pr_two_records 466461670716
 
-banner/greeting_disabled 549ce18a7380
-
-banner/greeting_empty_first_name 0f3333ff4961
-
 banner/lechonk af179f5e8814
 
 banner/narrow_plan 2b64f7dcb8f3
+
+banner/no_greeting f017ea2887ed
 
 config/config 15ce786bc3a2
 
@@ -69,13 +67,33 @@ context/context_textual_dark 92418a263362
 
 conversation/ask_user_question c774d4977819
 
+conversation/ask_user_question_answered_marker e3f2c1ce430c
+
+conversation/ask_user_question_answered_other_marker c774d4977819
+
+conversation/ask_user_question_edited_other_marker c774d4977819
+
 conversation/ask_user_question_input_keybindings 89415a0c68aa
+
+conversation/ask_user_question_left_other_edit_restore c774d4977819
+
+conversation/ask_user_question_locked_other_edit c774d4977819
+
+conversation/ask_user_question_locked_other_enter 49c505a07e08
+
+conversation/ask_user_question_locked_other_paste c774d4977819
+
+conversation/ask_user_question_locked_other_shift_enter c774d4977819
+
+conversation/ask_user_question_locked_other_switch c774d4977819
 
 conversation/ask_user_question_long_text c774d4977819
 
 conversation/ask_user_question_multi cbe8c155ddcd
 
 conversation/ask_user_question_multiline_other 31d2f34c7ec2
+
+conversation/ask_user_question_option_answer_other_text_esc 4c1376fb6751
 
 conversation/ask_user_question_other_prefix_click 9d0598d0214e
 
@@ -92,6 +110,10 @@ conversation/ask_user_question_scrollbar_drag 333c17685f87
 conversation/ask_user_question_space_toggle 801d1375939b
 
 conversation/ask_user_question_subagents 66359b75ecb4
+
+conversation/ask_user_question_tabs_ellipsis c774d4977819
+
+conversation/ask_user_question_tabs_wrap c774d4977819
 
 conversation/ask_user_question_transcript_click afdd16d32ba3
 
@@ -171,7 +193,13 @@ conversation/history_scroll_top_loading e2710b74b24d
 
 conversation/hook_notice 4e7fb2d1c332
 
+conversation/hook_notice_llm c774d4977819
+
 conversation/hook_notice_pre_tool 195cb2e023c2
+
+conversation/hook_notice_pre_tool_parallel b42e3a0d64a9
+
+conversation/hook_pre_llm_stops_turn c774d4977819
 
 conversation/image_attachment b32ccac407de
 
@@ -180,6 +208,8 @@ conversation/interrupt_marker_after_live_snapshot d94e6a75cdcb
 conversation/multi_turn aab8c71f6aff
 
 conversation/overlapping_approval_question a241dbdd05f0
+
+conversation/prompt_prepare_failed_sends_text b860fa884e52
 
 conversation/read_file_expand d0c2dab82cf5
 
@@ -224,6 +254,8 @@ conversation/subagent_view_empty 7a7f2c2eabcb
 conversation/subagent_view_killed 7058057c784f
 
 conversation/subagent_view_loading_context c774d4977819
+
+conversation/subagent_view_model 7a7f2c2eabcb
 
 conversation/subagent_view_open 7a7f2c2eabcb
 
@@ -325,6 +357,14 @@ conversation/wrapped_image_attachment_link f017ea2887ed
 
 conversation/write_file_highlight 402258b54bdf
 
+dangerous_directory/home_warning f017ea2887ed
+
+dangerous_directory/home_warning_disabled f017ea2887ed
+
+dangerous_directory/home_warning_disabled_from_cache f017ea2887ed
+
+dangerous_directory/home_warning_reenabled f017ea2887ed
+
 debug_console f017ea2887ed
 
 expand_scroll/collapse_from_body de9e616edcb6
@@ -377,6 +417,8 @@ file_mention/directory_descent f017ea2887ed
 
 file_mention/directory_submit c774d4977819
 
+file_mention/image_placeholder_prepare_failed 1d8dbe3ecb7d
+
 file_mention/image_placeholder_submit a14bbb50318e
 
 file_mention/mouse_caret_completion f017ea2887ed
@@ -385,7 +427,7 @@ file_mention/vertical_caret_completion f017ea2887ed
 
 footer/copy_path 0c7cc71204ae
 
-footer/usage_after_model_switch 398539c2b50b
+footer/usage_after_model_switch c1c3a6a0c386
 
 footer/usage_alarm ec5072df37c5
 
@@ -396,6 +438,52 @@ footer/usage_gauge_narrow 62a48b8c67bd
 footer/usage_refresh f07d685cd2ee
 
 footer/usage_spent 3c654f4bb994
+
+goal/clear_confirm 7236d3780897
+
+goal/complete_then_cleared fef0bafc413c
+
+goal/detail_panel 29d6b5142ef4
+
+goal/detail_paused e54f73fcaf66
+
+goal/edit_panel 5003168128b3
+
+goal/edit_rejected 51b0729bb5af
+
+goal/edit_shift_tab 079d6811b8b9
+
+goal/no_goal d9f833431ea5
+
+goal/notice_after_queued_turn e176f39a4014
+
+goal/notice_continuation 05bcfe8883fa
+
+goal/notice_resume 48cfadb2f60a
+
+goal/notice_stops 7a8edf5ede36
+
+goal/replace_complete 8fbcd435b58b
+
+goal/replace_confirm 738104422434
+
+goal/resume_prompt b9d1f968b6cc
+
+goal/resume_prompt_accept 87a59767bb2d
+
+goal/resume_prompt_feedback b91357505720
+
+goal/resume_prompt_vim c02228086241
+
+goal/row_selection c670b791b292
+
+goal/row_statuses 5711ada4d8fe
+
+goal/short_terminal 534b69c3c091
+
+goal/unsupported d9e88230505c
+
+goal/usage_limit 6ab766713216
 
 input/bash_failed e33d6d29d307
 
@@ -415,11 +503,15 @@ input/blur_paste_over_picker f017ea2887ed
 
 input/blur_paste_text_file f017ea2887ed
 
+input/ctrl_c_clear_undo 92e0f883751d
+
 input/ctrl_c_clears_input ccef4d087be4
 
 input/cursor_blink f017ea2887ed
 
 input/empty_bash_while_busy c774d4977819
+
+input/escape_clear_undo 92e0f883751d
 
 input/escape_no_quit 174058371787
 
@@ -437,7 +529,15 @@ input/program_status_reply bf7e4e505dac
 
 input/refusal_cleared_by_key c774d4977819
 
+input/removed_command 56052e31de62
+
 input/skill_invocation a1416c2a1327
+
+input/stash_from_recall c774d4977819
+
+input/stash_restore_after_submit d6d2f97bb0aa
+
+input/stash_swap f017ea2887ed
 
 input/terminal_cursor_config_overlay f017ea2887ed
 
@@ -491,9 +591,11 @@ input_delete_selected_lines 8c10c2ed5670
 
 input_history_exit 64c73a937099
 
-input_image_path_list_paste 328377b4325d
+input_image_path_list_paste 0f1563db3528
 
-input_image_path_paste c51b4658c1d1
+input_image_path_paste 9e0cf57eb14c
+
+input_image_path_paste_literal cb7200464110
 
 input_lala_two_shift_enter 16ef6cb1d921
 
@@ -576,6 +678,18 @@ log_level/log_level_session_cleared f017ea2887ed
 log_level/log_level_toggle 20d79248227a
 
 log_level/log_level_while_busy 0e066dc04566
+
+loops/idle_next_loop 831b479a0cfa
+
+loops/manager_delete f8d8622839b0
+
+loops/manager_form 2957489b24df
+
+loops/manager_keeps_order 40f9de7061cf
+
+loops/manager_side_pane bc10f48972df
+
+loops/manager_while_busy c774d4977819
 
 markdown/autolink f82efaebfff1
 
@@ -749,7 +863,7 @@ mcp/mcp_wheel_scroll 0ea5d069c394
 
 mcp/mcp_wrap_scroll 4212011fe3a4
 
-model/model 0c94b6190244
+model/model c5d405d66955
 
 model/model_border 694e55c4937d
 
@@ -781,23 +895,31 @@ model/model_enter_chain 9ac70276f2f5
 
 model/model_enter_session_chain 1267bc07e5d7
 
-model/model_hover a9129e27b081
+model/model_hover 9e03a79365eb
 
-model/model_nav fb03bd2c9b06
+model/model_locked_hidden c4a41a288a44
+
+model/model_nav a8e4e1adabd4
 
 model/model_pick_then_prompt 3342428c7337
 
-model/model_pick_while_busy 8ef5c3104b86
+model/model_pick_while_busy 765e0e43d789
 
 model/model_pinned_pick 694e55c4937d
 
+model/model_search c59062b66ccd
+
+model/model_search_empty febe797f8791
+
+model/model_search_pick 6ba9dc5e7559
+
 model/model_select 6c15c9917f94
 
-model/model_selection_telemetry 08262cb17eb8
+model/model_selection_telemetry 6aae28d644e6
 
 model/model_session 6b0ebd024efc
 
-model/model_session_chain a6cc34772070
+model/model_session_chain 9fbfef769bac
 
 model/model_session_enter_chain 00e73ea6c381
 
@@ -817,7 +939,13 @@ mouse_capture/enabled_live eb4c97915043
 
 mouse_capture/mouse_after_editor f017ea2887ed
 
-mouse_capture/tmux_mouse_on_after_editor f017ea2887ed
+mouse_capture/tmux_mouse_off_hint 18d2892e16fb
+
+mouse_capture/tmux_mouse_off_hint_dismissed 9d49bee1255e
+
+mouse_capture/tmux_mouse_off_hint_remembered f017ea2887ed
+
+mouse_capture/tmux_mouse_on_after_editor 0c31f82c9691
 
 notice/config_issue 406bc4d200ac
 
@@ -899,6 +1027,8 @@ onboarding/onboarding_setup_rejected 8b9e1d952a3e
 
 onboarding/onboarding_shell_key_override e22060a9a88b
 
+onboarding/onboarding_small_terminal 11479e216952
+
 onboarding/onboarding_theme_mouse bca167968581
 
 onboarding/onboarding_theme_nav e344864be885
@@ -965,6 +1095,8 @@ queue/ctrl_enter_steers 134d23156f51
 
 queue/edit_consumed_while_saving 66d284ec920b
 
+queue/edit_paused_queue a4a1b3c284c5
+
 queue/edit_queued_prompt d4985ecd1823
 
 queue/edit_queued_prompt_with_image 0f1880007859
@@ -987,6 +1119,8 @@ queue/queued_prompt a32ce6103a85
 
 queue/queued_turn_promoted a6dde8894e86
 
+queue/remove_from_paused_queue 7ff328811c41
+
 queue/remove_selected_prompt 633514045507
 
 queue/reply_lands_above_queue 298a38ce3dea
@@ -1004,6 +1138,20 @@ queue/steer_waits_for_history f6ecad8ce90f
 queue/super_enter_steers 134d23156f51
 
 queue/two_queued_prompts 323909c73b6f
+
+raw/raw_copy_indented cc9506c3c0da
+
+raw/raw_copy_wrapped c774d4977819
+
+raw/raw_off 93c5f871744d
+
+raw/raw_on ca97e6e78baa
+
+raw/raw_streaming c774d4977819
+
+raw/raw_toggle_clears_selection 1ba7b949683a
+
+raw/raw_usage c774d4977819
 
 reverse_search/navigate_accept 56668fdcf0ae
 
@@ -1209,7 +1357,7 @@ slash_command/config_edit_layout_breakpoint f017ea2887ed
 
 slash_command/config_edit_models f017ea2887ed
 
-slash_command/config_edit_mouse 2f337ca99c70
+slash_command/config_edit_mouse 38d257b05e75
 
 slash_command/config_edit_multiline f017ea2887ed
 
@@ -1269,13 +1417,13 @@ slash_command/loop_argument_hint_tab f017ea2887ed
 
 slash_command/loop_completion f017ea2887ed
 
-slash_command/loop_empty 0972967f0103
+slash_command/loop_empty 60a27d913eff
 
 slash_command/loop_errors c86db1cbc3c9
 
 slash_command/loop_management b0f57d9b3c52
 
-slash_command/loop_while_busy 159d65c25d97
+slash_command/loop_while_busy 08fc578f7408
 
 slash_command/mcp_argument_hint f017ea2887ed
 
@@ -1353,7 +1501,7 @@ slash_command/slash_command_caret_filter d89663c86725
 
 slash_command/slash_command_click f017ea2887ed
 
-slash_command/slash_command_menu 96b2ab1c0fd4
+slash_command/slash_command_menu 6670d0f11c94
 
 slash_command/slash_command_menu_closes_after_command f017ea2887ed
 
@@ -1367,11 +1515,11 @@ slash_command/slash_command_rank c60641b3ce77
 
 slash_command/slash_command_retry_retro e5286ae166bc
 
-slash_command/slash_command_scroll 67c489fcb1e2
+slash_command/slash_command_scroll ac00b936ae43
 
-slash_command/slash_command_wheel 7272f866423c
+slash_command/slash_command_wheel 976aba1530b8
 
-slash_command/slash_command_while_busy 9b400dfcea5b
+slash_command/slash_command_while_busy de8a54c40bb5
 
 slash_command/status 540392a4a7cd
 
@@ -1384,6 +1532,10 @@ slash_command/whoami 540392a4a7cd
 slash_command/whoami_cli_oidc 540392a4a7cd
 
 slash_command/whoami_identity 540392a4a7cd
+
+slash_command/whoami_plan_offer 540392a4a7cd
+
+startup/banner_cat_rounds aea19095f3f1
 
 startup/continue 19a00acf297b
 
@@ -1419,6 +1571,10 @@ startup/resume_waiting_turn f7d30dd8a989
 
 startup/startup 2a5c8a62500c
 
+startup/switch_api_key_offer 07db8a4176c8
+
+startup/switch_api_key_offer_model_switch a45fb51617e4
+
 startup/untrusted_config_warning 4aa125b35545
 
 startup/vscode_promo 3daffea0fd45
@@ -1429,7 +1585,9 @@ startup/whats_new_dismissed 5be7018b0a89
 
 startup/whats_new_initial_prompt 14f3d2e32031
 
-startup/whats_new_plan_offer 018f116d0c2a
+startup/whats_new_plan_offer 90820775a950
+
+startup/whats_new_plan_offer_model_switch c3af790b794d
 
 startup/whats_new_since_last_visit 469215bfa76f
 
@@ -1450,6 +1608,56 @@ sticky_prompt/sections 70fff4b02146
 sticky_prompt/short_terminal affcb0b80760
 
 sticky_prompt/table_cell_selection ce748abbde61
+
+storage/archive_done 952cb55031a3
+
+storage/archive_earlier_failed baf5fbd91f20
+
+storage/archive_earlier_scan_first b684a1780c83
+
+storage/archive_measured_row 831bc6936ee7
+
+storage/archive_open_refused 2f9ee76d70ac
+
+storage/archive_other_scan_late 116b77c4845e
+
+storage/archive_scan_failed 326ec5f03edf
+
+storage/archive_single_busy 24841c6ce787
+
+storage/delete_removes_worktree a63211bc2eb1
+
+storage/delete_saved_since_scan 076df5acc521
+
+storage/delete_shared 723af01a20cb
+
+storage/delete_shared_peer_gone 6b5e1c5f56d8
+
+storage/details 0eecc0ff66fb
+
+storage/first_scan d558bc934b4d
+
+storage/flag_off 949e1f3bdd52
+
+storage/flag_off_low_disk 310c8ba3d8a6
+
+storage/low_disk 90dd22e718ba
+
+storage/panel dffeafa67d31
+
+storage/refreshing ffbee320a49e
+
+storage/refreshing_failed d48da5753cc1
+
+storage/review c1e1a064ae2b
+
+storage/review_toggle_sort 58f74559599b
+
+storage/startup_low_disk_notice cb16b4e17ac3
+
+storage/unarchive 1fa53265277d
+
+storage/unsupported ccade83b8161
 
 terminal_title/approval a241dbdd05f0
 
@@ -1627,7 +1835,7 @@ text_selection/wrapped_transcript_copy c774d4977819
 
 theme/ansi_dark_subagent_hover a2c18ac7988b
 
-theme/ansi_light_config_scrollbar 0e3337fe230c
+theme/ansi_light_config_scrollbar 3e7164ca6ed4
 
 theme/ansi_light_copy_notice 9901b942f24d
 
@@ -1720,6 +1928,24 @@ trusted_folders/selection_autoscroll f017ea2887ed
 trusted_folders/wrapped_path_partial_selection f017ea2887ed
 
 trusted_folders/wrapped_path_selection f017ea2887ed
+
+trusted_folders_command/add 1b82c529fe69
+
+trusted_folders_command/add_complete 8a74b26cc7a8
+
+trusted_folders_command/add_error fe8bff291bf0
+
+trusted_folders_command/add_home 3c68c45032e8
+
+trusted_folders_command/add_invalid 7f19ba606bfb
+
+trusted_folders_command/browser 7216dc88542d
+
+trusted_folders_command/close ba783814c2cc
+
+trusted_folders_command/empty ba783814c2cc
+
+trusted_folders_command/search ba783814c2cc
 
 update/prompt 843db6421404
 

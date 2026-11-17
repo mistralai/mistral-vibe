@@ -169,6 +169,8 @@ def build_model_config(config: ConfigView) -> SessionConfigOptionSelect:
                 value=model.alias, name=model.display_name, description=model.name
             )
             for model in config.models
+            # ACP has no upsell, and a turn on a locked model is refused.
+            if model.requires is None
         ],
     )
 

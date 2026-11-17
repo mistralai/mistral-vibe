@@ -237,8 +237,34 @@ def wait_for_request_count_while_draining_child_output(
     )
 
 
-def wait_for_main_screen(child: pexpect.spawn, timeout: float = 20.0) -> None:
-    child.expect(ansi_tolerant_pattern("Mistral Vibe v"), timeout=timeout)
+# The loading line while the session starts (vibe/cli-rust/src/ui/loading/mod.rs).
+_STARTING_STATUS = "Initializing"
+
+
+def wait_for_session_ready(
+    child: pexpect.spawn, captured: io.StringIO, timeout: float = 20.0
+) -> None:
+    """Wait for the starting status to show, then go: a prompt typed before stays queued."""
+    deadline = time.monotonic() + timeout
+    waiting_for = "the session to start"
+    if _screen_within(
+        child,
+        captured,
+        lambda screen: _STARTING_STATUS in screen,
+        timeout,
+        waiting_for=waiting_for,
+    ) and _screen_within(
+        child,
+        captured,
+        lambda screen: _STARTING_STATUS not in screen,
+        deadline - time.monotonic(),
+        waiting_for=waiting_for,
+    ):
+        return
+    raise AssertionError(
+        f"Timed out waiting for {waiting_for}.\n\n"
+        f"Rendered screen:\n{rendered_screen(captured)}"
+    )
 
 
 def _rendered_within(

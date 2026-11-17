@@ -131,8 +131,11 @@ pub(super) async fn run_turn_loop(
                     };
                 }
                 let stop_reason = turn_stop_from_turn(&turn);
+                let answer = turn.hook_answer();
                 let final_response =
-                    match finalize_output(client, session_id, Some(turn_id), output, state).await {
+                    match finalize_output(client, session_id, Some(turn_id), answer, output, state)
+                        .await
+                    {
                         Ok(response) => response,
                         // The run cannot deliver its result, so it is an
                         // infrastructure failure.
@@ -167,13 +170,15 @@ pub(super) async fn run_turn_loop(
 }
 
 /// Finalize output after a turn ends: write the history for JSON format, or
-/// the turn's last assistant text for TEXT format. A write failure fails
+/// the turn's last assistant text for TEXT format (`hook_answer` instead, when a
+/// hook ended the turn without the model's answer). A write failure fails
 /// the run: reporting `Finished` with no result delivered would score a run
 /// that produced nothing.
 pub(super) async fn finalize_output(
     client: &Arc<Client>,
     session_id: &str,
     turn_id: Option<&str>,
+    hook_answer: Option<&str>,
     output: &Output,
     state: &Mutex<RunState>,
 ) -> Result<Option<String>, String> {
@@ -186,7 +191,7 @@ pub(super) async fn finalize_output(
     }
     let entries = read_reported_history(client, session_id, turn_id, &format, state).await?;
     output
-        .finalize(entries, turn_id)
+        .finalize(entries, turn_id, hook_answer)
         .map_err(|error| format!("write final output: {error}"))
 }
 

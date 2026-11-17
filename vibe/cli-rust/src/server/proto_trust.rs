@@ -41,3 +41,46 @@ pub struct WorkspaceTrustDecisionParams {
     /// Always absent here: the gate answers before any session exists.
     pub session_id: Option<String>,
 }
+
+/// `workspace/trust/folders/list` and `/update` response: the persisted decisions.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceTrustFolders {
+    #[serde(default)]
+    pub trusted: Vec<String>,
+    #[serde(default)]
+    pub untrusted: Vec<String>,
+}
+
+/// One folder `workspace/trust/folders/inspect` offers to trust.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustFolderCandidate {
+    /// Absolute and resolved: what `workspace/trust/folders/add` stores.
+    pub path: String,
+    /// The field text that selects it.
+    pub value: String,
+    /// `home` or `root`: the folder cannot be trusted.
+    #[serde(default)]
+    pub problem: Option<String>,
+    /// `trusted` or `untrusted` when the folder is already stored.
+    #[serde(default)]
+    pub stored: Option<String>,
+    #[serde(default)]
+    pub trusted_by: Option<String>,
+    #[serde(default)]
+    pub untrusted_inside: Vec<String>,
+    #[serde(default)]
+    pub untrusted_inside_count: usize,
+}
+
+/// `workspace/trust/folders/inspect` response: the typed folder or its closest parent, then completions.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustFolderInspection {
+    /// `missing` or `not_directory` when the typed path names no folder.
+    #[serde(default)]
+    pub typed_problem: Option<String>,
+    #[serde(default)]
+    pub candidates: Vec<TrustFolderCandidate>,
+}

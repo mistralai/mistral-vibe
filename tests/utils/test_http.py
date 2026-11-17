@@ -101,6 +101,27 @@ async def test_a_stream_survives_the_sdks_own_tracing(
 
 
 @pytest.mark.asyncio
+async def test_a_brotli_encoded_response_decodes() -> None:
+    """*Prepare*: A server answering with a brotli-encoded body.
+    *Do*: Read it through the Vibe HTTP client.
+    *Assert*: The body decodes. HTTPX2 needs brotli>=1.2, and raises a TypeError
+    on the older brotli some environments, like conda, ship.
+    """
+    # Prepare
+    body = b'\x8b\x05\x80{"ok": true}\x03'
+
+    def reply(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, headers={"content-encoding": "br"}, content=body)
+
+    async with VibeAsyncHTTPClient(transport=httpx2.MockTransport(reply)) as client:
+        # Do
+        response = await client.get("https://provider.example")
+
+    # Assert
+    assert response.json() == {"ok": True}
+
+
+@pytest.mark.asyncio
 async def test_the_sdk_client_resolves_the_sdks_default_timeout() -> None:
     """*Prepare*: The client Vibe gives the Mistral SDK, with a 5-second timeout.
     *Do*: Build a request the way the SDK does without ``timeout_ms``.

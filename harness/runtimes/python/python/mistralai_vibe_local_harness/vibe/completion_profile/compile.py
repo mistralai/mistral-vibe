@@ -66,7 +66,9 @@ def compile_profile(
             "which every completion needs"
         )
     entry = catalogue or CatalogueEntry()
-    known = find_known_model(model, known_models) or KnownModel()
+    # The card's name finds the row an alias serves today; the id is the fallback.
+    named = find_known_model(entry.name, known_models) if entry.name else None
+    known = named or find_known_model(model, known_models) or KnownModel()
     warnings: list[CompletionWarning] = []
     sources: dict[str, Source] = {}
 

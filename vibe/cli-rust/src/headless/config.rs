@@ -32,7 +32,7 @@ pub fn agent_config(
     })
 }
 
-/// `session/start` params; `--model` applies to this session only.
+/// `session/start` params; `--model` and `--thinking` apply to this session only.
 pub fn start_params(
     options: &HeadlessOptions,
     agent_config: AgentConfig,
@@ -42,7 +42,8 @@ pub fn start_params(
         agent_config,
         history_limit,
         model: options.model.clone(),
-        session_only: options.model.is_some(),
+        reasoning_effort: options.thinking.clone(),
+        session_only: options.model.is_some() || options.thinking.is_some(),
         kind: None,
     }
 }

@@ -9,17 +9,25 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 
 use crate::app::App;
 use crate::question_app::{
-    cancel, current_question, handle_other_key, is_other_selected, is_within_grace_period,
-    move_down, move_up, navigate_to_option, next_question, other_caret_at, other_option_idx,
-    paste_other, prev_question, select, set_selected_option, submit_other, toggle_focused,
+    cancel, current_question, discard_other_edit, edit_other, handle_other_key, is_other_selected,
+    is_within_grace_period, move_down, move_up, navigate_to_option, next_question, other_caret_at,
+    other_locked, other_option_idx, other_typing, paste_other, prev_question, select,
+    set_selected_option, submit_other, toggle_focused,
 };
 use crate::selection;
 
-/// The question app owns every key while it is open.
-/// It answers Esc, Up/Down, Enter and Space itself; the focused free-text row takes the
-/// chat input editing keys first, and ↑↓ leave it only from its first/last row.
+/// The question app owns every key; an editable free-text row takes editing keys first.
 pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
-    let other_focused = is_other_selected(app);
+    let plain = key.modifiers == KeyModifiers::NONE;
+    let locked = other_locked(app);
+    if locked && key.code == KeyCode::Char('e') && plain {
+        edit_other(app);
+        return;
+    }
+    let other_focused = other_typing(app);
+    if key.code == KeyCode::Esc && discard_other_edit(app) {
+        return;
+    }
     if other_focused && handle_other_key(app, key) {
         return;
     }
@@ -30,15 +38,13 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Esc => cancel(app, client),
         KeyCode::Up => move_up(app),
         KeyCode::Down => move_down(app),
-        KeyCode::Char('k') if !other_focused => move_up(app),
-        KeyCode::Char('j') if !other_focused => move_down(app),
-        KeyCode::Enter if !other_focused => select(app, client),
+        KeyCode::Char('k') if !other_focused && (plain || !locked) => move_up(app),
+        KeyCode::Char('j') if !other_focused && (plain || !locked) => move_down(app),
+        KeyCode::Enter if !other_focused && (plain || !locked) => select(app, client),
         // Only plain Space toggles.
-        KeyCode::Char(' ') if !other_focused && key.modifiers == KeyModifiers::NONE => {
-            toggle_focused(app)
-        }
+        KeyCode::Char(' ') if !other_focused && plain => toggle_focused(app),
         // Only plain Enter submits; modified Enters never do.
-        KeyCode::Enter if key.modifiers == KeyModifiers::NONE => submit_other(app, client),
+        KeyCode::Enter if plain => submit_other(app, client),
         KeyCode::Left if app.question_app.questions.len() > 1 => prev_question(app),
         KeyCode::Right if app.question_app.questions.len() > 1 => next_question(app),
         _ => {}
@@ -68,6 +74,9 @@ pub fn handle_paste(app: &mut App, text: String) {
     if !is_other_selected(app) || text.is_empty() {
         return;
     }
+    if other_locked(app) {
+        edit_other(app);
+    }
     paste_other(app, &text);
 }
 
@@ -95,6 +104,9 @@ pub fn handle_mouse(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
         return;
     }
     if let Some(offset) = other_caret_at(app, event.column, event.row) {
+        if other_locked(app) {
+            edit_other(app);
+        }
         app.question_app.other_cursor = offset;
     }
 }

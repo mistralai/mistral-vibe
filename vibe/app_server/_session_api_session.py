@@ -17,7 +17,7 @@ state the same way on both paths.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -95,7 +95,7 @@ _BLOCKING_CALLBACKS = frozenset({"approval", "user_input"})
 """Callback kinds that block a running Turn until the client answers."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
 class AppliedBatch:
     """What one stream batch changed, for the adapter to publish."""
 
@@ -107,6 +107,8 @@ class AppliedBatch:
     """Callbacks the batch opened, in the Runtime's callback entry format."""
     resolved_callbacks: list[JsonObject] = field(default_factory=list)
     """Callbacks the batch resolved, with their final state."""
+    turn_terminated: bool = False
+    """Whether the batch ended a Turn: a boundary for parked configuration."""
 
 
 @dataclass(slots=True)
@@ -260,70 +262,32 @@ class ApiSessionState:
         turn = self._turn
         if turn is None:
             return None
-        details = self._turn_details.get(turn.id, {})
-        started_at = (
-            turn.started_at if turn.started_at is not None else session.created_at
+        return runtime_turn(
+            turn,
+            self.session_id,
+            self._turn_details.get(turn.id, {}),
+            fallback_started_at=session.created_at,
         )
-        base: JsonObject = {
-            "id": turn.id,
-            "sessionId": self.session_id,
-            "queueItemId": details.get("queueItemId"),
-            "inputEntryId": details.get("inputEntryId"),
-            "startedAt": started_at,
-        }
-        completed_at = (
-            turn.completed_at if turn.completed_at is not None else started_at
-        )
-        match turn.termination:
-            case None:
-                return {**base, "status": "in_progress"}
-            case CompletedTermination(stop_reason=stop_reason, output=output):
-                completed: JsonObject = {
-                    **base,
-                    "status": "completed",
-                    "completedAt": completed_at,
-                    "stopReason": details.get("stopReason")
-                    or (
-                        "limit"
-                        if stop_reason == "iteration_limit"
-                        else "length"
-                        if stop_reason == "output_limit"
-                        else None
-                    ),
-                }
-                if stop_reason == "skipped":
-                    completed["skipReason"] = output if isinstance(output, str) else ""
-                elif stop_reason == "rejected":
-                    completed["rejectReason"] = (
-                        output if isinstance(output, str) else ""
-                    )
-                return completed
-            case FailedTermination(error=error):
-                return {
-                    **base,
-                    "status": "failed",
-                    "completedAt": completed_at,
-                    "error": {
-                        "message": error.message,
-                        "code": error.code,
-                        "details": error.details,
-                    },
-                }
-            case CancelledTermination(reason=reason):
-                return {
-                    **base,
-                    "status": "interrupted",
-                    "completedAt": completed_at,
-                    "reason": reason,
-                }
-            case UnknownTermination(original_outcome=outcome):
-                # A newer Runtime's outcome: Vibe has no state for it, so the Turn shows as ended.
-                return {
-                    **base,
-                    "status": "interrupted",
-                    "completedAt": completed_at,
-                    "reason": f"The turn ended with an outcome this version does not know: {outcome}",
-                }
+
+    def open_callback_entry(self, callback: SessionCallback) -> JsonObject | None:
+        """The Runtime's entry for ``callback``, which the Runtime holds open.
+
+        The entry takes its time and details from what this state saw of the
+        callback. None when the stream has not brought the callback yet, as
+        the stream sends it once it does, or for a callback Vibe cannot show.
+        """
+        seen = self._callbacks.get(callback.id)
+        if seen is None:
+            return None
+        return self._raw_callback(_OpenCallback(callback, seen.opened_at, seen.details))
+
+    def open_callback_entries(self) -> list[JsonObject]:
+        """The Runtime's entries for the callbacks this state holds open."""
+        return [
+            raw
+            for open_callback in self._callbacks.values()
+            if (raw := self._raw_callback(open_callback)) is not None
+        ]
 
     def _publish_opened(
         self, open_callback: _OpenCallback, applied: AppliedBatch
@@ -436,6 +400,7 @@ class ApiSessionState:
                     turn = turn.model_copy(update={"started_at": item.emitted_at})
                 self._turn = turn
             case TurnTerminatedEvent(turn=turn):
+                applied.turn_terminated = True
                 # A batch can start a new Turn before it ends an older one.
                 if self._turn is None or self._turn.id == turn.id:
                     self._turn = turn
@@ -473,6 +438,77 @@ class ApiSessionState:
                 pass
 
 
+def runtime_turn(
+    turn: TurnState,
+    session_id: str,
+    details: Mapping[str, JsonValue],
+    *,
+    fallback_started_at: int,
+) -> JsonObject:
+    """Vibe's Turn in the Runtime's format, from the API's ``TurnState``.
+
+    ``details`` are the Turn's ``vibe.turn_details``, empty when unknown;
+    ``fallback_started_at`` stands in for a start time the API does not give.
+    """
+    started_at = turn.started_at if turn.started_at is not None else fallback_started_at
+    base: JsonObject = {
+        "id": turn.id,
+        "sessionId": session_id,
+        "queueItemId": details.get("queueItemId"),
+        "inputEntryId": details.get("inputEntryId"),
+        "startedAt": started_at,
+    }
+    completed_at = turn.completed_at if turn.completed_at is not None else started_at
+    match turn.termination:
+        case None:
+            return {**base, "status": "in_progress"}
+        case CompletedTermination(stop_reason=stop_reason, output=output):
+            completed: JsonObject = {
+                **base,
+                "status": "completed",
+                "completedAt": completed_at,
+                "stopReason": details.get("stopReason")
+                or (
+                    "limit"
+                    if stop_reason == "iteration_limit"
+                    else "length"
+                    if stop_reason == "output_limit"
+                    else None
+                ),
+            }
+            if stop_reason == "skipped":
+                completed["skipReason"] = output if isinstance(output, str) else ""
+            elif stop_reason == "rejected":
+                completed["rejectReason"] = output if isinstance(output, str) else ""
+            return completed
+        case FailedTermination(error=error):
+            return {
+                **base,
+                "status": "failed",
+                "completedAt": completed_at,
+                "error": {
+                    "message": error.message,
+                    "code": error.code,
+                    "details": error.details,
+                },
+            }
+        case CancelledTermination(reason=reason):
+            return {
+                **base,
+                "status": "interrupted",
+                "completedAt": completed_at,
+                "reason": reason,
+            }
+        case UnknownTermination(original_outcome=outcome):
+            # A newer Runtime's outcome: Vibe has no state for it, so the Turn shows as ended.
+            return {
+                **base,
+                "status": "interrupted",
+                "completedAt": completed_at,
+                "reason": f"The turn ended with an outcome this version does not know: {outcome}",
+            }
+
+
 def _rewound_past(turn: TurnState | None, entries: Sequence[HistoryEntry]) -> bool:
     """Whether an in-place rewind removed every Turn from ``turn`` on.
 
@@ -507,4 +543,4 @@ def _resolved_state(outcome: CallbackOutcome | None) -> JsonObject:
             return {"status": "cancelled", "reason": ""}
 
 
-__all__ = ["ApiSessionState", "AppliedBatch"]
+__all__ = ["ApiSessionState", "AppliedBatch", "runtime_turn"]

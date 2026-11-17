@@ -3,6 +3,23 @@
 use super::QueueController;
 
 impl QueueController {
+    /// Hand a group whose head left to its oldest remaining prompt, returning the new server id.
+    pub(super) fn rekey_group(&mut self, server_message_id: &str) -> String {
+        let mut members = self
+            .items
+            .iter_mut()
+            .filter(|item| item.server_message_id == server_message_id);
+        let Some(head) = members.next() else {
+            return server_message_id.to_owned();
+        };
+        let new_id = head.message_id.clone();
+        head.server_message_id.clone_from(&new_id);
+        for item in members {
+            item.server_message_id.clone_from(&new_id);
+        }
+        new_id
+    }
+
     pub(super) fn revise_group(&mut self, server_message_id: &str) -> u64 {
         self.next_revision = self.next_revision.wrapping_add(1);
         let revision = self.next_revision;

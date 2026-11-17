@@ -102,14 +102,22 @@ class RemoteCache[K: Hashable, V]:
         self._store = store
         self._clock = clock
         self._states: dict[K, _KeyState[V]] = {}
-        self._on_changed: Callable[[K], None] | None = None
+        self._change_listeners: list[Callable[[K], None]] = []
 
-    def on_changed(self, callback: Callable[[K], None]) -> None:
+    def on_changed(self, callback: Callable[[K], None]) -> Callable[[], None]:
         """Be told when a key's held value changes: after a refresh, or when
         another process's newer copy is adopted. Fires once per changed value,
         never for the first one held or an unchanged re-save.
+
+        Every listener is told; the returned function stops telling this one.
         """
-        self._on_changed = callback
+        self._change_listeners.append(callback)
+
+        def unsubscribe() -> None:
+            if callback in self._change_listeners:
+                self._change_listeners.remove(callback)
+
+        return unsubscribe
 
     def cached(self, key: K) -> Cached[V] | None:
         """The value held in memory, without starting anything."""
@@ -348,12 +356,11 @@ class RemoteCache[K: Hashable, V]:
             self._notify_changed(key)
 
     def _notify_changed(self, key: K) -> None:
-        if self._on_changed is None:
-            return
-        try:
-            self._on_changed(key)
-        except Exception:
-            logger.debug("%s change listener failed", self._name, exc_info=True)
+        for listener in tuple(self._change_listeners):
+            try:
+                listener(key)
+            except Exception:
+                logger.debug("%s change listener failed", self._name, exc_info=True)
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,9 +12,8 @@ use super::Launch;
 /// Grace period for the app-server to exit after `session/stop` before killing it.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
-/// How long the TUI waits for the `session/stop` response. Covers the 5 s the
-/// app-server gives the user's notification hooks still running.
-pub const SESSION_STOP_GRACE: Duration = Duration::from_secs(7);
+/// How long the TUI waits for `session/stop`: the hooks' 2.5 s close grace, then the save.
+pub const SESSION_STOP_GRACE: Duration = Duration::from_secs(4);
 
 /// Owns the app-server child process; `main.rs` waits on it after `session/stop`.
 pub struct ChildHandle {

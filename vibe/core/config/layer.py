@@ -352,6 +352,11 @@ class ConfigLayer[S: BaseModel](ABC):
         """Last loaded sparse data, if any. Reads the cache without I/O."""
         return self._state.data
 
+    @property
+    def load_warnings(self) -> tuple[str, ...]:
+        """What the last read of the store ignored, for the user to see."""
+        return ()
+
     async def apply(
         self,
         patch: ConfigPatch,

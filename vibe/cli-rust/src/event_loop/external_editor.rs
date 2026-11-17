@@ -65,6 +65,7 @@ pub(super) async fn open_external_editor(
         Outcome::Cancelled => {}
     }
     lent.end()?;
+    crate::tmux_hint::refresh(app);
     app.terminal_notifier.invalidate_title();
     app.terminal_notifier.invalidate_program_status();
     Ok(false)

@@ -78,6 +78,7 @@ pub(super) enum CheckpointAgentResultStopReason {
     Skipped,
     Rejected,
     OutputLimit,
+    RepeatedToolFailure,
 }
 
 impl CheckpointAgentResultStopReason {
@@ -87,6 +88,7 @@ impl CheckpointAgentResultStopReason {
             TurnStopReason::Skipped => Self::Skipped,
             TurnStopReason::Rejected => Self::Rejected,
             TurnStopReason::OutputLimit => Self::OutputLimit,
+            TurnStopReason::RepeatedToolFailure => Self::RepeatedToolFailure,
         }
     }
 
@@ -96,6 +98,7 @@ impl CheckpointAgentResultStopReason {
             Self::Skipped => TurnStopReason::Skipped,
             Self::Rejected => TurnStopReason::Rejected,
             Self::OutputLimit => TurnStopReason::OutputLimit,
+            Self::RepeatedToolFailure => TurnStopReason::RepeatedToolFailure,
         }
     }
 }

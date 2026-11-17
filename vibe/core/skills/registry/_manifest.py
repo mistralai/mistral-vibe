@@ -10,21 +10,8 @@ import tomli_w
 
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.paths import VIBE_HOME
-from vibe.core.skills.models import REGISTRY_LATEST_ALIAS
+from vibe.core.skills.models import ManifestEntry
 from vibe.observability.logging import logger
-
-
-class ManifestEntry(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    name: str
-    skill_id: str
-    version: int | str = REGISTRY_LATEST_ALIAS
-    description: str = ""
-
-    @property
-    def alias(self) -> str | None:
-        return self.version if isinstance(self.version, str) else None
 
 
 class SkillManifest(BaseModel):

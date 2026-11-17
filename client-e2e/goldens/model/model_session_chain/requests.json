@@ -55,6 +55,7 @@
    "name": "vibe.model_selection.selected",
    "properties": {
     "default_model": "mistral-medium-3.5",
+    "has_search_query": false,
     "host_kind": "local",
     "is_default_model": true,
     "model": "mistral-medium-3.5",

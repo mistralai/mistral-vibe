@@ -54,6 +54,13 @@ type SubagentOperation = Literal[
 ]
 type SubagentOutcome = Literal["success", "failure", "timeout"]
 type SubagentProfileSource = Literal["generic", "vibe_profile"]
+# What moved the session to another mode: the user, uninstalling the agent it
+# ran, the org config disabling its mode, or a move (a worktree) to a folder
+# without its mode. Resuming a session whose saved mode is gone is not a move:
+# it starts in the default mode.
+type AgentModeTrigger = Literal[
+    "user", "agent_uninstalled", "org_policy", "agent_unavailable"
+]
 
 
 type ConfigValue = bool | int | float | str | None
@@ -498,6 +505,45 @@ class TelemetryClient:
         # Field names only: values and the client's free-text reason can hold PII.
         payload = {"fields": fields, "target_layers": target_layers}
         self.send_telemetry_event("vibe.config.updated", payload)
+
+    def send_agent_mode_selected(
+        self, *, from_agent: str, to_agent: str, trigger: AgentModeTrigger
+    ) -> None:
+        """Record the session moving from one agent mode to another."""
+        payload = {"from_agent": from_agent, "to_agent": to_agent, "trigger": trigger}
+        self.send_telemetry_event("vibe.agent_mode.selected", payload)
+
+    def send_tool_approval_resolved(
+        self,
+        *,
+        tool_name: str,
+        decision: str,
+        path_scope: str | None,
+        agent_profile_name: str | None,
+        wait_ms: int,
+        is_subagent: bool,
+        has_feedback: bool,
+        message_id: str | None,
+    ) -> None:
+        """Record the user's answer to one tool approval prompt.
+
+        ``vibe.tool_call_finished`` sees only whether the call ran: not how far
+        an approval reaches (once, session, permanently, path scope), a turn
+        the answer cancelled, or how long the user took. ``has_feedback`` stands
+        for the free-text reason, which is never sent. ``agent_profile_name`` is
+        None for a subagent's prompt, which runs under the subagent's profile.
+        """
+        payload = {
+            "tool_name": tool_name,
+            "decision": decision,
+            "path_scope": path_scope,
+            "agent_profile_name": agent_profile_name,
+            "wait_ms": wait_ms,
+            "is_subagent": is_subagent,
+            "has_feedback": has_feedback,
+            "message_id": message_id,
+        }
+        self.send_telemetry_event("vibe.tool_approval.resolved", payload)
 
     def send_turn_failed(
         self, *, error_code: str | None, http_status: int | None, message_id: str | None

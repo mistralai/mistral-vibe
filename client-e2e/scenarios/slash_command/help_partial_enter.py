@@ -5,6 +5,10 @@ from __future__ import annotations
 from e2e.app_server.scenario import Timeline
 
 request_methods = {"telemetry/record"}
-screen_contains = ("/help: Show help message", "/copy: Copy the last agent message")
+# The help list outgrows the screen, so only its tail is checked: `/copy` has scrolled away.
+screen_contains = (
+    "/help: Show help message",
+    "/whoami: Display the Mistral signed-in user",
+)
 
 timeline: Timeline = ["/hel", "\r"]  # typos:disable-line

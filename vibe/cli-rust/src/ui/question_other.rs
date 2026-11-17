@@ -6,11 +6,13 @@ use unicode_width::UnicodeWidthStr;
 
 use super::composer_layout::{self, ComposerLayout};
 use super::question_layout::Row;
-use super::question_rows::option_prefix;
+use super::question_rows::{option_prefix, style_marker};
 use super::tab_cells::cells;
 use super::{list_cursor, theme};
 use crate::app::App;
-use crate::question_app::{current_question, is_other_selected, other_text};
+use crate::question_app::{
+    current_question, holds_answer, is_other_selected, other_locked, other_text,
+};
 use crate::selection::fold;
 
 pub const OTHER_MAX_ROWS: usize = 5;
@@ -21,10 +23,16 @@ pub(crate) fn field_layout(app: &App, text_width: u16) -> ComposerLayout<'_> {
     ComposerLayout::new(text, "", app.question_app.other_cursor, text_width)
 }
 
+/// Cells the option prefix takes before the answer.
+pub(super) fn prefix_width(app: &App, other_idx: usize) -> usize {
+    option_prefix(other_idx, current_question(app).multi_select, false, false)
+        .chars()
+        .count()
+}
+
 /// Cells left for the answer once the option prefix is drawn.
 pub(super) fn text_width(app: &App, other_idx: usize, content_width: usize) -> u16 {
-    let prefix = option_prefix(other_idx, current_question(app).multi_select, false);
-    let width = content_width.saturating_sub(prefix.chars().count());
+    let width = content_width.saturating_sub(prefix_width(app, other_idx));
     u16::try_from(width).unwrap_or(u16::MAX)
 }
 
@@ -49,18 +57,25 @@ pub(super) fn other_rows(
     content_width: usize,
 ) -> Vec<(Row, bool, Option<u16>)> {
     let focused = is_other_selected(app);
+    let idx = app.question_app.current_question_idx;
+    let text = other_text(app, idx);
     let selected = app
         .question_app
         .multi_selections
-        .get(&app.question_app.current_question_idx)
+        .get(&idx)
         .is_some_and(|selections| selections.contains(&other_idx));
-    let prefix = option_prefix(other_idx, current_question(app).multi_select, selected);
+    let current = holds_answer(app);
+    let prefix = option_prefix(
+        other_idx,
+        current_question(app).multi_select,
+        selected,
+        current,
+    );
     let (body, muted) = match focused {
         true => list_cursor::styles(true),
         false => (theme::text(theme::foreground()), theme::muted_style()),
     };
-    let caret = focused && app.view.cursor_on;
-    let text = other_text(app, app.question_app.current_question_idx);
+    let caret = focused && app.view.cursor_on && !other_locked(app);
     if text.is_empty() {
         return vec![(placeholder_row(prefix, body, muted, caret), false, None)];
     }
@@ -88,6 +103,9 @@ pub(super) fn other_rows(
                 _ => indent.clone(),
             };
             let mut row = vec![(lead, body)];
+            if current && index == 0 {
+                style_marker(&mut row);
+            }
             push_text(
                 &mut row,
                 visual,

@@ -414,6 +414,301 @@ fn completion_failure_ends_the_turn() {
     );
 }
 
+const REJECTED_INPUT_NOTE: &str = "<system>A user message was removed here: the model provider rejected the request that carried it, for example because of an image it could not read.</system>";
+
+fn rejected_input_note() -> Value {
+    model_context_text(REJECTED_INPUT_NOTE)
+}
+
+fn rejected_request_error() -> Value {
+    json!({
+        "code": "completion_rejected",
+        "message": "the provider rejected the image",
+        "retryable": false,
+        "details": {"status_code": 400},
+    })
+}
+
+///
+/// *Prepare*: A turn has completed, and the next turn's first completion is in flight.
+/// *Do*: The provider rejects the request, then the user sends another message.
+/// *Assert*: The turn fails with the provider's error, a note stands in for its message in
+/// the model context, and the next completion gets a fresh Action ID.
+///
+#[test]
+fn rejected_request_replaces_its_input_with_a_note() {
+    // Prepare
+    let earlier_turn_id = "turn-before-rejection";
+    let rejected_turn_id = "turn-rejected-request";
+    let next_turn_id = "turn-after-rejection";
+    let mut runtime = SynchronousRuntime::new(config());
+    let earlier = runtime.start_turn(earlier_turn_id, "first request");
+    runtime.finish_turn_with_text(earlier_turn_id, &earlier, "first answer");
+    let rejected = runtime
+        .apply(
+            user_message(rejected_turn_id, "describe this image", "queue"),
+            running(rejected_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(rejected_turn_id, "describe this image")),
+        )
+        .only_action();
+    let error = rejected_request_error();
+
+    // Do
+    runtime.apply(
+        completion_failed(&rejected, &error),
+        failed(rejected_turn_id, error.clone())
+            .observe(failed_candidate(rejected_turn_id, &rejected, &error))
+            .observe(turn_failed(rejected_turn_id, &error)),
+    );
+    let after_failure = runtime.inspection_value();
+    let next = runtime
+        .apply(
+            user_message(next_turn_id, "say hello", "queue"),
+            running(next_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(next_turn_id, "say hello")),
+        )
+        .only_action();
+
+    // Assert
+    assert_ne!(
+        action_id(&next),
+        action_id(&rejected),
+        "the next completion gets a fresh Action ID"
+    );
+    assert_eq!(
+        after_failure,
+        json!({
+            "protocol_version": 1,
+            "status": "failed",
+            "active_turn_id": null,
+            "last_turn_id": rejected_turn_id,
+            "pending_actions": [],
+            "message_count": 4,
+            "context_revision": 4,
+            "tool_catalog_revision": 0,
+            "has_pending_model_input": false,
+            "last_input_id": 4,
+        })
+    );
+    runtime.assert_last_model_message_update(
+        &next,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("first request"),
+            model_assistant_text("first answer"),
+            rejected_input_note(),
+            model_user_text("say hello"),
+        ],
+    );
+    runtime.finish_turn_with_text(next_turn_id, &next, "hello");
+}
+
+///
+/// *Prepare*: A turn has completed. While idle, the session gets a context message and an
+/// agent-result notification; the next turn takes both, and steering arrives while its first
+/// request is in flight.
+/// *Do*: The provider rejects that request, then the user sends another message.
+/// *Assert*: Only the rejected turn's own message leaves the model context: the notification,
+/// the context message and the steering reach the next request.
+///
+#[test]
+fn rejected_request_keeps_the_context_and_steering_delivered_into_its_turn() {
+    // Prepare
+    let earlier_turn_id = "turn-before-delivered-context";
+    let rejected_turn_id = "turn-rejected-with-delivered-context";
+    let next_turn_id = "turn-after-delivered-context";
+    let mut runtime = SynchronousRuntime::new(config());
+    let earlier = runtime.start_turn(earlier_turn_id, "read the archive");
+    runtime.finish_turn_with_text(earlier_turn_id, &earlier, "archive requested");
+    runtime.apply(
+        json!({
+            "type": "context_message",
+            "content": [{"type": "text", "text": "database for this task: LOCAL-42"}],
+        }),
+        idle(),
+    );
+    let notification = json!({
+        "id": "archive-result",
+        "source": {
+            "type": "agent_result",
+            "sender_agent_path": "/root/research",
+            "termination": {"outcome": "completed", "output": {"archive": "checked"}},
+        },
+        "level": "info",
+        "message": "Archive research completed",
+    });
+    runtime.apply(
+        json!({"type": "notification", "notification": notification}),
+        idle().observe(json!({"type": "notification_received", "notification": notification})),
+    );
+    let rejected = runtime
+        .apply(
+            user_message(rejected_turn_id, "describe this image", "queue"),
+            running(rejected_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(rejected_turn_id, "describe this image"))
+                .observe(notification_delivered(
+                    rejected_turn_id,
+                    notification.clone(),
+                )),
+        )
+        .only_action();
+    runtime.receive_steering(rejected_turn_id, "use the newest archive", &[&rejected]);
+    let error = rejected_request_error();
+
+    // Do
+    runtime.apply(
+        completion_failed(&rejected, &error),
+        failed(rejected_turn_id, error.clone())
+            .observe(failed_candidate(rejected_turn_id, &rejected, &error))
+            .observe(turn_failed(rejected_turn_id, &error)),
+    );
+    let next = runtime
+        .apply(
+            user_message(next_turn_id, "say hello", "queue"),
+            running(next_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(next_turn_id, "say hello")),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &next,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("read the archive"),
+            model_assistant_text("archive requested"),
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Agent result from /root/research:\n"},
+                    {"type": "text", "text": "Status: completed\nOutput: {\"archive\":\"checked\"}"},
+                ],
+            }),
+            model_context_text("database for this task: LOCAL-42"),
+            rejected_input_note(),
+            model_user_text("use the newest archive"),
+            model_user_text("say hello"),
+        ],
+    );
+}
+
+///
+/// *Prepare*: The session's first turn has its completion in flight, and steering arrives
+/// while it runs.
+/// *Do*: The provider rejects the request, the Runtime restarts from the checkpoint, and the
+/// user sends another message.
+/// *Assert*: The note stands in for the rejected message, the system prompt stays, the
+/// steering follows, and the checkpoint restores; the next request holds the system prompt,
+/// the note, the steering and the new message.
+///
+#[test]
+fn rejected_first_request_keeps_the_system_prompt_and_its_steering() {
+    // Prepare
+    let rejected_turn_id = "turn-rejected-first-request";
+    let next_turn_id = "turn-after-first-rejection";
+    let mut runtime = SynchronousRuntime::new(config());
+    let rejected = runtime.start_turn(rejected_turn_id, "describe this image");
+    runtime.receive_steering(rejected_turn_id, "use the newest image", &[&rejected]);
+    let error = rejected_request_error();
+
+    // Do
+    runtime.apply(
+        completion_failed(&rejected, &error),
+        failed(rejected_turn_id, error.clone())
+            .observe(failed_candidate(rejected_turn_id, &rejected, &error))
+            .observe(turn_failed(rejected_turn_id, &error)),
+    );
+    runtime.restart_from_checkpoint();
+    let next = runtime
+        .apply(
+            user_message(next_turn_id, "say hello", "queue"),
+            running(next_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(next_turn_id, "say hello")),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &next,
+        "replace",
+        &[
+            model_system(),
+            rejected_input_note(),
+            model_user_text("use the newest image"),
+            model_user_text("say hello"),
+        ],
+    );
+    runtime.finish_turn_with_text(next_turn_id, &next, "hello");
+}
+
+///
+/// *Prepare*: A turn's model has called a tool, steering arrived while the tool ran, and the
+/// completion after the tool result, which carries the steering, is in flight.
+/// *Do*: The provider rejects that request, then the user sends another message.
+/// *Assert*: The turn fails, its messages and the steering stay in the model context because
+/// the model already answered in the turn, and the next request appends to the model input.
+///
+#[test]
+fn rejected_request_after_a_tool_call_keeps_the_turn_and_its_steering() {
+    // Prepare
+    let turn_id = "turn-rejected-after-tool";
+    let next_turn_id = "turn-after-tool-rejection";
+    let mut runtime = SynchronousRuntime::new(config());
+    let completion = runtime.start_turn(turn_id, "read the file");
+    let arguments = json!({"path": "notes.txt"});
+    let tool = runtime
+        .complete_with_tool_calls(
+            turn_id,
+            &completion,
+            &[tool_call("call-read", "read_file", arguments.clone())],
+            [runtime_tool("file_system.read_file", arguments)],
+        )
+        .only_action();
+    runtime.receive_steering(turn_id, "also check the logs", &[&tool]);
+    let tool_result = file_read_success(&tool, "the file body");
+    let rejected = runtime
+        .apply(
+            tool_result.clone(),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe_tool_result(&tool, &tool_result)
+                .observe(tool_execution_finished(
+                    turn_id,
+                    "call-read",
+                    tool_result["result"].clone(),
+                ))
+                .observe(turn_steered(turn_id, "also check the logs")),
+        )
+        .only_action();
+    let error = rejected_request_error();
+
+    // Do
+    runtime.apply(
+        completion_failed(&rejected, &error),
+        failed(turn_id, error.clone())
+            .observe(failed_candidate(turn_id, &rejected, &error))
+            .observe(turn_failed(turn_id, &error)),
+    );
+    let next = runtime
+        .apply(
+            user_message(next_turn_id, "continue", "queue"),
+            running(next_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(next_turn_id, "continue")),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(&next, "append", &[model_user_text("continue")]);
+}
+
 ///
 /// *Prepare*: A turn allows a single model iteration and the model spends it on a tool call.
 /// *Do*: Return the tool result so the turn reaches its iteration budget with the tool executed.
@@ -637,4 +932,41 @@ fn unlimited_turn_continues_after_a_tool_call() {
     // Assert
     assert_eq!(next_completion["max_iterations"], Value::Null);
     runtime.finish_turn_with_text(turn_id, &next_completion, "summary");
+}
+
+///
+/// *Prepare*: A turn's first request is in flight.
+/// *Do*: The provider rejects it with a retryable `completion_rejected`, then the user sends
+/// another message.
+/// *Assert*: The same input may succeed when sent again, so it stays and the next request
+/// appends to the model input.
+///
+#[test]
+fn retryable_rejected_request_keeps_its_input() {
+    // Prepare
+    let rejected_turn_id = "turn-retryable-rejection";
+    let next_turn_id = "turn-after-retryable-rejection";
+    let mut runtime = SynchronousRuntime::new(config());
+    let rejected = runtime.start_turn(rejected_turn_id, "describe this image");
+    let mut error = rejected_request_error();
+    error["retryable"] = json!(true);
+
+    // Do
+    runtime.apply(
+        completion_failed(&rejected, &error),
+        failed(rejected_turn_id, error.clone())
+            .observe(failed_candidate(rejected_turn_id, &rejected, &error))
+            .observe(turn_failed(rejected_turn_id, &error)),
+    );
+    let next = runtime
+        .apply(
+            user_message(next_turn_id, "say hello", "queue"),
+            running(next_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(next_turn_id, "say hello")),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(&next, "append", &[model_user_text("say hello")]);
 }

@@ -11,6 +11,7 @@ import respx
 from vibe.setup.auth import _oidc_tenant
 from vibe.setup.auth._oidc_config import OidcError
 from vibe.setup.auth._oidc_tenant import (
+    OidcDiscoveryFailed,
     OidcTenant,
     OidcTenantResolver,
     OidcUnauthorized,
@@ -128,7 +129,8 @@ async def test_a_waiter_takes_over_when_the_discovering_caller_gives_up() -> Non
 
 @pytest.mark.asyncio
 async def test_a_failed_discovery_is_not_retried_before_the_backoff() -> None:
-    """*Prepare*: A workspace lookup that fails, then succeeds.
+    """*Prepare*: A workspace lookup that fails with an error that is not a
+      missing answer, then succeeds.
     *Do*: Resolve, resolve again at once, then again after the backoff.
     *Assert*: The second call reuses the failure without a request; the third
       retries and succeeds.
@@ -152,6 +154,83 @@ async def test_a_failed_discovery_is_not_retried_before_the_backoff() -> None:
     assert second.value is first.value
     assert recovered == OidcTenant("org-1")
     assert discovery.calls == 2
+
+
+def _status_error(status: int) -> httpx2.HTTPStatusError:
+    request = httpx2.Request("GET", f"{AUDIENCE}/v1/users/me/workspaces")
+    return httpx2.HTTPStatusError(
+        f"HTTP {status}",
+        request=request,
+        response=httpx2.Response(status, request=request),
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        TimeoutError(),
+        httpx2.ConnectError("offline"),
+        httpx2.RemoteProtocolError("Server disconnected without sending a response."),
+        _status_error(503),
+        _status_error(429),
+    ],
+    ids=["timeout", "offline", "dropped", "server-error", "rate-limited"],
+)
+@pytest.mark.asyncio
+async def test_a_discovery_without_an_answer_is_retried_by_the_next_caller(
+    failure: Exception,
+) -> None:
+    """*Prepare*: A workspace lookup that gets no answer, then succeeds.
+    *Do*: Resolve, then resolve again at once.
+    *Assert*: The first fails as ``OidcDiscoveryFailed``; the second is not
+      answered from that failure but asks again and succeeds, so a caller
+      waiting for the network to come back is not held off by a stale one.
+    """
+    # Prepare
+    discovery = _HeldDiscovery(failure, OidcTenant("org-1"))
+    discovery.release.set()
+    resolver = OidcTenantResolver(discovery, clock=lambda: 1_000.0)
+
+    # Do
+    with pytest.raises(OidcDiscoveryFailed):
+        await _resolve(resolver)
+    recovered = await _resolve(resolver)
+
+    # Assert
+    assert recovered == OidcTenant("org-1")
+    assert discovery.calls == 2
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _status_error(403),
+        ValueError("unreadable workspaces page"),
+        httpx2.ProxyError("proxy refused"),
+    ],
+    ids=["forbidden", "unreadable-answer", "bad-proxy"],
+)
+@pytest.mark.asyncio
+async def test_a_discovery_that_was_answered_is_not_transient(
+    failure: Exception,
+) -> None:
+    """*Prepare*: A workspace lookup that the platform refuses, or answers with
+      a page this client cannot read.
+    *Do*: Resolve.
+    *Assert*: It fails as a plain ``OidcError``, not ``OidcDiscoveryFailed``:
+      the same request fails the same way again.
+    """
+    # Prepare
+    discovery = _HeldDiscovery(failure)
+    discovery.release.set()
+    resolver = OidcTenantResolver(discovery)
+
+    # Do
+    with pytest.raises(OidcError) as raised:
+        await _resolve(resolver)
+
+    # Assert
+    assert not isinstance(raised.value, OidcDiscoveryFailed)
 
 
 @pytest.mark.asyncio

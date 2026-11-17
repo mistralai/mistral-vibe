@@ -1,0 +1,10 @@
+[
+ {
+  "method": "loops/create",
+  "params": {
+   "cron": "0 9 * * 1-5",
+   "prompt": "Build watch\nCheck the build and report.",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

@@ -211,10 +211,12 @@ mod tests {
     fn config(task_id: &str) -> HarnessConfig {
         HarnessConfig {
             task_id: task_id.to_string(),
+            action_id_namespace: None,
             system_instructions: "system".to_string(),
             settings: HarnessSettings {
                 turn: TurnSettings {
                     max_iterations: Some(8),
+                    max_identical_tool_failures: None,
                     output_limit_recovery: Default::default(),
                 },
                 context: ContextSettings {

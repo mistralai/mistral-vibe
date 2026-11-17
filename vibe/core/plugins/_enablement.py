@@ -59,23 +59,32 @@ async def set_plugin_enabled(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
     plugin: PluginDescriptor,
     enabled: bool,
+    *,
+    turn_off: Sequence[PluginDescriptor] = (),
 ) -> FieldsMutation:
     """Turning on removes an ``off`` and, for an off-by-default plugin, adds an ``on``.
 
-    Turning off does the reverse, so the user layer never holds both. Both lists
-    are written together.
+    Turning off does the reverse, so the user layer never holds both. ``turn_off``
+    plugins are turned off in the same write. Both lists are written together.
     """
-    name = plugin.name
+    on = [plugin.name] if enabled else []
+    off = [*([] if enabled else [plugin.name]), *(p.name for p in turn_off)]
+    # Only off-by-default plugins appear in ``enabled_plugins``.
+    listed = {plugin.name} if not plugin.default_enabled else set[str]()
+    listed |= {p.name for p in turn_off if not p.default_enabled}
+    touched = {*on, *off}
 
-    def without(current: Any) -> list[str]:
-        return [str(entry) for entry in current or [] if str(entry) != name]
+    def disabled(current: Any) -> list[str]:
+        kept = [str(entry) for entry in current or [] if str(entry) not in touched]
+        return [*kept, *off]
 
-    def with_name(current: Any) -> list[str]:
-        return [*without(current), name]
+    def enabled_list(current: Any) -> list[str]:
+        kept = [str(entry) for entry in current or [] if str(entry) not in touched]
+        return [*kept, *(name for name in on if name in listed)]
 
-    mutations = {"/disabled_plugins": without if enabled else with_name}
-    if not plugin.default_enabled:
-        mutations["/enabled_plugins"] = with_name if enabled else without
+    mutations = {"/disabled_plugins": disabled}
+    if listed:
+        mutations["/enabled_plugins"] = enabled_list
     return await orchestrator.mutate_fields(
         mutations, reason="toggle a local plugin from the Plugins page", default=[]
     )

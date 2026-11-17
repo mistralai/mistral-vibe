@@ -1,0 +1,49 @@
+[
+ {
+  "method": "storage/usage/refresh",
+  "params": {
+   "maxAgeMs": 600000
+  }
+ },
+ {
+  "method": "storage/usage/read",
+  "params": {}
+ },
+ {
+  "method": "storage/usage/read",
+  "params": {}
+ },
+ {
+  "method": "storage/usage/refresh",
+  "params": {
+   "maxAgeMs": 600000
+  }
+ },
+ {
+  "method": "session/delete",
+  "params": {
+   "sessionId": "5e550000-0000-4000-8000-000000000004"
+  }
+ },
+ {
+  "method": "session/list",
+  "params": {
+   "includeArchived": true,
+   "limit": 500
+  }
+ },
+ {
+  "method": "workspace/git/worktrees/remove",
+  "params": {
+   "cwd": "/home/user/.vibe/worktrees/dashboard-aaaaaaaaaaaa/disk"
+  }
+ },
+ {
+  "method": "storage/usage/refresh",
+  "params": {
+   "waitForSessionIds": [
+    "5e550000-0000-4000-8000-000000000004"
+   ]
+  }
+ }
+]

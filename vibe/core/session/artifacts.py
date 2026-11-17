@@ -203,14 +203,18 @@ def sanitize_artifacts_in_raw_metadata(
     """
     from vibe.observability.logging import logger
 
-    for key, model in (("artifacts", SessionArtifact), ("worktrees", WorktreeArtifact)):
+    adapters = (
+        ("artifacts", TypeAdapter(SessionArtifact)),
+        ("worktrees", TypeAdapter(WorktreeArtifact)),
+    )
+    for key, adapter in adapters:
         entries = raw.get(key)
         if not isinstance(entries, list):
             continue
         kept: list[object] = []
         for entry in entries:
             try:
-                TypeAdapter(model).validate_python(entry)
+                adapter.validate_python(entry)
             except ValidationError as exc:
                 logger.warning(
                     "Dropping invalid persisted session artifact",

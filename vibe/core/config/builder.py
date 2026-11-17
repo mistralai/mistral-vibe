@@ -18,7 +18,7 @@ from vibe.core.config.layer import (
     UntrustedLayerError,
 )
 from vibe.core.config.schema import ConfigFragment, ConfigSchema, MergeFieldMetadata
-from vibe.core.utils.merge import MergeStrategy
+from vibe.core.utils.merge import MergeKeyError, MergeStrategy
 
 
 class ConfigMergeError(ValueError):
@@ -46,6 +46,10 @@ class InvalidConfigError(ValueError):
     @classmethod
     def from_validation_error(cls, err: ValidationError) -> InvalidConfigError:
         return cls("; ".join(_config_issue(issue) for issue in err.errors()))
+
+
+class MissingMergeKeyError(InvalidConfigError):
+    """A list entry lacks the key its layers merge on, such as an MCP server's name."""
 
 
 def _config_issue(issue: ErrorDetails) -> str:
@@ -114,11 +118,13 @@ class ConfigBuilder[S: ConfigSchema]:
             overrides = layer_overrides or {}
 
             layer_dicts: list[_LayerData] = []
+            load_warnings: list[str] = []
             for layer in internal_layers:
                 try:
                     data = overrides.get(layer.name)
                     if data is None:
                         data = await layer.load(force=force_load)
+                        load_warnings.extend(layer.load_warnings)
                     raw = data.model_dump()
                     if raw:
                         layer.check_lower_layers([
@@ -139,6 +145,7 @@ class ConfigBuilder[S: ConfigSchema]:
                 merged, origins=origins, defined_entries=defined_entries
             )
             config.check_layer_keys([(ld.name, ld.data) for ld in layer_dicts])
+            config.report_load_warnings(load_warnings)
             return config
 
     def _merge_fields(
@@ -158,10 +165,9 @@ class ConfigBuilder[S: ConfigSchema]:
                 if annotation is None:
                     continue
 
-                is_fragment = isinstance(annotation, type) and issubclass(
+                if isinstance(annotation, type) and issubclass(
                     annotation, ConfigFragment
-                )
-                if is_fragment:
+                ):
                     if not isinstance(value, dict):
                         continue
 
@@ -259,6 +265,11 @@ class ConfigBuilder[S: ConfigSchema]:
             return meta.merge_strategy.apply(
                 accumulated.get(key), value, key_fn=self._make_key_fn(meta)
             )
+        except MergeKeyError as error:
+            raise MissingMergeKeyError(
+                f"Invalid configuration: an entry of {key} from {layer_name} has no "
+                f"{error.key!r}. Add {error.key!r} to every [[{key}]] entry."
+            ) from error
         except TypeError as error:
             if key == "mcp_servers" and isinstance(value, dict):
                 raise ConfigMergeError(key, layer_name, "list", value) from error

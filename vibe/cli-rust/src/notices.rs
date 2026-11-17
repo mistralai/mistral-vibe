@@ -24,7 +24,7 @@ pub const HOOK_MESSAGE_CODE: &str = "hook_message";
 pub struct StartupNotices {
     /// The mounted startup box.
     id: Option<String>,
-    /// Its warnings, in arrival order.
+    /// Its warnings as markdown, in arrival order.
     items: Vec<String>,
     /// Set by the first turn.
     closed: bool,
@@ -81,11 +81,22 @@ pub fn warn(app: &mut App, message: &str) {
         local::add_message(&mut app.view.transcript, &id, "notice_warning", &message);
         return;
     }
+    file_startup(app, escape(&message.replace('\n', " ")));
+}
+
+/// A startup warning written as one line of markdown, for text the client controls; skipped once the box closed.
+pub fn warn_markdown(app: &mut App, markdown: &str) {
+    if !app.startup_notices.closed {
+        file_startup(app, markdown.to_owned());
+    }
+}
+
+fn file_startup(app: &mut App, markdown: String) {
     let notices = &mut app.startup_notices;
-    if notices.items.contains(&message) {
+    if notices.items.contains(&markdown) {
         return;
     }
-    notices.items.push(message);
+    notices.items.push(markdown);
     sync(app);
 }
 
@@ -111,6 +122,22 @@ pub fn sync(app: &mut App) {
             notices.id = Some(id);
         }
     }
+}
+
+/// Drop the warning filed as `markdown` from the open startup box, and the box once empty; false when it is not there.
+pub fn withdraw(app: &mut App, markdown: &str) -> bool {
+    let notices = &mut app.startup_notices;
+    let found = notices.items.iter().position(|item| item == markdown);
+    let Some(index) = found.filter(|_| !notices.closed) else {
+        return false;
+    };
+    notices.items.remove(index);
+    if !notices.items.is_empty() {
+        sync(app);
+    } else if let Some(id) = notices.id.take() {
+        app.view.transcript.remove(&id);
+    }
+    true
 }
 
 /// A hook's `system_message` (`[name] message`): a `✓` row in the conversation,
@@ -185,23 +212,36 @@ fn echo_if_hidden(app: &mut App, severity: Severity, message: &str) {
     }
 }
 
+/// Whether the startup box already lists the warning filed as `markdown`.
+pub fn startup_lists(app: &App, markdown: &str) -> bool {
+    app.startup_notices
+        .items
+        .iter()
+        .any(|item| item == markdown)
+}
+
+/// Whether warnings still collect in the startup box, before the first turn or picker resume.
+pub fn startup_open(app: &App) -> bool {
+    !app.startup_notices.closed
+}
+
 /// The first turn or a picker resume drops the startup box: later warnings belong to the conversation.
 pub fn close_startup(app: &mut App) {
     app.startup_notices.closed = true;
     sync(app);
 }
 
-/// The box body: one bullet per warning, its text escaped so markdown never rewrites it.
+/// The box body: one bullet per warning.
 fn body(items: &[String]) -> String {
     items
         .iter()
-        .map(|item| format!("- {}", escape(&item.replace('\n', " "))))
+        .map(|item| format!("- {item}"))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 /// Backslash-escape every ASCII punctuation character, which CommonMark then prints literally.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     text.chars()
         .flat_map(|c| {
             c.is_ascii_punctuation()

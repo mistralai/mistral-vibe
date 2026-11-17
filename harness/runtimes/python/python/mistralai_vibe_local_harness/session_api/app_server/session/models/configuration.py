@@ -14,6 +14,7 @@ from pydantic import (
     JsonValue,
     SerializationInfo,
     SerializerFunctionWrapHandler,
+    StringConstraints,
     field_validator,
     model_serializer,
     model_validator,
@@ -397,8 +398,24 @@ class McpHostSourceConfiguration(SessionModel):
     tool_timeout_seconds: Annotated[float, Field(gt=0)] = 300.0
 
 
+class McpStdioSourceConfiguration(SessionModel):
+    """Stdio MCP source that runs as a retained background process in the Session sandbox."""
+
+    transport: Literal["stdio"] = "stdio"
+    id: Annotated[str | None, Field(min_length=1)] = None
+    name: Annotated[str | None, Field(min_length=1)] = None
+    namespace: Annotated[str | None, Field(min_length=1)] = None
+    command: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    args: list[str] = Field(default_factory=list)
+    cwd: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] | None = None
+    model_access: ToolModelAccess = "programmatic"
+    disabled_tools: list[str] = Field(default_factory=list)
+    startup_timeout_seconds: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 30.0
+    tool_timeout_seconds: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 300.0
+
+
 type McpSourceConfiguration = Annotated[
-    McpHttpSourceConfiguration | McpHostSourceConfiguration,
+    McpHttpSourceConfiguration | McpHostSourceConfiguration | McpStdioSourceConfiguration,
     Field(discriminator="transport"),
 ]
 
@@ -552,7 +569,15 @@ class SubagentConfig(SessionModel):
     instructions: str = Field(min_length=1)
     completion: dict[str, JsonValue] | None = None
     max_iterations: Annotated[int | None, Field(gt=0)] = None
+    max_identical_tool_failures: Annotated[int | None, Field(gt=0)] = None
     first_output_timeout_seconds: Annotated[float | None, Field(gt=0)] = None
+    stream_idle_timeout_seconds: Annotated[float | None, Field(gt=0, allow_inf_nan=False)] = Field(
+        default=None,
+        description=(
+            "Replaces the parent's limit; omitted inherits it. Explicit null resets it to "
+            "the Runtime's default. A limit above the Runtime's maximum fails the spawn."
+        ),
+    )
     builtins: SubagentBuiltinsConfig | None = None
     sandbox_access: SandboxAccess | None = Field(
         default=None,
@@ -607,7 +632,9 @@ class SubagentConfig(SessionModel):
     def validate_layer(self) -> Self:
         nullable = {
             "max_iterations",
+            "max_identical_tool_failures",
             "first_output_timeout_seconds",
+            "stream_idle_timeout_seconds",
             "sandbox_access",
             "connectors",
         }
@@ -653,6 +680,26 @@ def _reject_blank_subagent_names(
     return value
 
 
+class BashTimeout(SessionModel):
+    """How long the agent's bash commands may run, in seconds.
+
+    The model's bash schema shows both values.
+    """
+
+    default_seconds: Annotated[int, Field(gt=0, le=9007199254740991)] = Field(
+        description="What a call without a timeout gets."
+    )
+    max_seconds: Annotated[int, Field(gt=0, le=9007199254740991)] = Field(
+        description="The longest timeout a call may ask for."
+    )
+
+    @model_validator(mode="after")
+    def reject_a_default_above_the_maximum(self) -> Self:
+        if self.default_seconds > self.max_seconds:
+            raise ValueError("default_seconds must be less than or equal to max_seconds")
+        return self
+
+
 class AgentConfig(SessionModel):
     """Serializable configuration shared by local and remote Session Runtimes."""
 
@@ -661,7 +708,32 @@ class AgentConfig(SessionModel):
     )
     name: str = "sdk_agent"
     max_iterations: Annotated[int | None, Field(gt=0)] = None
+    max_identical_tool_failures: Annotated[int | None, Field(gt=0)] = Field(
+        default=None,
+        description=(
+            "Model replies in a row whose tool calls all fail the same way before the Turn "
+            "stops with `repeated_tool_failure`. Null sets no limit."
+        ),
+    )
     first_output_timeout_seconds: Annotated[float | None, Field(gt=0)] = None
+    # Null and omitted both take the Runtime's default, so null is left out of the wire
+    # and a server that predates the field accepts a default start.
+    stream_idle_timeout_seconds: Annotated[float | None, Field(gt=0, allow_inf_nan=False)] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Seconds a model stream may stay silent after its first output before the "
+            "call is stopped as stalled. Null or omitted uses the Runtime's default. A "
+            "limit above the Runtime's maximum fails Session start."
+        ),
+    )
+    bash_timeout: BashTimeout | None = Field(
+        default=None,
+        description=(
+            "The agent's bash timeouts. Null uses the Host's; a maximum the Host or its "
+            "sandbox cannot run fails Session start."
+        ),
+    )
     builtins: BuiltinsConfig = Field(default_factory=BuiltinsConfig)
     sandbox_access: SandboxAccess | None = Field(
         default=None,

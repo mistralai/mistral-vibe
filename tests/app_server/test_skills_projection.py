@@ -435,8 +435,9 @@ def test_a_sessions_derivation_marks_the_registry_versions_it_loads_used(
 ) -> None:
     from tests.skills.registry.conftest import make_item
     from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.skills.models import ManifestEntry
     from vibe.core.skills.registry import _manifest, _store
-    from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+    from vibe.core.skills.registry._manifest import SkillManifest
 
     config = build_test_vibe_config(experimental_enable_registry_skills=True)
     _manifest.save_sync(
@@ -466,8 +467,9 @@ def test_a_derivation_that_loses_a_version_as_it_reads_it_resolves_again(
     from tests.skills.registry.conftest import make_item
     from vibe.app_server import _skills
     from vibe.core.config.harness_files import HarnessFilesManager
+    from vibe.core.skills.models import ManifestEntry
     from vibe.core.skills.registry import _manifest, _store
-    from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+    from vibe.core.skills.registry._manifest import SkillManifest
 
     config = build_test_vibe_config(experimental_enable_registry_skills=True)
     _manifest.save_sync(

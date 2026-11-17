@@ -56,6 +56,10 @@ enum CheckpointTurnStateRepr {
         /// Absent when the Turn has none, as in checkpoints written before it existed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         output_type: Option<OutputType>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        delivered_steering: u32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        input_reduced: bool,
     },
     Terminal {
         turn_id: String,
@@ -94,6 +98,8 @@ impl CheckpointTurnState {
                     model_input_ready: active.model_input_ready,
                     output_limit_retries: active.output_limit_retries,
                     output_type: active.output_type.clone(),
+                    delivered_steering: active.delivered_steering,
+                    input_reduced: active.input_reduced,
                 }))
             }
             TurnState::Terminal { turn_id, outcome } => {
@@ -137,6 +143,8 @@ impl CheckpointTurnState {
                 model_input_ready,
                 output_limit_retries,
                 output_type,
+                delivered_steering,
+                input_reduced,
             } => {
                 if !matches!(queued, CheckpointQueuedTurn::Empty) {
                     return Err("checkpoint contains pending queued requests; resume with the previous build before upgrading".to_string());
@@ -155,6 +163,8 @@ impl CheckpointTurnState {
                     model_input_ready,
                     output_limit_retries,
                     output_type,
+                    delivered_steering,
+                    input_reduced,
                 }))
             }
             CheckpointTurnStateRepr::Terminal { turn_id, outcome } => {
@@ -662,6 +672,10 @@ fn validate_identity(id: &str, label: &str) -> Result<(), String> {
         return Err(format!("{label} must not be empty"));
     }
     Ok(())
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 fn is_zero(value: &u32) -> bool {

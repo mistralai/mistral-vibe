@@ -1,0 +1,99 @@
+[
+ {
+  "method": "storage/usage/refresh",
+  "params": {
+   "maxAgeMs": 600000
+  }
+ },
+ {
+  "method": "storage/usage/read",
+  "params": {}
+ },
+ {
+  "method": "storage/usage/read",
+  "params": {}
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "storage",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "storage/usage/refresh",
+  "params": {
+   "maxAgeMs": 600000
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.storage_panel.opened",
+   "properties": {
+    "is_low": false,
+    "surface": "cli",
+    "total_bucket": "5\u201320 GB"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/archive",
+  "params": {
+   "archived": true,
+   "requireIdle": true,
+   "sessionId": "5e550000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "session/archive",
+  "params": {
+   "archived": true,
+   "requireIdle": true,
+   "sessionId": "5e550000-0000-4000-8000-000000000005"
+  }
+ },
+ {
+  "method": "session/archive",
+  "params": {
+   "archived": true,
+   "requireIdle": true,
+   "sessionId": "5e550000-0000-4000-8000-000000000006"
+  }
+ },
+ {
+  "method": "storage/usage/refresh",
+  "params": {
+   "waitForSessionIds": [
+    "5e550000-0000-4000-8000-000000000001",
+    "5e550000-0000-4000-8000-000000000005"
+   ]
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.storage_bulk_archive.done",
+   "properties": {
+    "archived_bucket": "1\u201310",
+    "estimated_freed_bucket": "1\u20135 GB",
+    "is_complete": false,
+    "measured_freed_bucket": null,
+    "refused_bucket": "1\u201310",
+    "selected_bucket": "1\u201310",
+    "status": "success",
+    "suggested_bucket": "1\u201310",
+    "surface": "cli"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

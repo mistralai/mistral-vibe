@@ -583,7 +583,6 @@ async def test_failed_turn_is_typed_and_leaves_the_session_usable(
     )
 
 
-@pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_turns_list_reconstructs_and_paginates_public_turns(
     backend_contract_connection: BackendContractConnection,
@@ -618,7 +617,60 @@ async def test_turns_list_reconstructs_and_paginates_public_turns(
     assert response.previous_cursor is None
 
 
-@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_turns_list_reports_how_each_past_turn_ended(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+    session_api_path: bool,
+) -> None:
+    """*Prepare*: A turn the provider fails, then a turn that answers.
+    *Do*: List the session's turns.
+    *Assert*: The answered turn names the message that started it. The Session
+    API path reads the failed turn as failed; the direct path rebuilds every
+    past turn from history, so it reads it as completed.
+    """
+    # Prepare
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+            backend_contract_mistral_response("recovered"),
+        ]
+    )
+    with pytest.raises(AppServerTurnError):
+        _ = [
+            event
+            async for event in backend_contract_session.act(
+                "fail first", client_message_id="message-failed"
+            )
+        ]
+    _ = [
+        event
+        async for event in backend_contract_session.act(
+            "try again", client_message_id="message-recovered"
+        )
+    ]
+
+    # Do
+    result = await backend_contract_connection.client.request(
+        "session/turns/list",
+        SessionTurnsListParams(session_id=backend_contract_session.session_id),
+    )
+
+    # Assert
+    response = SessionTurnsListResponse.model_validate(result)
+    failed, recovered = response.items
+    assert recovered.input_entry_id == "message-recovered"
+    assert recovered.status == "completed"
+    if session_api_path:
+        assert failed.status == "failed"
+        assert failed.error is not None
+        assert failed.error.code == TurnErrorCode.BACKEND_ERROR
+    else:
+        assert failed.status == "completed"
+
+
 @pytest.mark.asyncio
 async def test_turns_list_returns_an_empty_page_for_a_stale_cursor(
     backend_contract_connection: BackendContractConnection,

@@ -78,6 +78,14 @@ def _is_inside_git_checkout(directory: Path) -> bool:
     )
 
 
+def folder_has_commits(folder: Path) -> bool:
+    try:
+        with GitRepo.open(folder) as repository:
+            return repository.has_commits()
+    except GitError:
+        return False
+
+
 def _inspection_dict(inspected: _InspectedDirectory) -> dict[str, Any]:
     return {
         "directoryPath": str(inspected.path),
@@ -359,12 +367,7 @@ class ProjectLinksController:
     @staticmethod
     def _local_link_dict(link: ProjectLink) -> dict[str, Any]:
         path = project_link_path(link)
-        try:
-            with GitRepo.open(path) as repository:
-                has_commits = repository.has_commits()
-        except GitError:
-            has_commits = False
-        return {"directoryPath": str(path), "hasCommits": has_commits}
+        return {"directoryPath": str(path), "hasCommits": folder_has_commits(path)}
 
     @staticmethod
     def _link_dict(link: ProjectLink, directory_path: Path) -> dict[str, Any]:

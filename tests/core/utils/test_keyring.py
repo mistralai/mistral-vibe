@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 import subprocess
+import sys
 from threading import Event, Thread
+import types
+from typing import Literal, NoReturn
 
 import keyring
+from keyring.backends.SecretService import Keyring as SecretServiceKeyring
 from keyring.errors import KeyringError, NoKeyringError, PasswordDeleteError
 import pytest
 
@@ -1033,3 +1038,217 @@ def test_macos_set_wraps_security_failure_and_forgets_cache(
 
     monkeypatch.setattr(keyring, "get_password", lambda service, username: None)
     assert get_api_key_from_keyring("CUSTOM_API_KEY") is None
+
+
+class _FakeSecretStorageError(Exception):
+    pass
+
+
+class _FakeItemNotFoundError(_FakeSecretStorageError):
+    pass
+
+
+class _FakeDBusError(Exception):
+    pass
+
+
+class _FakeDBusConnection:
+    def close(self) -> None:
+        pass
+
+
+_Found = list[object] | dict[str, list[object]] | Exception
+_CollectionState = Literal["unlocked", "locked", "missing"]
+
+
+class _FakeCollection:
+    def __init__(self, *, locked: bool) -> None:
+        self.locked = locked
+
+    def is_locked(self) -> bool:
+        return self.locked
+
+
+class _FakeSecretStorage(types.ModuleType):
+    SecretStorageException = _FakeSecretStorageError
+    ItemNotFoundException = _FakeItemNotFoundError
+
+    def __init__(self, found: _Found, collection: _CollectionState) -> None:
+        super().__init__("secretstorage")
+        self.found = found
+        self.collection = collection
+        self.opened: list[str | None] = []
+        self.searches: list[dict[str, str]] = []
+
+    def dbus_init(self) -> _FakeDBusConnection:
+        return _FakeDBusConnection()
+
+    def Collection(
+        self, connection: _FakeDBusConnection, path: str | None = None
+    ) -> _FakeCollection:
+        self.opened.append(path)
+        if self.collection == "missing":
+            raise _FakeItemNotFoundError("no default collection")
+        return _FakeCollection(locked=self.collection == "locked")
+
+    def search_items(
+        self, connection: _FakeDBusConnection, attributes: dict[str, str]
+    ) -> Iterator[object]:
+        self.searches.append(attributes)
+        if isinstance(self.found, Exception):
+            raise self.found
+        if isinstance(self.found, dict):
+            return iter(self.found.get(attributes["service"], []))
+        return iter(self.found)
+
+
+class _FakeJeepneyWrappers(types.ModuleType):
+    DBusErrorResponse = _FakeDBusError
+
+
+class _RecordingSecretServiceKeyring(SecretServiceKeyring):
+    def __init__(
+        self, stored: str | None, preferred_collection: str | None = None
+    ) -> None:
+        super().__init__()
+        self.stored = stored
+        self.preferred_collection = preferred_collection
+        self.reads: list[tuple[str, str]] = []
+        self.writes: list[tuple[str, str, str]] = []
+
+    def get_password(self, service: str, username: str) -> str | None:
+        self.reads.append((service, username))
+        return self.stored
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        self.writes.append((service, username, password))
+
+    def delete_password(self, service: str, username: str) -> None:
+        pass
+
+
+def _install_linux_secret_service(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: _RecordingSecretServiceKeyring,
+    *,
+    collection: _CollectionState,
+    found: _Found | None = None,
+) -> _FakeSecretStorage:
+    secretstorage = _FakeSecretStorage([] if found is None else found, collection)
+    monkeypatch.setitem(sys.modules, "secretstorage", secretstorage)
+    monkeypatch.setitem(sys.modules, "jeepney", types.ModuleType("jeepney"))
+    monkeypatch.setitem(
+        sys.modules, "jeepney.wrappers", _FakeJeepneyWrappers("jeepney.wrappers")
+    )
+    monkeypatch.setattr(keyring_utils.sys, "platform", "linux")
+    keyring.set_keyring(backend)
+    return secretstorage
+
+
+def test_linux_secret_service_read_skips_the_prompt_when_the_collection_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _RecordingSecretServiceKeyring(stored="created-key")
+    _install_linux_secret_service(monkeypatch, backend, collection="missing")
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") is None
+    assert keyring_read_failure("MISTRAL_API_KEY") is None
+    assert backend.reads == []
+
+
+def test_linux_secret_service_read_fails_without_unlocking_a_locked_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _RecordingSecretServiceKeyring(stored="unlocked-key")
+    secretstorage = _install_linux_secret_service(
+        monkeypatch, backend, collection="locked"
+    )
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") is None
+    assert keyring_read_failure("MISTRAL_API_KEY") == "The system keyring is locked"
+    assert backend.reads == []
+    assert secretstorage.searches == [
+        {"username": "MISTRAL_API_KEY", "service": service} for service in _ALL_SERVICES
+    ]
+
+
+def test_linux_secret_service_read_unlocks_a_locked_collection_holding_the_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _RecordingSecretServiceKeyring(stored="stored-key")
+    _install_linux_secret_service(
+        monkeypatch, backend, collection="locked", found=[object()]
+    )
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") == "stored-key"
+    assert backend.reads == [(_CURRENT_SERVICE, "MISTRAL_API_KEY")]
+
+
+def test_linux_secret_service_read_finds_a_legacy_item_in_a_locked_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _RecordingSecretServiceKeyring(stored="legacy-key")
+    _install_linux_secret_service(
+        monkeypatch,
+        backend,
+        collection="locked",
+        found={_RELEASED_LEGACY_SERVICE: [object()]},
+    )
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") == "legacy-key"
+    assert backend.reads == [(_RELEASED_LEGACY_SERVICE, "MISTRAL_API_KEY")]
+    assert backend.writes == [(_CURRENT_SERVICE, "MISTRAL_API_KEY", "legacy-key")]
+
+
+def test_linux_secret_service_read_checks_the_preferred_collection_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work = "/org/freedesktop/secrets/collection/work"
+    backend = _RecordingSecretServiceKeyring(stored=None, preferred_collection=work)
+    secretstorage = _install_linux_secret_service(
+        monkeypatch, backend, collection="unlocked"
+    )
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") is None
+    assert keyring_read_failure("MISTRAL_API_KEY") is None
+    assert secretstorage.opened == [work] * 2
+    assert secretstorage.searches == []
+    assert backend.reads == [(service, "MISTRAL_API_KEY") for service in _ALL_SERVICES]
+
+
+@pytest.mark.parametrize(
+    "error", [_FakeSecretStorageError("no service"), _FakeDBusError("denied")]
+)
+def test_linux_secret_service_read_falls_back_to_keyring_when_the_search_fails(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    backend = _RecordingSecretServiceKeyring(stored="stored-key")
+    _install_linux_secret_service(
+        monkeypatch, backend, collection="locked", found=error
+    )
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") == "stored-key"
+    assert backend.reads == [(_CURRENT_SERVICE, "MISTRAL_API_KEY")]
+
+
+def test_linux_secret_service_read_lets_keyring_report_a_missing_preferred_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work = "/org/freedesktop/secrets/collection/work"
+    backend = _RecordingSecretServiceKeyring(stored=None, preferred_collection=work)
+    _install_linux_secret_service(monkeypatch, backend, collection="missing")
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") is None
+    assert backend.reads == [(service, "MISTRAL_API_KEY") for service in _ALL_SERVICES]
+
+
+def test_linux_read_treats_an_unloadable_keyring_backend_as_no_keyring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _missing_backend() -> NoReturn:
+        raise ModuleNotFoundError("No module named 'keyrings'")
+
+    monkeypatch.setattr(keyring_utils.sys, "platform", "linux")
+    monkeypatch.setattr(keyring, "get_keyring", _missing_backend)
+
+    assert get_api_key_from_keyring("MISTRAL_API_KEY") is None

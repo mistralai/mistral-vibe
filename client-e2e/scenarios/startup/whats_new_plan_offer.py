@@ -1,4 +1,4 @@
-"""The account's plan offer is appended to the what's-new body as a link."""
+"""An upgrade offer shows in its own box under the what's-new body, as a link."""
 
 from __future__ import annotations
 
@@ -22,24 +22,27 @@ Path(_home, "cache.toml").write_text(
 
 env = {"VIBE_HOME": _home, "VIBE_WHATS_NEW_DIR": os.fspath(WHATS_NEW_FIXTURE)}
 
-_URL = "https://chat.mistral.ai/code/extensions?focus=key"
+_URL = (
+    "https://admin.mistral.ai/subscriptions/upgrade/plans"
+    "?return_to=https%3A%2F%2Fchat.mistral.ai"
+)
 
 handshake = {
     "account/read": {
         "account": {
             "status": "ready",
             "plan": {"kind": "api", "name": "FREE", "title": None},
-            "planOffer": {"kind": "switch_api_key", "url": _URL},
+            "planOffer": {"kind": "upgrade_to_pro", "url": _URL},
             "rateLimitAction": None,
         }
     }
 }
 
-screen_contains = ("Switch to your Vibe Pro API key",)
+screen_contains = ("Unlock more with Vibe - Upgrade to Vibe Pro",)
 expected_actions = [Action("open_url", _URL)]
 
-# The offer's `Vibe Pro API key` link spans one-based columns 18-33 on row 16.
-_CLICK = "\x1b[<0;20;16M\x1b[<0;20;16m"
+# The offer's `Upgrade to Vibe Pro` link starts at one-based column 27 on row 18.
+_CLICK = "\x1b[<0;30;18M\x1b[<0;30;18m"
 
 # The banner mounts after startup; typing settles it before the snapshot.
-timeline: Timeline = ["x", take_snapshot(), _CLICK, take_snapshot()]
+timeline: Timeline = ["x", take_snapshot(), _CLICK]

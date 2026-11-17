@@ -15,7 +15,7 @@ from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
     connect_backend_contract_host,
 )
-from vibe.app_server._host_hooks import HOOK_MESSAGE_CODE
+from vibe.app_server._host_hooks import HOOK_FAILED_CODE, HOOK_MESSAGE_CODE
 from vibe.app_server._plugins import PLUGIN_HOOKS_RELOAD_NOTICE
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._unified_harness_backend_adapter import (
@@ -186,7 +186,11 @@ async def test_session_start_hook_notices_reach_the_client(
 
     # Assert
     assert message.params.warning.code == HOOK_MESSAGE_CODE
-    assert failure.params.warning.code == "warning"
+    assert failure.params.warning.code == HOOK_FAILED_CODE
+    assert failure.params.warning.details == {
+        "hookName": "broken",
+        "content": failure.params.warning.message.replace(" 'broken'", ""),
+    }
     assert runtime_notices == []
 
 

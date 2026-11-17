@@ -33,6 +33,7 @@ from vibe.core.git.worktree import (
     WorktreeRepository,
 )
 from vibe.core.git.worktree.naming import worktree_name_from_text
+from vibe.core.llm.utility_credentials import UtilityCredentialsFactory
 from vibe.core.paths import dedup_paths
 from vibe.core.session.worktrees import (
     CreateNamedWorktree,
@@ -80,8 +81,12 @@ class SessionWorktrees:
         launch_context_getter: Callable[[], LaunchContext | None] | None = None,
         *,
         housekeeping: WorktreeHousekeeping | None = None,
+        naming_credentials: UtilityCredentialsFactory | None = None,
     ) -> None:
-        self._lifecycle = WorktreeLifecycle(launch_context_getter=launch_context_getter)
+        self._lifecycle = WorktreeLifecycle(
+            launch_context_getter=launch_context_getter,
+            naming_credentials=naming_credentials,
+        )
         # None reaps nothing: a released worktree waits for the next sweep.
         self._housekeeping = housekeeping
 

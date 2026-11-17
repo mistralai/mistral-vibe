@@ -1,4 +1,4 @@
-"""Loop completion, bare input, and uppercase aliases remain model-facing prompts."""
+"""Completed bare `/loop` opens the loop manager without a turn; an uppercase alias with arguments stays a model-facing prompt."""
 
 from __future__ import annotations
 
@@ -16,10 +16,7 @@ request_methods = {
 }
 timeline: Timeline = [
     "/loo\t\r",
-    turn_started(),
-    user_msg("/loop"),
-    assistant_msg("What would you like me to repeat?"),
-    turn_completed(),
+    "\x1b",
     "/LOOP LS\r",
     turn_started(),
     user_msg("/LOOP LS"),
@@ -27,4 +24,4 @@ timeline: Timeline = [
     turn_completed(),
 ]
 screen_contains = ("/LOOP LS", "I will check your scheduled tasks.")
-screen_excludes = ("No scheduled loops.", "Usage:", "not implemented")
+screen_excludes = ("What would you like me to repeat?", "Usage:", "not implemented")

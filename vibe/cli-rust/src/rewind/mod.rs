@@ -252,11 +252,13 @@ fn apply_done(
     app.view.transcript.clear();
     // Either rewind mode leaves the harness session without its todo list.
     app.todo_tracker.clear();
+    crate::goal::adopt(app, state.session.goal.clone(), false);
     app.queue.clear();
     app.view.expanded.clear();
     app.view.transcript.load_snapshot(&state);
     crate::worktree::adopt_state(app, &state);
     crate::background_work::adopt_state(app, &state);
+    crate::loops::adopt_state(app, &state);
     app.expand_rebuilt_tools();
     if !inplace {
         local::add_rewind_fork(

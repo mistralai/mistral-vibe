@@ -104,7 +104,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
     if search {
         let target = MouseTarget::Plugins;
         let placeholder = "Search plugins";
-        browser_box::draw_search(
+        super::search_field::draw_under_title(
             app,
             f,
             area,

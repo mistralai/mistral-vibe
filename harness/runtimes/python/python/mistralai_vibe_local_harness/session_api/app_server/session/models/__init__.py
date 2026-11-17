@@ -52,6 +52,7 @@ from .common import (
 from .configuration import (
     AgentConfig,
     AlwaysHookMatcher,
+    BashTimeout,
     BuiltinsConfig,
     CapabilityBindingReference,
     ConnectorAllowlistSelection,
@@ -66,6 +67,7 @@ from .configuration import (
     McpHostSourceConfiguration,
     McpHttpSourceConfiguration,
     McpSourceConfiguration,
+    McpStdioSourceConfiguration,
     MistralConnectorConfiguration,
     PermissionPolicy,
     PermissionRule,
@@ -197,6 +199,7 @@ from .state import (
 __all__ = [
     "AbsolutePath",
     "AgentConfig",
+    "BashTimeout",
     "BuiltinsConfig",
     "ProgrammaticToolCallingConfig",
     "SandboxAccess",
@@ -302,6 +305,7 @@ __all__ = [
     "McpHostSourceConfiguration",
     "McpHttpSourceConfiguration",
     "McpSourceConfiguration",
+    "McpStdioSourceConfiguration",
     "MaterializedSkillDefinition",
     "LocalSkillSourceConfiguration",
     "LocalSkillSourceFile",

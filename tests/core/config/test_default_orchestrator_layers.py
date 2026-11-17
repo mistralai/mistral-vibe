@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import tomllib
 
 import pytest
@@ -408,3 +409,130 @@ class TestSeededShellTimeout:
             match="tools.bash: default_timeout is set without max_timeout_seconds",
         ):
             await build_default_orchestrator()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows refuses to delete the process cwd"
+)
+async def test_builds_from_the_user_config_after_the_process_cwd_is_deleted(
+    config_dir: Path, tmp_working_directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_user_config(config_dir, {"theme": "user-theme"})
+    deleted = tmp_working_directory / "deleted"
+    deleted.mkdir()
+    monkeypatch.chdir(deleted)
+    deleted.rmdir()
+
+    orch = await build_default_orchestrator()
+
+    assert orch.config.theme == "user-theme"
+    assert orch.writable_layer_name == "user-toml"
+
+
+class TestProjectTelemetryCanOnlyTurnOff:
+    @pytest.mark.asyncio
+    async def test_a_project_cannot_turn_telemetry_back_on(
+        self, config_dir: Path, tmp_working_directory: Path
+    ) -> None:
+        _write_user_config(config_dir, {"enable_telemetry": False})
+        _write_project_config(tmp_working_directory, {"enable_telemetry": True})
+        trusted_folders_manager.add_trusted(_project_vibe_dir(tmp_working_directory))
+
+        orch = await build_default_orchestrator()
+
+        assert orch.config.enable_telemetry is False
+        assert orch.config.origin_of("enable_telemetry") == "user-toml"
+        assert any(
+            "enable_telemetry = true" in warning
+            for warning in orch.config.validation_warnings
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_project_opt_in_falls_back_to_the_default(
+        self, config_dir: Path, tmp_working_directory: Path
+    ) -> None:
+        user_config = get_base_config()
+        del user_config["enable_telemetry"]
+        with (config_dir / "config.toml").open("wb") as f:
+            tomli_w.dump(user_config, f)
+        _write_project_config(tmp_working_directory, {"enable_telemetry": True})
+        trusted_folders_manager.add_trusted(_project_vibe_dir(tmp_working_directory))
+
+        orch = await build_default_orchestrator()
+
+        assert orch.config.enable_telemetry is True
+        assert orch.config.origin_of("enable_telemetry") == "default"
+
+    @pytest.mark.asyncio
+    async def test_a_project_can_turn_telemetry_off(
+        self, config_dir: Path, tmp_working_directory: Path
+    ) -> None:
+        _write_user_config(config_dir, {"enable_telemetry": True})
+        _write_project_config(tmp_working_directory, {"enable_telemetry": False})
+        trusted_folders_manager.add_trusted(_project_vibe_dir(tmp_working_directory))
+
+        orch = await build_default_orchestrator()
+
+        assert orch.config.enable_telemetry is False
+        assert orch.config.origin_of("enable_telemetry") == "project-toml"
+        assert not any(
+            "enable_telemetry" in warning for warning in orch.config.validation_warnings
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_environment_still_turns_telemetry_on(
+        self,
+        config_dir: Path,
+        tmp_working_directory: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("VIBE_ENABLE_TELEMETRY", "true")
+        _write_user_config(config_dir, {"enable_telemetry": False})
+        _write_project_config(tmp_working_directory, {"enable_telemetry": False})
+        trusted_folders_manager.add_trusted(_project_vibe_dir(tmp_working_directory))
+
+        orch = await build_default_orchestrator()
+
+        assert orch.config.enable_telemetry is True
+        assert orch.config.origin_of("enable_telemetry") == "environment"
+
+
+class TestAgentProfileTelemetryCanOnlyTurnOff:
+    @staticmethod
+    async def _with_profile(overrides: dict[str, object]):
+        from vibe.core.config.layers.agent_profile import AgentProfileLayer
+
+        orch = await build_default_orchestrator()
+        orch.replace_or_append_layer(
+            AgentProfileLayer.NAME, AgentProfileLayer(data=overrides, profile_name="x")
+        )
+        await orch.reload()
+        return orch
+
+    @pytest.mark.asyncio
+    async def test_an_agent_profile_cannot_turn_telemetry_back_on(
+        self, config_dir: Path
+    ) -> None:
+        _write_user_config(config_dir, {"enable_telemetry": False})
+
+        orch = await self._with_profile({"enable_telemetry": True})
+
+        assert orch.config.enable_telemetry is False
+        assert orch.config.origin_of("enable_telemetry") == "user-toml"
+        assert any(
+            "agent profile sets enable_telemetry = true" in warning
+            for warning in orch.config.validation_warnings
+        )
+
+    @pytest.mark.asyncio
+    async def test_an_agent_profile_can_turn_telemetry_off(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VIBE_ENABLE_TELEMETRY", "true")
+        _write_user_config(config_dir, {"enable_telemetry": True})
+
+        orch = await self._with_profile({"enable_telemetry": False})
+
+        assert orch.config.enable_telemetry is False
+        assert orch.config.origin_of("enable_telemetry") == "agent-profile"

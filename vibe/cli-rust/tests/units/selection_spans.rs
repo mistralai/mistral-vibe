@@ -43,6 +43,7 @@ fn selected_owner(
     let region = match owner {
         RegionId::Main => &mut app.view.selection_region,
         RegionId::Loading => &mut app.view.loading_selection_region,
+        RegionId::Goal => &mut app.view.goal_selection_region,
         RegionId::BottomApp => &mut app.view.bottom_app_selection_region,
     };
     region.area = chat;
@@ -107,6 +108,15 @@ fn frame_regions_select_without_chrome_gaps() {
         false,
     );
     assert_eq!(loading, vec![(0, 0, 8)]);
+    let goal = selected_owner(
+        "▶ Goal Ship it",
+        2,
+        13,
+        Granularity::Char,
+        RegionId::Goal,
+        false,
+    );
+    assert_eq!(goal, vec![(0, 2, 13)]);
 }
 
 #[test]

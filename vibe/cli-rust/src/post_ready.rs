@@ -1,4 +1,4 @@
-//! Post-ready startup work: the account plan and the greeting.
+//! Post-ready startup work: the account plan.
 
 use std::sync::Arc;
 
@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 use crate::app::App;
 use crate::commands::CommandEvent;
 use crate::server::{method, Client};
-use crate::utils::greeting_cache;
 
 /// The `identity` and `account` objects behind the banner and `/whoami`.
 #[derive(Clone, Default)]
@@ -42,10 +41,10 @@ pub fn plan_title(account: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Fetch the account and identity once the session is ready, then hand the
-/// banner its plan title and greeting. Holds the app busy until it lands, so a
+/// Fetch the account and identity once the session is ready, for the banner's
+/// plan title and the `/whoami` cache. Holds the app busy until they land, so a
 /// settled frame never misses them.
-pub fn fetch(app: &mut App, client: &Arc<Client>, show_greeting: bool) {
+pub fn fetch(app: &mut App, client: &Arc<Client>) {
     let (Some(session_id), Some(tx)) = (app.session.session_id.clone(), app.command_tx.clone())
     else {
         return;
@@ -55,27 +54,6 @@ pub fn fetch(app: &mut App, client: &Arc<Client>, show_greeting: bool) {
     let client = client.clone();
     crate::work::spawn(async move {
         let reads = read(&client, &session_id).await;
-        let greeting = reads
-            .as_ref()
-            .filter(|_| show_greeting)
-            .and_then(|reads| greeting(&reads.identity))
-            .filter(|_| greeting_cache::should_show());
-        if greeting.is_some() {
-            greeting_cache::mark_shown();
-        }
-        let _ = tx.try_send(CommandEvent::PostReady {
-            model,
-            reads,
-            greeting,
-        });
+        let _ = tx.try_send(CommandEvent::PostReady { model, reads });
     });
-}
-
-/// The greeting, shown only when identity exposes a first name.
-fn greeting(identity: &Value) -> Option<String> {
-    let username = identity
-        .get("firstName")
-        .and_then(Value::as_str)
-        .filter(|username| !username.is_empty())?;
-    Some(format!("Hello {username}, how can I help you?"))
 }

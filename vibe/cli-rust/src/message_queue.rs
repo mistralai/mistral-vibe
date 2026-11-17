@@ -79,8 +79,8 @@ pub struct QueueController {
     pub(crate) steering: Option<String>,
     /// Retry the requested steer after the latest queue contents are accepted.
     pub(crate) steer_after_replace: bool,
-    /// One prompt submitted while a queue mutation is in flight.
-    pub(crate) deferred_prompt: Option<String>,
+    /// One prompt submitted while a queue mutation is in flight, and whether the queue was held then.
+    pub(crate) deferred_prompt: Option<(String, bool)>,
     /// Whether the server holds the queue until the user resumes it.
     pub paused: bool,
     /// When the user interrupted a turn the server had not started yet.
@@ -113,6 +113,11 @@ impl QueueController {
 
     pub fn len(&self) -> usize {
         self.items.len()
+    }
+
+    /// Whether the queue header offers the paused-queue shortcuts: queue mode rebinds Enter and Up.
+    pub fn header_shortcuts(&self) -> bool {
+        self.paused && self.selected.is_none()
     }
 
     pub(crate) fn promotion_pending(&self, queue_item_id: &str) -> bool {

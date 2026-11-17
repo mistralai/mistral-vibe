@@ -260,7 +260,14 @@ class ToolResultHistoryEntry(HistoryEntryBase):
     type: Literal["tool_result"] = "tool_result"
     tool_call_id: ToolCallId
     name: str | None = None
-    result: JsonValue = None
+    result: JsonValue = Field(
+        default=None,
+        description=(
+            "The tool's result. While the entry is generating, the latest partial result the "
+            "tool reported, if any: each one replaces the previous one, and the completed entry "
+            "carries the final result. The model reads only the final result."
+        ),
+    )
     error: ProtocolError | None = None
     duration_ms: Annotated[int | None, Field(ge=0)] = None
     content: list[ContentBlock] | None = Field(

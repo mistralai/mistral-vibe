@@ -13,9 +13,9 @@ from e2e.app_server.svg import to_svg
 from e2e.pty.screen import Snapshot
 
 
-def normalize_snapshot(snap: Snapshot) -> Snapshot:
+def normalize_snapshot(snap: Snapshot, keep_braille: bool = False) -> Snapshot:
     """Mask volatile cells (version digits, spinner, scrollbar) for stable SVG comparison."""
-    cells = _normalized_cells(snap)
+    cells = _normalized_cells(snap, keep_braille)
     return Snapshot(label=snap.label, cells=tuple(tuple(row) for row in cells))
 
 

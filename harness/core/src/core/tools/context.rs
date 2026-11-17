@@ -7,7 +7,7 @@ use crate::core::hooks::HookPoint;
 use crate::core::hooks::HookToolKey;
 use crate::core::tools::execution::external_call::Admission;
 use crate::core::tools::external::{ExternalTool, ExternalToolCall};
-use crate::core::tools::resolved::ResolvedTools;
+use crate::core::tools::resolved::{EffectiveCall, ResolvedTools};
 use crate::core::tools::result::permission_denied_result;
 use crate::core::wire::tool::ToolCall;
 use serde_json::Value;
@@ -75,7 +75,7 @@ impl<'a> ToolContext<'a> {
         &self,
         original: &ExternalToolCall,
         arguments: Value,
-    ) -> Result<ExternalToolCall, CoreError> {
+    ) -> Result<EffectiveCall, CoreError> {
         self.tools.resolve_effective_call(original, arguments)
     }
 

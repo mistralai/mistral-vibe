@@ -1,0 +1,10 @@
+[
+ {
+  "method": "workspace/prompt/prepare",
+  "params": {
+   "message": "@'/Users/me/Desktop/shot one.png' what is this",
+   "sessionId": "00000000-0000-4000-8000-000000000001",
+   "titleContent": null
+  }
+ }
+]

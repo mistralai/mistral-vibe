@@ -450,6 +450,30 @@ async def test_set_field_keeps_what_another_session_saved_meanwhile(
 
 
 @pytest.mark.asyncio
+async def test_auto_worktree_round_trips_through_the_user_layer(
+    tmp_working_directory: Path,
+) -> None:
+    """The default is False (edit the checkout in place); a set persists in
+    the TOML and reads back the same on a fresh orchestrator.
+    """
+    path = tmp_working_directory / random_config_file_name()
+    orchestrator = await _session_orchestrator(path)
+    assert orchestrator.config.auto_worktree is False
+
+    assert await orchestrator.set_field("/auto_worktree", True) == []
+    assert orchestrator.config.auto_worktree is True
+    with path.open("rb") as file:
+        assert tomllib.load(file) == {"auto_worktree": True}
+
+    reloaded = await _session_orchestrator(path)
+    assert reloaded.config.auto_worktree is True
+    assert await reloaded.set_field("/auto_worktree", False) == []
+    with path.open("rb") as file:
+        assert tomllib.load(file) == {"auto_worktree": False}
+    assert (await _session_orchestrator(path)).config.auto_worktree is False
+
+
+@pytest.mark.asyncio
 async def test_mutate_field_builds_on_what_another_session_saved_meanwhile(
     tmp_working_directory: Path,
 ) -> None:

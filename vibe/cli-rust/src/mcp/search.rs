@@ -3,7 +3,7 @@
 use crossterm::event::KeyEvent;
 
 use crate::app::App;
-use crate::search_field::{self, Outcome};
+use crate::search_field;
 
 use super::reconcile_selection;
 
@@ -20,14 +20,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     if app.mcp.viewing_name.is_some() {
         return false;
     }
-    match search_field::handle_key(&mut app.mcp.search, &key) {
-        Outcome::Pass => false,
-        Outcome::Consumed => true,
-        Outcome::Filtered => {
-            query_changed(app);
-            true
-        }
-    }
+    search_field::handle_key(&mut app.mcp.search, &key).handled(|| query_changed(app))
 }
 
 fn query_changed(app: &mut App) {

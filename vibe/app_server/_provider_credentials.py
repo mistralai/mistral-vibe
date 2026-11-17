@@ -40,7 +40,10 @@ from vibe.utils.oidc_marker import is_oidc_marker
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mistralai_vibe_local_harness.vibe import ProviderRejectionReason
+    from mistralai_vibe_local_harness.vibe import (
+        ProviderAuthReason,
+        ProviderRejectionReason,
+    )
     from vibe.core.config import ProviderConfig, VibeConfigSchema
     from vibe.core.config.orchestrator import ConfigOrchestrator
 
@@ -49,6 +52,13 @@ if TYPE_CHECKING:
 __all__ = ["ProviderCredentialService"]
 
 _BEARER_STYLES = frozenset({"openai", "openai-responses", "reasoning"})
+
+# Read by clients that do not word the ``credential_unavailable`` turn error
+# themselves: the CLI, ACP, and older Desktop builds.
+CREDENTIAL_UNAVAILABLE_MESSAGE = (
+    "Your Mistral sign-in couldn't be checked right now (the computer may be "
+    "asleep or offline). Nothing was sent to the model; retry in a moment."
+)
 
 
 class ProviderCredentialService:
@@ -156,6 +166,12 @@ class ProviderCredentialService:
     async def reject(
         self, *, observed_revision: str, reason: ProviderRejectionReason
     ) -> None:
+        if reason != "http_unauthorized":
+            # Only a 401 refuses the credential. A 403 refuses the account or
+            # the request (a model outside the subscription tier, a key
+            # scope): another model or request may pass with the same
+            # credential, and withholding it would fail every later call.
+            return
         config = self._orchestrator.config
         try:
             provider = self._select_provider(config)
@@ -177,7 +193,7 @@ class ProviderCredentialService:
             # expire between resolution and send.
             return
 
-        if await self._platform_replaced(provider, observed_revision, reason):
+        if await self._platform_replaced(provider, observed_revision):
             # The credential's owner issued a replacement: the next resolution
             # sends it, so there is nothing to withhold.
             return
@@ -191,9 +207,7 @@ class ProviderCredentialService:
         else:
             async with self._lock:
                 self._rejected[provider.name] = observed_revision
-        logger.info(
-            "Provider %s rejected the active credential (%s)", provider.name, reason
-        )
+        logger.info("Provider %s rejected the active credential", provider.name)
 
     async def _current_snapshot(
         self, provider: ProviderConfig
@@ -252,18 +266,14 @@ class ProviderCredentialService:
         )
 
     async def _platform_replaced(
-        self,
-        provider: ProviderConfig,
-        observed_revision: str,
-        reason: ProviderRejectionReason,
+        self, provider: ProviderConfig, observed_revision: str
     ) -> bool:
         """Report a 401 to the platform credential that was sent; whether its
         owner answered with a replacement.
         """
         source = self._platform_sources.get(provider.name)
         if (
-            reason != "http_unauthorized"
-            or self._platform_credentials is None
+            self._platform_credentials is None
             or source is None
             or source[0] != observed_revision
         ):
@@ -322,6 +332,7 @@ def _credential_required(
         )
     if not user_token and reason not in {"expired", "reauthentication_required"}:
         return None
+    auth_reason: ProviderAuthReason = "missing"
     match reason:
         case "rejected":
             return ProviderAuthRequired(
@@ -336,10 +347,11 @@ def _credential_required(
                 message="Your Mistral sign-in has expired. Sign in again and retry.",
             )
         case "transient":
-            message = (
-                "Your Mistral sign-in could not be checked. "
-                "Retry, or sign in again if this persists."
-            )
+            # Nothing says the sign-in is bad: the credential's owner could
+            # not answer, as while the computer sleeps. The Harness waits a
+            # while for it before failing the turn as one worth retrying.
+            auth_reason = "unavailable"
+            message = CREDENTIAL_UNAVAILABLE_MESSAGE
         case "invalid":
             message = (
                 f"Your Mistral sign-in cannot be used for {provider.api_base}. "
@@ -348,7 +360,7 @@ def _credential_required(
         case "missing":
             message = "You are not signed in to Mistral. Sign in and retry."
     return ProviderAuthRequired(
-        reason="missing", provider=provider.name, message=message
+        reason=auth_reason, provider=provider.name, message=message
     )
 
 

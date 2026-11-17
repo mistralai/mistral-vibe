@@ -1,14 +1,25 @@
-//! Model-facing loop prompts retain their text and built-in discovery.
+//! Bare `/loop` opens the local loop manager; every form with arguments stays a model-facing prompt.
 
 use vibe_rs::commands::{argument_hint, entries, is_side_channel, parse};
 use vibe_rs::input_modes::{classify, ClassifiedInput};
 use vibe_rs::skill::Skill;
 
 #[test]
-fn every_loop_form_is_a_verbatim_prompt_not_a_local_command_or_skill() {
+fn bare_loop_is_the_local_manager_even_beside_a_conflicting_skill() {
+    let skills = [Skill::new("loop", "A conflicting skill")];
+    for text in ["/loop", "/LOOP", " /loop\t "] {
+        assert_eq!(
+            classify(text, &skills),
+            ClassifiedInput::SlashCommand { command: "/loop" },
+            "{text:?}"
+        );
+    }
+}
+
+#[test]
+fn every_loop_form_with_arguments_is_a_verbatim_prompt_not_a_local_command_or_skill() {
     let skills = [Skill::new("loop", "A conflicting skill")];
     for text in [
-        "/loop",
         "/loop list",
         "/loop LS",
         "/loop cancel",
@@ -35,7 +46,7 @@ fn every_loop_form_is_a_verbatim_prompt_not_a_local_command_or_skill() {
 }
 
 #[test]
-fn loop_remains_a_discoverable_builtin_not_a_side_channel() {
+fn loop_is_a_discoverable_side_channel_builtin() {
     assert_eq!(
         entries(&[], |_| true)
             .iter()
@@ -49,7 +60,8 @@ fn loop_remains_a_discoverable_builtin_not_a_side_channel() {
         .unwrap()
         .description;
     assert!(description.contains("/loop [schedule] [prompt]"));
-    assert!(!is_side_channel("/loop"));
+    // The manager opens while a turn runs; arguments still queue as a prompt.
+    assert!(is_side_channel("/loop"));
 }
 
 #[test]

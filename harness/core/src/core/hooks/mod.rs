@@ -2,9 +2,11 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
+mod invalid_arguments;
 mod result_consistency;
 mod tool_identity;
 
+pub(crate) use invalid_arguments::invalid_pre_tool_call_arguments;
 pub(crate) use result_consistency::post_tool_call_warning;
 pub(crate) use tool_identity::{HookToolKey, HookToolTarget};
 
@@ -88,6 +90,9 @@ pub(crate) enum HookCall {
     PostToolCall {
         tool_call: HookToolCall,
         tool_result: ToolResult,
+        /// Host time between the step that dispatched the tool Action and the
+        /// step that applied its result; 0 when Host time went backwards.
+        duration_ms: u64,
     },
 }
 

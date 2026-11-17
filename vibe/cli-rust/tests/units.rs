@@ -81,6 +81,10 @@ mod composer_mentions;
 mod composer_model_click;
 #[path = "units/composer_pastes.rs"]
 mod composer_pastes;
+#[path = "units/composer_stash_hint.rs"]
+mod composer_stash_hint;
+#[path = "units/composer_stash_recall.rs"]
+mod composer_stash_recall;
 #[path = "units/composer_yank.rs"]
 mod composer_yank;
 #[path = "units/config_filter.rs"]
@@ -129,6 +133,8 @@ mod file_index_metrics;
 mod file_index_rescan_ignore;
 #[path = "units/file_mention_matching.rs"]
 mod file_mention_matching;
+#[path = "units/file_mention_unicode.rs"]
+mod file_mention_unicode;
 #[path = "units/focus.rs"]
 mod focus;
 #[path = "units/fold_clicks.rs"]
@@ -139,6 +145,16 @@ mod footer_gauge;
 mod foreign_session;
 #[path = "units/frames_oversized.rs"]
 mod frames_oversized;
+#[path = "units/goal.rs"]
+mod goal;
+#[path = "units/goal_edit_save.rs"]
+mod goal_edit_save;
+#[path = "units/goal_notice.rs"]
+mod goal_notice;
+#[path = "units/goal_panels.rs"]
+mod goal_panels;
+#[path = "units/goal_turn_end.rs"]
+mod goal_turn_end;
 #[path = "units/headless_cli_flags.rs"]
 mod headless_cli_flags;
 #[path = "units/headless_logic.rs"]
@@ -159,6 +175,8 @@ mod hints;
 mod history_loading;
 #[path = "units/history_wrapped_recall.rs"]
 mod history_wrapped_recall;
+#[path = "units/hook_notices.rs"]
+mod hook_notices;
 #[path = "units/image_placeholders.rs"]
 mod image_placeholders;
 #[path = "units/image_prompt.rs"]
@@ -191,12 +209,18 @@ mod linked_lines_gaps;
 mod list_nav;
 #[path = "units/list_scroll.rs"]
 mod list_scroll;
+#[path = "units/literal_image_paste.rs"]
+mod literal_image_paste;
 #[path = "units/loading_frames.rs"]
 mod loading_frames;
 #[path = "units/loading_startup.rs"]
 mod loading_startup;
 #[path = "units/long_paste.rs"]
 mod long_paste;
+#[path = "units/loops.rs"]
+mod loops;
+#[path = "units/loops_form.rs"]
+mod loops_form;
 #[path = "units/markdown_cache.rs"]
 mod markdown_cache;
 #[path = "units/markdown_links.rs"]
@@ -369,6 +393,8 @@ mod resume_picker_exits;
 mod resume_picker_list;
 #[path = "units/resume_picker_outcomes.rs"]
 mod resume_picker_outcomes;
+#[path = "units/resume_picker_resuming.rs"]
+mod resume_picker_resuming;
 #[path = "units/retry_presentation.rs"]
 mod retry_presentation;
 #[path = "units/reverse_search.rs"]
@@ -419,6 +445,8 @@ mod setup_welcome_gate;
 mod setup_wire;
 #[path = "units/shell_submission.rs"]
 mod shell_submission;
+#[path = "units/shift_tab.rs"]
+mod shift_tab;
 #[path = "units/skill.rs"]
 mod skill;
 #[path = "units/skill_mention_completion.rs"]
@@ -467,6 +495,10 @@ mod startup_resume_intent;
 mod sticky_prompt;
 #[path = "units/sticky_prompt_hover.rs"]
 mod sticky_prompt_hover;
+#[path = "units/storage_flag.rs"]
+mod storage_flag;
+#[path = "units/storage_panel.rs"]
+mod storage_panel;
 #[path = "units/stress_command.rs"]
 mod stress_command;
 #[path = "units/system_proxy.rs"]
@@ -514,6 +546,8 @@ mod transcript_images;
 mod transcript_patch;
 #[path = "units/transcript_tool_group.rs"]
 mod transcript_tool_group;
+#[path = "units/trusted_folders_add.rs"]
+mod trusted_folders_add;
 #[path = "units/tts_request.rs"]
 mod tts_request;
 #[path = "units/turn_counter.rs"]

@@ -38,10 +38,10 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 Then, in a new terminal:
 
 ```powershell
-uv tool install mistral-vibe
+uv tool install --python 3.14 mistral-vibe
 ```
 
-If you already use uv, `uv tool install mistral-vibe` works on any platform.
+If you already use uv, `uv tool install --python 3.14 mistral-vibe` works on any platform.
 
 Once installed, run `vibe` in your project and sign in with your Mistral account or an API key. Type `/help` to see every command.
 
@@ -50,7 +50,9 @@ Once installed, run `vibe` in your project and sign in with your Mistral account
 
 If a new terminal says `vibe` is not found, run `uv tool update-shell` and open a new terminal.
 
-Vibe needs a GIL-enabled build of Python 3.12 or later. If you have a free-threaded (no-GIL) Python and the install fails, use the GIL build of Python 3.14:
+`--python 3.14` keeps uv off Python versions some of Vibe's dependencies don't ship wheels for yet, such as 3.15. uv downloads Python 3.14 if you don't have it. If an existing install hangs or fails while upgrading, the install is likely running on such a Python version; reinstall it on 3.14 with `uv tool install --force --python 3.14 mistral-vibe`.
+
+Vibe needs a GIL-enabled build of Python 3.12 or later. If uv still picks a free-threaded (no-GIL) Python and the install fails, use the GIL build of Python 3.14:
 
 ```bash
 uv python install cpython-3.14

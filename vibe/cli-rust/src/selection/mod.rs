@@ -7,6 +7,8 @@ mod flow;
 pub mod fold;
 mod gesture;
 pub mod region;
+mod row_ranges;
+mod snap;
 mod table;
 
 pub use bottom_bar::BottomBarSelection;

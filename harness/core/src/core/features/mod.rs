@@ -7,6 +7,8 @@ pub(super) mod notifications;
 pub(super) mod output_limit_recovery;
 pub(super) mod permissions;
 pub(super) mod programmatic_tool_calling;
+pub(super) mod repeated_tool_failure;
+pub(super) mod sign_in;
 pub(super) mod skills;
 pub(super) mod subagents;
 pub(super) mod tool_discovery;

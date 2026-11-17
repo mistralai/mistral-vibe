@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from http import HTTPStatus
 import json
 import logging
@@ -27,6 +27,7 @@ from mistralai_vibe_local_harness.protocol import (
 from mistralai_vibe_local_harness.vibe._completion_budget import (
     CompletionBudgetAccountingDeferred,
 )
+from mistralai_vibe_local_harness.vibe._credential_wait import resolve_credential
 from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderAuthRequired,
     ProviderCredentialResult,
@@ -71,6 +72,10 @@ from mistralai_vibe_local_harness.vibe.completion_profile import (
 )
 
 logger = logging.getLogger(__name__)
+
+# The failure code of a model call whose credential the Host could not check
+# within ``LocalRuntimeAdapterConfig.credential_wait_s``.
+CREDENTIAL_UNAVAILABLE_CODE = "model_credential_unavailable"
 
 # Stable user-facing message for a rejected credential. The Host authentication
 # contract asserts this value character-for-character.
@@ -230,17 +235,15 @@ async def execute_completion(
 ) -> RustCompletionSucceededEvent | RustCompletionFailedEvent:
     turn_id = action.turn_id
 
-    compaction = action.purpose == "compaction"
+    route = request_route(action, config)
+    request_config = _request_config(action, config, route)
     # A standalone compaction request carries the history as a transcript and
     # runs without tools and without reasoning, so it shares nothing with the
     # in-context request that failed and cannot be answered from its cache.
-    standalone = compaction and action.request == "standalone"
-    route = request_route(action, config)
-    request_config = _request_config(action, config, route)
-    if standalone:
+    if action.purpose == "compaction" and action.request == "standalone":
         tools = []
     try:
-        credential: ProviderCredentialResult = await config.credentials.resolve()
+        credential = await _wait_for_credential(config, turn_id, retry_sink)
     except Exception as exc:
         # A resolver is not allowed to fail the turn with an untyped error.
         return _logged_failure(
@@ -299,40 +302,35 @@ async def execute_completion(
     )
     malformed = MalformedToolCalls()
     succeeded = False
+    # The credential the request carries; a refused one may be replaced once.
+    sent = _SentCredential(credential)
     try:
-        if config.backend == "mistral":
-            # Compaction streams too, although nothing is published from it: a
-            # long summary sent as one plain response transfers no bytes until
-            # it is complete, and proxies that close idle connections cut it.
-            result = await execute_mistral_completion(
+        result = await _call_with_replay(
+            lambda current: _call_provider(
+                action,
                 messages,
                 tools,
                 request_config,
-                credential,
+                current,
                 route,
-                stream=True,
-                metadata=(
-                    config.completion_metadata(action.purpose, action.iteration)
-                    if config.completion_metadata is not None
-                    else None
-                ),
                 on_retry=retry_observer,
                 on_delta=on_delta,
                 malformed=malformed,
-            )
-        elif config.backend == "generic":
-            result = await execute_generic_completion(
-                messages,
-                tools,
-                request_config,
-                credential,
-                route=route,
-                on_retry=retry_observer,
-                on_delta=on_delta,
-                malformed=malformed,
-            )
-        else:
-            raise ValueError(f"Unsupported completion backend: {config.backend}")
+            ),
+            sent,
+            lambda exc: _replacement_after_refusal(
+                action,
+                exc,
+                config,
+                sent.credential,
+                route,
+                retry_sink,
+                elapsed_s=time.perf_counter() - started,
+            ),
+            on_replay=lambda: _before_replay(emitter, reasoning_watch, on_retry),
+        )
+        if isinstance(result, RustCompletionFailedEvent):
+            return result
         succeeded = True
     except CompactionReasoningLimitExceeded as stopped:
         succeeded = True
@@ -349,7 +347,7 @@ async def execute_completion(
             action,
             exc,
             config,
-            credential,
+            sent.credential,
             route,
             elapsed_s=time.perf_counter() - started,
         )
@@ -366,6 +364,182 @@ async def execute_completion(
     return RustCompletionSucceededEvent(action_id=action.action_id, result=result)
 
 
+@dataclass(slots=True)
+class _SentCredential:
+    """The credential the current request carries."""
+
+    credential: ProviderCredentialSnapshot
+
+
+async def _call_with_replay(
+    call: Callable[[ProviderCredentialSnapshot], Awaitable[RustCompletionResult]],
+    sent: _SentCredential,
+    replacement_after_refusal: Callable[
+        [Exception], Awaitable[ProviderCredentialSnapshot | RustCompletionFailedEvent]
+    ],
+    *,
+    on_replay: Callable[[], Awaitable[None]],
+) -> RustCompletionResult | RustCompletionFailedEvent:
+    """Run ``call``, replaying it once with a replacement credential when the
+    provider refuses the one it sent with HTTP 401.
+
+    Any other failure, and a refusal of the replay, propagates.
+    """
+    try:
+        return await call(sent.credential)
+    except Exception as exc:
+        if credential_rejection(read_provider_failure(exc)) != "http_unauthorized":
+            raise
+        replacement = await replacement_after_refusal(exc)
+    if isinstance(replacement, RustCompletionFailedEvent):
+        return replacement
+    await on_replay()
+    sent.credential = replacement
+    return await call(replacement)
+
+
+async def _before_replay(
+    emitter: _ProvisionalDeltaEmitter | None,
+    reasoning_watch: _ReasoningWatch | None,
+    on_retry: Callable[[ProviderRetry | None], Awaitable[None]],
+) -> None:
+    """Withdraw a refused attempt's output before its replay, as a retry does,
+    and the retry notice it may have left up: a retry that ends in a refusal
+    is never recovered, so nothing else clears it.
+    """
+    if emitter is not None:
+        await emitter.restart()
+    if reasoning_watch is not None:
+        reasoning_watch.restart()
+    await on_retry(None)
+
+
+async def _call_provider(
+    action: RustLLMCallAction,
+    messages: list[RustMessage],
+    tools: list[RustToolDefinition],
+    request_config: LocalRuntimeAdapterConfig,
+    credential: ProviderCredentialSnapshot,
+    route: LocalModelRoute,
+    *,
+    on_retry: Callable[[ProviderRetry | None], Awaitable[None]] | None,
+    on_delta: Callable[[ProviderStreamDelta], Awaitable[None]] | None,
+    malformed: MalformedToolCalls,
+) -> RustCompletionResult:
+    """Run the completion on the configured backend with ``credential``."""
+    if request_config.backend == "mistral":
+        # Compaction streams too, although nothing is published from it: a
+        # long summary sent as one plain response transfers no bytes until
+        # it is complete, and proxies that close idle connections cut it.
+        return await execute_mistral_completion(
+            messages,
+            tools,
+            request_config,
+            credential,
+            route,
+            stream=True,
+            metadata=(
+                request_config.completion_metadata(action.purpose, action.iteration)
+                if request_config.completion_metadata is not None
+                else None
+            ),
+            on_retry=on_retry,
+            on_delta=on_delta,
+            malformed=malformed,
+        )
+    if request_config.backend == "generic":
+        return await execute_generic_completion(
+            messages,
+            tools,
+            request_config,
+            credential,
+            route=route,
+            on_retry=on_retry,
+            on_delta=on_delta,
+            malformed=malformed,
+        )
+    raise ValueError(f"Unsupported completion backend: {request_config.backend}")
+
+
+async def _replacement_after_refusal(
+    action: RustLLMCallAction,
+    exc: Exception,
+    config: LocalRuntimeAdapterConfig,
+    sent: ProviderCredentialSnapshot,
+    route: LocalModelRoute,
+    retry_sink: Callable[[str, ProviderRetry | None], Awaitable[None]] | None,
+    *,
+    elapsed_s: float,
+) -> ProviderCredentialSnapshot | RustCompletionFailedEvent:
+    """The credential to replay a request the provider refused with HTTP 401,
+    or the call's failure when there is none.
+
+    A credential can expire while its request is in flight, for example when
+    the computer sleeps during a long stream and the retry after the wake
+    sends it again. Its owner may already hold a replacement, or issue one
+    when told of the refusal. Only a credential whose revision changed is
+    replayed, and only once: an unchanged credential, such as a static API
+    key, or a second refusal fails the call as before. A replacement that
+    stays unavailable past the wait fails it as retryable.
+    """
+    await config.credentials.reject(
+        observed_revision=sent.revision, reason="http_unauthorized"
+    )
+    try:
+        replacement = await _wait_for_credential(config, action.turn_id, retry_sink)
+    except Exception:
+        logger.warning("Could not resolve a replacement credential", exc_info=True)
+        replacement = None
+    if (
+        isinstance(replacement, ProviderCredentialSnapshot)
+        and replacement.revision != sent.revision
+    ):
+        logger.info(
+            "Provider refused credential revision %s; replaying the request once "
+            "with revision %s (turn_id=%s action_id=%s)",
+            sent.revision,
+            replacement.revision,
+            action.turn_id,
+            action.action_id,
+        )
+        return replacement
+    if isinstance(replacement, ProviderAuthRequired) and replacement.reason == (
+        "unavailable"
+    ):
+        failure_event = _auth_required_event(action, replacement)
+    else:
+        failure_event = _unauthorized_event(
+            action,
+            "http_unauthorized",
+            sent.api_key_source,
+            details=_failure_details(action, config.provider, route, exc),
+            failure=read_provider_failure(exc),
+        )
+    return _logged_failure(action, failure_event, cause=exc, elapsed_s=elapsed_s)
+
+
+async def _wait_for_credential(
+    config: LocalRuntimeAdapterConfig,
+    turn_id: str | None,
+    retry_sink: Callable[[str, ProviderRetry | None], Awaitable[None]] | None,
+) -> ProviderCredentialResult:
+    """Resolve the call's credential, showing a wait for an unchecked one as a
+    retry of the turn.
+    """
+
+    async def notice(retry: ProviderRetry | None) -> None:
+        if retry_sink is None or turn_id is None:
+            return
+        try:
+            await retry_sink(turn_id, retry)
+        except Exception:
+            logger.warning("Could not report the credential wait", exc_info=True)
+
+    return await resolve_credential(
+        config.credentials, wait_s=config.credential_wait_s, notices=notice
+    )
+
+
 async def _call_failure(
     action: RustLLMCallAction,
     exc: Exception,
@@ -376,16 +550,17 @@ async def _call_failure(
     elapsed_s: float,
 ) -> RustCompletionFailedEvent:
     """Type a provider call's failure, and report a refused credential."""
-    rejection = credential_rejection(read_provider_failure(exc))
+    failure = read_provider_failure(exc)
+    rejection = credential_rejection(failure)
     if rejection is None:
-        failure = (
+        failure_event = (
             _refusal_event(action, exc, provider=config.provider, route=route)
             if isinstance(exc, ProviderRefusal)
             else _stream_failed_event(
                 action, exc, provider=config.provider, route=route
             )
         )
-        return _logged_failure(action, failure, cause=exc, elapsed_s=elapsed_s)
+        return _logged_failure(action, failure_event, cause=exc, elapsed_s=elapsed_s)
     # Tell the credential's owner what the borrower observed, so the
     # material just refused is not re-sent on the next turn.
     await config.credentials.reject(
@@ -398,6 +573,7 @@ async def _call_failure(
             rejection,
             credential.api_key_source,
             details=_failure_details(action, config.provider, route, exc),
+            failure=failure,
         ),
         cause=exc,
         elapsed_s=elapsed_s,
@@ -708,15 +884,32 @@ def credential_rejection(failure: ProviderFailure) -> ProviderRejectionReason | 
 def _auth_required_event(
     action: RustLLMCallAction, credential: ProviderAuthRequired
 ) -> RustCompletionFailedEvent:
+    # A credential that could not be checked is not a bad one: nothing was
+    # sent, and the same request may pass once the Host can answer.
+    unavailable = credential.reason == "unavailable"
     return RustCompletionFailedEvent(
         action_id=action.action_id,
         error=RustProtocolError(
-            code="model_unauthorized",
+            code=CREDENTIAL_UNAVAILABLE_CODE if unavailable else "model_unauthorized",
             message=credential.message,
-            retryable=False,
+            retryable=unavailable,
             details={"provider": credential.provider, "reason": credential.reason},
         ),
     )
+
+
+def _refused_request_message(failure: ProviderFailure) -> str:
+    """The sentence for a request the provider refused without blaming the key.
+
+    HTTP 403 covers causes a retry without a new key can only repeat -- a
+    subscription tier without the model, an org restricted from a feature --
+    and the provider's own body says which. Without one, the failure's
+    rendered message is whatever the transport felt like saying, so a fixed
+    sentence keeps the refusal distinguishable from other errors.
+    """
+    if failure.explanation:
+        return f"The model provider refused this request: {failure.explanation}"
+    return "The model provider refused this request (HTTP 403)."
 
 
 def _unauthorized_event(
@@ -725,15 +918,21 @@ def _unauthorized_event(
     api_key_source: str | None,
     *,
     details: JsonObject,
+    failure: ProviderFailure,
 ) -> RustCompletionFailedEvent:
-    # Only a 401 says the credential itself was refused. A 403 is a permission
-    # problem, so naming the variable the key came from would misdirect.
+    # Only a 401 says the credential itself was refused, so only its message
+    # names or blames the key. A 403 is the provider refusing the account or
+    # the request, and the provider's own explanation names the real cause.
     refused_key = api_key_source if reason == "http_unauthorized" else None
     return RustCompletionFailedEvent(
         action_id=action.action_id,
         error=RustProtocolError(
             code="model_unauthorized",
-            message=invalid_api_key_message(refused_key),
+            message=(
+                invalid_api_key_message(refused_key)
+                if reason == "http_unauthorized"
+                else _refused_request_message(failure)
+            ),
             retryable=False,
             details=details | {"reason": reason},
         ),
@@ -777,19 +976,32 @@ def _stream_failed_event(
     provider: str,
     route: LocalModelRoute,
 ) -> RustCompletionFailedEvent:
-    failure = read_provider_failure(exc)
+    code, message = _stream_failure(read_provider_failure(exc))
     return RustCompletionFailedEvent(
         action_id=action.action_id,
         error=RustProtocolError(
-            # A prompt over the model's window fails the same way on every retry.
-            code="context_overflow"
-            if failure.context_overflow
-            else "model_stream_failed",
-            message=failure.message,
+            code=code,
+            message=message,
             retryable=False,
             details=_failure_details(action, provider, route, exc),
         ),
     )
+
+
+def _stream_failure(failure: ProviderFailure) -> tuple[str, str]:
+    """The failure code, and the sentence the user reads."""
+    # A prompt over the model's window fails the same way on every retry.
+    if failure.context_overflow:
+        return "context_overflow", failure.message
+    # A refused payment holds until the account can pay again, so another
+    # attempt fails the same way. The provider's own sentence says why and when
+    # that changes; the status line and raw body around it would bury it.
+    if (
+        failure.response is not None
+        and failure.response.status == HTTPStatus.PAYMENT_REQUIRED
+    ):
+        return "model_billing_denied", failure.explanation or failure.message
+    return "model_stream_failed", failure.message
 
 
 def _refusal_event(
@@ -838,6 +1050,7 @@ def _failure_details(
 
 
 __all__ = [
+    "CREDENTIAL_UNAVAILABLE_CODE",
     "INVALID_API_KEY_MESSAGE",
     "CompactionReasoningLimitExceeded",
     "credential_rejection",

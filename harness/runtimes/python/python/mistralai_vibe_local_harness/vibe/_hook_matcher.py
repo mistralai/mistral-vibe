@@ -34,14 +34,6 @@ from mistralai_vibe_local_harness.protocol import (
     RustProvidedToolCall,
 )
 
-# The Core rejects a ``tool_keys`` selector at these points, so they cannot be scoped
-# by tool. ``pre_agent_turn`` and ``post_agent_turn`` take a ``match`` that selects the
-# agent whose turn it is, applied by the Runtime at call time.
-_UNMATCHABLE_LIFECYCLE_POINTS: frozenset[RustHookPoint] = frozenset({
-    "pre_llm_call",
-    "post_llm_call",
-})
-
 _MATCH_ALL = "*"
 _REGEX_PREFIX = "re:"
 
@@ -93,6 +85,7 @@ __all__ = [
     "compile_selector",
     "is_unscoped",
     "match_predicate",
+    "model_called_tool_name",
     "qualified_tool_name",
     "selects_agent",
     "selects_tool",
@@ -104,6 +97,19 @@ def qualified_tool_name(call: RustExternalToolCall) -> str:
     if isinstance(call, RustProvidedToolCall):
         return f"{call.group_name}.{call.tool_name}"
     return call.name
+
+
+def model_called_tool_name(name: str) -> str:
+    """The qualified name of a builtin the model called by its model name (``bash``
+    is ``file_system.bash``); any other name as the model wrote it.
+
+    A model response names tools the way the model saw them, which for a builtin
+    is neither its qualified name nor its leaf (see ``_BUILTIN_MODEL_NAMES``).
+    """
+    for qualified, names in _BUILTIN_MODEL_NAMES.items():
+        if name in names:
+            return qualified
+    return name
 
 
 def match_predicate(match: str | None) -> Callable[[str], bool]:
@@ -166,8 +172,11 @@ def selects_agent(match: str | None, name: str | None, *, main: bool) -> bool:
 def compile_selector(
     point: RustHookPoint, match: str | None
 ) -> RustHarnessHookSelector:
-    if point in _UNMATCHABLE_LIFECYCLE_POINTS and match is not None:
-        raise ValueError(f"lifecycle hook point {point!r} cannot declare a match")
+    """Every hook binds ``always``: its ``match`` applies at call time, against the
+    called tool or, at a lifecycle point (where the Core refuses a ``tool_keys``
+    selector), the agent whose turn it is.
+    """
+    del point, match
     return RustAlwaysHookSelector()
 
 

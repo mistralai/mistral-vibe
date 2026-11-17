@@ -176,7 +176,7 @@ fn cut_share(canonical: &[StoredMessage], token_threshold: u64) -> u64 {
         budget(None).image_cost,
     )
     .expect("the carry is collected");
-    let mut minimal = head(system("agent system prompt"), &carried, &note);
+    let mut minimal = rebuilt_history_head(system("agent system prompt"), &carried, &note);
     minimal.push(view_message(&prompts().reduced_view_omitted));
     (token_threshold - size(&minimal) - 1) * TRUNCATED_SUMMARY_SHARE / 100
 }
@@ -234,7 +234,7 @@ fn the_carry_is_at_most_a_quarter_of_the_room_and_at_most_20k_tokens() {
     assert!(carried.contains(TRUNCATION_MARKER_END));
     assert!(text_tokens(&carried) <= USER_CARRY_TOKENS as u64 + 20);
 
-    let preamble = size(&head(system("agent system prompt"), &[], "")[..2]);
+    let preamble = size(&rebuilt_history_head(system("agent system prompt"), &[], "")[..2]);
     let rebuilt = rebuild(&canonical, "summary", Some(40_000)).expect("the rebuild fits");
     let carried = text(&rebuilt.messages[2]);
     assert!(carried.starts_with("Fix the parser"));
@@ -391,6 +391,7 @@ fn the_exchange_is_reduced_before_the_later_messages() {
         &Reduction {
             reduced_messages: 3,
             view: "clipped",
+            turn_message_reduced: true,
         }
     );
     assert!(rebuilt.summary_cut.is_none());
@@ -418,6 +419,7 @@ fn later_messages_are_reduced_when_the_exchange_alone_is_not_enough() {
         &Reduction {
             reduced_messages: 4,
             view: "clipped",
+            turn_message_reduced: true,
         }
     );
     let view = text(rebuilt.messages.last().expect("the view"));
@@ -438,6 +440,7 @@ fn a_summary_too_long_for_the_room_is_cut_to_the_share_at_a_line_end_with_the_no
         &Reduction {
             reduced_messages: 4,
             view: OMITTED_LEVEL,
+            turn_message_reduced: true,
         }
     );
     assert_eq!(
@@ -524,7 +527,7 @@ fn a_huge_task_message_keeps_its_carry_and_the_new_tool_results_give_way() {
         result("call-2", "grep", "d".repeat(100_000)),
         user("also check the tests"),
     ];
-    let preamble = size(&head(system("agent system prompt"), &[], "")[..2]);
+    let preamble = size(&rebuilt_history_head(system("agent system prompt"), &[], "")[..2]);
     let quarter = (60_000 - preamble) / 4;
 
     let rebuilt = rebuild(&canonical, "summary", Some(60_000)).expect("the rebuild fits");
@@ -570,7 +573,11 @@ fn a_compaction_that_may_start_fits_any_summary() {
     let canonical = history("Fix the parser", "also check the tests");
     let prompts = prompts();
     let long_summary = summary_lines(5_000);
-    let start = size(&head(system("agent system prompt"), &[], ""));
+    let start = size(&rebuilt_history_head(
+        system("agent system prompt"),
+        &[],
+        "",
+    ));
     // The tightest thresholds that let a compaction start.
     let mut started = 0;
     for token_threshold in start..start + 2_000 {

@@ -412,7 +412,7 @@ fn toggling_tools_collapses_the_viewed_children_group_cache() {
     vibe_rs::subagents::show_subagent_chat(&mut app, "a");
     {
         let child = app.subagents.transcripts.child_mut("a").unwrap();
-        child.cache.ensure_context(40, 40, 0, false);
+        child.cache.ensure_context(40, 40, 0, false, false);
         child.cache.store_layout(
             child.transcript.revision(),
             40,
@@ -497,7 +497,7 @@ fn copying_a_child_view_selection_extracts_the_child_transcript() {
     vibe_rs::subagents::show_subagent_chat(&mut app, "a");
     {
         let child = app.subagents.transcripts.child_mut("a").unwrap();
-        child.cache.ensure_context(40, 40, 0, false);
+        child.cache.ensure_context(40, 40, 0, false, false);
         child.cache.store_layout(
             child.transcript.revision(),
             40,

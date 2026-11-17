@@ -22,9 +22,11 @@ The effective order is:
    a user's `false` keeps the catalog off. While that flag is on, this layer
    leaves out the two older model flags: `vibe_cli_extra_models`, which adds
    models, and `vibe_cli_default_routing_model`, which adds a model and makes
-   it the default (the "routed default"). The catalog lists its own models and
-   recommends its own default; when it supplies none, the built-in models
-   remain. The `vibe_cli_model_catalog_filter` flag filters the catalog's
+   it the default (the "routed default"). While those flags list at least one
+   model, the built-in models from layer 1 are not available, as under a
+   catalog listing models. The catalog lists its own models and recommends its
+   own default; when neither it nor those flags supply a model, the built-in
+   models (Mistral Large 4, then Mistral Medium 3.5) remain. The `vibe_cli_model_catalog_filter` flag filters the catalog's
    data before the merge, as if the catalog itself had sent it filtered:
    `hide` drops models, `order` lists ids first in the picker, `default`
    picks the default, and `settings` sets per-model fields (request settings,
@@ -60,6 +62,17 @@ strategies (`REPLACE` / `UNION` / `CONCAT` / `SHALLOW` / `DEEP`) decide how
 overlapping fields combine, with the project layer taking priority. An untrusted
 or absent project layer is skipped from the merge by the builder while the user
 layer still contributes.
+
+One exception: a project config or an agent profile may turn usage telemetry
+off, never on. Their `enable_telemetry = true` is dropped before the merge, so
+the value falls back to the layers below them (the user config, then the
+default), and the config carries a validation warning naming the source;
+`enable_telemetry = false` is honoured. A cloned repository's
+`.vibe/config.toml` or `.vibe/agents/*.toml` therefore cannot undo the user's
+opt-out. The rule applies to every agent profile, the user's own included.
+The environment and the org admin config still decide above the project
+config; an agent profile's `false` wins over the environment, as any profile
+value does.
 
 The default write target is selected from the installed layers:
 
@@ -100,8 +113,9 @@ resolved to that model's ID. An `active_model` absent from the merged model
 list is then normalized to the empty, unpinned sentinel. Default resolution
 then applies: the GrowthBook routed default (absent while the
 `vibe_cli_model_catalog` flag is on), then the catalog filter's `default`, then
-the model catalog's recommendation, then the first available model (the
-built-in default only when no catalog model is available), each skipped when
+the model catalog's recommendation, then the built-in default Mistral Large 4
+(available only while neither the catalog nor a GrowthBook model flag lists
+models), then the first available model, each skipped when
 `allowed_models` excludes it. The
 invalid source value is left untouched and reported as a validation warning
 that names no cause.
@@ -120,6 +134,38 @@ active model: compaction rides the active model's connection, so it has no route
 to a second provider. The source value is left untouched and reported as a
 validation warning rather than rejected, so a model pick, including a restored
 session pin, never fails on it.
+
+A model's automatic compaction threshold is resolved in this order:
+
+1. the model's own `auto_compact_threshold` (a field of its `[models.<id>]`
+   entry), from the highest of the layers listed above that sets one on that
+   model;
+2. the top-level `auto_compact_threshold`, from the highest layer that sets it;
+3. neither: the session derives one from the model's context window.
+
+A top-level threshold never replaces a model's own, whichever layer sets it,
+the admin config included: since the model catalog sets a threshold on most
+models, a top-level admin value reaches only the models it leaves without one.
+To apply one value to every model, an admin sets it on each model, with an entry
+naming the model by its catalog ID and its provider (the managed-config form
+accepts no entry without `provider`):
+
+```toml
+[[models]]
+name = "mistral-large-4-0"
+provider = "mistral"
+auto_compact_threshold = 200000
+```
+
+The catalog's other values for that model stay; the model picker lists it
+under the admin's models. The entry defines the model on its own: once the
+catalog stops listing that model, it still stays in the picker, without its
+context window, until the admin removes the entry.
+
+The `/config` row `auto_compact_threshold` shows the threshold the active model
+uses and the layer it comes from. It edits the model's own threshold when the
+model has one, else the top-level one, and is read-only when the value it shows
+comes from the admin config.
 
 Clients that let a user pick a scope (the `/config` screen) offer the default
 target, the trusted project layer, and the session override layer, in that
@@ -151,6 +197,10 @@ against the schema (`vibe.core.config._setting_keys`). It reports:
 - a retired setting, such as `include_model_info`; and
 - a setting with no effect under the unified harness, such as `[tools.grep]` or
   `tools.read_file.max_read_bytes`.
+
+A setting removed together with the feature it toggled, such as
+`show_greeting`, is not reported whatever its value: no value can ask for
+anything Vibe still does.
 
 A tool setting is checked against the tool's own settings model. Settings of a
 tool that is not builtin, such as an MCP tool, are not checked.
@@ -219,6 +269,48 @@ The public API accepts `{op, path, value, target_layer}` ops and a
 client-supplied `reloadRuntime` choice. It does not expose resource revisions,
 complete provenance or per-field runtime-impact metadata. Clients use explicit
 layer targets rather than infer them from a redacted view.
+
+### Provenance and locked settings
+
+The environment and admin layers outrank every persistent write target and
+cannot be written through the config API. A value either one sets is
+**locked** for writes to a layer below it: the write is persisted, but the
+session keeps running the higher layer's value.
+
+- `config/fields/read` returns each field's `origin` (the layer its value comes
+  from) and `locked` (the origin is the environment or admin layer above the
+  default write target). Older servers send neither; clients treat a missing
+  `locked` as writable.
+- `config/write` keeps a shadowed write and lists it in `shadowed`
+  (`{path, origin}` per top-level field), so a client can say why the value it
+  wrote does not run. Only whole top-level fields are checked. The session's
+  override and agent profile layers are session choices and never lock.
+
+### Session-less usage telemetry
+
+`config/telemetry/read` and `config/telemetry/update` serve a settings screen
+with no session open. They read the user config with the environment, the held
+org admin config and cached experiments applied, and no project config:
+`{enabled, origin, locked}`. Since a project config or agent profile can only turn
+telemetry off for its own sessions, a session never sends more than this
+setting says: it runs `enabled` or, where they opt out, `false`. Inside such a
+session, `config/fields/read` reports the field with origin `project-toml` or
+`agent-profile`. An update writes `enable_telemetry` to the user
+config, or answers `rejected` with a reason while the environment
+(`VIBE_ENABLE_TELEMETRY`) or the org admin config decides it. Once written,
+every session open in the process re-reads its config files, applies the
+change when idle or at its next turn boundary, and announces it with
+`runtime/updated`.
+
+### Config change notifications
+
+A connection that calls `config/subscribe` receives `config/changed` (no
+params) when the config a session opened now would run may have changed: the
+process's held org admin config changed (refreshed every 10 minutes, or
+adopted from another process), or a session-less settings update landed. The
+client re-reads what it shows. It is opt-in, so clients that reject unknown
+notifications are unaffected. An attached session keeps reporting its own
+config with `runtime/updated`.
 
 ## Client-local application
 

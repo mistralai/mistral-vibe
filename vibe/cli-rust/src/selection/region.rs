@@ -22,6 +22,7 @@ pub enum ScrollTarget {
 pub enum RegionId {
     Main,
     Loading,
+    Goal,
     BottomApp,
 }
 
@@ -91,6 +92,7 @@ pub fn get(app: &App, id: RegionId) -> Region {
     match id {
         RegionId::Main => app.view.selection_region,
         RegionId::Loading => app.view.loading_selection_region,
+        RegionId::Goal => app.view.goal_selection_region,
         RegionId::BottomApp => app.view.bottom_app_selection_region,
     }
 }
@@ -126,6 +128,7 @@ pub fn spans(app: &App, buf: &Buffer, chat: Rect) -> Vec<RowSpan> {
     };
     let chrome = selection.owner == RegionId::Main;
     let gutters: &[RowSpan] = if chrome { &app.view.diff_hitmap } else { &[] };
+    let raw: &[(u16, u16)] = if chrome { &app.view.raw_hitmap } else { &[] };
     let spans = resolve(
         Flow {
             selection: (selection.anchor, selection.head),
@@ -137,6 +140,7 @@ pub fn spans(app: &App, buf: &Buffer, chat: Rect) -> Vec<RowSpan> {
         buf,
         area,
         gutters,
+        raw,
         false,
     );
     if !chrome {
@@ -177,6 +181,7 @@ pub fn extract_document(app: &App) -> Option<String> {
             &document.buffer,
             document.area,
             &[],
+            &[],
             true,
         );
         return Some(document.extract(&spans));
@@ -197,6 +202,7 @@ pub fn extract_document(app: &App) -> Option<String> {
         &document.buffer,
         document.area,
         &document.gutters,
+        &document.raw,
         true,
     );
     spans.retain(|(y, _, _)| document.margins.binary_search(y).is_err());
@@ -264,6 +270,6 @@ pub fn extract(buf: &Buffer, spans: &[RowSpan]) -> String {
 pub fn folds(app: &App, id: RegionId) -> Folds {
     match id {
         RegionId::BottomApp => app.view.bottom_app_selection_folds.clone(),
-        RegionId::Main | RegionId::Loading => Folds::default(),
+        RegionId::Main | RegionId::Loading | RegionId::Goal => Folds::default(),
     }
 }

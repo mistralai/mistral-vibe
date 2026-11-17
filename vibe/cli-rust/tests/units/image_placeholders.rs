@@ -62,7 +62,7 @@ fn preparation_sees_mentions_and_the_model_sees_placeholders() {
 
     let mut prepared = PreparedPrompt::from_text(expanded);
     prepared.images = vec![file("/snapshots/1.png", "/tmp/shot one.png")];
-    collapse(&mut prepared, text, &images);
+    collapse(&mut prepared, text, &images).expect("every placeholder has a snapshot");
 
     assert_eq!(prepared.prompt_text.as_deref(), Some(text));
     assert_eq!(prepared.images[0].alias, "[Image #1]");
@@ -84,7 +84,7 @@ fn the_same_file_pasted_twice_shares_its_snapshot() {
     let mut prepared = PreparedPrompt::from_text(expand(text, &images));
     prepared.images = vec![file("/snapshots/1.png", "/Users/me/Desktop/shot.png")];
 
-    collapse(&mut prepared, text, &images);
+    collapse(&mut prepared, text, &images).expect("every placeholder has a snapshot");
     merge_edit_images(&mut prepared, &images, text);
 
     let sent: Vec<_> = prepared
@@ -103,7 +103,42 @@ fn the_same_file_pasted_twice_shares_its_snapshot() {
 }
 
 #[test]
-fn an_unprepared_placeholder_still_attaches_its_file() {
+fn a_placeholder_without_a_snapshot_fails_instead_of_sending_its_file() {
+    let images = [file("/Users/me/Desktop/shot one.png", "[Image #1]")];
+    let text = "what is in [Image #1]?";
+    let mut prepared = PreparedPrompt::from_text(expand(text, &images));
+
+    let error = collapse(&mut prepared, text, &images).expect_err("no snapshot was prepared");
+
+    assert_eq!(
+        error,
+        "Couldn't attach [Image #1]: /Users/me/Desktop/shot one.png is missing or unreadable"
+    );
+}
+
+#[test]
+fn only_the_placeholders_the_text_keeps_are_collapsed() {
+    let images = [
+        file("/Users/me/Desktop/shot.png", "[Image #1]"),
+        file("/Users/me/Desktop/shot.png", "[Image #2]"),
+        file("/Users/me/Desktop/gone.png", "[Image #3]"),
+    ];
+    let text = "only [Image #2]";
+    let mut prepared = PreparedPrompt::from_text(expand(text, &images));
+    prepared.images = vec![file("/snapshots/1.png", "/Users/me/Desktop/shot.png")];
+
+    collapse(&mut prepared, text, &images).expect("dropped placeholders need no snapshot");
+
+    let aliases: Vec<_> = prepared
+        .images
+        .iter()
+        .map(|image| image.alias.as_str())
+        .collect();
+    assert_eq!(aliases, ["[Image #2]"]);
+}
+
+#[test]
+fn merging_keeps_an_image_the_text_still_references() {
     let images = [file("/tmp/a.png", "[Image #4]")];
     let mut prepared = PreparedPrompt::from_text("see [Image #4]".into());
 

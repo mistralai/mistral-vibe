@@ -386,6 +386,9 @@ class SessionBackendEvent:
     params: ProtocolModel | None = None
     session_id: str | None = None
     event_id: int | None = None
+    # An event of one of the root's child sessions, numbered on that child's own
+    # sequence. Only clients that declared `childSessionEvents` receive it.
+    child_session: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -612,7 +615,7 @@ class SessionBackendRuntimeView(Protocol):
 class SessionBackendOpenCallbacks(Protocol):
     """Optional access to open callbacks owned by a backend."""
 
-    def open_callbacks(self) -> list[PublicCallbackEntry]: ...
+    async def read_open_callbacks(self) -> list[PublicCallbackEntry]: ...
 
     async def reject_callback_delivery(
         self, session_id: str, callback_id: str, error: CallbackResultError

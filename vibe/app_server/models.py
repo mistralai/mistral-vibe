@@ -65,6 +65,7 @@ from vibe.app_server._effect_models import (
     effect_input_json as effect_input_json,
 )
 from vibe.app_server._model import ProtocolModel
+from vibe.config_values import ThinkingLevel
 from vibe.permissions import PathGrantScope, RequiredPermission
 from vibe.questions import (
     QuestionChoice as QuestionChoice,
@@ -431,8 +432,13 @@ class TurnErrorCode(StrEnum):
     INVALID_MODEL = auto()
     INVALID_API_KEY = auto()
     INTERNAL_ERROR = auto()
+    # The provider refused the request because the account has no credit left.
+    USAGE_LIMIT = auto()
     # A price budget is set, but a model the run uses has no price.
     PRICING_UNAVAILABLE = auto()
+    # The sign-in could not be checked, as while the computer sleeps, so no
+    # request was sent. The same request may pass once it can be.
+    CREDENTIAL_UNAVAILABLE = auto()
 
 
 class PublicError(ProtocolModel):
@@ -542,7 +548,7 @@ class SkillSummary(ProtocolModel):
     prompt: str
     user_invocable: bool = True
     source: Literal["builtin", "local", "registry", "plugin"] = "local"
-    scope: Literal["builtin", "global", "project"] = "global"
+    scope: Literal["builtin", "global", "project", "session"] = "global"
     registry: RegistryRefView | None = None
     enabled: bool = True
     locked: bool = False
@@ -930,6 +936,11 @@ class PublicEffectEntry(_PublicHistoryEntryBase):
     title: str
     detail: EffectDetail
     state: EffectState
+    # The model's ID for this call, which a hook notice names in ``toolCallId``
+    # (the entry's own ID comes from the Runtime's action). Absent when unknown.
+    tool_call_id: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class PublicCallbackEntry(_PublicHistoryEntryBase):
@@ -945,6 +956,8 @@ class HookScope(StrEnum):
     PRE_TOOL = auto()
     POST_TOOL = auto()
     PRE_AGENT = auto()
+    PRE_LLM = auto()
+    POST_LLM = auto()
 
 
 class HookSeverity(StrEnum):
@@ -987,12 +1000,51 @@ class ScheduledLoopFiredNoticeDetail(ProtocolModel):
     loop_id: str
 
 
+type GoalNoticeEvent = Literal[
+    # The user's actions.
+    "set",
+    "edited",
+    "paused",
+    "resumed",
+    "cleared",
+    # An automatic turn working on the goal.
+    "continued",
+    # The goal stopped on its own, or the user interrupted it.
+    "completed",
+    "blocked",
+    "budget_limited",
+    "usage_limited",
+    "interrupted",
+]
+
+
+class GoalNoticeDetail(ProtocolModel):
+    """A goal event the transcript shows where it happened."""
+
+    kind: Literal["goal"] = "goal"
+    event: GoalNoticeEvent
+    goal_id: str
+    # The objective, on ``set`` and on an ``edited`` that changed it.
+    objective: str | None = None
+    status: GoalStatus
+    status_reason: GoalStatusReason | None = None
+    # The continuation's number, on ``continued``.
+    continuation: int | None = None
+    tokens_used: int = 0
+    token_budget: int | None = None
+    time_used_seconds: int = 0
+    # The turn error that stopped the goal, bounded, on ``blocked`` by a
+    # failed turn.
+    error: str | None = None
+
+
 NoticeDetail = Annotated[
     HookNoticeDetail
     | AgentChangedNoticeDetail
     | SessionTitleUpdatedNoticeDetail
     | WaitingForInputNoticeDetail
-    | ScheduledLoopFiredNoticeDetail,
+    | ScheduledLoopFiredNoticeDetail
+    | GoalNoticeDetail,
     Field(discriminator="kind"),
 ]
 
@@ -1110,6 +1162,9 @@ class PublicSession(ProtocolModel):
     started_by_session_id: str | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    # A turn another session started ended or was cut short, and the reply
+    # to it is still unsent: a client resumes the session to send it.
+    owes_reply: bool = Field(default=False, exclude_if=lambda value: not value)
     title: str | None = None
     preview: str = ""
     status: PublicSessionStatus
@@ -1134,6 +1189,11 @@ class PublicSession(ProtocolModel):
     # Scheduled loops persisted for this session. The additive default keeps
     # old clients and old servers working (ADR 0014).
     loops: list[ScheduledLoop] = Field(default_factory=list)
+    # The session's durable goal, if any. Omitted while unset so old clients
+    # and old servers keep working (ADR 0014).
+    goal: PublicGoal | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     # None while unstamped. With local projects on, a listing stamps an unstamped
     # session whose folder is a local project's.
     project: PublicSessionProject | None = None
@@ -1148,10 +1208,21 @@ class PublicSession(ProtocolModel):
         return self
 
 
+# The model a child's agent type declares, with the thinking level fitted to it.
+class PublicChildModel(ProtocolModel):
+    display_name: str
+    thinking: ThinkingLevel
+
+
 class PublicChildSession(ProtocolModel):
     id: str
     name: str
     agent_type: str
+    # The child's path in its session tree, such as `/root/researcher`; None
+    # until the spawn has named the child.
+    agent_path: str | None = None
+    # The model its agent type declares, as configured now; None runs on the session's.
+    model: PublicChildModel | None = None
     status: PublicSessionStatus
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     context_usage: TokenUsage | None = None
@@ -1204,6 +1275,15 @@ class PublicTurn(ProtocolModel):
         default=None, exclude_if=lambda value: value is None
     )
     queue_item_id: str | None = None
+    # Why a hook ended the Turn without the model's answer (pre_agent, pre_llm):
+    # the hook's reason, empty when it gave none.
+    skip_reason: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # Why a hook rejected the Turn's answer (strict post_llm).
+    reject_reason: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 def turn_stop(turn: PublicTurn | None) -> TurnStop | None:
@@ -1287,3 +1367,40 @@ class ScheduledLoop(ProtocolModel):
     interval_seconds: int | None = None
     cron: str | None = Field(default=None, exclude_if=lambda value: value is None)
     next_fire_at: float
+
+
+class GoalStatus(StrEnum):
+    ACTIVE = auto()
+    PAUSED = auto()
+    BLOCKED = auto()
+    COMPLETE = auto()
+    BUDGET_LIMITED = auto()
+    USAGE_LIMITED = auto()
+
+
+class GoalStatusReason(StrEnum):
+    """Why a goal left ``active``; ``None`` on a goal the user set active."""
+
+    USER = auto()
+    INTERRUPTED = auto()
+    SUSPENDED = auto()
+    MODEL = auto()
+    NO_PROGRESS = auto()
+    TOOL_FAILURES = auto()
+    TURN_FAILED = auto()
+
+
+class PublicGoal(ProtocolModel):
+    goal_id: str
+    # Bumped on every change, for compare-and-swap.
+    revision: int
+    # Bumped only when the objective text changes.
+    objective_revision: int
+    objective: str
+    status: GoalStatus
+    status_reason: GoalStatusReason | None = None
+    token_budget: int | None = None
+    tokens_used: int = 0
+    time_used_seconds: int = 0
+    created_at: int
+    updated_at: int

@@ -8,6 +8,7 @@ const MAX_AGENT_TYPES: usize = 128;
 pub(crate) struct AgentTypeDefinition {
     pub(crate) name: String,
     pub(crate) description: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) path: String,
 }
 
@@ -25,7 +26,9 @@ pub(crate) fn validate_agent_types<'a>(
     for agent_type in agent_types {
         validate_text(&agent_type.name, "agent type name")?;
         validate_text(&agent_type.description, "agent type description")?;
-        validate_text(&agent_type.path, "agent type path")?;
+        if !agent_type.path.is_empty() {
+            validate_text(&agent_type.path, "agent type path")?;
+        }
         if !names.insert(agent_type.name.as_str()) {
             return Err(format!("duplicate agent type name {:?}", agent_type.name));
         }

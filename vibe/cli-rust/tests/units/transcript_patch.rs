@@ -142,6 +142,35 @@ fn transcript_update_for_an_unknown_entry_is_ignored() {
     assert_eq!(transcript.last_assistant_message().as_deref(), Some("Par"));
 }
 
+/// `/copy` skips a draft a hook rejected or sent back, but keeps an interrupted answer.
+#[test]
+fn copy_skips_a_draft_a_hook_discarded() {
+    let mut transcript = Transcript::default();
+    for (id, text, outcome) in [
+        ("m1", "Kept", json!({"type": "committed"})),
+        (
+            "m2",
+            "Rejected",
+            json!({"type": "discarded", "cause": "failure"}),
+        ),
+    ] {
+        transcript.add(&json!({
+            "entry": {"id": id, "type": "message", "role": "assistant",
+                      "content": [{"type": "text", "text": text}], "outcome": outcome}
+        }));
+    }
+    assert_eq!(transcript.last_assistant_message().as_deref(), Some("Kept"));
+    transcript.add(&json!({
+        "entry": {"id": "m3", "type": "message", "role": "assistant",
+                  "content": [{"type": "text", "text": "Partial"}],
+                  "outcome": {"type": "discarded", "cause": "interrupt"}}
+    }));
+    assert_eq!(
+        transcript.last_assistant_message().as_deref(),
+        Some("Partial")
+    );
+}
+
 #[test]
 fn consecutive_effects_share_one_group_keyed_by_the_first_entry() {
     let mut transcript = Transcript::default();
@@ -213,64 +242,6 @@ fn hidden_entries_do_not_render_until_reasoning_is_enabled() {
 }
 
 #[test]
-fn hook_notices_mount_only_inside_an_open_container() {
-    let mut transcript = Transcript::default();
-    transcript.add(
-        &json!({"entry": {"id": "n1", "type": "notice", "message": "hook",
-                          "detail": {"kind": "hook_run_started", "scope": "pre_tool",
-                                     "toolCallId": "t1"}}}),
-    );
-    transcript.add(
-        &json!({"entry": {"id": "n2", "type": "notice", "message": "hook",
-                          "detail": {"kind": "hook_completed", "scope": "pre_tool",
-                                     "toolCallId": "t1", "content": "ran lint",
-                                     "hookName": "lint"}}}),
-    );
-    // The lifecycle line is hidden; only the completed line with content mounts.
-    assert_eq!(transcript.lines().count(), 1);
-
-    let mut orphan = Transcript::default();
-    orphan.add(
-        &json!({"entry": {"id": "n2", "type": "notice", "message": "hook",
-                          "detail": {"kind": "hook_completed", "scope": "pre_tool",
-                                     "toolCallId": "t1", "content": "ran lint",
-                                     "hookName": "lint"}}}),
-    );
-    // A completed hook outside any opened container renders nothing.
-    assert_eq!(orphan.lines().count(), 0);
-}
-
-#[test]
-fn a_pre_agent_hook_line_mounts_in_its_own_turn_container() {
-    let mut transcript = Transcript::default();
-    transcript.add(
-        &json!({"entry": {"id": "n1", "type": "notice", "message": "hook",
-                          "detail": {"kind": "hook_run_started", "scope": "pre_agent"}}}),
-    );
-    transcript.add(
-        &json!({"entry": {"id": "n2", "type": "notice", "message": "hook",
-                          "detail": {"kind": "hook_completed", "scope": "pre_agent",
-                                     "content": "Rewrote the message",
-                                     "hookName": "redact"}}}),
-    );
-    assert_eq!(transcript.lines().count(), 1);
-
-    let mut other_scope = Transcript::default();
-    other_scope.add(
-        &json!({"entry": {"id": "n1", "type": "notice", "message": "hook",
-                          "detail": {"kind": "hook_run_started", "scope": "post_agent"}}}),
-    );
-    other_scope.add(
-        &json!({"entry": {"id": "n2", "type": "notice", "message": "hook",
-                          "detail": {"kind": "hook_completed", "scope": "pre_agent",
-                                     "content": "Rewrote the message",
-                                     "hookName": "redact"}}}),
-    );
-    // A post_agent run does not open the pre_agent container.
-    assert_eq!(other_scope.lines().count(), 0);
-}
-
-#[test]
 fn groups_with_tools_covers_groupable_entries() {
     let reasoning = HistoryEntry::from_value(&json!({"type": "reasoning", "text": "t"}));
     let hook = HistoryEntry::from_value(&json!({"type": "notice",
@@ -315,6 +286,7 @@ fn group_of(kinds: Vec<(&'static str, usize)>, reasoning: bool) -> Group<'static
         running: Vec::new(),
         reasoning,
         thinking: false,
+        hooks: 0,
     }
 }
 
@@ -350,6 +322,26 @@ fn group_labels_pluralize_by_count() {
         group.label(),
         "Read 10 files, loaded 1 skill, ran 3 commands, updated todos 2 times"
     );
+}
+
+#[test]
+fn a_group_of_hook_lines_only_counts_its_hooks() {
+    let hooks_only = Group {
+        hooks: 2,
+        ..group_of(vec![], false)
+    };
+    assert_eq!(hooks_only.label(), "Ran 2 hooks");
+    let running_hooks = Group {
+        hooks: 2,
+        ..running_group_of(vec![], false)
+    };
+    assert_eq!(running_hooks.label(), "Running 2 hooks");
+
+    let with_tools = Group {
+        hooks: 1,
+        ..group_of(vec![("shell", 1)], false)
+    };
+    assert_eq!(with_tools.label(), "Ran 1 command");
 }
 
 #[test]

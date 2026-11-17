@@ -258,26 +258,6 @@ fn a_rewound_placeholder_names_the_rewound_image_not_an_older_paste() {
     );
 }
 
-#[test]
-fn a_recalled_path_glued_to_a_placeholder_is_left_alone() {
-    let mut harness = Harness::new();
-    let paste = long("row");
-    let input = &mut harness.app.chat_input;
-    input.collapsed_pastes.remember(paste.as_str().into());
-    input
-        .history
-        .add(&format!("compare /tmp/a.png{paste} and /tmp/b.png then"));
-
-    harness.press(KeyCode::Up, KeyModifiers::NONE);
-
-    let label = placeholder(&paste);
-    assert_eq!(
-        harness.app.chat_input.input,
-        format!("compare /tmp/a.png{label} and @/tmp/b.png then")
-    );
-    assert_eq!(harness.pastes(), [paste.as_str()]);
-}
-
 fn recalled(paste: &str, entry: &str) -> Harness {
     let mut harness = Harness::new();
     let input = &mut harness.app.chat_input;
@@ -288,35 +268,19 @@ fn recalled(paste: &str, entry: &str) -> Harness {
 }
 
 #[test]
-fn a_path_after_a_placeholder_is_rewritten_only_when_it_stands_alone() {
+fn a_recalled_prompt_keeps_its_image_paths_as_sent() {
     let paste = long("row");
     let label = placeholder(&paste);
 
-    let glued = recalled(&paste, &format!("{paste}/tmp/c.png"));
-    assert_eq!(glued.app.chat_input.input, format!("{label}/tmp/c.png"));
-
-    let spaced = recalled(&paste, &format!("{paste} /tmp/c.png"));
-    assert_eq!(spaced.app.chat_input.input, format!("{label} @/tmp/c.png"));
-
-    let trailing = format!("{paste}\n");
-    let hidden_space = recalled(&trailing, &format!("{trailing}/tmp/c.png"));
-    assert_eq!(
-        hidden_space.app.chat_input.input,
-        format!("{}@/tmp/c.png", placeholder(&trailing))
+    let prompt = recalled(
+        &paste,
+        &format!("compare /tmp/a.png{paste} and /tmp/b.png then"),
     );
-}
-
-#[test]
-fn a_path_between_two_placeholders_is_rewritten_and_shell_mode_rewrites_nothing() {
-    let paste = long("row");
-    let label = placeholder(&paste);
-
-    let between = recalled(&paste, &format!("{paste}\u{a0}/tmp/c.png\u{3000}{paste}"));
     assert_eq!(
-        between.app.chat_input.input,
-        format!("{label}\u{a0}@/tmp/c.png\u{3000}{label}")
+        prompt.app.chat_input.input,
+        format!("compare /tmp/a.png{label} and /tmp/b.png then")
     );
-    assert_eq!(between.pastes().len(), 2);
+    assert_eq!(prompt.pastes(), [paste.as_str()]);
 
     let shell = recalled(&paste, &format!("!cat /tmp/c.png {paste}"));
     assert_eq!(

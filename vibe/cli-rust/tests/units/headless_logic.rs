@@ -9,7 +9,7 @@ use vibe_rs::headless_output::{denied_tool_warning, last_assistant_text, turn_en
 use vibe_rs::headless_prompt::{parse_piped_prompt, PipedPrompt, MAX_STDIN_PROMPT_BYTES};
 use vibe_rs::headless_trust::warning_from;
 use vibe_rs::run_export::{RunOutcome, RunWarning};
-use vibe_rs::server::{AgentConfig, RpcError};
+use vibe_rs::server::{AgentConfig, PublicTurn, RpcError};
 use vibe_rs::utils::paths::user_home_from;
 
 #[test]
@@ -249,6 +249,42 @@ fn last_assistant_text_skips_a_draft_a_hook_sent_back_for_a_retry() {
 }
 
 #[test]
+fn last_assistant_text_skips_a_draft_a_hook_rejected() {
+    let history = serde_json::json!([
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Let me check."}],
+            "outcome": {"type": "committed"}
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Unsafe draft."}],
+            "outcome": {"type": "discarded", "cause": "failure"}
+        }
+    ]);
+    assert_eq!(
+        last_assistant_text(&history).as_deref(),
+        Some("Let me check.")
+    );
+}
+
+#[test]
+fn a_turn_a_hook_ended_answers_with_the_hook_reason() {
+    let turn = PublicTurn::read(&serde_json::json!({
+        "turn": {"id": "t1", "status": "completed", "skipReason": "model budget spent"}
+    }));
+    assert_eq!(turn.hook_answer(), Some("model budget spent"));
+    let rejected = PublicTurn::read(&serde_json::json!({
+        "turn": {"id": "t1", "status": "completed", "rejectReason": "unsafe answer"}
+    }));
+    assert_eq!(rejected.hook_answer(), Some("unsafe answer"));
+    let answered = PublicTurn::read(&serde_json::json!({"turn": {"id": "t1"}}));
+    assert_eq!(answered.hook_answer(), None);
+}
+
+#[test]
 fn last_assistant_text_keeps_an_interrupted_partial_answer() {
     let history = serde_json::json!([
         {
@@ -446,6 +482,7 @@ fn headless_options_with_budgets() -> HeadlessOptions {
         output_dir: None,
         system_prompt: None,
         model: None,
+        thinking: None,
         agent: None,
         auto_approve: false,
         enabled_tools: vec![],

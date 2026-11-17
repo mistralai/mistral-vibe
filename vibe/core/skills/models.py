@@ -5,7 +5,7 @@ from enum import StrEnum, auto
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class SkillSource(StrEnum):
@@ -19,6 +19,7 @@ class SkillScope(StrEnum):
     BUILTIN = auto()
     GLOBAL = auto()
     PROJECT = auto()
+    SESSION = auto()
 
 
 # The registry's reserved alias that always resolves to the newest version,
@@ -26,6 +27,19 @@ class SkillScope(StrEnum):
 # alias auto-resolves to latest and never reports an "update available".
 REGISTRY_LATEST_ALIAS = "latest"
 DISABLE_MODEL_INVOCATION_FIELD = "disable-model-invocation"
+
+
+class ManifestEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    skill_id: str
+    version: int | str = REGISTRY_LATEST_ALIAS
+    description: str = ""
+
+    @property
+    def alias(self) -> str | None:
+        return self.version if isinstance(self.version, str) else None
 
 
 class RegistryRef(BaseModel):

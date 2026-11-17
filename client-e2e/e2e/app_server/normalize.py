@@ -83,6 +83,14 @@ def _normalize_request(request: Request, replacement_keys: dict[str, str]) -> Re
         params["repoLocalPaths"] = ["<cwd>" for _ in params.get("repoLocalPaths", [])]
         if params.get("sessionCwd") is not None:
             params["sessionCwd"] = "<cwd>"
+    # The trusted-folder add view starts on the checkout and resolves against it.
+    if request.method.startswith("workspace/trust/folders/") and isinstance(
+        cwd := params.get("cwd"), str
+    ):
+        params["cwd"] = "<cwd>"
+        path = params.get("path")
+        if isinstance(path, str) and path.startswith(cwd):
+            params["path"] = "<cwd>" + path[len(cwd) :]
     # `initialize` names the build's version; goldens must survive a bump.
     if (
         request.method == "initialize"
@@ -147,7 +155,9 @@ def _collapse_elapsed(cells: list[Cell]) -> list[Cell]:
     return (normalized + [padding] * len(cells))[: len(cells)]
 
 
-def _normalized_cells(snapshot: Snapshot) -> list[list[Cell]]:
+def _normalized_cells(
+    snapshot: Snapshot, keep_braille: bool = False
+) -> list[list[Cell]]:
     normalized_rows = [
         _collapse_elapsed(_normalize_vibe_dir(list(snapshot_row)))
         for snapshot_row in snapshot.cells
@@ -169,7 +179,7 @@ def _normalized_cells(snapshot: Snapshot) -> list[list[Cell]]:
         # Mask whole scrollbar columns so blank thumb cells cannot vary by host.
         for x, cell in enumerate(cell_row):
             volatile = (
-                _BRAILLE.match(cell.character)
+                (not keep_braille and _BRAILLE.match(cell.character))
                 or (
                     scrollbar
                     and x == len(cell_row) - 1

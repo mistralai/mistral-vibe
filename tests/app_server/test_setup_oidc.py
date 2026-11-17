@@ -127,7 +127,8 @@ async def test_setup_status_reports_the_cli_oidc_session_over_a_keyring_key(
         keyring, "get_password", lambda service, username: "keyring-api-key"
     )
     monkeypatch.setattr(
-        "vibe.setup.auth._oidc_runtime.stored_oidc_credential", lambda: OIDC_API_KEY
+        "vibe.setup.auth._oidc_runtime.read_stored_oidc_credential",
+        lambda: OIDC_API_KEY,
     )
     client, client_transport, server_transport = await setup_client(
         process_services=process_services

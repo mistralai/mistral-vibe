@@ -156,8 +156,14 @@ fn remove_at(app: &mut App, client: &Arc<Client>, index: usize) {
         .iter()
         .any(|remaining| remaining.server_message_id == item.server_message_id)
     {
-        app.queue.revise_group(&item.server_message_id);
-        replacement::replace_group(app, client, &item.server_message_id);
+        // The server echoes the merged entry under the group's id, so it must name a prompt still shown.
+        let server_message_id = if item.message_id == item.server_message_id {
+            app.queue.rekey_group(&item.server_message_id)
+        } else {
+            item.server_message_id
+        };
+        app.queue.revise_group(&server_message_id);
+        replacement::replace_group(app, client, &server_message_id);
         return;
     }
     let client = client.clone();

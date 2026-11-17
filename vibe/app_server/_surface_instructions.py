@@ -35,10 +35,18 @@ def client_surface(entrypoint: AgentEntrypoint) -> ClientSurface:
 
 
 def with_surface_instructions(
-    instructions: str, *, variant: str, surface: ClientSurface
+    instructions: str, *, variant: str | None, surface: ClientSurface
 ) -> str:
-    """Append ``surface``'s block to the product prompt of ``variant``."""
-    layout = _VARIANT_LAYOUTS.get(variant, _DEFAULT_LAYOUT)
+    """Append ``surface``'s block to the product prompt of ``variant``.
+
+    ``variant`` is ``None`` for a behavior no variant names, such as one
+    GrowthBook sends: it takes the default layout.
+    """
+    layout = (
+        _DEFAULT_LAYOUT
+        if variant is None
+        else _VARIANT_LAYOUTS.get(variant, _DEFAULT_LAYOUT)
+    )
     return f"{instructions}\n\n{_surface_block(surface, layout)}"
 
 
@@ -119,6 +127,13 @@ _RESPONSE_FORMATS: dict[ClientSurface, str] = {
 - Code reference → `path/to/file.py:42` then a fenced block""",
 }
 
+_DESKTOP_IDENTITY = """\
+You are running in Vibe Desktop, Mistral Vibe's desktop app, not in the Vibe CLI. When the user asks about Vibe itself (how to do something, a setting, a command), answer for the desktop app:
+
+- Desktop runs the same agent as the CLI, but has no CLI flags and no CLI slash commands such as `/compact`. Do not tell the user to run `vibe` or pass a flag unless they ask about the CLI.
+- The `vibe` skill describes the CLI. Use its facts about config files, skills, agents, hooks, and MCP servers, but not its flags, slash commands, or terminal UI.
+- If you do not know how the desktop app exposes something, say so and give the config file equivalent. Do not invent menus, settings pages, or shortcuts."""
+
 _DESKTOP_RENDERING = """\
 - Comparison / options → markdown table.
 - Hierarchy → nested list. Put a file tree in a fenced `text` block; never use box-drawing characters in prose.
@@ -131,7 +146,10 @@ Diffs, command output, tool calls, and the todo list have their own views. Do no
 
 
 def _surface_block(surface: ClientSurface, layout: _VariantLayout) -> str:
-    sections = [f"{'#' * layout.heading_level} {_HEADINGS[surface]}", _DISPLAY[surface]]
+    sections = [f"{'#' * layout.heading_level} {_HEADINGS[surface]}"]
+    if surface == "desktop":
+        sections.append(_DESKTOP_IDENTITY)
+    sections.append(_DISPLAY[surface])
     if layout.carries_response_format:
         sections.append(_RESPONSE_FORMATS[surface])
     if surface == "desktop":

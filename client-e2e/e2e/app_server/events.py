@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlparse
 import uuid
 
-from e2e.app_server.config import FIXTURE_PATH
+from e2e.app_server.config import FIXTURE_PATH, REPLAY_NOW_MS
 from e2e.app_server.scenario import AppServerEvent
 
 _fixture = json.loads(FIXTURE_PATH.read_text())
@@ -862,6 +862,7 @@ def child_session_updated(
     total_tokens: int = 0,
     context_tokens: int | None = None,
     created_at: int = _TIMESTAMP,
+    model: dict[str, str] | None = None,
 ) -> AppServerEvent:
     """Build a `session/childSessionUpdated` notification (PublicChildSession)."""
     status_union: dict[str, Any] = {"type": status}
@@ -892,6 +893,8 @@ def child_session_updated(
     }
     if context_tokens is not None:
         child["contextUsage"] = usage(context_tokens)
+    if model is not None:
+        child["model"] = model
     return _event(
         "session/childSessionUpdated",
         {"sessionId": SESSION_ID, "emittedAt": _TIMESTAMP, "childSession": child},
@@ -1571,6 +1574,39 @@ def worktree_settled(
     )
 
 
+def scheduled_loop(
+    loop_id: str,
+    prompt: str,
+    *,
+    in_seconds: int,
+    interval_seconds: int | None = None,
+    cron: str | None = None,
+) -> dict[str, Any]:
+    """A `ScheduledLoop` whose next run is `in_seconds` after the replay's frozen now."""
+    scheduled: dict[str, Any] = {
+        "id": loop_id,
+        "prompt": prompt,
+        "intervalSeconds": interval_seconds,
+        "nextFireAt": REPLAY_NOW_MS / 1000 + in_seconds,
+    }
+    if cron is not None:
+        scheduled["cron"] = cron
+    return scheduled
+
+
+def loops_updated(loops: Sequence[dict[str, Any]]) -> AppServerEvent:
+    """Build the `session/updated` a loop mutation sends with the session's loops."""
+    return _event(
+        "session/updated",
+        {
+            "eventId": 0,
+            "sessionId": SESSION_ID,
+            "emittedAt": _TIMESTAMP,
+            "patch": [{"op": "replace", "path": "/loops", "value": list(loops)}],
+        },
+    )
+
+
 def worktree_failed(name: str, message: str) -> AppServerEvent:
     """Build the pushed failed session-start worktree entry.
 
@@ -1707,6 +1743,105 @@ def artifact_created(artifact: dict[str, Any]) -> AppServerEvent:
         "artifacts/created",
         {"sessionId": SESSION_ID, "emittedAt": _TIMESTAMP, "artifact": artifact},
     )
+
+
+def goal(
+    status: str = "active",
+    *,
+    objective: str = "Make the parity suite pass",
+    status_reason: str | None = None,
+    token_budget: int | None = 50_000,
+    tokens_used: int = 12_500,
+    time_used_seconds: int = 240,
+    revision: int = 3,
+) -> dict[str, Any]:
+    """Build a `PublicGoal` as `session/updated` and session reads carry it."""
+    return {
+        "goalId": "goal-1",
+        "revision": revision,
+        "objectiveRevision": 1,
+        "objective": objective,
+        "status": status,
+        "statusReason": status_reason,
+        "tokenBudget": token_budget,
+        "tokensUsed": tokens_used,
+        "timeUsedSeconds": time_used_seconds,
+        "createdAt": _TIMESTAMP,
+        "updatedAt": _TIMESTAMP,
+    }
+
+
+def goal_updated(
+    value: dict[str, Any] | None, session_id: str | None = None
+) -> AppServerEvent:
+    """The `session/updated` patch setting, replacing (`add`) or clearing (`remove`) the goal."""
+    op = (
+        {"op": "remove", "path": "/goal"}
+        if value is None
+        else {"op": "add", "path": "/goal", "value": value}
+    )
+    return _event(
+        "session/updated",
+        {
+            "eventId": 0,
+            "sessionId": session_id or SESSION_ID,
+            "emittedAt": _TIMESTAMP,
+            "patch": [op],
+        },
+    )
+
+
+def goal_notice(
+    event: str,
+    message: str,
+    *,
+    level: str = "info",
+    objective: str | None = None,
+    continuation: int | None = None,
+    status: str = "active",
+    tokens_used: int = 12_500,
+    token_budget: int | None = 50_000,
+    time_used_seconds: int = 240,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """Build a goal notice history entry (`GoalNoticeDetail`), outside any turn."""
+    entry = _entry(
+        "notice",
+        entry_id=f"goal-notice-{event}-{continuation or 0}",
+        session_id=session_id,
+        level=level,
+        message=message,
+        detail={
+            "kind": "goal",
+            "event": event,
+            "goalId": "goal-1",
+            "objective": objective,
+            "status": status,
+            "statusReason": None,
+            "continuation": continuation,
+            "tokensUsed": tokens_used,
+            "tokenBudget": token_budget,
+            "timeUsedSeconds": time_used_seconds,
+        },
+    )
+    entry["turnId"] = None
+    return entry
+
+
+def entry_added(entry: dict[str, Any]) -> AppServerEvent:
+    """Announce a built history entry live."""
+    return _added(entry)
+
+
+def in_turn(event: AppServerEvent, turn_id: str) -> AppServerEvent:
+    """Re-address a built event and its entry or turn to `turn_id`."""
+    params = json.loads(json.dumps(event["params"]))
+    if "turnId" in params:
+        params["turnId"] = turn_id
+    for key in ("entry", "turn"):
+        if isinstance(params.get(key), dict):
+            params[key]["turnId" if key == "entry" else "id"] = turn_id
+    return {**event, "params": params}
 
 
 def artifact_updated(artifact: dict[str, Any]) -> AppServerEvent:

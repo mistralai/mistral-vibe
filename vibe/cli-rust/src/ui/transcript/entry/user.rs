@@ -14,9 +14,10 @@ use crate::server::{ImageAttachment, ImageSource, MessageContent, MessageEntry};
 use crate::transcript::{FiredLoop, TranscriptEntry};
 
 const QUEUE_HEADER_LABEL: &str = "» Queued";
-/// Shown once the server holds the queue: Enter releases it.
+/// Shown once the server holds the queue: Enter releases it, Up edits it.
 const QUEUE_PAUSED_PREFIX: &str = "» Queued — press ";
-const QUEUE_PAUSED_SUFFIX: &str = " to send, type to add";
+const QUEUE_PAUSED_SEND: &str = " to send, ";
+const QUEUE_PAUSED_SUFFIX: &str = " to edit, type to add";
 const ATTACHED_IMAGE: &str = "  ┝ attached image: ";
 const LAST_ATTACHED_IMAGE: &str = "  └ attached image: ";
 /// The alias the harness gives a resumed image, which forgets its placeholder.
@@ -29,10 +30,12 @@ pub(super) fn push_queue_header(lines: &mut LinkedLines, width: u16, paused: boo
     lines.push_gap();
     lines.push(match paused {
         false => Line::from(Span::styled(QUEUE_HEADER_LABEL, label)),
-        // The shortcut only recolors the label it sits in.
+        // The shortcuts only recolor the label they sit in.
         true => Line::from(vec![
             Span::styled(QUEUE_PAUSED_PREFIX, label),
             Span::styled(crate::hints::key::ENTER, label.fg(theme::primary())),
+            Span::styled(QUEUE_PAUSED_SEND, label),
+            Span::styled(crate::hints::key::UP, label.fg(theme::primary())),
             Span::styled(QUEUE_PAUSED_SUFFIX, label),
         ]),
     });

@@ -35,7 +35,6 @@ def build_test_app_config(
         enable_file_autocomplete=True,
         file_watcher_for_autocomplete=False,
         ask_confirmation_on_exit=True,
-        show_greeting=True,
         voice_mode_enabled=voice_mode_enabled,
         narrator_enabled=narrator_enabled,
         show_thinking_nodes=show_thinking_nodes,

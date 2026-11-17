@@ -6,6 +6,7 @@ from typing import Any
 
 import pytest
 
+from tests.stubs.fake_sign_in import signed_in_credentials
 from vibe.core.git.worktree import naming_model as worktree_naming_model
 from vibe.core.git.worktree.naming_model import suggest_worktree_name
 
@@ -107,3 +108,42 @@ async def test_does_not_load_config_without_a_prompt(
     monkeypatch.setattr(worktree_naming_model, "build_default_orchestrator", explode)
 
     assert await suggest_worktree_name("", cwd=Path.cwd()) is None
+
+
+@pytest.mark.asyncio
+async def test_names_with_the_connections_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signed-in connection names a worktree with its sign-in, for the
+    config the name is asked under.
+    """
+    captured: dict[str, Any] = {}
+
+    class _Orchestrator:
+        config = object()
+
+    orchestrator = _Orchestrator()
+    credentials = signed_in_credentials()
+    built_for: list[object] = []
+
+    async def build(**_kwargs: Any) -> _Orchestrator:
+        return orchestrator
+
+    async def complete(**kwargs: Any) -> str | None:
+        captured.update(kwargs)
+        return "fix-login-bug"
+
+    def credentials_for(built: object) -> Any:
+        built_for.append(built)
+        return credentials
+
+    monkeypatch.setattr(worktree_naming_model, "build_default_orchestrator", build)
+    monkeypatch.setattr(worktree_naming_model, "run_utility_completion", complete)
+
+    name = await suggest_worktree_name(
+        "Fix the login bug", cwd=Path.cwd(), credentials=credentials_for
+    )
+
+    assert name == "fix-login-bug"
+    assert built_for == [orchestrator]
+    assert captured["credentials"] is credentials

@@ -15,6 +15,7 @@ use super::gateway::{
     PyPIUpdateGateway, Update, UpdateGateway, UpdateGatewayCause, UpdateGatewayError,
 };
 use super::update::plain_output_env;
+use crate::utils::tls::{apply_uv_tls_trust, tls_trust_store, TlsTrustStore};
 
 /// The tool this oracle watches.
 pub const PROJECT_NAME: &str = "mistral-vibe";
@@ -191,9 +192,13 @@ impl UpdateGateway for UvOracleGateway {
     async fn fetch_update(&self) -> Result<Option<Update>, UpdateGatewayError> {
         let output = tokio::time::timeout(
             std::time::Duration::from_secs(ORACLE_TIMEOUT_SECONDS),
-            plain_output_env(Command::new("uv").args(["tool", "list", "--outdated"]))
-                .kill_on_drop(true)
-                .output(),
+            apply_uv_tls_trust(plain_output_env(Command::new("uv").args([
+                "tool",
+                "list",
+                "--outdated",
+            ])))
+            .kill_on_drop(true)
+            .output(),
         )
         .await;
         let output = match output {
@@ -202,11 +207,13 @@ impl UpdateGateway for UvOracleGateway {
                 return self.fallback.fetch_update().await;
             }
             Ok(Ok(output)) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(UpdateGatewayError {
                     cause: UpdateGatewayCause::ErrorResponse,
                     user_message: Some(format!(
-                        "uv could not list outdated tools: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
+                        "uv could not list outdated tools: {}{}",
+                        stderr.trim(),
+                        certificate_hint(&stderr)
                     )),
                 });
             }
@@ -226,6 +233,14 @@ impl UpdateGateway for UvOracleGateway {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(parse_outdated_tool_list(&stdout).map(|latest_version| Update { latest_version }))
     }
+}
+
+/// The way out of a certificate failure, e.g. behind a TLS-inspecting proxy.
+pub fn certificate_hint(stderr: &str) -> &'static str {
+    if tls_trust_store() == TlsTrustStore::System || !stderr.contains("invalid peer certificate") {
+        return "";
+    }
+    "\nIf a proxy inspects your HTTPS traffic, set `UV_SYSTEM_CERTS=true`, or set `enable_system_trust_store = true` in your Vibe config and start `vibe` once."
 }
 
 /// uv's usage error for a flag it predates; any other failure stays an error.

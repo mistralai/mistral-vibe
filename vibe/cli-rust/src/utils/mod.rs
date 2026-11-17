@@ -12,6 +12,15 @@ pub fn replay_now_ms() -> Option<u64> {
     std::env::var("VIBE_REPLAY_NOW_MS").ok()?.parse().ok()
 }
 
+/// Epoch milliseconds; the frozen replay clock under the e2e harness.
+pub fn now_ms() -> u64 {
+    replay_now_ms().unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |value| value.as_millis() as u64)
+    })
+}
+
 /// `default`, or the milliseconds in env var `name`: a seam tests use to set a timeout.
 pub fn timeout_or_env(name: &str, default: std::time::Duration) -> std::time::Duration {
     let ms = std::env::var(name).ok().and_then(|ms| ms.parse().ok());
@@ -26,6 +35,7 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+pub mod bytes;
 pub mod cache_store;
 pub mod clean;
 pub mod datetime;
@@ -33,7 +43,6 @@ pub mod file_index;
 pub mod file_match;
 pub mod fuzzy;
 pub mod graphemes;
-pub mod greeting_cache;
 pub mod history_manager;
 pub mod history_persist;
 pub mod input_edit;

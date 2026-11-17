@@ -267,6 +267,7 @@ def _write_recording_uv(path: Path, *, fail_install_until_seeded: bool) -> None:
         state="${{UV_FAKE_SEED_STATE:-}}"
 
         echo "$*" >>"$log"
+        echo "${{UV_SYSTEM_CERTS-unset}}" >>"${{UV_FAKE_SYSTEM_CERTS_LOG:-/dev/null}}"
 
         case "$*" in
           "--version") echo "uv 0.test" ;;
@@ -348,3 +349,41 @@ def test_install_seeds_a_managed_gil_python_when_the_pinned_request_fails(
     assert invocations[first + 1] == seed
     assert invocations[first + 2] == install
     assert state.exists()
+
+
+def _uv_system_certs_seen(tmp_path: Path, extra_env: dict[str, str]) -> set[str]:
+    home = tmp_path / "home"
+    fake_bin = tmp_path / "fake-bin"
+    home.mkdir()
+    fake_bin.mkdir()
+    system_certs_log = tmp_path / "uv-system-certs.log"
+    _write_recording_uv(fake_bin / "uv", fail_install_until_seeded=False)
+
+    result = _run_install_script(
+        home,
+        [fake_bin],
+        {
+            "UV_TOOL_BIN_DIR": str(fake_bin),
+            "UV_FAKE_INVOCATIONS_LOG": str(tmp_path / "uv-invocations.log"),
+            "UV_FAKE_SYSTEM_CERTS_LOG": str(system_certs_log),
+            **extra_env,
+        },
+    )
+
+    assert result.returncode == 0
+    return set(system_certs_log.read_text().splitlines())
+
+
+def test_install_makes_uv_trust_the_system_certificate_store(tmp_path: Path) -> None:
+    """A TLS-inspecting proxy's root CA lives in the OS trust store, which uv
+    ignores unless asked.
+    """
+    assert _uv_system_certs_seen(tmp_path, {}) == {"true"}
+
+
+def test_install_keeps_an_explicit_uv_system_certs_choice(tmp_path: Path) -> None:
+    assert _uv_system_certs_seen(tmp_path, {"UV_SYSTEM_CERTS": "false"}) == {"false"}
+
+
+def test_install_keeps_a_legacy_uv_native_tls_choice(tmp_path: Path) -> None:
+    assert _uv_system_certs_seen(tmp_path, {"UV_NATIVE_TLS": "false"}) == {"unset"}

@@ -1,4 +1,4 @@
-//! `--model`: sent with `session/start` for this session only.
+//! `--model` and `--thinking`: sent with `session/start` for this session only.
 use clap::Parser;
 use serde_json::{json, Value};
 use vibe_rs::cli::Cli;
@@ -35,5 +35,50 @@ fn a_saved_session_is_a_usage_error() {
         let err = Cli::parse_from(args).headless_options(None).unwrap_err();
 
         assert_eq!(err, "--model only applies to a new session");
+    }
+}
+
+#[test]
+fn the_thinking_level_is_picked_for_this_session_only() {
+    let payload = start_payload(&["vibe-rs", "-p", "hi", "--thinking", "max"]);
+
+    assert_eq!(payload["reasoningEffort"], json!("max"));
+    assert_eq!(payload["sessionOnly"], json!(true));
+    assert!(payload.get("model").is_none());
+}
+
+#[test]
+fn the_thinking_level_applies_to_the_picked_model() {
+    let payload = start_payload(&[
+        "vibe-rs",
+        "-p",
+        "hi",
+        "--model",
+        "devstral-small",
+        "--thinking",
+        "high",
+    ]);
+
+    assert_eq!(payload["model"], json!("devstral-small"));
+    assert_eq!(payload["reasoningEffort"], json!("high"));
+    assert_eq!(payload["sessionOnly"], json!(true));
+}
+
+#[test]
+fn without_the_thinking_flag_no_level_is_sent() {
+    let payload = start_payload(&["vibe-rs", "-p", "hi", "--model", "devstral-small"]);
+
+    assert!(payload.get("reasoningEffort").is_none());
+}
+
+#[test]
+fn thinking_on_a_saved_session_is_a_usage_error() {
+    for resume in [&["-c"][..], &["--resume", "abc"][..]] {
+        let mut args = vec!["vibe-rs", "-p", "hi", "--thinking", "high"];
+        args.extend_from_slice(resume);
+
+        let err = Cli::parse_from(args).headless_options(None).unwrap_err();
+
+        assert_eq!(err, "--thinking only applies to a new session");
     }
 }

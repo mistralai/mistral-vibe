@@ -57,7 +57,6 @@
         "logLevel": null,
         "disableWelcomeBannerAnimation": true,
         "cursorBlink": false,
-        "showGreeting": true,
         "autocopyToClipboard": true,
         "enableFileAutocomplete": true,
         "fileWatcherForAutocomplete": false,
@@ -286,7 +285,6 @@
           "logLevel": null,
           "disableWelcomeBannerAnimation": true,
           "cursorBlink": false,
-          "showGreeting": true,
           "autocopyToClipboard": true,
           "enableFileAutocomplete": true,
           "fileWatcherForAutocomplete": false,
@@ -1280,22 +1278,6 @@
           ]
         },
         {
-          "name": "show_greeting",
-          "kind": "bool",
-          "description": "Show greeting at startup (Mistral providers only, once per 24h).",
-          "value": true,
-          "path": "/show_greeting",
-          "popular": false,
-          "enumChoices": [],
-          "valueLabels": {},
-          "layerValues": [
-            {
-              "layer": "default",
-              "value": true
-            }
-          ]
-        },
-        {
           "name": "autocopy_to_clipboard",
           "kind": "bool",
           "description": "",
@@ -1816,7 +1798,6 @@
           "logLevel": null,
           "disableWelcomeBannerAnimation": true,
           "cursorBlink": false,
-          "showGreeting": true,
           "autocopyToClipboard": true,
           "enableFileAutocomplete": true,
           "fileWatcherForAutocomplete": false,

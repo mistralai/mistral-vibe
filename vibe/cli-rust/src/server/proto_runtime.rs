@@ -65,7 +65,7 @@ pub struct ConfigView {
     #[serde(default = "yes")]
     pub cursor_blink: bool,
     #[serde(default = "yes")]
-    pub show_greeting: bool,
+    pub show_dangerous_directory_warning: bool,
     #[serde(default = "yes")]
     pub autocopy_to_clipboard: bool,
     #[serde(default = "yes")]
@@ -99,9 +99,13 @@ pub struct ConfigView {
     pub experimental_enable_tab_status: bool,
     #[serde(default)]
     pub enable_pr_monitoring: bool,
-    /// Absent on an older server: stay silent rather than assume consent.
+    /// GrowthBook `vibe_storage_usage`; absent on an older server: off.
     #[serde(default)]
-    pub enable_telemetry: bool,
+    pub experimental_enable_storage_usage: bool,
+    /// Telemetry on and a deployment that is not self-hosted. Absent on an
+    /// older server: stay silent rather than assume consent.
+    #[serde(default)]
+    pub crash_reports_enabled: bool,
     #[serde(default, deserialize_with = "crate::utils::json::lenient")]
     pub models: Vec<ModelView>,
     pub transcription: Option<AudioView>,
@@ -125,6 +129,9 @@ pub struct ModelView {
     pub supports_images: Option<bool>,
     #[serde(deserialize_with = "crate::utils::json::lenient")]
     pub thinking_levels: Vec<String>,
+    /// What the user's plan lacks to run the model; present only on a model
+    /// the picker could upsell, which this client never offers.
+    pub requires: Option<Value>,
 }
 
 /// `TranscriptionConfigView` or `SpeechConfigView`: a model and its provider.

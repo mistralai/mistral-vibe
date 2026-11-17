@@ -227,6 +227,9 @@ class SessionProjector:
         token_usage = state.session.token_usage
         context_usage = state.session.context_usage
         preview = state.session.preview or first_user_message_preview(entries)
+        # Turns whose model call a pre_llm_call hook skipped: the Core discards
+        # that call in the transition that completes the Turn.
+        model_call_skipped: set[str] = set()
         for observation in transition.observations:
             if isinstance(observation, RustTurnStartedObservation):
                 latest_turn = InProgressPublicTurn(
@@ -448,6 +451,8 @@ class SessionProjector:
             ):
                 # A hook retry discards a candidate mid-turn: settle its streamed
                 # entries now, not at the end of the turn.
+                if observation.cause.type == "skipped":
+                    model_call_skipped.add(observation.turn_id)
                 entries = [
                     _settled_provisional_entry(
                         entry,
@@ -479,7 +484,12 @@ class SessionProjector:
                     else entry
                     for entry in entries
                 ]
-                if observation.stop_reason == "skipped":
+                # Only a pre_agent_turn skip drops the user message: a skipped
+                # model call (pre_llm_call) ends a Turn the Core keeps.
+                if (
+                    observation.stop_reason == "skipped"
+                    and observation.turn_id not in model_call_skipped
+                ):
                     entries = _with_skipped_user_message(
                         entries, observation.turn_id, observed_at
                     )
@@ -495,6 +505,11 @@ class SessionProjector:
                     stop_reason=_completed_stop_reason(observation),
                     skip_reason=_skip_reason(observation),
                     reject_reason=_reject_reason(observation),
+                    repeated_tool_failure=(
+                        _output_text(observation)
+                        if observation.stop_reason == "repeated_tool_failure"
+                        else None
+                    ),
                 )
             elif isinstance(observation, RustTurnInterruptedObservation):
                 started_at = _started_at(latest_turn, observation.turn_id, observed_at)
@@ -1480,6 +1495,8 @@ def _running_effect_entry(
             "title": tool_name,
             "detail": detail,
             "state": {"status": "running", "outputText": ""},
+            # The model's call ID, which the call's hook notices name.
+            "toolCallId": action.call_id,
         },
     )
 
@@ -1804,6 +1821,8 @@ def _completed_effect_entry(  # noqa: PLR0914 - one cohesive effect entry
             "title": tool_name,
             "detail": {**detail, "display": display},
             "state": effect_state,
+            # A call a pre_tool hook denied names its hook line by this ID too.
+            "toolCallId": observation.call_id,
         },
     )
 

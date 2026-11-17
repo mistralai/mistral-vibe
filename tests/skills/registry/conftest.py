@@ -12,7 +12,7 @@ import tomli_w
 
 from tests.conftest import build_test_vibe_config
 from vibe.core.platform_auth import PlatformCredentialFactory
-from vibe.core.skills.models import REGISTRY_LATEST_ALIAS
+from vibe.core.skills.models import REGISTRY_LATEST_ALIAS, ManifestEntry
 from vibe.core.skills.registry import (
     _manifest,
     _store,
@@ -20,7 +20,7 @@ from vibe.core.skills.registry import (
     evict_versions,
     still_served,
 )
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import SkillManifest
 from vibe.core.skills.registry.models import RegistrySkillItem
 from vibe.core.utils import file_lock
 

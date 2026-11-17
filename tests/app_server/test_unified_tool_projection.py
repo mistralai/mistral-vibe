@@ -425,6 +425,755 @@ def test_projects_edit_without_carried_text_stays_positional() -> None:
     assert output.occurrences[0].new_start_line is None
 
 
+# The target runtime's file tool annotations, as its `sandbox_helpers` package
+# names them (`FILE_DIFF_PREVIEW_BLOCKS_ANNOTATION_KEY`,
+# `FILE_PREVIOUS_CONTENT_ANNOTATION_KEY`). Spelled out to pin the contract: the
+# app server does not depend on that package.
+_TARGET_PREVIEW_KEY = "mistralai.vibe.harness.file_diff_preview_blocks"
+_TARGET_PREVIOUS_KEY = "mistralai.vibe.harness.file_previous_content"
+
+
+def test_projects_a_target_runtime_write_over_an_existing_file() -> None:
+    """*Prepare*: A target runtime write over a CRLF file, with its diff blocks
+    and the replaced text.
+    *Do*: Project the completed call.
+    *Assert*: The write shows as an update that carries the replaced text, and
+    the written content takes the replaced file's line endings.
+    """
+    # Prepare
+    entry = _effect(
+        "file_system.write_file",
+        {"path": "config.yaml", "content": "name: demo\nreplicas: 5\n"},
+        result={
+            "structured_content": {
+                "path": "/workspace/config.yaml",
+                "bytes_written": 25,
+                "file_existed": True,
+            },
+            "_meta": {
+                _TARGET_PREVIEW_KEY: [
+                    {
+                        "old_start_line": 2,
+                        "new_start_line": 2,
+                        "old_lines": ["replicas: 2\r\n"],
+                        "new_lines": ["replicas: 5\r\n"],
+                    }
+                ],
+                _TARGET_PREVIOUS_KEY: "name: demo\r\nreplicas: 2\r\n",
+            },
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, FileWriteEffectDetail)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileWriteEffectOutput.model_validate(projected.state.output)
+    assert output == FileWriteEffectOutput(
+        file_path="/workspace/config.yaml",
+        content="name: demo\r\nreplicas: 5\r\n",
+        file_existed=True,
+        previous_content="name: demo\r\nreplicas: 2\r\n",
+    )
+    assert projected.state.display.verb == "Updated"
+
+
+@pytest.mark.parametrize(
+    ("meta", "file_existed"),
+    [
+        pytest.param(None, True, id="binary-or-oversized-overwrite"),
+        pytest.param(
+            {
+                _TARGET_PREVIEW_KEY: [
+                    {
+                        "old_start_line": 1,
+                        "new_start_line": 1,
+                        "old_lines": [],
+                        "new_lines": ["hello\n"],
+                    }
+                ]
+            },
+            False,
+            id="creation",
+        ),
+    ],
+)
+def test_projects_a_target_runtime_write_without_replaced_text(
+    meta: dict[str, object] | None, file_existed: bool
+) -> None:
+    """*Prepare*: A target runtime write whose result carries no replaced text:
+    a creation, or an overwrite of a binary or oversized file.
+    *Do*: Project the completed call.
+    *Assert*: The write projects with no previous content, as on the local
+    runtime.
+    """
+    # Prepare
+    result: dict[str, object] = {
+        "structured_content": {
+            "path": "/workspace/notes.txt",
+            "bytes_written": 6,
+            "file_existed": file_existed,
+        }
+    }
+    if meta is not None:
+        result["_meta"] = meta
+    entry = _effect(
+        "file_system.write_file",
+        {"path": "notes.txt", "content": "hello\n"},
+        result=result,
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileWriteEffectOutput.model_validate(projected.state.output)
+    assert output.file_existed is file_existed
+    assert output.previous_content is None
+    assert projected.state.display.verb == ("Updated" if file_existed else "Created")
+
+
+def test_projects_a_target_runtime_edit_with_its_blocks_and_replaced_text() -> None:
+    """*Prepare*: A target runtime replace-all edit with two diff blocks and the
+    pre-edit text.
+    *Do*: Project the completed call.
+    *Assert*: Each block becomes an anchored occurrence, and the pre-edit text
+    is carried for restores.
+    """
+    # Prepare
+    entry = _effect(
+        "file_system.edit",
+        {
+            "file_path": "src/app.py",
+            "old_string": "foo",
+            "new_string": "bar",
+            "replace_all": True,
+        },
+        result={
+            "structured_content": {
+                "file": "/workspace/src/app.py",
+                "lines_changed": 2,
+                "warnings": [],
+            },
+            "_meta": {
+                _TARGET_PREVIEW_KEY: [
+                    {
+                        "old_start_line": 1,
+                        "new_start_line": 1,
+                        "old_lines": ["x = foo\n"],
+                        "new_lines": ["x = bar\n"],
+                    },
+                    {
+                        "old_start_line": 3,
+                        "new_start_line": 3,
+                        "old_lines": ["z = foo()\n"],
+                        "new_lines": ["z = bar()\n"],
+                    },
+                ],
+                _TARGET_PREVIOUS_KEY: "x = foo\ny = 1\nz = foo()\n",
+            },
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, FileEditEffectDetail)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileEditEffectOutput.model_validate(projected.state.output)
+    assert output.file == "/workspace/src/app.py"
+    assert [
+        (item.start_line, item.new_start_line, item.old_text, item.new_text)
+        for item in output.occurrences
+    ] == [(1, 1, "x = foo\n", "x = bar\n"), (3, 3, "z = foo()\n", "z = bar()\n")]
+    assert output.previous_content == "x = foo\ny = 1\nz = foo()\n"
+    assert projected.state.display.verb == "Edited"
+
+
+def test_projects_a_target_runtime_edit_of_an_oversized_file_positionally() -> None:
+    """*Prepare*: A target runtime edit of a file too large for its replaced
+    text: the result carries the diff blocks only.
+    *Do*: Project the completed call.
+    *Assert*: The edit still shows its diff, with no previous content, so a
+    restore falls back to reversing the blocks.
+    """
+    # Prepare
+    entry = _effect(
+        "file_system.edit",
+        {"file_path": "big.txt", "old_string": "beta", "new_string": "BETA"},
+        result={
+            "structured_content": {
+                "file": "/workspace/big.txt",
+                "lines_changed": 1,
+                "warnings": [],
+            },
+            "_meta": {
+                _TARGET_PREVIEW_KEY: [
+                    {
+                        "old_start_line": 2,
+                        "new_start_line": 2,
+                        "old_lines": ["beta\n"],
+                        "new_lines": ["BETA\n"],
+                    }
+                ]
+            },
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileEditEffectOutput.model_validate(projected.state.output)
+    assert output.previous_content is None
+    assert [
+        (item.start_line, item.new_start_line, item.old_text, item.new_text)
+        for item in output.occurrences
+    ] == [(2, 2, "beta\n", "BETA\n")]
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        pytest.param(None, id="no-annotations"),
+        pytest.param({_TARGET_PREVIOUS_KEY: "alpha\n"}, id="unchanged-file"),
+        pytest.param({_TARGET_PREVIEW_KEY: "not blocks"}, id="malformed-blocks"),
+    ],
+)
+def test_leaves_a_target_runtime_edit_without_diff_blocks_generic(
+    meta: dict[str, object] | None,
+) -> None:
+    """*Prepare*: A target runtime edit whose result has no usable diff blocks.
+    *Do*: Project the completed call.
+    *Assert*: The call stays generic rather than showing an empty diff, as an
+    edit without blocks does on the local runtime.
+    """
+    # Prepare
+    result: dict[str, object] = {
+        "structured_content": {
+            "file": "/workspace/notes.txt",
+            "lines_changed": 0,
+            "warnings": ["the edit leaves the file unchanged"],
+        }
+    }
+    if meta is not None:
+        result["_meta"] = meta
+    entry = _effect(
+        "file_system.edit",
+        {"file_path": "notes.txt", "old_string": "alpha", "new_string": "beta"},
+        result=result,
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, GenericEffectDetail)
+
+
+@pytest.mark.parametrize(
+    ("blocks", "start_lines"),
+    [
+        pytest.param(
+            # `x a c a d`: replace_all `a` with `a b b2`.
+            [
+                {
+                    "old_start_line": 2,
+                    "new_start_line": 3,
+                    "old_lines": [],
+                    "new_lines": ["b\n", "b2\n"],
+                },
+                {
+                    "old_start_line": 4,
+                    "new_start_line": 7,
+                    "old_lines": [],
+                    "new_lines": ["b\n", "b2\n"],
+                },
+            ],
+            [3, 5],
+            id="after-lines",
+        ),
+        pytest.param(
+            # `z`: replace `z` with `top z`.
+            [
+                {
+                    "old_start_line": 1,
+                    "new_start_line": 1,
+                    "old_lines": [],
+                    "new_lines": ["top\n"],
+                }
+            ],
+            [1],
+            id="at-the-top",
+        ),
+    ],
+)
+def test_projects_target_runtime_insertions_where_their_lines_land(
+    blocks: list[dict[str, object]], start_lines: list[int]
+) -> None:
+    """*Prepare*: A target runtime edit that only adds lines: its blocks, as the
+    runtime builds them, have no old lines and name the line before them. It
+    carries no replaced text, and its call inserts other lines than its blocks
+    show, so no unchanged line is known.
+    *Do*: Project the completed call.
+    *Assert*: Each occurrence starts at the line its new lines take in the file
+    before the edit, and keeps the runtime's new-file anchor.
+    """
+    # Prepare
+    entry = _effect(
+        "file_system.edit",
+        {"file_path": "f.txt", "old_string": "a\n", "new_string": "a\nb\n"},
+        result={
+            "structured_content": {
+                "file": "/workspace/f.txt",
+                "lines_changed": 1,
+                "warnings": [],
+            },
+            "_meta": {_TARGET_PREVIEW_KEY: blocks},
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileEditEffectOutput.model_validate(projected.state.output)
+    assert [item.start_line for item in output.occurrences] == start_lines
+    assert [item.new_start_line for item in output.occurrences] == [
+        block["new_start_line"] for block in blocks
+    ]
+    assert all(item.old_text == "" for item in output.occurrences)
+
+
+def _insertion(old_start: int, new_start: int, *lines: str) -> dict[str, object]:
+    return {
+        "old_start_line": old_start,
+        "new_start_line": new_start,
+        "old_lines": [],
+        "new_lines": list(lines),
+    }
+
+
+@pytest.mark.parametrize(
+    ("previous", "old_string", "new_string", "blocks", "occurrences", "uncarried"),
+    [
+        pytest.param(
+            "a\nb\nc\n",
+            "a\n",
+            "a\nNEW1\nNEW2\n",
+            [_insertion(1, 2, "NEW1\n", "NEW2\n")],
+            [(1, 1, "a\n", "a\nNEW1\nNEW2\n")],
+            [(2, 2, "", "NEW1\nNEW2\n")],
+            id="after-the-match",
+        ),
+        pytest.param(
+            "a\nb\nc\n",
+            "b\n",
+            "NEW\nb\n",
+            [_insertion(1, 2, "NEW\n")],
+            [(2, 2, "b\n", "NEW\nb\n")],
+            None,
+            id="before-the-match",
+        ),
+        pytest.param(
+            "m\nx\nm\ny\nm\n",
+            "m\n",
+            "m\nI\n",
+            [_insertion(1, 2, "I\n"), _insertion(3, 5, "I\n"), _insertion(5, 8, "I\n")],
+            [(1, 1, "m\n", "m\nI\n"), (3, 4, "m\n", "m\nI\n"), (5, 7, "m\n", "m\nI\n")],
+            [(2, 2, "", "I\n"), (4, 5, "", "I\n"), (6, 8, "", "I\n")],
+            id="replace-all",
+        ),
+        pytest.param(
+            "x = 1\n    y = 2\n\ndef g():\n    x = 1\n    y = 2\n",
+            "x = 1\n    y = 2\n",
+            "x = 1\n    z = 3\n    y = 2\n",
+            [_insertion(1, 2, "    z = 3\n"), _insertion(5, 7, "    z = 3\n")],
+            [
+                (1, 1, "x = 1\n", "x = 1\n    z = 3\n"),
+                (5, 6, "    x = 1\n", "    x = 1\n    z = 3\n"),
+            ],
+            # The call's first line may start mid-line ("    x = 1" at line 5).
+            [(2, 2, "", "    z = 3\n"), (6, 7, "", "    z = 3\n")],
+            id="after-a-first-line-matched-mid-line",
+        ),
+        pytest.param(
+            "foo\nbar\nfoo()\n",
+            "foo",
+            "N\nfoo",
+            [_insertion(1, 1, "N\n"), _insertion(2, 4, "N\n")],
+            [(1, 1, "foo\n", "N\nfoo\n"), (3, 4, "foo()\n", "N\nfoo()\n")],
+            # The call's "foo" may be the start of a longer line ("foo()").
+            [(1, 1, "", "N\n"), (3, 4, "", "N\n")],
+            id="before-a-last-line-matched-without-its-end",
+        ),
+        pytest.param(
+            "a\nb\n",
+            "a\n",
+            "TOP\na\n",
+            [_insertion(1, 1, "TOP\n")],
+            [(1, 1, "a\n", "TOP\na\n")],
+            None,
+            id="at-the-top",
+        ),
+        pytest.param(
+            "a\r\nb\r\n",
+            "a\n",
+            "a\nNEW\n",
+            [_insertion(1, 2, "NEW\r\n")],
+            [(1, 1, "a\r\n", "a\r\nNEW\r\n")],
+            [(2, 2, "", "NEW\r\n")],
+            id="crlf",
+        ),
+        pytest.param(
+            "\ufeffa\nb\n",
+            "a\n",
+            "TOP\na\n",
+            [_insertion(1, 1, "TOP\n")],
+            [(1, 1, "a\n", "TOP\na\n")],
+            None,
+            id="bom-at-the-top",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "carried", [True, False], ids=["replaced-text", "call-strings"]
+)
+def test_projects_target_runtime_insertions_with_a_line_of_context(
+    carried: bool,
+    previous: str,
+    old_string: str,
+    new_string: str,
+    blocks: list[dict[str, object]],
+    occurrences: list[tuple[int, int, str, str]],
+    uncarried: list[tuple[int, int, str, str]] | None,
+) -> None:
+    """*Prepare*: A target runtime edit that only adds lines, with its blocks
+    as the runtime builds them (no old lines), with or without the replaced
+    text (a file over 64,000 bytes has none).
+    *Do*: Project the completed call.
+    *Assert*: Each insertion carries one unchanged line on both sides, as the
+    local runtime's matched text does, so no side of the diff is empty. The
+    line comes from the replaced text, else from the call's matched lines when
+    the call kept a line after the insertion; otherwise the insertion stays
+    bare, as the Runtime may have moved it past equal file lines.
+    """
+    # Prepare
+    meta: dict[str, object] = {_TARGET_PREVIEW_KEY: blocks}
+    if carried:
+        meta[_TARGET_PREVIOUS_KEY] = previous
+    entry = _effect(
+        "file_system.edit",
+        {"file_path": "f.txt", "old_string": old_string, "new_string": new_string},
+        result={
+            "structured_content": {
+                "file": "/workspace/f.txt",
+                "lines_changed": 1,
+                "warnings": [],
+            },
+            "_meta": meta,
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileEditEffectOutput.model_validate(projected.state.output)
+    assert [
+        (item.start_line, item.new_start_line, item.old_text, item.new_text)
+        for item in output.occurrences
+    ] == (occurrences if carried or uncarried is None else uncarried)
+    assert output.previous_content == (previous if carried else None)
+
+
+def _removal(old_start: int, new_start: int, *lines: str) -> dict[str, object]:
+    return {
+        "old_start_line": old_start,
+        "new_start_line": new_start,
+        "old_lines": list(lines),
+        "new_lines": [],
+    }
+
+
+@pytest.mark.parametrize(
+    ("previous", "old_string", "new_string", "blocks", "occurrences", "uncarried"),
+    [
+        pytest.param(
+            "a\nb\nc\n",
+            "a\nb\n",
+            "a\n",
+            [_removal(2, 1, "b\n")],
+            [(1, 1, "a\nb\n", "a\n")],
+            [(2, 1, "b\n", "")],
+            id="after-a-kept-line",
+        ),
+        pytest.param(
+            "a\nb\nc\n",
+            "a\nb\n",
+            "b\n",
+            [_removal(1, 1, "a\n")],
+            [(1, 1, "a\nb\n", "b\n")],
+            None,
+            id="before-a-kept-line",
+        ),
+        pytest.param(
+            "x\na\nb\n",
+            "a\nb\n",
+            "b\n",
+            [_removal(2, 1, "a\n")],
+            [(2, 2, "a\nb\n", "b\n")],
+            None,
+            id="before-a-kept-line-below-the-top",
+        ),
+        pytest.param(
+            "x y\na",
+            "x y\na",
+            "a",
+            [_removal(1, 1, "x y\n")],
+            [(1, 1, "x y\na", "a")],
+            # The call's "a" may be the start of a longer file line.
+            [(1, 1, "x y\n", "")],
+            id="before-a-last-line-without-a-line-break",
+        ),
+        pytest.param(
+            "k\nx\ny\nk\nx\nz\n",
+            "k\nx\n",
+            "k\n",
+            [_removal(2, 1, "x\n"), _removal(5, 3, "x\n")],
+            [(1, 1, "k\nx\n", "k\n"), (4, 3, "k\nx\n", "k\n")],
+            [(2, 1, "x\n", ""), (5, 3, "x\n", "")],
+            id="replace-all",
+        ),
+        pytest.param(
+            "a\r\nb\r\nc\r\n",
+            "a\nb\n",
+            "a\n",
+            [_removal(2, 1, "b\r\n")],
+            [(1, 1, "a\r\nb\r\n", "a\r\n")],
+            [(2, 1, "b\r\n", "")],
+            id="crlf",
+        ),
+        pytest.param(
+            "a\nb\nc\nd\n",
+            "b\nc\n",
+            "",
+            [_removal(2, 1, "b\n", "c\n")],
+            [(2, 1, "b\nc\n", "")],
+            None,
+            id="no-kept-line-as-on-the-local-runtime",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "carried", [True, False], ids=["replaced-text", "call-strings"]
+)
+def test_projects_target_runtime_removals_with_a_line_of_context(
+    carried: bool,
+    previous: str,
+    old_string: str,
+    new_string: str,
+    blocks: list[dict[str, object]],
+    occurrences: list[tuple[int, int, str, str]],
+    uncarried: list[tuple[int, int, str, str]] | None,
+) -> None:
+    """*Prepare*: A target runtime edit that only removes lines, with its blocks
+    as the runtime builds them (no new lines), with or without the replaced
+    text.
+    *Do*: Project the completed call.
+    *Assert*: Each removal carries the line the call kept next to it on both
+    sides, as the local runtime's matched text does; a call that kept no line
+    leaves the new side empty there too. Without the replaced text, the line
+    comes from the call only when it kept a line after the removal.
+    """
+    # Prepare
+    meta: dict[str, object] = {_TARGET_PREVIEW_KEY: blocks}
+    if carried:
+        meta[_TARGET_PREVIOUS_KEY] = previous
+    entry = _effect(
+        "file_system.edit",
+        {"file_path": "f.txt", "old_string": old_string, "new_string": new_string},
+        result={
+            "structured_content": {
+                "file": "/workspace/f.txt",
+                "lines_changed": 1,
+                "warnings": [],
+            },
+            "_meta": meta,
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileEditEffectOutput.model_validate(projected.state.output)
+    assert [
+        (item.start_line, item.new_start_line, item.old_text, item.new_text)
+        for item in output.occurrences
+    ] == (occurrences if carried or uncarried is None else uncarried)
+
+
+_TARGET_TRUNCATED_WARNING = (
+    "edit preview truncated because the diff exceeds preview limits"
+)
+
+
+@pytest.mark.parametrize(
+    ("blocks", "previous_content"),
+    [
+        pytest.param(
+            [
+                {
+                    "old_start_line": 1,
+                    "new_start_line": 1,
+                    "old_lines": ["a = foo\n"],
+                    "new_lines": ["a = bar\n"],
+                }
+            ],
+            "a = foo\nb = foo\n",
+            id="partial-blocks",
+        ),
+        pytest.param(None, "a = foo\nb = foo\n", id="no-blocks"),
+        pytest.param(
+            [
+                {
+                    "old_start_line": 1,
+                    "new_start_line": 1,
+                    "old_lines": ["a = foo\n"],
+                    "new_lines": ["a = bar\n"],
+                }
+            ],
+            None,
+            id="partial-blocks-oversized-file",
+        ),
+        pytest.param(None, None, id="no-annotations"),
+    ],
+)
+def test_projects_a_truncated_target_runtime_edit_from_its_call_strings(
+    blocks: list[dict[str, object]] | None, previous_content: str | None
+) -> None:
+    """*Prepare*: A target runtime edit whose diff preview went past its limits:
+    it kept some blocks or none, and the warning says so.
+    *Do*: Project the completed call.
+    *Assert*: The edit shows the call's strings rather than a partial diff that
+    a rewind would half undo, and keeps whatever replaced text it carried.
+    """
+    # Prepare
+    meta: dict[str, object] = {}
+    if blocks is not None:
+        meta[_TARGET_PREVIEW_KEY] = blocks
+    if previous_content is not None:
+        meta[_TARGET_PREVIOUS_KEY] = previous_content
+    entry = _effect(
+        "file_system.edit",
+        {
+            "file_path": "src/app.py",
+            "old_string": "foo",
+            "new_string": "bar",
+            "replace_all": True,
+        },
+        result={
+            "structured_content": {
+                "file": "/workspace/src/app.py",
+                "lines_changed": 2,
+                "warnings": [_TARGET_TRUNCATED_WARNING],
+            },
+            # As the target runtime sends it: no `_meta` without annotations.
+            **({"_meta": meta} if meta else {}),
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, FileEditEffectDetail)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileEditEffectOutput.model_validate(projected.state.output)
+    assert (output.old_string, output.new_string) == ("foo", "bar")
+    assert output.occurrences == []
+    assert output.previous_content == previous_content
+    assert projected.state.display.warnings == [_TARGET_TRUNCATED_WARNING]
+
+
+def test_projects_a_target_runtime_write_whatever_its_diff_blocks() -> None:
+    """*Prepare*: A target runtime write whose diff blocks are malformed.
+    *Do*: Project the completed call.
+    *Assert*: The write still carries its replaced text: it diffs from that
+    text and never reads the blocks.
+    """
+    # Prepare
+    entry = _effect(
+        "file_system.write_file",
+        {"path": "notes.txt", "content": "hello\n"},
+        result={
+            "structured_content": {
+                "path": "/workspace/notes.txt",
+                "bytes_written": 6,
+                "file_existed": True,
+            },
+            "_meta": {
+                _TARGET_PREVIEW_KEY: "not blocks",
+                _TARGET_PREVIOUS_KEY: "goodbye\n",
+            },
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    output = FileWriteEffectOutput.model_validate(projected.state.output)
+    assert output.previous_content == "goodbye\n"
+
+
+def test_leaves_a_target_runtime_write_with_malformed_replaced_text_generic() -> None:
+    """*Prepare*: A target runtime write whose replaced text is not a string.
+    *Do*: Project the completed call.
+    *Assert*: The call stays generic rather than reading as a creation.
+    """
+    # Prepare
+    entry = _effect(
+        "file_system.write_file",
+        {"path": "notes.txt", "content": "hello\n"},
+        result={
+            "structured_content": {
+                "path": "/workspace/notes.txt",
+                "bytes_written": 6,
+                "file_existed": True,
+            },
+            "_meta": {_TARGET_PREVIOUS_KEY: ["goodbye\n"]},
+        },
+    )
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.detail, GenericEffectDetail)
+
+
 def test_projects_unified_shell_result_from_structured_transcript() -> None:
     entry = _effect(
         "bash",
@@ -645,9 +1394,9 @@ def test_projects_process_start_with_command_in_display() -> None:
     assert projected.state.output["processId"] == "process-abc12345-abcdef"
 
 
-def test_self_sleep_label_renders_the_verb_alone() -> None:
+def test_self_sleep_reads_as_a_script_still_in_progress() -> None:
     # The Harness stamps the raw tool key as the settled result message.
-    entry = _effect("self.sleep", {"seconds": 1}, result={"structured_content": {}})
+    entry = _effect("self.sleep", {"seconds": 5}, result={"structured_content": {}})
     entry = entry.model_copy(
         update={
             "state": entry.state.model_copy(
@@ -662,15 +1411,33 @@ def test_self_sleep_label_renders_the_verb_alone() -> None:
 
     assert isinstance(projected, PublicEffectEntry)
     assert isinstance(projected.detail, GenericEffectDetail)
-    assert projected.detail.display.verb == "Sleeping"
-    # Empty string (not None) keeps the header as the verb alone rather than
-    # falling back to the summary or leaking the raw "self.sleep" key.
-    assert projected.detail.display.message == ""
-    assert projected.detail.display.settled_message == ""
-    assert projected.detail.display.summary == "Sleeping"
+    assert projected.detail.display.verb == "Script in progress,"
+    assert projected.detail.display.message == "next step in 5s"
+    assert projected.detail.display.status_text == "Script in progress"
+    assert projected.detail.display.settled_verb == "Script waited"
+    assert projected.detail.display.settled_message == "5s"
     assert isinstance(projected.state, CompletedEffectState)
-    assert projected.state.display.verb == "Slept"
-    assert projected.state.display.message == ""
+    assert projected.state.display.verb == "Script waited"
+    assert projected.state.display.message == "5s"
+
+
+def test_self_sleep_keeps_a_fractional_duration() -> None:
+    projected = project_unified_history_entry(_effect("self.sleep", {"seconds": 0.5}))
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert projected.detail.display.message == "next step in 0.5s"
+
+
+@pytest.mark.parametrize("arguments", [{"seconds": 0}, {}], ids=["zero", "missing"])
+def test_self_sleep_without_a_valid_duration_still_reads_as_a_script(
+    arguments: dict[str, object],
+) -> None:
+    projected = project_unified_history_entry(_effect("self.sleep", arguments))
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert projected.detail.display.verb == "Script in progress"
+    assert projected.detail.display.message == ""
+    assert projected.detail.display.settled_verb == "Script waited"
 
 
 def test_self_wait_label_hides_the_raw_tool_key() -> None:
@@ -2345,3 +3112,68 @@ def test_parse_grep_invocation_recognizes_plain_invocations(
 )
 def test_parse_grep_invocation_rejects_ambiguous_invocations(command: str) -> None:
     assert _parse_grep_invocation(command) is None
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "verb", "settled", "message"),
+    [
+        ("vibe.get_goal", {}, "Reading", "Read", "the goal"),
+        (
+            "vibe.create_goal",
+            {"objective": "Write  a.txt\nthen check it"},
+            "Setting",
+            "Set",
+            "goal: Write a.txt then check it",
+        ),
+        (
+            "vibe.update_goal",
+            {"status": "complete"},
+            "Completing",
+            "Completed",
+            "the goal",
+        ),
+        (
+            "vibe.update_goal",
+            {"status": "blocked"},
+            "Marking",
+            "Marked",
+            "the goal blocked",
+        ),
+        ("vibe.update_goal", {"status": "paused"}, "Pausing", "Paused", "the goal"),
+    ],
+)
+def test_goal_tool_calls_read_as_actions(name, arguments, verb, settled, message):
+    """*Prepare*: A completed goal tool call, as the Harness reports it.
+    *Do*: Project it.
+    *Assert*: The header reads as an action on the goal, not the raw tool key.
+    """
+    # Prepare
+    entry = _effect(name, arguments, result={"structured_content": {"goal": None}})
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert isinstance(projected, PublicEffectEntry)
+    assert projected.detail.tool_name == name
+    assert projected.detail.display.verb == verb
+    assert projected.detail.display.settled_verb == settled
+    assert projected.detail.display.message == message
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.verb == settled
+    assert projected.state.display.message == message
+
+
+def test_an_unknown_goal_status_stays_generic():
+    """*Prepare*: An update_goal call with a status this surface does not know.
+    *Do*: Project it.
+    *Assert*: The entry is left as the Harness reported it.
+    """
+    # Prepare
+    entry = _effect("vibe.update_goal", {"status": "active"}, error="refused")
+
+    # Do
+    projected = project_unified_history_entry(entry)
+
+    # Assert
+    assert projected == entry

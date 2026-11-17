@@ -111,26 +111,40 @@ fn draw_input(
 ) {
     let bar = theme::border_style().bg(theme::background());
     f.buffer_mut().set_string(x, text.y, "▎", bar);
-    if !input.field.text.is_empty() {
-        draw_field(f, text, &mut input.field, focused, cursor_on);
-        return;
+    let description = &input.description;
+    draw_field_or_placeholder(f, text, &mut input.field, description, focused, cursor_on);
+}
+
+/// `draw_field`, or the muted `placeholder` with the caret on its first cell while the field is empty.
+pub(crate) fn draw_field_or_placeholder(
+    f: &mut Frame,
+    area: Rect,
+    field: &mut Field,
+    placeholder: &str,
+    focused: bool,
+    cursor_on: bool,
+) {
+    if !field.text.is_empty() {
+        return draw_field(f, area, field, focused, cursor_on);
     }
-    let placeholder = theme::muted_style().bg(theme::background());
-    f.buffer_mut().set_stringn(
-        text.x,
-        text.y,
-        &input.description,
-        text.width as usize,
-        placeholder,
-    );
-    if focused && cursor_on && text.width > 0 {
-        let cell = Rect::new(text.x, text.y, 1, 1);
+    let muted = theme::muted_style().bg(theme::background());
+    f.buffer_mut()
+        .set_stringn(area.x, area.y, placeholder, area.width as usize, muted);
+    if focused && cursor_on && area.width > 0 {
+        let cell = Rect::new(area.x, area.y, 1, 1);
         f.buffer_mut()
-            .set_style(cell, theme::fixed::input_caret(placeholder));
+            .set_style(cell, theme::fixed::input_caret(muted));
     }
 }
 
-fn draw_field(f: &mut Frame, area: Rect, field: &mut Field, focused: bool, cursor_on: bool) {
+/// A compact single-line input: the caret, the selection and a horizontal scroll that follows the caret.
+pub(crate) fn draw_field(
+    f: &mut Frame,
+    area: Rect,
+    field: &mut Field,
+    focused: bool,
+    cursor_on: bool,
+) {
     let base = theme::text(theme::foreground()).bg(theme::background());
     let selected = crate::chat_input::selection_range(&field.text, field.cursor, field.anchor);
     let caret = theme::fixed::input_caret(base);

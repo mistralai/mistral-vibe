@@ -346,7 +346,7 @@ fn restoring_onto_the_same_model_keeps_the_correction() {
 ///
 /// *Prepare*: A Session with a short exchange, its requests counted at 30 times their
 /// estimate, and a compaction it has started but not yet requested.
-/// *Do*: Restore it on a model with a 4,000-token compaction threshold, moved there
+/// *Do*: Restore it on a model with a 4,800-token compaction threshold, moved there
 /// from the large model.
 /// *Assert*: The restore succeeds with the correction starting over, because the
 /// pending compaction is fitted to the new model only after the move resets the
@@ -377,9 +377,9 @@ fn a_pending_compaction_is_fitted_after_the_move() {
     );
     let mut config = automatic_compaction_config();
     let facts = &mut config.settings.context.model_facts;
-    facts.context_window = 4_001;
-    facts.compaction_threshold = 4_000;
-    facts.compaction_threshold_max = 4_000;
+    facts.context_window = 4_801;
+    facts.compaction_threshold = 4_800;
+    facts.compaction_threshold_max = 4_800;
 
     // Do
     let moved = moved_to(&session, config.clone());

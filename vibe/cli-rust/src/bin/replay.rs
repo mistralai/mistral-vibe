@@ -80,6 +80,14 @@ fn canned(entry: &mut Value) -> Option<Value> {
     Some(entry.clone())
 }
 
+/// A request's events: a list on every call, or `{"calls": [[...], ...]}` one batch per call, repeating the last.
+fn per_call_events(entry: &mut Value) -> Option<Vec<Value>> {
+    match entry.get_mut("calls") {
+        Some(calls) => canned(calls).and_then(|batch| batch.as_array().cloned()),
+        None => entry.as_array().cloned(),
+    }
+}
+
 /// Check if the handshake declares an error response for a method, per session first.
 fn resolve_error<'a>(
     handshake: &'a Map<String, Value>,
@@ -455,7 +463,7 @@ fn main() {
     let Fixture {
         mut handshake,
         batches,
-        on_request,
+        mut on_request,
         declared,
         catalogs,
     } = load_fixture();
@@ -550,9 +558,8 @@ fn main() {
         let shell_run = method == SHELL_COMMAND
             && msg.pointer("/params/action").and_then(Value::as_str) == Some("run");
         let mut request_events = on_request
-            .get(method)
-            .and_then(Value::as_array)
-            .cloned()
+            .get_mut(method)
+            .and_then(per_call_events)
             .filter(|_| method != SHELL_COMMAND || shell_run)
             .unwrap_or_default();
         if let Some(operation_id) = msg.pointer("/params/operationId").and_then(Value::as_str) {

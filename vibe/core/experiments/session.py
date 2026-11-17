@@ -5,6 +5,7 @@ from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Final
 
 from vibe import __version__
+from vibe.core.config._self_hosted import experiments_allowed
 from vibe.core.experiments.active import ExperimentSurface
 from vibe.core.experiments.cache import (
     clear_cached_eval_responses,
@@ -120,7 +121,7 @@ async def resolve_plan_attributes(
     """The attribute snapshot and plan telemetry segments by, for a session
     that sends no eval; ``(None, None)`` with telemetry off.
     """
-    if not config.enable_telemetry or not config.experiments.enable:
+    if not experiments_allowed(config):
         # The `vibe` launcher reads this cache without the config, so opting out must drop it.
         clear_cached_eval_responses()
     if not config.enable_telemetry:
@@ -153,7 +154,7 @@ async def initialize_experiments(
     """
     mistral = (
         mistral_credentials(config, credentials)
-        if config.enable_telemetry and config.experiments.enable
+        if experiments_allowed(config)
         else None
     )
     cache_key = await resolve_principal(mistral) if mistral is not None else None
@@ -171,10 +172,11 @@ async def initialize_experiments(
     if attributes is None:
         # Mistral provider present but key missing — tried but failed.
         return False, user_plan
-    if user_plan == NO_PLAN_DATA or not config.experiments.enable:
-        # No Mistral provider (sentinel) or the A/B opt-out: keep the attribute
-        # snapshot + user_plan for telemetry segmentation, but run no GrowthBook
-        # eval (no bucketing, no eval cache, no prompt refresh, no persist).
+    if user_plan == NO_PLAN_DATA or not experiments_allowed(config):
+        # No Mistral provider (sentinel), the A/B opt-out or a self-hosted
+        # deployment: keep the attribute snapshot + user_plan for telemetry
+        # segmentation, but run no GrowthBook eval (no bucketing, no eval
+        # cache, no prompt refresh, no persist).
         manager.set_attributes(attributes)
         return False, user_plan
     await manager.initialize(attributes)

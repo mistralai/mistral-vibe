@@ -55,6 +55,22 @@ from vibe.app_server._enter_worktree import (
     WorktreeEnterer,
     run_enter_worktree,
 )
+from vibe.app_server._goal import (
+    CREATE_GOAL_TOOL_DESCRIPTION,
+    CREATE_GOAL_TOOL_NAME,
+    GET_GOAL_TOOL_DESCRIPTION,
+    GET_GOAL_TOOL_NAME,
+    GOAL_TOOL_NAMES,
+    UPDATE_GOAL_TOOL_DESCRIPTION,
+    UPDATE_GOAL_TOOL_NAME,
+    CreateGoalArgs,
+    GetGoalArgs,
+    GoalController,
+    GoalToolResult,
+    UpdateGoalArgs,
+)
+from vibe.app_server._goal_state import GoalError
+from vibe.app_server._goal_store import GoalStoreError
 from vibe.app_server._session_peers import (
     ARCHIVE_SESSIONS_TOOL_DESCRIPTION,
     ARCHIVE_SESSIONS_TOOL_NAME,
@@ -147,6 +163,7 @@ VIBE_PROVIDED_TOOL_NAMES = {
     f"{VIBE_TOOL_GROUP}.{SEND_TO_SESSION_TOOL_NAME}": SEND_TO_SESSION_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{ARCHIVE_SESSIONS_TOOL_NAME}": ARCHIVE_SESSIONS_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{RESTORE_SESSIONS_TOOL_NAME}": RESTORE_SESSIONS_TOOL_NAME,
+    **{f"{VIBE_TOOL_GROUP}.{name}": name for name in GOAL_TOOL_NAMES},
     f"{VIBE_TOOL_GROUP}.{MARK_SESSIONS_SEEN_TOOL_NAME}": MARK_SESSIONS_SEEN_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{ENTER_WORKTREE_TOOL_NAME}": ENTER_WORKTREE_TOOL_NAME,
 }
@@ -168,6 +185,9 @@ VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
     RESTORE_SESSIONS_TOOL_NAME: "ask",
     MARK_SESSIONS_SEEN_TOOL_NAME: "ask",
     SCRATCHPAD_TOOL_NAME: "allow",
+    # The goal tools touch only the session's own goal, and the user keeps every
+    # lifecycle control, so they never ask.
+    **dict.fromkeys(GOAL_TOOL_NAMES, "allow"),
     # Moving off the user's checkout is the safe direction: never asked about.
     ENTER_WORKTREE_TOOL_NAME: "allow",
 }
@@ -181,6 +201,7 @@ def vibe_tool_groups(
     session_spawn: Sequence[SpawnModel] | None = None,
     session_peers: bool = False,
     session_peer_restore: bool = False,
+    goals: bool = False,
     session_peer_mark_seen: bool = False,
     enter_worktree: bool = False,
 ) -> list[RustToolGroupDefinition]:
@@ -307,6 +328,25 @@ def vibe_tool_groups(
                         else "direct",
                     )
                 )
+    if goals:
+        for name, description, args in (
+            (GET_GOAL_TOOL_NAME, GET_GOAL_TOOL_DESCRIPTION, GetGoalArgs),
+            (CREATE_GOAL_TOOL_NAME, CREATE_GOAL_TOOL_DESCRIPTION, CreateGoalArgs),
+            (UPDATE_GOAL_TOOL_NAME, UPDATE_GOAL_TOOL_DESCRIPTION, UpdateGoalArgs),
+        ):
+            if not _passes_tool_filters(
+                name, enabled=enabled_tools, disabled=disabled_tools
+            ):
+                continue
+            tools.append(
+                RustProvidedToolDefinition(
+                    name=name,
+                    description=description,
+                    input_schema=args.model_json_schema(),
+                    output_schema=GoalToolResult.model_json_schema(by_alias=False),
+                    exposure="direct",
+                )
+            )
     if not tools:
         return []
 
@@ -351,6 +391,7 @@ class VibeProvidedTools:
         session_origin: SessionOriginResolver | None = None,
         session_peers: SessionPeers | None = None,
         hops_of: HopsOf | None = None,
+        goals: Callable[[str], GoalController] | None = None,
         sender_of: SenderOf | None = None,
         starter_of: StarterOf | None = None,
         turn_starts: TurnStarts | None = None,
@@ -386,6 +427,15 @@ class VibeProvidedTools:
                             invocation_id=action.action_id,
                             origin_of=session_origin,
                             spawner=session_spawner,
+                        )
+                    elif action.call.tool_name in GOAL_TOOL_NAMES:
+                        if goals is None:
+                            raise ValueError("Goals are not available for this session")
+                        result = await goals(session_id).run_tool(
+                            action.call.tool_name,
+                            action.call.arguments,
+                            call_id=action.action_id,
+                            turn_id=action.turn_id,
                         )
                     elif action.call.tool_name == ENTER_WORKTREE_TOOL_NAME:
                         if enter_worktree is None:
@@ -434,6 +484,8 @@ class VibeProvidedTools:
                     ScheduledLoopStoreError,
                     SessionSpawnError,
                     SessionPeerError,
+                    GoalError,
+                    GoalStoreError,
                     EnterWorktreeError,
                 ) as error:
                     return _failed(action, error)

@@ -267,6 +267,29 @@ class TestConfigLoading:
             HookType.NOTIFICATION,
         ]
 
+    def test_model_call_hooks_load_with_strict(self, config_dir: Path) -> None:
+        _write_hooks_toml(
+            config_dir / "hooks.toml",
+            [
+                {
+                    "name": "budget",
+                    "type": "pre_llm",
+                    "command": "echo ok",
+                    "match": "main",
+                    "strict": True,
+                },
+                {
+                    "name": "audit",
+                    "type": "post_llm",
+                    "command": "echo ok",
+                    "strict": True,
+                },
+            ],
+        )
+        result = load_hooks_from_fs()
+        assert result.issues == []
+        assert [h.type for h in result.hooks] == [HookType.PRE_LLM, HookType.POST_LLM]
+
     def test_session_hooks_load(self, config_dir: Path) -> None:
         _write_hooks_toml(
             config_dir / "hooks.toml",

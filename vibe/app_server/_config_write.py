@@ -34,13 +34,23 @@ def model_after_write(config: VibeConfigSchema, model_alias: str | None) -> str:
 
 
 def model_config_write_ops(
-    config: VibeConfigSchema, *, model_alias: str | None, reasoning_effort: str | None
+    config: VibeConfigSchema,
+    *,
+    model_alias: str | None,
+    reasoning_effort: str | None,
+    default_thinking: str | None = None,
 ) -> list[ConfigWriteOpWire]:
     """The writes a model pick makes, from the pick itself.
 
     Thinking is stored under whichever model is active after this write -- the
     one being picked, or the current one when only thinking changes -- so the
     two travel together and only this function needs to know the paths.
+
+    A level equal to that model's ``default_thinking`` is not stored, so the
+    model keeps following its default as the catalog or GrowthBook changes it:
+    the pick removes the level instead, which does nothing when none is saved.
+    Removing it rather than skipping the write keeps a level saved earlier from
+    staying in force over the default the user just picked.
 
     An empty alias is how this configuration says "follow the default", and
     writing it is the only way to unpin a session, so it is passed through
@@ -59,12 +69,11 @@ def model_config_write_ops(
             ConfigWriteOpWire(op="set", path=ACTIVE_MODEL_PATH, value=model_alias)
         )
     if reasoning_effort is not None:
-        target = model_after_write(config, model_alias)
-        ops.append(
-            ConfigWriteOpWire(
-                op="set", path=model_thinking_path(target), value=reasoning_effort
-            )
-        )
+        path = model_thinking_path(model_after_write(config, model_alias))
+        if reasoning_effort != default_thinking:
+            ops.append(ConfigWriteOpWire(op="set", path=path, value=reasoning_effort))
+        else:
+            ops.append(ConfigWriteOpWire(op="remove", path=path))
     return ops
 
 

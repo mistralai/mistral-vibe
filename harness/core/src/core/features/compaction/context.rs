@@ -304,6 +304,18 @@ pub(in crate::core) struct Reduction {
     pub reduced_messages: usize,
     /// The reduced view's level.
     pub view: &'static str,
+    /// A message of the current Turn, such as its input, its steering, or its own replies
+    /// and tool results, is shown only in the reduced view, not as a message of its own.
+    pub turn_message_reduced: bool,
+}
+
+/// Whether the reduced messages among `kept` include one of the current Turn's: a message
+/// with the newest Turn index among them. Earlier Turns' messages carry older indexes.
+fn reduces_turn_message(kept: &[StoredMessage], is_reduced: impl Fn(usize) -> bool) -> bool {
+    let current = kept.iter().filter_map(|stored| stored.turn_index).max();
+    kept.iter().enumerate().any(|(index, stored)| {
+        is_reduced(index) && (current.is_none() || stored.turn_index == current)
+    })
 }
 
 /// Why and how far the summary was cut: the `compaction_summary_cut_off`
@@ -385,7 +397,7 @@ fn fitted_replacement(
                 }),
             ),
         };
-        let mut messages = head(system_message.clone(), &carried, &summary_text);
+        let mut messages = rebuilt_history_head(system_message.clone(), &carried, &summary_text);
         messages.extend(kept.iter().cloned());
         return Ok(Some(Rebuilt {
             messages,
@@ -435,6 +447,7 @@ fn fitted_replacement(
         reduction: (!kept.is_empty()).then_some(Reduction {
             reduced_messages: kept.len(),
             view: OMITTED_LEVEL,
+            turn_message_reduced: reduces_turn_message(kept, |_| true),
         }),
         summary_cut,
     }))
@@ -476,7 +489,7 @@ fn carry_tokens(
     let Some(token_threshold) = budget.token_threshold else {
         return Ok(USER_CARRY_TOKENS);
     };
-    let preamble = head(system_message.clone(), &[], "");
+    let preamble = rebuilt_history_head(system_message.clone(), &[], "");
     let fixed = estimate(&preamble[..2], tools, budget)?;
     let room = token_threshold.saturating_sub(fixed) / USER_CARRY_ROOM_SHARE;
     Ok(usize::try_from(room)
@@ -517,7 +530,8 @@ impl KeptFitter<'_> {
                 .copied()
                 .collect::<Vec<_>>();
             reduced.sort_unstable();
-            let mut messages = head(self.system_message.clone(), self.carried, summary);
+            let mut messages =
+                rebuilt_history_head(self.system_message.clone(), self.carried, summary);
             let view_index = messages.len();
             messages.extend(
                 (0..kept.len())
@@ -558,6 +572,9 @@ impl KeptFitter<'_> {
                     Some(Reduction {
                         reduced_messages: reduced.len(),
                         view: view.level(),
+                        turn_message_reduced: reduces_turn_message(kept, |index| {
+                            reduced.binary_search(&index).is_ok()
+                        }),
                     }),
                 )));
             }
@@ -598,7 +615,7 @@ impl KeptFitter<'_> {
     /// The fixed parts, `summary` and, when messages follow the last reply,
     /// the omitted line in their place.
     fn minimal(&self, summary: &str) -> Vec<StoredMessage> {
-        let mut messages = head(self.system_message.clone(), self.carried, summary);
+        let mut messages = rebuilt_history_head(self.system_message.clone(), self.carried, summary);
         if !self.kept.is_empty() {
             messages.push(view_message(self.texts.view.omitted));
         }
@@ -674,7 +691,7 @@ pub(super) fn cut_at_line_end(text: &str, max_bytes: usize) -> &str {
 
 /// The system prompt, the carried user messages and the summary: the parts
 /// every rebuilt history starts with.
-fn head(
+fn rebuilt_history_head(
     system_message: StoredMessage,
     carried: &[StoredMessage],
     summary: &str,

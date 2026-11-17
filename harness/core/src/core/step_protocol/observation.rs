@@ -22,6 +22,10 @@ pub(crate) enum TurnStopReason {
     /// output-limit recovery was off, out of retries, or at the Turn's last iteration; the Turn's
     /// output is the cut-off reply, or a hook's replacement of it.
     OutputLimit,
+    /// The newest model replies failed the same tool call the same way as many times in a row as
+    /// `settings.turn.max_identical_tool_failures` allows; the Turn's output is a fixed message
+    /// that asks the user for a new message.
+    RepeatedToolFailure,
 }
 
 /// What one Core feature function produced: actions for the Runtime to run and
@@ -142,6 +146,9 @@ pub(crate) enum WarningCode {
     /// `structured_content` into one whose `content` does not. Core uses the
     /// result as returned.
     PostToolCallResultInconsistent,
+    /// Pre-tool-call hooks returned arguments that do not satisfy the tool's
+    /// input schema. The call fails without running.
+    PreToolCallArgumentsInvalid,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

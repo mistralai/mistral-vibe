@@ -38,6 +38,24 @@ class _Workspaces(BaseModel):
     workspaces: list[_Workspace]
 
 
+def read_stored_oidc_credential() -> str | None:
+    """The marker when a matching session is stored, else None.
+
+    Raises ``OidcStorageError`` when the session cannot be read and
+    ``OidcError`` when the configuration is invalid, so a caller that reports
+    on the sign-in (``/status``) can tell "cannot tell" from "signed out".
+    """
+    config = OidcConfig.from_env()
+    tokens = OidcCredentialStore()._load()
+    if tokens is None or (tokens.issuer, tokens.client_id, tokens.audience) != (
+        config.issuer,
+        config.client_id,
+        config.audience,
+    ):
+        return None
+    return OIDC_API_KEY
+
+
 def stored_oidc_credential() -> str | None:
     """The marker when a matching session is stored, else None (never raises).
 
@@ -46,17 +64,9 @@ def stored_oidc_credential() -> str | None:
     still offer browser sign-in.
     """
     try:
-        config = OidcConfig.from_env()
-        tokens = OidcCredentialStore()._load()
+        return read_stored_oidc_credential()
     except (OidcError, OidcStorageError):
         return None
-    if tokens is None or (tokens.issuer, tokens.client_id, tokens.audience) != (
-        config.issuer,
-        config.client_id,
-        config.audience,
-    ):
-        return None
-    return OIDC_API_KEY
 
 
 def stored_oidc_cache_key() -> str | None:

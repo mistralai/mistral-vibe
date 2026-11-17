@@ -19,8 +19,8 @@ from tests.e2e.agent_loop_characterization.support import (
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
-    wait_for_main_screen,
     wait_for_rendered_text,
+    wait_for_session_ready,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -174,7 +174,7 @@ def test_resumed_session_sends_prior_tool_call_and_result_history_to_the_model(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send(RESUME_INITIAL_PROMPT)
         child.send("\r")
 
@@ -202,7 +202,7 @@ def test_resumed_session_sends_prior_tool_call_and_result_history_to_the_model(
         resumed_child,
         resumed_captured,
     ):
-        wait_for_main_screen(resumed_child, timeout=15)
+        wait_for_session_ready(resumed_child, resumed_captured, timeout=15)
         resumed_child.send(RESUME_CONTINUE_PROMPT)
         resumed_child.send("\r")
 

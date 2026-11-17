@@ -13,9 +13,9 @@ from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     poll_until,
     send_ctrl_c_until_quit_confirmation,
-    wait_for_main_screen,
     wait_for_rendered_text,
     wait_for_request_count_while_draining_child_output,
+    wait_for_session_ready,
 )
 from tests.e2e.mock_server import StreamingMockServer
 
@@ -61,7 +61,7 @@ def test_spawn_cli_runs_configured_hook_after_turn(
     _setup_recording_hook(vibe_home, invocation_path)
 
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Run the configured hook")
         child.send("\r")
 
@@ -115,7 +115,7 @@ def test_spawn_cli_runs_post_agent_hooks_scoped_to_the_main_agent(
     _setup_recording_hooks(vibe_home, invocation_paths, match=True)
 
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Run the scoped hooks")
         child.send("\r")
 

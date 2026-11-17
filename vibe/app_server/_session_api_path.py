@@ -14,23 +14,36 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
+from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING, Any, cast
+
+from pydantic import TypeAdapter
 
 from mistralai_vibe_local_harness.session_api.app_server.session.models import (
     HistoryEntry,
     Page,
     PageRequest as ApiPageRequest,
     ToolResultHistoryEntry,
+    TurnState,
 )
 from mistralai_vibe_local_harness.session_api.app_server.session.procedures import (
+    CallbacksTreeParams,
+    CallbacksTreeResponse,
     EventsReadParams,
+    PluginInfo as ApiPluginInfo,
+    PluginInfoParams as ApiPluginInfoParams,
+    PluginInfoResponse as ApiPluginInfoResponse,
     SessionHistoryListParams,
     SessionHistoryListResponse,
     SessionReadParams as ApiSessionReadParams,
     SessionReadResponse as ApiSessionReadResponse,
+    SessionTurnsListParams as ApiTurnsListParams,
+    SessionTurnsListResponse as ApiTurnsListResponse,
 )
 from mistralai_vibe_local_harness.session_protocol import (
     PublicSessionState as HarnessPublicSessionState,
+    PublicTurn as HarnessPublicTurn,
     SessionReadParams as HarnessSessionReadParams,
     SessionSnapshot as HarnessSessionSnapshot,
 )
@@ -43,7 +56,12 @@ from mistralai_vibe_local_harness.vibe._session_api_extensions import (
     VibeSessionReadResponse,
 )
 from vibe.app_server._session_api_commands import SessionApiCommands
-from vibe.app_server._session_api_session import ApiSessionState, AppliedBatch
+from vibe.app_server._session_api_projection import ApiHistoryProjection
+from vibe.app_server._session_api_session import (
+    ApiSessionState,
+    AppliedBatch,
+    runtime_turn,
+)
 from vibe.app_server._session_api_streams import SessionApiStreams, SessionBatch
 from vibe.app_server._session_backend_port import (
     SessionBackendEvent,
@@ -55,13 +73,23 @@ from vibe.app_server._unified_harness_backend_adapter import (
     _harness_call,
     _history_limit,
     _ProjectedHistory,
+    _public_turn,
     _retrying_event,
+    _turns_from_history,
+    _with_app_server_entries,
     _with_callbacks_in_history,
+)
+from vibe.app_server._unified_history_projection import (
+    with_approval_display,
+    with_available_path_scopes,
 )
 from vibe.app_server.models import (
     PublicCallbackEntry,
     PublicEntryGenerationStatus,
+    PublicHistoryEntry,
     PublicSessionState,
+    PublicTurn,
+    validate_history_entry,
 )
 from vibe.app_server.protocol import (
     SessionCompactParams,
@@ -74,6 +102,18 @@ if TYPE_CHECKING:
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
     )
+
+logger = logging.getLogger(__name__)
+
+_HARNESS_TURN: TypeAdapter[HarnessPublicTurn] = TypeAdapter(HarnessPublicTurn)
+
+
+@dataclass(frozen=True, slots=True)
+class ApiHistoryWindow:
+    """The root's latest public history entries, and the cursor to older ones."""
+
+    history: list[PublicHistoryEntry]
+    history_before_cursor: str | None
 
 
 class SessionApiPath:
@@ -151,10 +191,64 @@ class SessionApiPath:
         snapshot = snapshot.model_copy(
             update={"state": adapter._state_with_child_summaries(snapshot.state)}
         )
+        snapshot = snapshot.model_copy(
+            update={"state": await adapter._settle_goal_turns_on_attach(snapshot.state)}
+        )
         adapter._translated_state = snapshot.state
         return SessionEventSubscription(
             snapshot=snapshot, events=self._translated_events(streams)
         )
+
+    async def read_open_callbacks(self) -> list[PublicCallbackEntry]:
+        """The callbacks open in the root Session and its subagents.
+
+        ``callbacks/tree`` says which callbacks the Runtime holds open; each
+        Session's state gives the details only its stream carries. A callback
+        the stream of a followed Session has not brought yet is left out: the
+        stream sends it to the client once it does. A subagent the stream does
+        not follow yet is read for its details.
+        """
+        adapter = self._adapter
+        await self.commands.ensure_open()
+        tree = await self.commands.transport.request(
+            "app_server/session/callbacks/tree",
+            CallbacksTreeParams(session_id=adapter.session_id),
+            CallbacksTreeResponse,
+        )
+        # Without a stream, no state follows the Runtime: read every Session.
+        states = dict(self._states) if adapter._events_subscribed else {}
+        callbacks: list[PublicCallbackEntry] = []
+        for item in tree.callbacks:
+            state = states.get(item.session_id)
+            if state is None:
+                try:
+                    read, extensions = await self._read_page(
+                        item.session_id, _HISTORY_PAGE_WINDOW
+                    )
+                except Exception:
+                    if item.session_id == adapter.session_id:
+                        raise
+                    # A subagent that stopped since the tree read has no callbacks.
+                    logger.warning(
+                        "Could not read subagent %s for its open callbacks",
+                        item.session_id,
+                        exc_info=True,
+                    )
+                    continue
+                state = ApiSessionState(
+                    item.session_id, adapter._session_display_roots()
+                )
+                state.reset(read, extensions)
+                states[item.session_id] = state
+            raw = state.open_callback_entry(item.callback)
+            if raw is None:
+                continue
+            callback = validate_history_entry(raw)
+            if isinstance(callback, PublicCallbackEntry):
+                callbacks.append(
+                    with_available_path_scopes(with_approval_display(callback))
+                )
+        return callbacks
 
     async def flush_events(self) -> None:
         """Wait until the stream published the last event the Session has now.
@@ -169,6 +263,103 @@ class SessionApiPath:
             ApiSessionReadParams(session_id=adapter.session_id)
         )
         await streams.wait_observed(adapter.session_id, extensions.last_event_id)
+
+    async def read_window(self, window: int) -> ApiHistoryWindow:
+        """The root's latest ``window`` history entries, read with ``history/list``.
+
+        ``window`` counts Session API entries, as a tool's call and result are
+        two; each window ends where the latest one does, so the adapter cuts
+        a client's page from it as on the direct path, whose cursors are
+        public entry IDs.
+        """
+        adapter = self._adapter
+        await self.commands.ensure_open()
+        session_id = adapter.session_id
+        latest = await self._history_page(
+            session_id, ApiPageRequest(limit=window, direction="backward")
+        )
+        page = await self._with_lone_result_call(session_id, latest)
+        has_older = page.next_cursor is not None
+        projection = ApiHistoryProjection(session_id, adapter._session_display_roots())
+        history = _with_app_server_entries(
+            projection.reset(page.items),
+            has_older=has_older,
+            goal_notices=adapter._goal_notices.notices,
+            mcp_apps=adapter._mcp_apps,
+        )
+        return ApiHistoryWindow(
+            history=history,
+            history_before_cursor=history[0].id if history and has_older else None,
+        )
+
+    async def read_turns(self) -> list[PublicTurn]:
+        """Every Turn of the root, oldest first, read with ``turns/list``.
+
+        The API's Turns do not name the message that started them: as on the
+        direct path, it comes from the entries of the latest history window.
+        """
+        adapter = self._adapter
+        await self.commands.ensure_open()
+        session_id = adapter.session_id
+        states: list[TurnState] = []
+        cursor: str | None = None
+        while True:
+            listed = await self.commands.transport.request(
+                "app_server/session/turns/list",
+                ApiTurnsListParams(
+                    session_id=session_id,
+                    page=ApiPageRequest(
+                        limit=_HISTORY_PAGE_WINDOW, direction="forward", cursor=cursor
+                    ),
+                ),
+                ApiTurnsListResponse,
+            )
+            states.extend(listed.page.items)
+            cursor = listed.page.next_cursor
+            if cursor is None:
+                break
+        window = await self.read_window(_HISTORY_PAGE_WINDOW)
+        known = {
+            turn.id: turn for turn in _turns_from_history(window.history, session_id)
+        }
+        turns: list[PublicTurn] = []
+        session_created_at: int | None = None
+        for state in states:
+            seen = known.get(state.id)
+            started_at = state.started_at
+            if started_at is None and seen is not None:
+                started_at = seen.started_at
+            if started_at is None:
+                started_at = state.completed_at
+            if started_at is None:
+                # As for the latest Turn, the Session's creation stands in.
+                if session_created_at is None:
+                    session_created_at = await self._session_created_at(session_id)
+                started_at = session_created_at
+            raw = runtime_turn(state, session_id, {}, fallback_started_at=started_at)
+            turn = _public_turn(_HARNESS_TURN.validate_python(raw))
+            if seen is not None:
+                turn = turn.model_copy(update={"input_entry_id": seen.input_entry_id})
+            turns.append(turn)
+        return turns
+
+    async def _session_created_at(self, session_id: str) -> int:
+        read = await self.commands.transport.request(
+            "app_server/session/read",
+            ApiSessionReadParams(session_id=session_id),
+            ApiSessionReadResponse,
+        )
+        return read.state.session.created_at
+
+    async def read_plugin_info(self) -> ApiPluginInfo:
+        """What the root Session bound, read with ``plugin/info``."""
+        await self.commands.ensure_open()
+        response = await self.commands.transport.request(
+            "app_server/session/plugin/info",
+            ApiPluginInfoParams(session_id=self._adapter.session_id),
+            ApiPluginInfoResponse,
+        )
+        return response.info
 
     async def compact(
         self, params: SessionCompactParams
@@ -298,33 +489,51 @@ class SessionApiPath:
     ) -> tuple[ApiSessionReadResponse, VibeSessionReadResponse]:
         """A read of the latest ``history_limit`` entries, without splitting a tool.
 
-        A tool is a call and a result, next to each other. A page that ends at
-        a result keeps it only with its call, so the read adds the entry just
-        before its page edge. The page cursor stays valid while entries are
-        appended, so that entry is the call however the Session moved on.
+        A tool is a call and a result, next to each other
+        (``_with_lone_result_call``).
         """
         read, extensions = await self._read_page(session_id, history_limit)
         history = read.state.history
-        if history is None or not _starts_with_a_lone_result(history):
+        if history is None:
             return read, extensions
-        older = await self.commands.transport.request(
-            "app_server/session/history/list",
-            SessionHistoryListParams(
-                session_id=session_id,
-                page=ApiPageRequest(
-                    limit=1, direction="backward", cursor=history.next_cursor
-                ),
-            ),
-            SessionHistoryListResponse,
-        )
-        widened = history.model_copy(
-            update={
-                "items": [*history.items, *older.page.items],
-                "next_cursor": older.page.next_cursor,
-            }
-        )
+        widened = await self._with_lone_result_call(session_id, history)
+        if widened is history:
+            return read, extensions
         state = read.state.model_copy(update={"history": widened})
         return read.model_copy(update={"state": state}), extensions
+
+    async def _with_lone_result_call(
+        self, session_id: str, history: Page[HistoryEntry]
+    ) -> Page[HistoryEntry]:
+        """``history``, with the call of a result at its older edge added.
+
+        A page that ends at a result keeps it only with its call, so the entry
+        just before the page edge joins it. The page cursor stays valid while
+        entries are appended, so that entry is the call however the Session
+        moved on.
+        """
+        if not _starts_with_a_lone_result(history):
+            return history
+        older = await self._history_page(
+            session_id,
+            ApiPageRequest(limit=1, direction="backward", cursor=history.next_cursor),
+        )
+        return history.model_copy(
+            update={
+                "items": [*history.items, *older.items],
+                "next_cursor": older.next_cursor,
+            }
+        )
+
+    async def _history_page(
+        self, session_id: str, page: ApiPageRequest
+    ) -> Page[HistoryEntry]:
+        listed = await self.commands.transport.request(
+            "app_server/session/history/list",
+            SessionHistoryListParams(session_id=session_id, page=page),
+            SessionHistoryListResponse,
+        )
+        return listed.page
 
     async def _read_page(
         self, session_id: str, history_limit: int
@@ -355,13 +564,14 @@ class SessionApiPath:
         *,
         callbacks_in_history: bool = True,
         event_id: int | None = None,
+        has_older: bool = False,
     ) -> SessionReadResponse:
         """Vibe's read response for one Session API state.
 
         A read carries open callbacks as history entries, as a resync must.
         The live update leaves them out: the callback's own events add it.
         """
-        has_older = (
+        has_older = has_older or (
             read is not None
             and read.state.history is not None
             and read.state.history.next_cursor is not None
@@ -480,8 +690,10 @@ class SessionApiPath:
         if root:
             translated, current = await self._root_update(state, applied, previous)
         else:
-            translated, current = self._child_update(state, previous)
+            translated, current = await self._child_update(state, previous)
         adapter._translated_state = current
+        if root and applied.turn_terminated:
+            adapter._settle_configuration_at_turn_end()
         async for backend_event in adapter._with_turn_start_effects(translated):
             yield backend_event
         for kind, callbacks in (
@@ -490,10 +702,7 @@ class SessionApiPath:
         ):
             for callback in callbacks:
                 for backend_event in (
-                    adapter._callback_events(
-                        {"type": kind, "callback": callback}, include_history=root
-                    )
-                    or []
+                    adapter._callback_events({"type": kind, "callback": callback}) or []
                 ):
                     yield backend_event
         for signal in applied.signals:
@@ -524,33 +733,47 @@ class SessionApiPath:
             }
         )
         adapter._record_root_update(changed)
-        await adapter._drain_pending_shell_effects()
-        current = self._read_response(state, callbacks_in_history=False).state
-        adapter._track_context_tokens(current)
-        current = current.model_copy(
-            update={"history_before_cursor": previous.history_before_cursor}
-        )
-        adapter._rewind_snapshots.observe(current)
-        current = await adapter._record_unseen_transition(previous, current)
+        with adapter._translating_goal_update():
+            await adapter._drain_pending_shell_effects()
+            # A live update keeps the window it extends, older entries included.
+            current = self._read_response(
+                state,
+                callbacks_in_history=False,
+                has_older=previous.history_before_cursor is not None,
+            ).state
+            adapter._track_context_tokens(current)
+            current = current.model_copy(
+                update={"history_before_cursor": previous.history_before_cursor}
+            )
+            adapter._rewind_snapshots.observe(current)
+            current = await adapter._record_unseen_transition(previous, current)
+            current = await adapter._observe_goal_turns(previous, current)
         current = _with_settled_callbacks_kept(previous, current)
         return adapter._translate_snapshot_update(previous, current)
 
-    def _child_update(
+    async def _child_update(
         self, state: ApiSessionState, root_state: PublicSessionState
     ) -> tuple[list[SessionBackendEvent], PublicSessionState]:
         adapter = self._adapter
         previous = adapter._child_states.get(state.session_id)
         current = self._child_public_state(state)
+        child_events: list[SessionBackendEvent] = []
+        if previous is not None:
+            child_events, current = adapter._child_state_events(previous, current)
         adapter._child_states[state.session_id] = current
         refreshed = adapter._state_with_child_summaries(root_state)
-        translated, root_state = adapter._child_summary_events(root_state, refreshed)
+        summary_events, root_state = adapter._child_summary_events(
+            root_state, refreshed
+        )
+        translated = [*child_events, *summary_events]
         if (
             previous is not None
             and previous.retrying != current.retrying
             and current.retrying is not None
         ):
             translated.append(_retrying_event(state.session_id, current.retrying))
-        return translated, root_state
+        goal_events, root_state = await adapter._child_goal_progress(root_state)
+        return [*translated, *goal_events], root_state
 
     async def _signal_events(
         self, streams: SessionApiStreams, session_id: str, signal: VibeExtensionEvent
@@ -579,7 +802,11 @@ class SessionApiPath:
     async def _subagent_registered(
         self, streams: SessionApiStreams, child_id: str
     ) -> list[SessionBackendEvent]:
-        """Follow a subagent the root just started."""
+        """Follow a subagent the root just started.
+
+        Its stream starts after the read, so the callbacks the read finds open
+        are sent from the read.
+        """
         adapter = self._adapter
         child_read = await streams.add_child(child_id)
         previous = adapter._translated_state
@@ -590,6 +817,14 @@ class SessionApiPath:
         current = adapter._state_with_child_summaries(previous)
         translated, current = adapter._child_summary_events(previous, current)
         adapter._translated_state = current
+        for callback in self._states[child_id].open_callback_entries():
+            translated.extend(
+                adapter._callback_events({
+                    "type": "callback_requested",
+                    "callback": callback,
+                })
+                or []
+            )
         return translated
 
 

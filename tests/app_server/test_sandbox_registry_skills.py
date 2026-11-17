@@ -39,14 +39,25 @@ from vibe.app_server._sandbox_skills import SandboxSessionSkills, SandboxSkills
 from vibe.app_server._skills import discover_session_skills
 from vibe.app_server.events import CallbackRequested
 from vibe.app_server.local import LocalHarnessHost
-from vibe.app_server.protocol import SkillsSetEnabledParams
+from vibe.app_server.protocol import (
+    AppServerResponseError,
+    ProtocolErrorCode,
+    SkillsImportParams,
+    SkillsSetEnabledParams,
+)
 from vibe.core.agents.models import BuiltinAgentName
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.skills.manager import SkillManager
-from vibe.core.skills.models import InstalledSkill, RegistryRef, SkillInfo, SkillScope
+from vibe.core.skills.models import (
+    InstalledSkill,
+    ManifestEntry,
+    RegistryRef,
+    SkillInfo,
+    SkillScope,
+)
 from vibe.core.skills.registry import _manifest, _store
 from vibe.core.skills.registry._eviction import last_cleanup
-from vibe.core.skills.registry._manifest import ManifestEntry, SkillManifest
+from vibe.core.skills.registry._manifest import SkillManifest
 
 pytestmark = [
     pytest.mark.timeout(60),
@@ -453,3 +464,31 @@ async def test_with_registry_skills_off_a_session_copies_skills_only_as_it_opens
         await host.close()
 
     assert not any(b"Late notes." in body for body in _copied_bodies(sandbox_tmp))
+
+
+@pytest.mark.asyncio
+async def test_a_sandboxed_session_refuses_a_skill_picked_for_it(
+    project: Path, sandbox_tmp: Path, respx_mock: respx.MockRouter
+) -> None:
+    registry = registry_serves_deploy(respx_mock)
+    host = LocalHarnessHost()
+    session = await host.start(_options(RecordingSandbox(project)))
+
+    try:
+        with pytest.raises(AppServerResponseError) as refused:
+            await session.resources.skills._mutate(
+                "skills/import",
+                SkillsImportParams(
+                    session_id=session.session_id,
+                    skill_id="cid",
+                    alias="latest",
+                    scope="session",
+                ),
+            )
+    finally:
+        await session.close()
+        await host.close()
+
+    assert refused.value.error.code is ProtocolErrorCode.INVALID_PARAMS
+    assert "sandboxed" in refused.value.error.message
+    assert not registry.called

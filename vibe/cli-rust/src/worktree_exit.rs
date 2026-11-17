@@ -98,7 +98,7 @@ async fn inspect_request(client: &Arc<Client>, path: &str) -> Option<WorktreeRem
     remove_request_inner(client, path, false, None, true, false).await
 }
 
-async fn remove_request_inner(
+pub(crate) async fn remove_request_inner(
     client: &Arc<Client>,
     path: &str,
     force: bool,

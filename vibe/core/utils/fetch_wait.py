@@ -31,13 +31,14 @@ class FetchFailures:
 
 
 class FetchWait:
-    """A session waiting on a fetch: done once the fetch's task ends or the
-    cap expires. The cap counts from creation; create it in the running loop.
+    """A session waiting on a fetch: done once the fetch's task (or any future
+    standing for it) ends or the cap expires. The cap counts from creation;
+    create it in the running loop.
     """
 
     def __init__(
         self,
-        task: asyncio.Task[Any],
+        task: asyncio.Future[Any],
         *,
         name: str,
         cap_seconds: float,
@@ -60,7 +61,7 @@ class FetchWait:
     async def wait(self) -> None:
         await self._done.wait()
 
-    def _settle(self, _task: asyncio.Task[Any]) -> None:
+    def _settle(self, _task: asyncio.Future[Any]) -> None:
         self._cap.cancel()
         self._done.set()
 

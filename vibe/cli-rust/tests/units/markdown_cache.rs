@@ -178,7 +178,7 @@ fn newer_revision_removes_stale_prepared_markdown() {
 fn transcript_geometry_reuses_the_prewrapped_verdict() {
     let mut cache = TranscriptCache::default();
     let computes = Cell::new(0);
-    cache.ensure_context(80, 79, 2, false);
+    cache.ensure_context(80, 79, 2, false, false);
 
     let first = cache.geometry(0, 1, 80, || {
         computes.set(computes.get() + 1);
@@ -201,7 +201,7 @@ fn transcript_geometry_reuses_the_prewrapped_verdict() {
 }
 
 #[test]
-fn transcript_geometry_is_invalidated_by_width_theme_and_queue_copy() {
+fn transcript_geometry_is_invalidated_by_width_theme_queue_copy_and_raw() {
     let mut cache = TranscriptCache::default();
     let computes = Cell::new(0);
     let geometry = || {
@@ -212,17 +212,19 @@ fn transcript_geometry_is_invalidated_by_width_theme_and_queue_copy() {
         }
     };
 
-    cache.ensure_context(80, 79, 2, false);
+    cache.ensure_context(80, 79, 2, false, false);
     assert_eq!(cache.geometry(0, 1, 80, geometry).height, 12);
     assert_eq!(cache.geometry(0, 1, 80, geometry).height, 12);
-    cache.ensure_context(79, 78, 2, false);
+    cache.ensure_context(79, 78, 2, false, false);
     assert_eq!(cache.geometry(0, 1, 79, geometry).height, 12);
-    cache.ensure_context(79, 78, 3, false);
+    cache.ensure_context(79, 78, 3, false, false);
     assert_eq!(cache.geometry(0, 1, 79, geometry).height, 12);
-    cache.ensure_context(79, 78, 3, true);
+    cache.ensure_context(79, 78, 3, true, false);
+    assert_eq!(cache.geometry(0, 1, 79, geometry).height, 12);
+    cache.ensure_context(79, 78, 3, true, true);
     assert_eq!(cache.geometry(0, 1, 79, geometry).height, 12);
 
-    assert_eq!(computes.get(), 4);
+    assert_eq!(computes.get(), 5);
 }
 
 #[test]

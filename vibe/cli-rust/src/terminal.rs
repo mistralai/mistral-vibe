@@ -25,6 +25,8 @@ pub struct TerminalGuard {
     configured: bool,
     /// Whether `ENABLE_WINDOW_INPUT` was added to the Windows console, to clear on suspend.
     window_input: bool,
+    /// Whether VT input was turned off on the Windows console, to turn back on at suspend.
+    vt_input: bool,
 }
 
 /// Ratatui's `try_init`, with the resyncing backend.
@@ -70,6 +72,7 @@ pub fn init(configured: bool) -> std::io::Result<(Tui, TerminalGuard)> {
         mouse,
         configured,
         window_input: false,
+        vt_input: false,
     };
     if let Err(error) = guard.enter() {
         drop(guard);
@@ -164,6 +167,8 @@ impl TerminalGuard {
     }
 
     fn enable_raw_modes(&mut self) -> std::io::Result<()> {
+        // Before mouse capture, which overwrites the whole console mode.
+        self.vt_input = crate::platform::disable_vt_input();
         if self.mouse {
             capture_mouse(&mut std::io::stdout())?;
         } else {
@@ -229,6 +234,7 @@ impl TerminalGuard {
         if std::mem::take(&mut self.window_input) {
             crate::platform::disable_window_input();
         }
+        crate::platform::restore_vt_input(std::mem::take(&mut self.vt_input));
         let _ = ratatui::try_restore();
         let _ = execute!(std::io::stdout(), Show, crossterm::terminal::SetTitle(""));
     }

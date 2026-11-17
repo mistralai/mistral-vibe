@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import os
 from pathlib import Path, PureWindowsPath
 import re
@@ -11,13 +12,20 @@ from vibe import VIBE_ROOT
 from vibe.core.scratchpad import is_scratchpad_path
 from vibe.core.tools.base import BaseTool, BaseToolState, ToolPermission
 from vibe.core.tools.builtins._powershell_lexer import (
+    PowerShellArgument,
+    powershell_pipeline_inputs,
     powershell_redirection_targets,
     powershell_redirections,
     split_powershell_arguments,
     split_powershell_commands,
 )
 from vibe.core.tools.builtins._shell_permission_analysis import RedirectWrite
-from vibe.core.tools.builtins.bash import BashToolConfig, CapturedShellResult
+from vibe.core.tools.builtins.bash import (
+    BashToolConfig,
+    CapturedShellResult,
+    SensitiveReadPaths,
+    _is_working_directory_command,
+)
 from vibe.core.tools.builtins.experimental_bash import (
     BashLogFile,
     BashLogFileArgs,
@@ -47,6 +55,7 @@ from vibe.core.tools.permissions import PermissionContext, RequiredPermission
 from vibe.core.tools.utils import (
     ToolPath,
     is_path_within_workdir,
+    matches_sensitive_pattern,
     names_a_link,
     resolve_tool_path,
     ungranted_paths,
@@ -287,8 +296,13 @@ def _windows_home_value(environment: dict[str, str]) -> str | None:
 def _expand_windows_powershell_path(
     token: str, *, command_cwd: Path, environment: dict[str, str]
 ) -> tuple[str, bool]:
-    value = token.strip("\"'")
+    value = str(token) if isinstance(token, PowerShellArgument) else token.strip("\"'")
     unresolved = False
+
+    if isinstance(token, PowerShellArgument) and not token.dynamic:
+        if value == "~" or value.startswith(("~/", "~\\")):
+            value = f"{Path.home()}{value[1:]}"
+        return value, False
 
     def replace_variable(match: re.Match[str]) -> str:
         nonlocal unresolved
@@ -449,10 +463,15 @@ def _analyze_windows_paths(
     scratchpad_dir: Path | None,
     environment: dict[str, str],
     supplied_cwd: str | None = None,
-) -> tuple[dict[str, str], set[str]]:
+    sensitive_patterns: list[str] | None = None,
+    pipe_sources: list[str | None] | None = None,
+) -> tuple[dict[str, str], set[str], SensitiveReadPaths]:
     """Resolved outside paths mapped to their supplied spelling, and dynamic tokens."""
     paths: dict[str, str] = {}
     dynamic_paths: set[str] = set()
+    sensitive_files: set[str] = set()
+    requires_exact_read = False
+    cwd_changed = False
     if not is_path_within_workdir(
         str(command_cwd), workspace=workspace
     ) and not is_scratchpad_path(str(command_cwd), scratchpad_dir=scratchpad_dir):
@@ -471,7 +490,37 @@ def _analyze_windows_paths(
         if dynamic:
             dynamic_paths.add(token)
 
-    for part in command_parts:
+    def collect_read(token: str, literal: bool) -> None:
+        nonlocal requires_exact_read
+        if not sensitive_patterns:
+            return
+        if cwd_changed or not isinstance(token, PowerShellArgument) or token.dynamic:
+            requires_exact_read = True
+            return
+        resolved, ambiguous_path = _windows_sensitive_targets(
+            token, literal=literal, command_cwd=command_cwd
+        )
+        requires_exact_read = requires_exact_read or ambiguous_path
+        sensitive_files.update(
+            target
+            for target in resolved
+            if not is_scratchpad_path(target, scratchpad_dir=scratchpad_dir)
+            and matches_sensitive_pattern(target, sensitive_patterns)
+        )
+
+    def collect_arguments(command: str, arguments: list[str]) -> None:
+        # Workspace policy keeps its conservative original path inventory.
+        # Uncertain sensitive-reader roles must not erase outside obligations.
+        for token in arguments:
+            if _windows_looks_like_option(token):
+                if value := _windows_attached_parameter_value(token):
+                    collect(value)
+                    continue
+                if token.startswith("-") or command in _WINDOWS_SLASH_OPTION_COMMANDS:
+                    continue
+            collect(token)
+
+    for index, part in enumerate(command_parts):
         tokens = split_powershell_arguments(part)
         if not tokens:
             continue
@@ -482,18 +531,286 @@ def _analyze_windows_paths(
             collect(target)
 
         command = _windows_command_name(executable)
+        cwd_changed = cwd_changed or _windows_parent_directory_may_change(
+            tokens, executable
+        )
         if not command or command in _WINDOWS_NON_PATH_COMMANDS:
             continue
+        collect_arguments(command, arguments)
+        if sensitive_patterns and _windows_opaque_reader_invocation(tokens, executable):
+            # Unknown sensitive-file roles require the original command, while
+            # independent executable, redirect and outside-path duties remain.
+            requires_exact_read = True
+            continue
 
-        for token in arguments:
-            if _windows_looks_like_option(token):
-                if value := _windows_attached_parameter_value(token):
-                    collect(value)
-                    continue
-                if token.startswith("-") or command in _WINDOWS_SLASH_OPTION_COMMANDS:
-                    continue
-            collect(token)
-    return paths, dynamic_paths
+        reader = _windows_read_path_inventory(executable, arguments)
+        if reader is not None:
+            read_paths, ambiguous = reader
+            requires_exact_read = requires_exact_read or bool(
+                sensitive_patterns
+                and (
+                    ambiguous
+                    or (
+                        not read_paths
+                        and pipe_sources is not None
+                        and _windows_reads_piped_files(
+                            _windows_reader_command(executable), pipe_sources[index]
+                        )
+                    )
+                )
+            )
+            for token, literal in read_paths:
+                collect_read(token, literal)
+    return (
+        paths,
+        dynamic_paths,
+        SensitiveReadPaths(sensitive_files, requires_exact_read),
+    )
+
+
+def _windows_reader_command(executable: str) -> str:
+    return _windows_powershell_alias_target(executable) or _windows_command_name(
+        executable
+    )
+
+
+def _windows_pipe_sources(command: str, command_parts: list[str]) -> list[str | None]:
+    """For each statement, the command piped into it, or ``None`` if none is."""
+    sources: list[str | None] = []
+    previous = ""
+    for part, piped in zip(
+        command_parts, powershell_pipeline_inputs(command), strict=True
+    ):
+        sources.append(previous if piped else None)
+        tokens = split_powershell_arguments(part)
+        previous = (
+            _windows_reader_command(_windows_invoked_command(tokens)[0])
+            if tokens
+            else ""
+        )
+    return sources
+
+
+def _windows_reads_piped_files(command: str, piped_from: str | None) -> bool:
+    """Whether a reader with no path operand opens files named by its input.
+
+    ``piped_from`` is the command before the ``|``, or ``None`` when there is
+    no pipe. Get-Content and Select-String bind piped file objects and path
+    strings to their path parameters, so ``dir .env | Get-Content`` reads
+    ``.env``. Select-String only searches the text it is given when Get-Content
+    produced it. Native readers receive piped text on stdin and open no file.
+    """
+    if piped_from is None or command not in _POWERSHELL_READER_VALUE_PARAMETERS:
+        return False
+    return not (command == "select-string" and piped_from == "get-content")
+
+
+def _windows_dynamic_invocation(tokens: list[str]) -> bool:
+    invoked = tokens[1] if tokens[0] == "&" and len(tokens) > 1 else tokens[0]
+    return isinstance(invoked, PowerShellArgument) and invoked.dynamic
+
+
+def _windows_parent_directory_may_change(tokens: list[str], executable: str) -> bool:
+    command = _windows_command_name(executable)
+    return (
+        _is_working_directory_command(command)
+        or tokens[0] == "."
+        or _windows_dynamic_invocation(tokens)
+        or command in {"invoke-expression", "iex"}
+        or executable.casefold().endswith(".ps1")
+    )
+
+
+def _windows_opaque_reader_invocation(tokens: list[str], executable: str) -> bool:
+    return _windows_dynamic_invocation(tokens) or _windows_command_name(executable) in {
+        "pwsh",
+        "powershell",
+        "cmd",
+        "invoke-expression",
+        "iex",
+    }
+
+
+def _powershell_array_element(token: str) -> bool:
+    return isinstance(token, PowerShellArgument) and token.array_element
+
+
+# One reader inventory binds both workspace paths and sensitive-file reads.
+# Unknown/abbreviated parameter roles cannot nominate files for remembered grants.
+_POWERSHELL_COMMON_VALUE_PARAMETERS = frozenset({
+    "erroraction",
+    "warningaction",
+    "informationaction",
+    "progressaction",
+    "errorvariable",
+    "warningvariable",
+    "informationvariable",
+    "outvariable",
+    "outbuffer",
+    "pipelinevariable",
+})
+_POWERSHELL_COMMON_SWITCH_PARAMETERS = frozenset({
+    "verbose",
+    "debug",
+    "whatif",
+    "confirm",
+})
+_POWERSHELL_READER_VALUE_PARAMETERS = {
+    "get-content": frozenset({
+        "path",
+        "literalpath",
+        "filter",
+        "include",
+        "exclude",
+        "readcount",
+        "totalcount",
+        "tail",
+        "encoding",
+        "delimiter",
+        "stream",
+        "credential",
+    }),
+    "select-string": frozenset({
+        "path",
+        "literalpath",
+        "pattern",
+        "inputobject",
+        "include",
+        "exclude",
+        "context",
+        "encoding",
+        "culture",
+    }),
+}
+_POWERSHELL_READER_SWITCH_PARAMETERS = {
+    "get-content": frozenset({"raw", "wait", "force", "asbytestream"}),
+    "select-string": frozenset({
+        "simplematch",
+        "casesensitive",
+        "quiet",
+        "list",
+        "notmatch",
+        "allmatches",
+        "noemphasis",
+        "raw",
+    }),
+}
+
+
+def _windows_read_path_inventory(
+    executable: str, arguments: list[str]
+) -> tuple[list[tuple[str, bool]], bool] | None:
+    command = _windows_reader_command(executable)
+    if command not in _POWERSHELL_READER_VALUE_PARAMETERS:
+        return _windows_native_read_path_inventory(command, arguments)
+
+    value_parameters = (
+        _POWERSHELL_READER_VALUE_PARAMETERS[command]
+        | _POWERSHELL_COMMON_VALUE_PARAMETERS
+    )
+    switch_parameters = (
+        _POWERSHELL_READER_SWITCH_PARAMETERS[command]
+        | _POWERSHELL_COMMON_SWITCH_PARAMETERS
+    )
+    candidates: list[tuple[str, bool]] = []
+    pattern_bound = command != "select-string"
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        index += 1
+        if isinstance(token, PowerShellArgument) and token.parameter:
+            name = token[1:].rstrip(":").casefold()
+            names = [
+                parameter
+                for parameter in value_parameters | switch_parameters
+                if parameter.startswith(name)
+            ]
+            if len(names) != 1:
+                return [], True
+            parameter = names[0]
+            if parameter in switch_parameters:
+                continue
+            if index == len(arguments):
+                return [], True
+            values = [arguments[index]]
+            index += 1
+            while index < len(arguments) and _powershell_array_element(
+                arguments[index]
+            ):
+                values.append(arguments[index])
+                index += 1
+            if parameter in {"filter", "include", "exclude", "stream"}:
+                # Filtering/alternate streams change which files are actually read.
+                return [], True
+            if parameter in {"path", "literalpath"}:
+                candidates.extend(
+                    (value, parameter == "literalpath") for value in values
+                )
+            if parameter == "pattern":
+                pattern_bound = True
+            continue
+        if not pattern_bound:
+            pattern_bound = True
+            while index < len(arguments) and _powershell_array_element(
+                arguments[index]
+            ):
+                index += 1
+            continue
+        candidates.append((token, False))
+    return candidates, False
+
+
+def _windows_native_read_path_inventory(
+    command: str, arguments: list[str]
+) -> tuple[list[tuple[str, bool]], bool] | None:
+    if command not in {"type", "more", "findstr"}:
+        return None
+    # Native readers' option and wildcard binding differs from cmdlets.
+    if any(
+        _windows_looks_like_option(token)
+        or re.match(r"^/[A-Za-z]+:", token)
+        or any(char in token for char in "*?[")
+        for token in arguments
+    ):
+        return [], True
+    return [(token, True) for token in arguments[int(command == "findstr") :]], False
+
+
+def _windows_sensitive_targets(
+    token: str, *, literal: bool, command_cwd: Path
+) -> tuple[set[str], bool]:
+    value = str(token)
+    if provider_path := _WINDOWS_POWERSHELL_PROVIDER_PATH.match(value):
+        if provider_path.group("provider").casefold() != "filesystem":
+            return set(), True
+        value = provider_path.group("path")
+    windows_path = PureWindowsPath(value)
+    if (windows_path.drive and not windows_path.root) or (
+        windows_path.is_absolute() and not Path(value).is_absolute()
+    ):
+        return set(), True
+    # PowerShell providers interpret backtick-escaped wildcards even inside
+    # single-quoted strings; -LiteralPath bypasses provider wildcard expansion.
+    if not literal:
+        pattern: list[str] = []
+        index = 0
+        while index < len(value):
+            char = value[index]
+            if char == "`" and index + 1 < len(value):
+                index += 1
+                char = glob.escape(value[index])
+            pattern.append(char)
+            index += 1
+        value = "".join(pattern)
+    path = Path(value.replace("\\", os.sep)).expanduser()
+    if not path.is_absolute():
+        path = command_cwd / path
+    if literal or not any(char in value for char in "*?["):
+        return {str(path.resolve())}, False
+    return {
+        str(Path(match).resolve())
+        for match in glob.iglob(str(path), include_hidden=True)
+    }, False
 
 
 class WindowsShellToolConfig(ExperimentalBashToolConfig):
@@ -622,13 +939,15 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         ):
             return guardrail_permission
 
-        outside_paths, dynamic_paths = _analyze_windows_paths(
+        outside_paths, dynamic_paths, sensitive_reads = _analyze_windows_paths(
             command_parts,
             command_cwd=command_cwd,
             workspace=self.workspace,
             scratchpad_dir=self.scratchpad_dir,
             environment={**os.environ, **(env or {})},
             supplied_cwd=cwd,
+            sensitive_patterns=self.config.sensitive_file_patterns,
+            pipe_sources=_windows_pipe_sources(command, command_parts),
         )
         outside_paths = ungranted_paths(
             outside_paths, self.config.allowlist, self.workspace
@@ -638,17 +957,39 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
         )
         commands_cleared = (
             self._is_unconditionally_allowed(
-                command_parts, context_required, dynamic_paths=dynamic_paths
+                command_parts,
+                sensitive_reads.files,
+                context_required,
+                dynamic_paths=dynamic_paths,
             )
             and not guardrail_permission
+            and not sensitive_reads.requires_exact_command
         )
         if commands_cleared and not outside_paths:
             return PermissionContext(permission=ToolPermission.ALWAYS)
 
         # Cleared commands leave only the outside paths to answer for.
         required = self._build_required_permissions(
-            [] if commands_cleared else command_parts, outside_paths
+            []
+            if commands_cleared or sensitive_reads.requires_exact_command
+            else command_parts,
+            outside_paths,
+            sensitive_reads.files,
         )
+        if sensitive_reads.requires_exact_command:
+            label = (
+                f"dynamic PowerShell path ({next(iter(dynamic_paths))})"
+                if len(dynamic_paths) == 1
+                else "dynamic sensitive-file read (PowerShell)"
+            )
+            required.append(
+                self._build_command_required_permission(
+                    invocation_pattern=command,
+                    session_pattern=command,
+                    label=label,
+                    literal=True,
+                )
+            )
         required.extend(context_required)
         required.extend(
             self._build_command_required_permission(
@@ -657,6 +998,7 @@ class WindowsShellPermissionMixin[ConfigT: BashToolConfig](
                 label=f"dynamic PowerShell path ({path})",
             )
             for path in sorted(dynamic_paths)
+            if not sensitive_reads.requires_exact_command
         )
         if guardrail_permission:
             required.extend(guardrail_permission.required_permissions)

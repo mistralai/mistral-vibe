@@ -138,8 +138,6 @@ def inspect_plugin(path: Path) -> PluginInspection:
         inspection = _unsupported_schema_inspection(detection)
     else:
         match detection.source_format:
-            case DetectedPluginFormat.AMBIGUOUS:
-                inspection = _ambiguous_format_inspection(root, detection.marker_paths)
             case (
                 DetectedPluginFormat.AGENT_PLUGINS_1_0
                 | DetectedPluginFormat.CODEX
@@ -184,22 +182,6 @@ def _unsupported_schema_inspection(detection: _FormatDetection) -> PluginInspect
         component="manifest",
     )
     return _empty_inspection(detection.source_format, (diagnostic,))
-
-
-def _ambiguous_format_inspection(
-    root: Path, marker_paths: tuple[Path, ...]
-) -> PluginInspection:
-    paths = tuple(_relative_path(path, root) for path in marker_paths)
-    diagnostic = PluginDiagnostic(
-        severity="error",
-        code="plugin.compatibility.format_ambiguous",
-        path=".",
-        message=f"Multiple plugin formats were detected: {', '.join(paths)}",
-        fatal=True,
-        source_format=DetectedPluginFormat.AMBIGUOUS,
-        component="manifest",
-    )
-    return _empty_inspection(DetectedPluginFormat.AMBIGUOUS, (diagnostic,))
 
 
 def _unavailable_adapter_inspection(

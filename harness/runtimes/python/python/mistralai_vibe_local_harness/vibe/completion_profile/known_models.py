@@ -84,8 +84,7 @@ _MISTRAL_MEDIUM_3_5 = KnownModel(
     reasoning=ReasoningSupport(("high",), can_turn_off=True),
     image_cost=_MISTRAL_IMAGE_COST,
 )
-# The Mistral API card lists mistral-large-latest as an alias of mistral-large-2512,
-# a model without reasoning that rejects every reasoning effort.
+# Mistral Large 2512 has no reasoning and rejects every reasoning effort.
 _MISTRAL_LARGE_2512 = KnownModel(
     context_window=262_144,
     input_modalities=TEXT_AND_IMAGE,
@@ -121,7 +120,7 @@ KNOWN_MODELS: Sequence[KnownModelRow] = (
         _MISTRAL_MEDIUM_3_5,
     ),
     (("mistral-large-4", "mistral-large-4-0"), _MISTRAL_LARGE_4),
-    (("mistral-large-2512", "mistral-large-latest"), _MISTRAL_LARGE_2512),
+    (("mistral-large-2512",), _MISTRAL_LARGE_2512),
     (("zai-glm-5-3", "zai-glm-5", "zai-glm-latest"), _GLM_5_3),
     (_claude("claude-haiku-5-5"), _claude_model(can_turn_off=True)),
     (

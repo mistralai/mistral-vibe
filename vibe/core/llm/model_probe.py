@@ -11,10 +11,17 @@ import os
 import time
 from typing import TYPE_CHECKING, Any, Final
 
+from vibe.core.llm.utility_credentials import (
+    UtilityCredentials,
+    credential_identity,
+    holds_credential,
+    resolve_credential_identity,
+    sends_sign_in,
+    still_signed_in_as,
+)
 from vibe.core.paths import UTILITY_MODEL_CACHE_FILE
 from vibe.core.types import LLMMessage, Role
 from vibe.observability.logging import logger
-from vibe.utils.api_keys import resolve_api_key
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -61,6 +68,15 @@ class _Entry:
         return self.stored_at > now - ttl
 
 
+class _SignInRefusedError(Exception):
+    """The sign-in a probe sent was refused: nothing was learnt about the model.
+
+    Raised rather than answered as undecided, which backs off for ten minutes:
+    the refusal already told the sign-in, whose replacement the next session
+    should probe with at once.
+    """
+
+
 class CompletionProbeSource:
     """One-token completion per model, until one succeeds or the budget runs out."""
 
@@ -70,6 +86,7 @@ class CompletionProbeSource:
         provider: ProviderConfig,
         models: Sequence[ModelConfig],
         timeout_seconds: float,
+        credentials: UtilityCredentials | None = None,
     ) -> Mapping[str, bool]:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
@@ -79,7 +96,10 @@ class CompletionProbeSource:
             if remaining <= 0:
                 break
             available = await _probe(
-                provider=provider, model=model, timeout_seconds=remaining
+                provider=provider,
+                model=model,
+                timeout_seconds=remaining,
+                credentials=credentials,
             )
             if available is None:
                 continue
@@ -100,9 +120,22 @@ class ModelAvailabilityCache:
         self._retry_after: dict[str, float] = {}
         self._lock = asyncio.Lock()
 
-    def peek(self, *, provider: ProviderConfig, model: ModelConfig) -> bool | None:
-        """The cached verdict, or None when unknown."""
-        key = _cache_key(provider=provider, model=model)
+    def peek(
+        self,
+        *,
+        provider: ProviderConfig,
+        model: ModelConfig,
+        credentials: UtilityCredentials | None = None,
+    ) -> bool | None:
+        """The cached verdict for the credential ``credentials`` selects, or
+        None when unknown.
+        """
+        identity = credential_identity(provider, credentials)
+        if identity is None:
+            return None
+        return self._peek(_cache_key(provider=provider, model=model, identity=identity))
+
+    def _peek(self, key: str) -> bool | None:
         now = int(time.time())
         entry = self._memory.get(key)
         if entry is None or not entry.fresh(now):
@@ -114,9 +147,21 @@ class ModelAvailabilityCache:
         return entry.available
 
     def remember(
-        self, *, provider: ProviderConfig, model: ModelConfig, available: bool
+        self,
+        *,
+        provider: ProviderConfig,
+        model: ModelConfig,
+        available: bool,
+        credentials: UtilityCredentials | None = None,
     ) -> None:
-        key = _cache_key(provider=provider, model=model)
+        identity = credential_identity(provider, credentials)
+        if identity is None:
+            return
+        self._remember(
+            _cache_key(provider=provider, model=model, identity=identity), available
+        )
+
+    def _remember(self, key: str, available: bool) -> None:
         entry = _Entry(available=available, stored_at=int(time.time()))
         self._memory[key] = entry
         self._absent_until.pop(key, None)
@@ -135,40 +180,58 @@ class ModelAvailabilityCache:
         provider: ProviderConfig,
         models: Sequence[ModelConfig],
         timeout_seconds: float = PROBE_TIMEOUT_SECONDS,
+        credentials: UtilityCredentials | None = None,
     ) -> None:
-        """Ask about the unknown models (in preference order) ahead of the first available one."""
-        if not self._askable(provider=provider, models=models):
+        """Ask about the unknown models (in preference order) ahead of the first available one.
+
+        ``credentials`` is the connection's: verdicts are asked with, and kept
+        for, the credential it selects. Without one, the provider's API key.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        identity = await _asking_identity(provider, credentials, timeout_seconds)
+        if identity is None:
+            return
+        if not self._askable(provider=provider, models=models, identity=identity):
             return
         async with self._lock:
-            askable = self._askable(provider=provider, models=models)
+            askable = self._askable(provider=provider, models=models, identity=identity)
             if not askable:
                 return
-            if provider.api_key_env_var and not resolve_api_key(
-                provider.api_key_env_var
-            ):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
                 return
-            verdicts = await self._source.check(
-                provider=provider, models=askable, timeout_seconds=timeout_seconds
-            )
+            try:
+                verdicts = await self._source.check(
+                    provider=provider,
+                    models=askable,
+                    timeout_seconds=remaining,
+                    credentials=credentials,
+                )
+            except _SignInRefusedError:
+                return
+            # Another account signed in meanwhile: these verdicts are not its.
+            if not still_signed_in_as(provider, credentials, identity):
+                return
             retry_after = time.monotonic() + _UNDECIDED_RETRY_SECONDS
             for model in askable:
+                key = _cache_key(provider=provider, model=model, identity=identity)
                 available = verdicts.get(model.name)
                 if available is None:
-                    key = _cache_key(provider=provider, model=model)
                     self._retry_after[key] = retry_after
                 else:
-                    self.remember(provider=provider, model=model, available=available)
+                    self._remember(key, available)
 
     def _askable(
-        self, *, provider: ProviderConfig, models: Sequence[ModelConfig]
+        self, *, provider: ProviderConfig, models: Sequence[ModelConfig], identity: str
     ) -> list[ModelConfig]:
         now = time.monotonic()
         askable: list[ModelConfig] = []
         for model in models:
-            known = self.peek(provider=provider, model=model)
+            key = _cache_key(provider=provider, model=model, identity=identity)
+            known = self._peek(key)
             if known:
                 break
-            key = _cache_key(provider=provider, model=model)
             if known is None and self._retry_after.get(key, 0.0) <= now:
                 askable.append(model)
         return askable
@@ -186,10 +249,38 @@ class ModelAvailabilityCache:
 MODEL_AVAILABILITY = ModelAvailabilityCache()
 
 
+async def _asking_identity(
+    provider: ProviderConfig,
+    credentials: UtilityCredentials | None,
+    timeout_seconds: float,
+) -> str | None:
+    """What verdicts are asked and kept under, or None when nothing may be
+    asked: no credential, or a sign-in whose account is not known in time.
+
+    A sign-in's account is known once it has been resolved: until then there
+    is no verdict to read, nor anywhere to keep one. Resolving it spends the
+    probe's budget.
+    """
+    if not holds_credential(provider, credentials):
+        return None
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            return await resolve_credential_identity(provider, credentials)
+    except TimeoutError:
+        return None
+
+
 async def _probe(
-    *, provider: ProviderConfig, model: ModelConfig, timeout_seconds: float
+    *,
+    provider: ProviderConfig,
+    model: ModelConfig,
+    timeout_seconds: float,
+    credentials: UtilityCredentials | None = None,
 ) -> bool | None:
-    """True if served, False on a client error, None when inconclusive."""
+    """True if served, False on a client error, None when inconclusive.
+
+    Raises ``_SignInRefusedError`` when the connection's sign-in was refused.
+    """
     from mistralai_vibe_local_harness.vibe import UtilityCompletionError
     from vibe.core.llm.completion import CompletionTransport, complete_once
     from vibe.core.telemetry.build_metadata import build_request_metadata
@@ -214,6 +305,9 @@ async def _probe(
                     stream_idle_timeout_s=None,
                     enable_system_trust_store=system_trust_store_enabled(),
                 ),
+                credentials=None
+                if credentials is None
+                else credentials.for_provider(provider.name),
             )
     except TimeoutError:
         logger.debug(
@@ -224,6 +318,19 @@ async def _probe(
         )
         return None
     except UtilityCompletionError as exc:
+        if exc.rejection == "http_unauthorized" and sends_sign_in(
+            provider, credentials
+        ):
+            # The sign-in was refused, not the model: it keeps its account
+            # across a token refresh, so a refusal kept under it would outlive
+            # the expired token that caused it. An API key's refusal stays one.
+            logger.debug(
+                "Availability probe for '%s' on '%s' reached no verdict "
+                "(sign-in refused)",
+                model.name,
+                provider.name,
+            )
+            raise _SignInRefusedError from exc
         if not _is_refusal(exc.status):
             logger.debug(
                 "Availability probe for '%s' on '%s' reached no verdict (status %s)",
@@ -266,14 +373,15 @@ def _is_refusal(status: int | None) -> bool:
     )
 
 
-def _cache_key(*, provider: ProviderConfig, model: ModelConfig) -> str:
-    """Hashed; per credential, since access is granted per key."""
-    credential = resolve_api_key(provider.api_key_env_var) or ""
+def _cache_key(*, provider: ProviderConfig, model: ModelConfig, identity: str) -> str:
+    """Hashed; per credential (the API key, or the signed-in account), since
+    access is granted per key and per tenant.
+    """
     material = "|".join([
         provider.api_base.rstrip("/"),
         str(provider.backend),
         model.name,
-        sha256(credential.encode()).hexdigest(),
+        sha256(identity.encode()).hexdigest(),
     ])
     return sha256(material.encode()).hexdigest()[:32]
 

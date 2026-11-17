@@ -13,6 +13,7 @@ mod cut_off;
 mod image;
 mod rebuild;
 mod refusal;
+mod rejected;
 mod requests;
 mod standalone;
 mod support;

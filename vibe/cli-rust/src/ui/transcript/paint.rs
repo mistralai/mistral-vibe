@@ -73,7 +73,7 @@ pub(super) fn paint_prewrapped(
 }
 
 #[cfg(debug_assertions)]
-fn report_overflow(lines: &[Line<'static>], width: u16) {
+pub(super) fn report_overflow(lines: &[Line<'static>], width: u16) {
     for line in lines {
         let row_width = line.width();
         if row_width > width as usize {
@@ -83,4 +83,4 @@ fn report_overflow(lines: &[Line<'static>], width: u16) {
 }
 
 #[cfg(not(debug_assertions))]
-fn report_overflow(_lines: &[Line<'static>], _width: u16) {}
+pub(super) fn report_overflow(_lines: &[Line<'static>], _width: u16) {}

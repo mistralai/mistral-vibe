@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import shlex
+import shutil
+import subprocess
 import sys
 
 from pydantic import ValidationError
@@ -260,6 +263,608 @@ def test_legacy_bash_guardrail_sees_the_tokens_git_bash_runs(
 
     assert isinstance(permission, PermissionContext)
     assert permission.permission is ToolPermission.ASK
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat .env",
+        "head .env.local",
+        "grep --file=.envrc input.txt",
+        "od -c config/.env.production",
+    ],
+)
+def test_allowlisted_readers_require_sensitive_file_approval(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    sensitive = [
+        required
+        for required in permission.required_permissions
+        if required.scope.value == "file_pattern"
+    ]
+    assert len(sensitive) == 1
+    assert sensitive[0].label == "accessing sensitive files"
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_sensitive_file_approval_overrides_always_permission(
+    shell_kind, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        tool = Bash(
+            config_getter=lambda: BashToolConfig(permission=ToolPermission.ALWAYS),
+            state=BaseToolState(),
+        )
+        permission = tool.resolve_permission(BashArgs(command="cat .env"))
+    else:
+        tool = ExperimentalBash(
+            config_getter=lambda: ExperimentalBashToolConfig(
+                permission=ToolPermission.ALWAYS
+            ),
+            state=BaseToolState(),
+        )
+        permission = tool.resolve_permission(ExperimentalBashArgs(command="cat .env"))
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_reader_uses_configured_sensitive_file_patterns(
+    shell_kind, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        config = BashToolConfig(sensitive_file_patterns=["**/*.secret"])
+        tool = Bash(config_getter=lambda: config, state=BaseToolState())
+        permission = tool.resolve_permission(BashArgs(command="cat credentials.secret"))
+    else:
+        config = ExperimentalBashToolConfig(sensitive_file_patterns=["**/*.secret"])
+        tool = ExperimentalBash(config_getter=lambda: config, state=BaseToolState())
+        permission = tool.resolve_permission(
+            ExperimentalBashArgs(command="cat credentials.secret")
+        )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat .e??",
+        "cat .e* > /dev/null",
+        "cat .e* 2>&1",
+        "cat .[!x]nv",
+        "cat .[^x]nv",
+        "cat .e[[:alpha:]]v",
+        "cat .[[=e=]]nv",
+        "shopt -s nocaseglob; cat .EN?",
+    ],
+)
+def test_shell_reader_expands_globs_before_checking_sensitive_files(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    # Bracket forms Python's glob cannot evaluate, and globs after a glob
+    # option change, are approved as the exact command instead of a file.
+    assert any(
+        required.scope is PermissionScope.FILE_PATTERN
+        or (required.literal and required.session_pattern == command)
+        for required in permission.required_permissions
+    )
+    store = _store_after_granting(shell_kind, command)
+    assert _uncovered(store, shell_kind, "cat .env.local")
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat '.env.a[1]'",
+        'cat ".env.a[1]"',
+        r"cat .env.a\[1\]",
+        "cat .env'.a[1]'",
+        "cat '.env.a[1]' > /dev/null",
+        "cat '.env.a[1]' 2>&1",
+        "cat '.env.a[1]' \"$(printf ordinary.txt)\"",
+        "grep -f'.env.a[1]' ordinary.txt",
+        'grep --file=".env.a[1]" ordinary.txt',
+    ],
+)
+def test_quoted_sensitive_file_grants_do_not_expand_literal_globs(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    literal = tmp_path / ".env.a[1]"
+    literal.touch()
+    (tmp_path / ".env.a1").touch()
+    (tmp_path / "ordinary.txt").touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    sensitive = [
+        required
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [required.invocation_pattern for required in sensitive] == [str(literal)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_unrelated_glob_does_not_expand_a_quoted_sensitive_operand(
+    shell_kind, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    literal = tmp_path / ".env.a[1]"
+    for name in [".env.a[1]", ".env.a1", "prefix.env.a1"]:
+        (tmp_path / name).touch()
+
+    permission = _resolve_default_shell_permission(
+        shell_kind, "cat prefix*.env.a[1] '.env.a[1]'"
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    sensitive = [
+        required
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [required.invocation_pattern for required in sensitive] == [str(literal)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command", ["grep .env.a[1] '.env.a[1]'", "grep -e .env.a[1] '.env.a[1]'"]
+)
+def test_grep_pattern_glob_does_not_expand_an_equal_literal_file(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    literal = tmp_path / ".env.a[1]"
+    literal.touch()
+    (tmp_path / ".env.a1").touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    sensitive = [
+        required.invocation_pattern
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert sensitive == [str(literal)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command", ["cat .env.a[1] '.env.a[1]'", "grep -f .env.a[1] '.env.a[1]'"]
+)
+def test_repeated_sensitive_file_operands_keep_each_occurrences_glob_policy(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    literal = tmp_path / ".env.a[1]"
+    expanded = tmp_path / ".env.a1"
+    literal.touch()
+    expanded.touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    sensitive = {
+        required.invocation_pattern
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    }
+    assert sensitive == {str(literal), str(expanded)}
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat '.env.a[1]'*",
+        "grep -f'.env.a[1]'* ordinary.txt",
+        "grep --file='.env.a[1]'* ordinary.txt",
+        "file -m '.env.a[1]'*:.env.b[2] ordinary.txt",
+    ],
+)
+def test_mixed_literal_and_live_globs_preserve_policy_option_operations(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    for name in [".env.a[1]suffix", ".env.a1suffix", ".env.b2", "ordinary.txt"]:
+        (tmp_path / name).touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    sensitive = {
+        required.invocation_pattern
+        for required in permission.required_permissions
+        if required.scope is PermissionScope.FILE_PATTERN
+    }
+    expected = {str(tmp_path / ".env.a[1]suffix")}
+    if command.startswith("file"):
+        expected.add(str(tmp_path / ".env.b2"))
+    assert sensitive == expected
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command", ["grep -f.e?? ordinary.txt", "grep --file=.e?? ordinary.txt"]
+)
+def test_attached_sensitive_file_options_expand_unquoted_globs(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / ".env"
+    target.touch()
+    (tmp_path / "ordinary.txt").touch()
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope is PermissionScope.FILE_PATTERN
+        and required.invocation_pattern == str(target)
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_shell_reader_checks_symlink_target_for_sensitive_files(
+    shell_kind, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("secret=value\n")
+    (tmp_path / "ordinary.txt").symlink_to(tmp_path / ".env")
+
+    permission = _resolve_default_shell_permission(shell_kind, "cat ordinary.txt")
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat README.md",
+        "grep .env README.md",
+        "grep --reg=.env README.md",
+        "grep --regex .env README.md",
+        "grep --context .env README.md",
+        "grep --context=0 .env README.md",
+        "grep --con .env README.md",
+        "grep --la ordinary-label .env README.md",
+        "grep --exclude ignored.txt .env README.md",
+        "grep --exclude-dir=cache .env README.md",
+    ],
+)
+def test_non_sensitive_allowlisted_read_remains_allowed(shell_kind, command):
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--reg=token", ".env"],
+        ["--regex=token", ".env"],
+        ["--regexp=token", ".env"],
+        ["--reg", "token", ".env"],
+        ["--regex", "token", ".env"],
+        ["--regexp", "token", ".env"],
+        ["--context", "token", ".env"],
+        ["--context=0", "token", ".env"],
+        ["--con", "token", ".env"],
+        ["--file=patterns.txt", ".env"],
+        ["--file", "patterns.txt", ".env"],
+        ["-e", "token", ".env"],
+        ["-etoken", ".env"],
+        ["-f", "patterns.txt", ".env"],
+        ["-fpatterns.txt", ".env"],
+    ],
+)
+def test_actual_grep_option_syntax_keeps_sensitive_operands_gated(
+    shell_kind, arguments, tmp_path, monkeypatch
+):
+    grep = shutil.which("grep")
+    if grep is None:
+        pytest.skip("native grep is unavailable")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("token=synthetic\n")
+    (tmp_path / "patterns.txt").write_text("token\n")
+
+    result = subprocess.run(
+        [grep, *arguments], capture_output=True, text=True, timeout=5, check=False
+    )
+    version = subprocess.run(
+        [grep, "--version"], capture_output=True, text=True, timeout=5, check=False
+    )
+    if "GNU grep" in version.stdout and arguments[0] in {"--context", "--con"}:
+        # GNU requires a number here; BSD permits an omitted context count.
+        assert result.returncode == 2, result.stderr
+        assert result.stdout == ""
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "token=synthetic\n"
+    permission = _resolve_default_shell_permission(
+        shell_kind, shlex.join(["grep", *arguments])
+    )
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope is PermissionScope.FILE_PATTERN
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep --fil=patterns.txt .env",
+        "grep --fil patterns.txt .env",
+        "grep --l token .env",
+        "grep --ex token .env",
+    ],
+)
+def test_ambiguous_grep_pattern_option_keeps_possible_file_operands_gated(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope is PermissionScope.FILE_PATTERN
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep token .env",
+        "grep -e token .env",
+        "grep --color token .env",
+        "grep --colour token .env",
+        "grep --color=always token .env",
+    ],
+)
+def test_grep_sensitive_file_operands_require_approval(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep -r token .",
+        "grep -R token",
+        "grep --recursive token .",
+        "grep --recurs token .",
+        "grep --dereference-recursive token .",
+        "grep --directories=recurse token .",
+        "grep --directories=rec token .",
+        "grep --directories recurse token .",
+        "grep -d recurse token .",
+        "grep -drec token .",
+        "diff -r . other",
+        "diff --recursive . other",
+        "diff --recurs . other",
+    ],
+)
+def test_recursive_readers_require_approval(shell_kind, command, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("token=secret\n")
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "command_pattern"
+        for required in permission.required_permissions
+    )
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("permission", [ToolPermission.ASK, ToolPermission.ALWAYS])
+@pytest.mark.parametrize("command", ["grep -rn TODO .", "diff -r . other"])
+def test_recursive_readers_follow_disabled_sensitive_file_patterns(
+    shell_kind, permission, command, tmp_path, monkeypatch
+):
+    """``sensitive_file_patterns = []`` turns the recursive-reader gate off too."""
+    monkeypatch.chdir(tmp_path)
+    if shell_kind == "legacy":
+        config = BashToolConfig(permission=permission, sensitive_file_patterns=[])
+        tool = Bash(config_getter=lambda: config, state=BaseToolState())
+        result = tool.resolve_permission(BashArgs(command=command))
+    else:
+        managed_config = ExperimentalBashToolConfig(
+            permission=permission, sensitive_file_patterns=[]
+        )
+        managed = ExperimentalBash(
+            config_getter=lambda: managed_config, state=BaseToolState()
+        )
+        result = managed.resolve_permission(ExperimentalBashArgs(command=command))
+
+    assert isinstance(result, PermissionContext)
+    assert result.permission is ToolPermission.ALWAYS
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    ("granted", "escalated"),
+    [
+        ("cat {a,b}.txt", "cat .e{n,}v"),
+        ("cat {a,b}.txt", "cat {.e,x}nv"),
+        ("sh -c 'cat a.txt'", "sh -c 'cat .env'"),
+        ("bash -c 'cat a.txt'", "bash -c 'cat .env'"),
+        ("env cat a.txt", "env cat .env"),
+        ("env FOO=1 cat a.txt", "env FOO=1 cat .env"),
+        ("env -C sub cat a.txt", "env -C sub cat .env"),
+        ("command cat a.txt", "command cat .env"),
+        ("nice cat a.txt", "nice cat .env"),
+        ("nice -n 5 cat a.txt", "nice -n 5 cat .env"),
+        ("nohup cat a.txt", "nohup cat .env"),
+        ("setsid cat a.txt", "setsid cat .env"),
+        ("stdbuf -o0 cat a.txt", "stdbuf -o0 cat .env"),
+        ("time -p cat a.txt", "time -p cat .env"),
+        ("timeout 5 cat a.txt", "timeout 5 cat .env"),
+        ("timeout -s KILL 5 cat a.txt", "timeout -s KILL 5 cat .env"),
+        ("echo a.txt | xargs cat", "echo .env | xargs cat"),
+        ("xargs cat < a.txt", "xargs cat < .env.list"),
+        ("xargs -a a.txt cat", "xargs -a .env.list cat"),
+    ],
+)
+def test_a_wrapper_grant_does_not_cover_a_sensitive_read(
+    shell_kind, granted, escalated, tmp_path, monkeypatch
+):
+    """A session grant on a wrapper, ``cat *`` or ``nice *``, is never the
+    approval for a sensitive file the wrapped reader opens.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("secret\n")
+    (tmp_path / "a.txt").write_text("ordinary\n")
+    (tmp_path / "sub").mkdir()
+    store = _store_after_granting(shell_kind, granted)
+
+    assert _uncovered(store, shell_kind, escalated)
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env cat .env",
+        "env -i cat .env",
+        "nice -n 5 cat .env",
+        "nohup cat .env",
+        "stdbuf -o0 cat .env",
+        "time -p cat .env",
+        "timeout 5 cat .env",
+    ],
+)
+def test_a_recognized_wrapper_binds_the_sensitive_file_it_runs(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert [
+        rp.invocation_pattern
+        for rp in permission.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ] == [str(tmp_path / ".env")]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env --chdir=sub cat .env",
+        "env -S 'cat .env'",
+        "nice --adj=5 cat .env",
+        "timeout --sig=KILL 5 cat .env",
+        "nice $LEVEL cat .env",
+        "echo .env | xargs cat",
+        "xargs -I{} cat {} < list.txt",
+    ],
+)
+def test_an_unreadable_wrapper_requires_the_exact_command(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    """Options outside a wrapper's grammar, abbreviations included, leave the
+    command it runs unknown, so no file or wrapper pattern is granted.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert not any(
+        rp.scope is PermissionScope.FILE_PATTERN
+        for rp in permission.required_permissions
+    )
+    assert [
+        rp.session_pattern
+        for rp in permission.required_permissions
+        if rp.scope is PermissionScope.COMMAND_PATTERN
+    ] == [command]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("command", ["eval cat .env", "exec cat .env"])
+def test_wrapped_sensitive_reader_requires_approval(
+    shell_kind, command, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    permission = _resolve_default_shell_permission(shell_kind, command)
+
+    assert isinstance(permission, PermissionContext)
+    assert permission.permission is ToolPermission.ASK
+    assert any(
+        required.scope.value == "file_pattern"
+        for required in permission.required_permissions
+    )
 
 
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
@@ -689,6 +1294,10 @@ def test_shell_wrappers_do_not_hide_lesskey_options(shell_kind, command):
         "date -Iseconds",
         "date -j -f %Y 2026",
         "date -- -s",
+        "grep --directories=read token input.txt",
+        "grep --directories=skip token input.txt",
+        "grep -dread token input.txt",
+        "grep -ds token input.txt",
     ],
 )
 def test_benign_allowlisted_options_remain_allowed(shell_kind, command):
@@ -1758,8 +2367,9 @@ def test_shell_approval_prompt_names_the_offending_syntax(
 @pytest.mark.parametrize(
     ("command", "expected_pattern"),
     [
-        # Allowlisted, so the pattern only exists to carry the answer.
-        ("cat -n $FILE", "cat *"),
+        # An unknown read operand must not earn a broad reader grant.
+        ("cat -n $FILE", "cat -n $FILE"),
+        # Other allowlisted argument expansions can generalize.
         ("echo $HOME", "echo *"),
         ("echo ===", "echo *"),
         # Not allowlisted, so the pattern is the grant.
@@ -1774,21 +2384,18 @@ def test_shell_approval_prompt_names_the_offending_syntax(
         "arity-prefix",
     ],
 )
-def test_a_readable_command_is_scoped_by_its_pattern_not_the_whole_string(
+def test_shell_scope_keeps_unknown_reads_exact_and_other_arguments_general(
     shell_kind, command, expected_pattern
 ):
-    """Syntax the analysis reads around varies arguments, and arguments wildcard away.
-
-    Scoping these to the literal string made every session grant a single-use
-    allow: the next call differed by a character and asked again.
-    """
+    """Unknown reads need exact approval; ordinary argument expansions can generalize."""
     result = _resolve_default_shell_permission(shell_kind, command)
 
     assert isinstance(result, PermissionContext)
     assert result.permission is ToolPermission.ASK
     patterns = {rp.session_pattern for rp in result.required_permissions}
     assert expected_pattern in patterns
-    assert command not in patterns
+    if command != expected_pattern:
+        assert command not in patterns
 
 
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
@@ -1898,6 +2505,37 @@ def _uncovered(
     result = _resolve_default_shell_permission(shell_kind, command)
     assert isinstance(result, PermissionContext)
     return [rp for rp in result.required_permissions if not store.covers("bash", rp)]
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+@pytest.mark.parametrize("wrapper", ["", "exec -- "])
+@pytest.mark.parametrize(
+    "operand", ["$FILE", ".env.other$(printf x)", '".env.other${SUFFIX}"']
+)
+def test_dynamic_reader_grants_only_the_exact_command_and_known_files(
+    shell_kind, wrapper, operand, tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    command = f"{wrapper}cat .env {operand}"
+    permission = _resolve_default_shell_permission(shell_kind, command)
+    assert isinstance(permission, PermissionContext)
+    files = [
+        rp
+        for rp in permission.required_permissions
+        if rp.scope is PermissionScope.FILE_PATTERN
+    ]
+    assert [rp.invocation_pattern for rp in files] == [str(tmp_path / ".env")]
+    commands = [
+        rp
+        for rp in permission.required_permissions
+        if rp.scope is PermissionScope.COMMAND_PATTERN
+    ]
+    assert len(commands) == 1
+    assert commands[0].session_pattern == command
+    store = _store_after_granting(shell_kind, command)
+    assert not _uncovered(store, shell_kind, command)
+    assert _uncovered(store, shell_kind, "cat .env $OTHER")
+    assert _uncovered(store, shell_kind, "cat .env.otherx")
 
 
 @pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
@@ -2069,10 +2707,17 @@ def test_a_policy_that_only_names_paths_leaves_the_command_generalising(shell_ki
     Those land in OUTSIDE_DIRECTORY, a scope no command pattern is matched
     against, so keeping ``grep`` exact would cost prompts and buy nothing.
     """
-    store = _store_after_granting(shell_kind, "grep -rn $PATTERN src")
+    store = _store_after_granting(shell_kind, "grep -n $PATTERN src")
 
-    assert not _uncovered(store, shell_kind, "grep -rn $OTHER src")
+    assert not _uncovered(store, shell_kind, "grep -n $OTHER src")
     assert _uncovered(store, shell_kind, "grep --file=/etc/shadow src")
+
+
+@pytest.mark.parametrize("shell_kind", ["legacy", "managed"])
+def test_recursive_reader_grant_does_not_cover_another_pattern(shell_kind):
+    store = _store_after_granting(shell_kind, "grep -rn token src")
+
+    assert _uncovered(store, shell_kind, "grep -rn other src")
 
 
 @pytest.mark.parametrize(

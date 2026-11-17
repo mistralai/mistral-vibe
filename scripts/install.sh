@@ -18,6 +18,13 @@ ORIGINAL_PATH="${PATH}"
 UV_INSTALLER_VERSION="0.11.26"
 UV_INSTALLER_SHA256="92fa9085d24c214bb4445cc1da8c15ca9cca8cffb34726240fa08c5302e94ccc"
 
+# TLS-inspecting corporate proxies install their root CA in the OS trust store,
+# which curl already uses but uv ignores by default. Make uv trust it too;
+# set UV_SYSTEM_CERTS=false to keep uv's bundled roots.
+if [[ -z "${UV_SYSTEM_CERTS:-}" && -z "${UV_NATIVE_TLS:-}" ]]; then
+    export UV_SYSTEM_CERTS=true
+fi
+
 function error() {
     echo -e "${RED}[ERROR]${NC} $1" >&2
 }

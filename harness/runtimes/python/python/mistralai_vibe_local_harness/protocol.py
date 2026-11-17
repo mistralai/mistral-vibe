@@ -177,7 +177,7 @@ class RustKnowledgeFolderDefinition(RustProtocolModel):
 class RustAgentTypeDefinition(RustProtocolModel):
     name: str
     description: str
-    path: str
+    path: str = Field(default="", exclude_if=lambda value: not value)
 
 
 class RustHarnessHookToolKey(RustProtocolModel):
@@ -420,6 +420,11 @@ RustOutputLimitRecovery = Annotated[
 
 class RustTurnSettings(RustProtocolModel):
     max_iterations: Annotated[int, Field(gt=0)] | None = None
+    # Omitted while unset, as Core omits it, so configs and digests recorded
+    # before the setting existed still match.
+    max_identical_tool_failures: Annotated[int, Field(gt=0)] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     # Omitted while disabled, as Core omits it, so configs and digests recorded
     # before the setting existed still match.
     output_limit_recovery: RustOutputLimitRecovery = Field(
@@ -1136,6 +1141,9 @@ class RustPreToolCallHookInput(RustProtocolModel):
 class RustPostToolCallHookInput(RustProtocolModel):
     tool_call: RustHookToolCall
     tool_result: RustToolResult
+    # Sessions stored by earlier releases hold pending post-tool hook actions
+    # without a duration; those report 0.
+    duration_ms: int = Field(default=0, ge=0)
 
 
 class RustHookCallActionBase(RustProtocolModel):
@@ -1243,7 +1251,7 @@ class RustAgentResultError(RustProtocolModel):
 
 
 type RustTurnStopReason = Literal[
-    "iteration_limit", "skipped", "rejected", "output_limit"
+    "iteration_limit", "skipped", "rejected", "output_limit", "repeated_tool_failure"
 ]
 
 
@@ -1442,6 +1450,7 @@ type RustWarningCode = Literal[
     "compaction_summary_cut_off",
     "compaction_inputs_reduced",
     "post_tool_call_result_inconsistent",
+    "pre_tool_call_arguments_invalid",
 ]
 
 

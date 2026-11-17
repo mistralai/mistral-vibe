@@ -21,8 +21,8 @@ from tests.e2e.agent_loop_characterization.support import (
 from tests.e2e.common import (
     SpawnedVibeProcessFixture,
     send_ctrl_c_until_quit_confirmation,
-    wait_for_main_screen,
     wait_for_rendered_text,
+    wait_for_session_ready,
 )
 from tests.e2e.mock_server import ChatCompletionsRequestPayload, StreamingMockServer
 
@@ -142,7 +142,7 @@ def test_reasoning_and_text_after_tool_call_reusing_message_id_does_not_crash_th
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Check the todos")
         child.send("\r")
 
@@ -188,7 +188,7 @@ def test_denylisted_bash_tool_does_not_run_and_is_reported_to_the_model(
     denied_path = e2e_workdir / DENIED_BASH_FILE
 
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Try a denied shell command")
         child.send("\r")
 
@@ -235,7 +235,7 @@ def test_failed_bash_tool_result_is_reported_to_the_model_and_turn_recovers(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Run a failing shell command")
         child.send("\r")
 
@@ -292,7 +292,7 @@ def test_multiple_tool_calls_in_one_assistant_turn_return_distinct_results(
     spawned_vibe_process: SpawnedVibeProcessFixture,
 ) -> None:
     with spawned_vibe_process(e2e_workdir) as (child, captured):
-        wait_for_main_screen(child, timeout=15)
+        wait_for_session_ready(child, captured, timeout=15)
         child.send("Run two todo reads")
         child.send("\r")
 

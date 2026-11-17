@@ -20,7 +20,7 @@ use crate::core::wire::content::ContentBlock;
 use crate::core::wire::message::{Message, ToolOutcome};
 use crate::core::wire::tool::ToolCall;
 
-use super::program::CheckpointProgramExecution;
+use super::program::{CheckpointProgramExecution, is_zero};
 use super::schema::{CheckpointExternalTool, CheckpointToolResult};
 use super::validate_derived_hook_action_id;
 
@@ -81,11 +81,17 @@ enum CheckpointToolExecutionState {
     },
     DirectPending {
         call: CheckpointExternalTool,
+        /// Earlier V1 checkpoints do not record it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatched_at_unix_ms: Option<u64>,
     },
     DirectAwaitingPostHook {
         hook_binding_ids: Vec<String>,
         call: CheckpointExternalTool,
         result: CheckpointToolResult,
+        /// Earlier V1 checkpoints do not record it.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        duration_ms: u64,
     },
     ProgramPending {
         execution: CheckpointProgramExecution,
@@ -145,13 +151,17 @@ impl CheckpointToolExecutionState {
                         )?,
                     })
                 }
-                ExternalCallStage::Pending => Ok(Self::DirectPending {
+                ExternalCallStage::Pending {
+                    dispatched_at_unix_ms,
+                } => Ok(Self::DirectPending {
                     call: capture_external_tool_call(call, model_call_id, ToolOrigin::TopLevel)?,
+                    dispatched_at_unix_ms: *dispatched_at_unix_ms,
                 }),
                 ExternalCallStage::AwaitingPostHook {
                     hook_action_id,
                     hook_binding_ids,
                     result,
+                    duration_ms,
                 } => {
                     validate_tool_hook_action_id(
                         hook_action_id,
@@ -167,6 +177,7 @@ impl CheckpointToolExecutionState {
                             ToolOrigin::TopLevel,
                         )?,
                         result: CheckpointToolResult::capture(result),
+                        duration_ms: *duration_ms,
                     })
                 }
             },
@@ -223,19 +234,25 @@ impl CheckpointToolExecutionState {
             } => Ok(ToolExecutionState::Direct(
                 PendingExternalCall::awaiting_pre_hook(restore_call(call), hook_binding_ids),
             )),
-            Self::DirectPending { call } => Ok(ToolExecutionState::Direct(
-                PendingExternalCall::pending(restore_call(call)),
-            )),
+            Self::DirectPending {
+                call,
+                dispatched_at_unix_ms,
+            } => Ok(ToolExecutionState::Direct(PendingExternalCall::pending(
+                restore_call(call),
+                dispatched_at_unix_ms,
+            ))),
             Self::DirectAwaitingPostHook {
                 hook_binding_ids,
                 call,
                 result,
+                duration_ms,
             } => {
                 let call = restore_call(call);
                 let stage = ExternalCallStage::AwaitingPostHook {
                     hook_action_id: hook_action_id(&call.action_id, HookPoint::PostToolCall),
                     hook_binding_ids,
                     result: result.restore(),
+                    duration_ms,
                 };
                 Ok(ToolExecutionState::Direct(PendingExternalCall {
                     call,

@@ -121,6 +121,7 @@ class CatalogueSnapshot:
             {
                 "endpoint": self.endpoint,
                 "model": self.model,
+                "name": self.entry.name,
                 "context_window": self.entry.context_window,
                 "max_output_tokens": self.entry.max_output_tokens,
                 "input_modalities": None
@@ -150,6 +151,7 @@ class CatalogueSnapshot:
                     max_output_tokens=_count(data.get("max_output_tokens")),
                     input_modalities=_modalities(data.get("input_modalities")),
                     reasoning=_reasoning(data.get("reasoning")),
+                    name=_optional_text(data.get("name")),
                 ),
             )
         except (ValueError, TypeError, KeyError, AttributeError, ProfileError):
@@ -160,6 +162,10 @@ def _text(value: Any) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("not a non-empty string")
     return value
+
+
+def _optional_text(value: Any) -> str | None:
+    return None if value is None else _text(value)
 
 
 def _count(value: Any) -> int | None:

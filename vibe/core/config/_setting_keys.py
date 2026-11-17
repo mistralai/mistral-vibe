@@ -26,7 +26,7 @@ from pydantic import AliasChoices, AliasPath, BaseModel, TypeAdapter, Validation
 from pydantic.fields import FieldInfo
 from pydantic_core import to_jsonable_python
 
-from vibe.core.config.models import _LEGACY_STATIC_AUTH_KEYS
+from vibe.core.config.models import _LEGACY_STATIC_AUTH_KEYS, normalize_mcp_server_name
 
 # Layer name -> how a notice names it.
 CHECKED_LAYERS: Mapping[str, str] = {
@@ -45,6 +45,32 @@ TOOLS_WITHOUT_EFFECT: Mapping[str, str] = {
     ),
     "task": "subagents are started with the built-in `agents.spawn` tool",
 }
+
+# Former tool names the unified harness has no tool for, so a tool filter
+# naming one matches nothing, with what replaces each.
+RETIRED_TOOL_NAMES: Mapping[str, str] = {
+    "grep": "the agent searches through `bash`, which also runs any other command",
+    "task": TOOLS_WITHOUT_EFFECT["task"],
+    "web_fetch": "pages are fetched by `connector_web_search_open_url`",
+    "web_search": "the web is searched by `connector_web_search_web_search`",
+    **{
+        f"{shell}_{helper}": f"background processes follow the `{shell}` tool"
+        for shell in ("bash", "git_bash", "powershell")
+        for helper in ("log_file", "output", "sessions", "stdin")
+    },
+}
+
+# Tool filters are also checked in the session's overrides. The agent-profile
+# layer is not: the built-in explore profile still names `grep`.
+_FILTER_LAYERS: Mapping[str, str] = {
+    **{
+        layer: label
+        for layer, label in CHECKED_LAYERS.items()
+        if layer != "agent-profile"
+    },
+    "overrides": "this session's overrides (--enabled-tools / --disabled-tools)",
+}
+_LAYER_LABELS: Mapping[str, str] = {**CHECKED_LAYERS, **_FILTER_LAYERS}
 
 # Keys a tool still accepts that nothing reads with the unified harness, which
 # runs these tools itself.
@@ -89,6 +115,11 @@ _FORMER_TOOL_DEFAULTS: Mapping[str, Mapping[str, Any]] = {
     "web_fetch": {"max_content_bytes": 512000},
 }
 
+# Settings dropped along with the feature they toggled: no value left in a file
+# asks for anything Vibe still does, so none is reported. Each maps to the JSON
+# type it had, for the editor schema.
+_RETIRED_WITHOUT_NOTICE: Mapping[str, str] = {"show_greeting": "boolean"}
+
 # Keys a model's ``mode="before"`` validator reads and rewrites, so they are
 # not fields but are still used.
 _LEGACY_INPUT_KEYS: Mapping[str, frozenset[str]] = {
@@ -105,6 +136,7 @@ class KeyIssueKind(StrEnum):
     UNKNOWN = "unknown"
     RETIRED = "retired"
     NO_EFFECT = "no_effect"
+    NO_TOOL = "no_tool"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +146,7 @@ class KeyIssue:
     kind: KeyIssueKind
     suggestion: str | None = None
     reason: str | None = None
+    entry: str | None = None
 
     def describe(self) -> str:
         match self.kind:
@@ -127,6 +160,10 @@ class KeyIssue:
             case KeyIssueKind.NO_EFFECT:
                 why = f" ({self.reason})" if self.reason else ""
                 return f"`{self.path}` has no effect{why}"
+            case KeyIssueKind.NO_TOOL:
+                return (
+                    f"`{self.entry}` in `{self.path}` matches no tool ({self.reason})"
+                )
 
 
 class UnusedConfigKeysError(ValueError):
@@ -135,7 +172,7 @@ class UnusedConfigKeysError(ValueError):
     def __init__(self, issues: Sequence[KeyIssue]) -> None:
         self.issues = tuple(issues)
         lines = [
-            f"- {issue.describe()}, in {CHECKED_LAYERS.get(issue.layer, issue.layer)}"
+            f"- {issue.describe()}, in {_LAYER_LABELS.get(issue.layer, issue.layer)}"
             for issue in self.issues
         ]
         super().__init__(
@@ -181,13 +218,19 @@ def find_unused_keys(
     schema: type[BaseModel], layers: Iterable[tuple[str, Mapping[str, Any]]]
 ) -> list[KeyIssue]:
     """Every key in a checked layer that the schema does not use, in layer order."""
+    layers = list(layers)
+    mcp_prefixes = _mcp_tool_prefixes(layers)
     issues: list[KeyIssue] = []
     for layer, data in layers:
+        if layer in _FILTER_LAYERS:
+            issues.extend(_retired_tool_filters(layer, data, mcp_prefixes))
         if layer not in CHECKED_LAYERS:
             continue
         for key, value in data.items():
             field = schema.model_fields.get(key)
             if field is None:
+                if key in _RETIRED_WITHOUT_NOTICE:
+                    continue
                 if key in _FORMER_DEFAULTS:
                     if not _same(value, _FORMER_DEFAULTS[key]):
                         issues.append(KeyIssue(layer, key, KeyIssueKind.RETIRED))
@@ -218,10 +261,43 @@ def notice(issues: Sequence[KeyIssue]) -> list[str]:
         rest = len(layer_issues) - NOTICE_KEY_LIMIT
         more = f"; and {rest} more" if rest > 0 else ""
         messages.append(
-            f"Settings in {CHECKED_LAYERS.get(layer, layer)} that Vibe ignores: "
+            f"Settings in {_LAYER_LABELS.get(layer, layer)} that Vibe ignores: "
             f"{named}{more}. Remove them, or fix the spelling."
         )
     return messages
+
+
+def _mcp_tool_prefixes(
+    layers: Iterable[tuple[str, Mapping[str, Any]]],
+) -> tuple[str, ...]:
+    # An MCP tool is filtered as `{server}_{tool}`, ignoring case, so
+    # `web_fetch` may name one.
+    return tuple(
+        f"{normalize_mcp_server_name(server['name'])}_".casefold()
+        for _, data in layers
+        if isinstance(servers := data.get("mcp_servers"), list)
+        for server in servers
+        if isinstance(server, Mapping) and isinstance(server.get("name"), str)
+    )
+
+
+def _retired_tool_filters(
+    layer: str, data: Mapping[str, Any], mcp_prefixes: tuple[str, ...]
+) -> list[KeyIssue]:
+    return [
+        KeyIssue(
+            layer,
+            key,
+            KeyIssueKind.NO_TOOL,
+            reason=RETIRED_TOOL_NAMES[entry.casefold()],
+            entry=entry,
+        )
+        for key in ("enabled_tools", "disabled_tools")
+        if isinstance(entries := data.get(key), list)
+        for entry in dict.fromkeys(e for e in entries if isinstance(e, str))
+        if entry.casefold() in RETIRED_TOOL_NAMES
+        and not entry.casefold().startswith(mcp_prefixes)
+    ]
 
 
 def _unknown(layer: str, path: str, key: str, known: Iterable[str]) -> KeyIssue:
@@ -507,7 +583,17 @@ def config_json_schema(schema: type[BaseModel]) -> dict[str, Any]:
     document = schema.model_json_schema(mode="serialization", by_alias=True)
     # Vibe warns about any other top-level key, so an editor can flag it too.
     document["additionalProperties"] = False
-    tools = document.get("properties", {}).get("tools")
+    properties = document.setdefault("properties", {})
+    for key, json_type in sorted(_RETIRED_WITHOUT_NOTICE.items()):
+        properties.setdefault(
+            key,
+            {
+                "type": json_type,
+                "deprecated": True,
+                "description": "Retired: accepted for older configs, with no effect.",
+            },
+        )
+    tools = properties.get("tools")
     if isinstance(tools, dict):
         tools["properties"] = tool_settings_json_schema()
         tools["description"] = (
@@ -532,6 +618,7 @@ def _inline_refs(node: Any, defs: Mapping[str, Any]) -> Any:
 
 __all__ = [
     "CHECKED_LAYERS",
+    "RETIRED_TOOL_NAMES",
     "STRICT_CONFIG_ENV",
     "TOOLS_WITHOUT_EFFECT",
     "TOOL_SETTINGS_WITHOUT_EFFECT",

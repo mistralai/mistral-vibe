@@ -177,15 +177,23 @@ def probe_keyring(env_var: str) -> SourceProbe:
 
 
 def probe_cli_oidc() -> SourceProbe:
-    """Inspect the CLI OIDC sign-in the way resolution reads it.
+    """Inspect the CLI OIDC sign-in, distinguishing signed out from unreadable.
 
-    ``stored_oidc_credential`` answers the non-secret marker when a sign-in
-    matching the configured issuer is stored, and reads unreadable storage as
-    signed out — the same answer resolution acts on.
+    ``read_stored_oidc_credential`` answers the non-secret marker when a
+    sign-in matching the configured issuer, client, and audience is stored,
+    and ``None`` when none is. Unreadable storage and an invalid OIDC
+    configuration report the sign-in unavailable: signing in would hit the
+    same error, so it is not "signed out". Resolution reads the same session
+    but treats either error as no credential.
     """
-    from vibe.setup.auth._oidc_runtime import stored_oidc_credential
+    from vibe.setup.auth._oidc_config import OidcError
+    from vibe.setup.auth._oidc_credentials import OidcStorageError
+    from vibe.setup.auth._oidc_runtime import read_stored_oidc_credential
 
-    return SourceProbe(value=stored_oidc_credential())
+    try:
+        return SourceProbe(value=read_stored_oidc_credential())
+    except (OidcError, OidcStorageError):
+        return SourceProbe(unavailable=True)
 
 
 def _auth_kind(provider: ProviderConfig) -> ProviderAuthKind:
@@ -217,7 +225,8 @@ def _cli_oidc_sources(probe: SourceProbe) -> list[ProviderCredentialSourceView]:
     """The source list while the CLI OIDC sign-in replaces the API key.
 
     Resolution reads no API-key source then, so none is listed: the sign-in is
-    in use, could not be inspected, or the list is empty (signed out).
+    in use, could not be inspected (unreadable storage, invalid configuration,
+    or a probe past its deadline), or the list is empty (signed out).
     """
     if probe.unavailable:
         return [

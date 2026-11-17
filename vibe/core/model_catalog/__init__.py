@@ -19,7 +19,11 @@ from vibe.core.model_catalog.models import (
     ModelCatalogResponse,
     parse_model_catalog_response,
 )
-from vibe.core.model_catalog.wait import ModelCatalogWait, model_catalog_wait_needed
+from vibe.core.model_catalog.wait import (
+    ModelCatalogWait,
+    model_catalog_pending,
+    model_catalog_wait_needed,
+)
 
 __all__ = [
     "ModelCatalogCapabilities",
@@ -28,6 +32,7 @@ __all__ = [
     "ModelCatalogResponse",
     "ModelCatalogWait",
     "load_cached_model_catalog",
+    "model_catalog_pending",
     "model_catalog_wait_needed",
     "parse_model_catalog_response",
     "store_cached_model_catalog",

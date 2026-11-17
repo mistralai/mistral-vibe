@@ -56,6 +56,7 @@ class RegistrySkillSync:
         self._apply = apply
         self._following = False
         self._synced_roots: tuple[Path, ...] | None = None
+        self._cleaned_roots: tuple[Path, ...] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
         self._lease = StoreLease()
         self._lease_order = asyncio.Lock()
@@ -71,10 +72,12 @@ class RegistrySkillSync:
         """
         if not self._following:
             return
-        if not self._config().experimental_enable_registry_skills:
-            return
-        self._hold_running()
+        # Session picks load without registry skills on, so they are held even then.
+        held = self._hold_running()
         roots = tuple(self._roots())
+        if not self._config().experimental_enable_registry_skills:
+            self._clean_without_sync(roots, after=held)
+            return
         if roots == self._synced_roots:
             return
         self._synced_roots = roots
@@ -107,9 +110,28 @@ class RegistrySkillSync:
             if not done and self._synced_roots == roots:
                 self._synced_roots = None
 
-    def _hold_running(self) -> None:
+    def _clean_without_sync(
+        self, roots: tuple[Path, ...], *, after: asyncio.Task[None]
+    ) -> None:
+        """Session picks fetch into the store without registry skills on, so the
+        store is still cleaned, once per set of roots and after the session holds
+        what it loads, and nothing is synced.
+        """
+        if self._cleanup is None or roots == self._cleaned_roots:
+            return
+        self._cleaned_roots = roots
+
+        async def clean() -> None:
+            await after
+            await self._evict_unused(roots)
+
+        task = asyncio.create_task(clean(), name="vibe-unified-registry-cleanup")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def _hold_running(self) -> asyncio.Task[None]:
         versions = tuple(self._running().values())
-        self._in_order(lambda: self._hold(versions))
+        return self._in_order(lambda: self._hold(versions))
 
     def _hold(self, versions: Iterable[tuple[str, int]]) -> None:
         try:

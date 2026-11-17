@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any
 
 from vibe.app_server._cached_layers import apply_cached_layers
+from vibe.app_server._config_changes import ConfigChanges
 from vibe.app_server._config_errors import USER_CONFIG_ERRORS, user_config_error
+from vibe.app_server._config_introspect import TELEMETRY_FIELD, telemetry_setting_view
 from vibe.app_server._connection_protocol import ClientInfo
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
 from vibe.app_server._experiments_service import ExperimentsService
@@ -31,6 +33,7 @@ from vibe.app_server._local_skills_controller import (
 from vibe.app_server._missing_layers import MissingLayerFetches
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._model_catalog_service import ModelCatalogService
+from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigService
 from vibe.app_server._project_links import (
     ProjectLinksController,
@@ -50,6 +53,11 @@ from vibe.app_server._session_config_cache import (
 from vibe.app_server._session_model import active_model_is_pinned
 from vibe.app_server._setup import SetupRequestHandler, _launch_context
 from vibe.app_server._state import build_stored_public_state, history_page
+from vibe.app_server._storage_usage.files import touch_stale_marker
+from vibe.app_server._trusted_folders import (
+    TRUST_FOLDER_METHODS,
+    dispatch_trust_folders,
+)
 from vibe.app_server._workspace import (
     WorkspaceTrustError,
     decide_workspace_trust,
@@ -89,6 +97,10 @@ from vibe.app_server.protocol import (
     SessionTitleUpdateResponse,
     SkillsListParams,
     SkillsListResponse,
+    TelemetrySettingReadParams,
+    TelemetrySettingReadResponse,
+    TelemetrySettingUpdateParams,
+    TelemetrySettingUpdateResponse,
     WorkspaceGitBranchChanges,
     WorkspaceGitCheckout,
     WorkspaceGitCheckoutsParams,
@@ -97,6 +109,8 @@ from vibe.app_server.protocol import (
     WorkspaceTrustDecisionParams,
     WorkspaceTrustStatusParams,
     WorkspaceUntrustedConfigParams,
+    WorkspaceWorktreeAutoUpdateParams,
+    WorkspaceWorktreeAutoUpdateResponse,
     WorkspaceWorktreeLimitUpdateParams,
     WorkspaceWorktreeLimitUpdateResponse,
     WorkspaceWorktreeListParams,
@@ -109,9 +123,15 @@ from vibe.app_server.protocol import (
 )
 from vibe.core.agents.manager import AgentManager
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
+from vibe.core.config._self_hosted import (
+    crash_reports_allowed,
+    log_self_hosted_services,
+)
 from vibe.core.config._setting_keys import config_json_schema
+from vibe.core.config.builder import InvalidConfigError
 from vibe.core.config.harness_files import HarnessFilesManager
-from vibe.core.config.layers.admin import enforced_keys
+from vibe.core.config.layers.admin import AdminConfigLayer, enforced_keys
+from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.git.errors import (
     GitError,
@@ -145,6 +165,8 @@ _HOST_METHODS = frozenset({
     "agents/list",
     "config/read",
     "config/schema",
+    "config/telemetry/read",
+    "config/telemetry/update",
     "projectLinks/inspectRoot",
     "projectLinks/list",
     "projectLinks/resolveRoot",
@@ -166,9 +188,11 @@ _HOST_METHODS = frozenset({
     *LOCAL_SKILL_METHODS,
     *LOCAL_PLUGIN_METHODS,
     "workspace/trust/decision",
+    *TRUST_FOLDER_METHODS,
     "workspace/trust/untrustedConfig",
     "workspace/trust/status",
     "workspace/git/checkouts",
+    "workspace/git/worktrees/auto/update",
     "workspace/git/worktrees/limit/update",
     "workspace/git/worktrees/list",
     "workspace/git/worktrees/prune",
@@ -188,8 +212,14 @@ class HostRequestHandler:
         credentials: PlatformCredentialFactory | None = None,
         image_fallback: bool = False,
         builtin_plugin_roots: Sequence[Path] | None = None,
+        open_sessions: OpenSessions | None = None,
+        config_changes: ConfigChanges | None = None,
     ) -> None:
         self._harness_files = harness_files
+        # Reached by a setting written without a session; None when nothing
+        # else in the process holds a session or listens for config changes.
+        self._open_sessions = open_sessions
+        self._config_changes = config_changes
         self._org_config = org_config
         self._model_catalog = model_catalog
         self._credentials = credentials or api_key_credentials
@@ -239,6 +269,12 @@ class HostRequestHandler:
             if error is None:
                 raise
             raise RequestFailure(error.code, error.message, error.data) from exc
+        except InvalidConfigError as exc:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                f"Cannot load the Vibe config. {exc}",
+                {"kind": "configuration"},
+            ) from exc
         except WorkspaceTrustError as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
         except GitError as exc:
@@ -264,6 +300,17 @@ class HostRequestHandler:
             case "config/schema":
                 validate_wire(ConfigSchemaReadParams, raw_params)
                 response: ProtocolModel = config_schema_response()
+            case "config/telemetry/read":
+                validate_wire(TelemetrySettingReadParams, raw_params)
+                response = TelemetrySettingReadResponse(
+                    setting=telemetry_setting_view(
+                        await self._load_orchestrator(self._user_config_files())
+                    )
+                )
+            case "config/telemetry/update":
+                response = await self._update_telemetry(
+                    validate_wire(TelemetrySettingUpdateParams, raw_params)
+                )
             case "config/read":
                 response = await self._read_config(
                     validate_wire(ConfigReadParams, raw_params),
@@ -550,6 +597,10 @@ class HostRequestHandler:
                     self._cwd(params.cwd),
                     self._harness_files.trust_store,
                 )
+            case _ if method in TRUST_FOLDER_METHODS:
+                response = await dispatch_trust_folders(
+                    method, raw_params, cwd=self._cwd
+                )
             case "workspace/git/worktrees/list":
                 params = validate_wire(WorkspaceWorktreeListParams, raw_params)
                 response = await asyncio.to_thread(
@@ -567,6 +618,18 @@ class HostRequestHandler:
                 )
                 response = WorkspaceWorktreeLimitUpdateResponse(
                     limit=orchestrator.config.worktree_limit,
+                    failures=[str(failure) for failure in failures],
+                )
+            case "workspace/git/worktrees/auto/update":
+                params = validate_wire(WorkspaceWorktreeAutoUpdateParams, raw_params)
+                orchestrator = await self._load_orchestrator(self._session_files(None))
+                failures = await orchestrator.set_field(
+                    "/auto_worktree",
+                    params.auto,
+                    reason="desktop worktree placement setting",
+                )
+                response = WorkspaceWorktreeAutoUpdateResponse(
+                    auto=orchestrator.config.auto_worktree,
                     failures=[str(failure) for failure in failures],
                 )
             case "workspace/git/worktrees/prune":
@@ -752,10 +815,46 @@ class HostRequestHandler:
     def _session_files(self, cwd: str | None) -> HarnessFilesManager:
         return self._harness_files.for_session(self._cwd(cwd))
 
+    def _user_config_files(self) -> HarnessFilesManager:
+        """The user's own config, with no project's: a setting a client shows
+        outside any project.
+        """
+        return replace(self._session_files(None), sources=("user",))
+
+    async def _update_telemetry(
+        self, params: TelemetrySettingUpdateParams
+    ) -> TelemetrySettingUpdateResponse:
+        """Write ``enable_telemetry`` to the user config.
+
+        Refused while the environment or the org's admin config decides it: the
+        write would be reported as saved and change nothing. Once written, the
+        sessions already open re-read it, and subscribed clients are told.
+        """
+        orchestrator = await self._load_orchestrator(self._user_config_files())
+        current = telemetry_setting_view(orchestrator)
+        if current.locked:
+            return TelemetrySettingUpdateResponse(
+                setting=current,
+                rejected=True,
+                reason=_LOCKED_REASONS.get(current.origin, _LOCKED_REASON_FALLBACK),
+            )
+        failures = await orchestrator.set_field(
+            f"/{TELEMETRY_FIELD}", params.enabled, reason="telemetry setting"
+        )
+        if not failures:
+            if self._open_sessions is not None:
+                await self._open_sessions.reload_config_files()
+            if self._config_changes is not None:
+                self._config_changes.publish()
+        return TelemetrySettingUpdateResponse(
+            setting=telemetry_setting_view(orchestrator),
+            failures=[str(failure) for failure in failures],
+        )
+
     def _local_skill_files(self, project_root: Path | None) -> HarnessFilesManager:
         # The user's own skills follow the user's config, wherever this server runs.
         if project_root is None:
-            return replace(self._session_files(None), sources=("user",))
+            return self._user_config_files()
         return self._session_files(str(project_root))
 
     def _resolved_builtin_plugin_roots(self) -> list[Path]:
@@ -765,10 +864,17 @@ class HostRequestHandler:
             return packaged_builtin_plugin_roots()
         return list(self._builtin_plugin_roots)
 
-    async def telemetry_enabled(self) -> bool:
-        """The telemetry gate from local and cached config, never fetched."""
+    async def crash_reports_allowed(self) -> bool:
+        """The crash-report gate from local and cached config, never fetched."""
         orchestrator = await self._load_orchestrator(self._session_files(None))
-        return orchestrator.config.enable_telemetry
+        return crash_reports_allowed(orchestrator.config)
+
+    async def log_self_hosted_services(self) -> None:
+        """Note a self-hosted deployment in ``vibe.log``, from local and cached
+        config, never fetched.
+        """
+        orchestrator = await self._load_orchestrator(self._session_files(None))
+        log_self_hosted_services(orchestrator.config)
 
     async def _load_orchestrator(
         self, session_files: HarnessFilesManager, *, org_config: bool = True
@@ -805,6 +911,15 @@ class HostRequestHandler:
     @staticmethod
     def _cwd(value: str | None) -> Path:
         return Path(value or Path.cwd()).expanduser().resolve()
+
+
+_LOCKED_REASONS = {
+    AdminConfigLayer.NAME: "Usage telemetry is enforced by your organization.",
+    EnvironmentLayer.NAME: (
+        "Usage telemetry is set by the VIBE_ENABLE_TELEMETRY environment variable."
+    ),
+}
+_LOCKED_REASON_FALLBACK = "Usage telemetry is set where this setting cannot change it."
 
 
 @lru_cache(maxsize=1)
@@ -991,6 +1106,9 @@ def worktree_remove_response(
             branch_created=branch_created,
             holders=holders,
         )
+    if release.outcome is WorktreeReleaseOutcome.REMOVED and not inspect:
+        # A scan that still counted the folder now reads stale.
+        touch_stale_marker()
     return WorkspaceWorktreeRemoveResponse(
         outcome=_WORKTREE_REMOVE_OUTCOMES[release.outcome],
         root=None if release.root is None else str(release.root),

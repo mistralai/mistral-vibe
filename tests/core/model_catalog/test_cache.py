@@ -99,3 +99,16 @@ def test_the_stored_time_is_kept() -> None:
 
     assert record is not None
     assert record[1] == 1_900_000_000
+
+
+def test_a_cached_catalog_keeps_requires_and_provider() -> None:
+    fetched = _catalog(
+        models=[
+            {"id": "glm-5-2", "label": "GLM", "provider": "mistral", "requires": None},
+            {"id": "large", "label": "Large", "requires": {"kind": "higher_plan"}},
+            {"id": "azure_ai/gpt", "label": "GPT", "provider": "internal-ai-gateway"},
+        ]
+    )
+    store_cached_model_catalog("user-abc", fetched)
+
+    assert _loaded("user-abc") == fetched

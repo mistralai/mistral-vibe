@@ -10,7 +10,7 @@ use crate::server::{
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::{dispatch, is_side_channel, parse, waits_for_jobs};
+use super::{dispatch, is_side_channel, parse, runs, waits_for_jobs};
 use crate::app::{App, QueuedPrompt, Severity, Status};
 use crate::input_modes::{classify_submitted, submitted_value, ClassifiedInput};
 use crate::startup::banners;
@@ -88,9 +88,9 @@ pub fn submit(
         return false;
     }
     // A held queue takes a bare Enter as "send it now"; an active turn takes it
-    // as "steer the accepted queue into this turn".
+    // as "steer the accepted queue into this turn". Neither applies while editing.
     if value.is_empty() {
-        if app.queue.paused {
+        if app.queue.paused && app.queue.selected.is_none() {
             // Releasing a held queue with Enter dismisses the what's-new body,
             // as any non-empty submission does.
             banners::dismiss_whats_new(app);
@@ -114,8 +114,18 @@ pub fn submit(
         }
         return false;
     }
-    let classified = classify_submitted(mode, &value, &app.completion.skills);
-    if !matches!(&classified, ClassifiedInput::SlashCommand { .. }) {
+    let classified = match classify_submitted(mode, &value, &app.completion.skills) {
+        ClassifiedInput::SlashCommand { command } if !runs(command, |f| f.is_on(app)) => {
+            ClassifiedInput::Prompt {
+                text: value.clone(),
+            }
+        }
+        classified => classified,
+    };
+    if !matches!(
+        &classified,
+        ClassifiedInput::SlashCommand { .. } | ClassifiedInput::RemovedCommand { .. }
+    ) {
         if reject_while_shell_runs(app, &value) {
             return false;
         }
@@ -158,6 +168,12 @@ pub fn submit(
                 message_queue::enqueue_prompt(app, client, command);
                 message_queue::resume(app, client);
             }
+        }
+        ClassifiedInput::RemovedCommand { command, version } => {
+            let notice = format!("{command} was removed in Vibe {version}.");
+            crate::ui::notice::show_sticky(app, Severity::Warning, &notice);
+            remember(app, &value);
+            crate::telemetry::slash_command_used(app, command, "removed");
         }
         ClassifiedInput::Bash { command } => {
             if let Some(hint) = reject_hint(app) {

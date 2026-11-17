@@ -40,6 +40,7 @@ import rfc8785
 from mistralai_vibe_local_harness import HarnessSession
 from mistralai_vibe_local_harness.protocol import (
     RustAcceptedApplyResult,
+    RustActionDirective,
     RustActionsNextAction,
     RustAudioContentBlock,
     RustBackgroundProcessNotificationSource,
@@ -54,10 +55,14 @@ from mistralai_vibe_local_harness.protocol import (
     RustImageContentBlock,
     RustKeepActionDirective,
     RustLLMCallAction,
+    RustModelInputUpdate,
+    RustModelMessageReplace,
     RustModelToolCallPart,
+    RustModelToolCatalogKeep,
     RustNotificationEvent,
     RustPluginContextDefinition,
     RustPluginsChange,
+    RustPostToolCallHookAction,
     RustProvidedToolDefinition,
     RustReasoningPart,
     RustReconfigureEvent,
@@ -67,6 +72,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustSettingsChange,
     RustSystemInstructionsChange,
     RustTextContentBlock,
+    RustUserMessageEvent,
     parse_apply_result,
 )
 from mistralai_vibe_local_harness.session_protocol import (
@@ -361,12 +367,13 @@ type StoredHarnessInput = Annotated[
 def _dump_stored_transition(
     transition: RustSessionTransition, handler: SerializerFunctionWrapHandler
 ) -> object:
-    """Store a transition without the fields that route a call's span.
+    """Store a transition without its model inputs or the fields that route a call's span.
 
     This Runtime never reads them from a restored transition, and a build whose
     Core predates them can then still load the document that holds it.
     """
-    return handler(_without_tool_call_routing(transition) or transition)
+    stored = _without_model_inputs(transition) or transition
+    return handler(_without_tool_call_routing(stored) or stored)
 
 
 type StoredSessionTransition = Annotated[
@@ -2478,6 +2485,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             # that introduced it, without walking the transcript every turn.
             checkpoint_messages(checkpoint)
         runtime_state = _discard_provider_operation_results(runtime_state)
+        runtime_state = _discard_model_inputs(runtime_state)
         if core_action_ids is not None:
             runtime_state = _release_settled_actions(runtime_state, core_action_ids)
             runtime_state = _release_settled_callbacks(runtime_state)
@@ -3437,6 +3445,44 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             if receipt.state == "reserved" and receipt.abandon_on_restart
         )
 
+    def reserved_turn_starts_core_took(self) -> tuple[str, ...]:
+        """Open ``turn/start`` reservations whose user message Core already took.
+
+        The Runtime reserves and applies a command under one lock, and every user
+        message reaches Core through a command of its own. So a reservation the
+        journal still holds took the first user message recorded after it and
+        before the next reservation, if any. One the journal no longer holds was
+        folded after it was made: by its own command, right before Core took its
+        input, or later in the turn it started. Either way Core took it, unless
+        a process stopped between that fold and the input and a later process
+        folded the reservation again; that start is taken for one Core took.
+        """
+        stored = self.load()
+        reserved = [
+            receipt.client_command_id
+            for receipt in stored.runtime_state.command_receipts
+            if receipt.state == "reserved" and receipt.method == "turn/start"
+        ]
+        journalled = {
+            record.payload.client_command_id
+            for record in stored.journal
+            if isinstance(record, CommandReservedRecordV1)
+        }
+        taken = [command_id for command_id in reserved if command_id not in journalled]
+        candidate: str | None = None
+        for record in stored.journal:
+            if isinstance(record, CommandReservedRecordV1):
+                command_id = record.payload.client_command_id
+                candidate = command_id if command_id in reserved else None
+            elif (
+                candidate is not None
+                and isinstance(record, CoreInputRecordV1)
+                and isinstance(record.payload.input.command, RustUserMessageEvent)
+            ):
+                taken.append(candidate)
+                candidate = None
+        return tuple(taken)
+
     def resolve_internal_command_id(self, namespace: str) -> str:
         """Reuse an interrupted operation or allocate its next durable sequence ID."""
         pending = self.pending_internal_command(namespace)
@@ -3567,6 +3613,8 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         ],
         lease_id: str | None = None,
     ) -> ActionIntentRecordV1:
+        if kind == "completion":
+            request = _without_model_input(request)
         record = self.append_record(
             "action_intent",
             ActionIntentPayloadV1(
@@ -4229,7 +4277,26 @@ def sha256_json(value: JsonValue) -> str:
 
 
 def transition_sha256(transition: RustSessionTransition) -> str:
-    return sha256_json(transition.model_dump(mode="json", by_alias=True))
+    return sha256_json(_digest_value(transition))
+
+
+def _digest_value(transition: RustSessionTransition) -> dict[str, Any]:
+    """The transition as every digest sees it.
+
+    A post-tool hook's duration is Host time that replay measures again, and
+    journals recorded before Core measured it lack the field, so no digest
+    covers it.
+    """
+    value = cast(dict[str, Any], transition.model_dump(mode="json", by_alias=True))
+    if isinstance(transition.next, RustActionsNextAction):
+        for directive, dumped in zip(
+            transition.next.directives, value["next"]["directives"], strict=True
+        ):
+            if isinstance(directive, RustDispatchActionDirective) and isinstance(
+                directive.action, RustPostToolCallHookAction
+            ):
+                del dumped["action"]["input"]["duration_ms"]
+    return value
 
 
 def _replay_transition_sha256(
@@ -4258,9 +4325,7 @@ def _digest_with_llm_actions_normalized(
     *,
     include_committed_calls: bool = True,
 ) -> str:
-    value = cast(
-        dict[str, JsonValue], transition.model_dump(mode="json", by_alias=True)
-    )
+    value = _digest_value(transition)
     if not include_committed_calls:
         observations = value.get("observations")
         if isinstance(observations, list):
@@ -4582,9 +4647,7 @@ def _kept_action_ids(transition: RustSessionTransition) -> set[str]:
 def _legacy_transition_sha256(  # noqa: PLR0911 - one return per legacy transition shape
     transition: RustSessionTransition, durable_actions: list[RuntimeActionV1]
 ) -> str | None:
-    value = cast(
-        dict[str, JsonValue], transition.model_dump(mode="json", by_alias=True)
-    )
+    value = _digest_value(transition)
     next_action = value.get("next")
     if not isinstance(next_action, dict) or next_action.get("type") != "actions":
         return None
@@ -4635,6 +4698,15 @@ def _action_replay_identity(action: dict[str, JsonValue]) -> dict[str, JsonValue
     # did builds whose Core predates the field. The parent only places the call's
     # span, so the same call with or without it is the same request.
     value.pop("parent_call_id", None)
+    # Journals recorded before Core measured a tool call hold its post-tool
+    # hook request without the duration. Replay measures it again from the
+    # recorded Host times, so the request is the same with or without it.
+    if value.get("hook") == "post_tool_call" and isinstance(
+        hook_input := value.get("input"), dict
+    ):
+        value["input"] = {
+            key: item for key, item in hook_input.items() if key != "duration_ms"
+        }
     return value
 
 
@@ -4799,6 +4871,93 @@ def _discard_provider_operation_results(runtime: RuntimeStateV3) -> RuntimeState
     ):
         return runtime
     return runtime.model_copy(update={"provider_operations": operations})
+
+
+def _discard_model_inputs(runtime: RuntimeStateV3) -> RuntimeStateV3:
+    """Drop model inputs from the ledger, including ones an earlier build journalled."""
+    actions = [_action_without_model_input(action) for action in runtime.actions]
+    if all(
+        stripped is original
+        for stripped, original in zip(actions, runtime.actions, strict=True)
+    ):
+        return runtime
+    return runtime.model_copy(update={"actions": actions})
+
+
+def _action_without_model_input(action: RuntimeActionV1) -> RuntimeActionV1:
+    if action.kind != "completion" or action.request_pruned:
+        return action
+    request = _without_model_input(action.request)
+    if request is action.request:
+        return action
+    return action.model_copy(
+        update={"request": request, "request_sha256": sha256_json(request)}
+    )
+
+
+# No model cache holds this tool revision, so running a stripped call fails loudly.
+_OMITTED_MODEL_INPUT = RustModelInputUpdate(
+    messages=RustModelMessageReplace(messages=[]),
+    tool_catalog=RustModelToolCatalogKeep(revision=_MAX_SAFE_JSON_INTEGER),
+)
+_OMITTED_MODEL_INPUT_JSON = cast(
+    JsonValue, _OMITTED_MODEL_INPUT.model_dump(mode="json", by_alias=True)
+)
+
+
+def _without_model_input(request: JsonValue) -> JsonValue:
+    """A model call's request with an empty model input; other requests unchanged.
+
+    The input copies the whole conversation, which can outgrow the document cap.
+    Nothing reads it back: recovery fails an interrupted call, replay ignores it,
+    and a restored Runtime resyncs it from Core. Empty, it still loads in older builds.
+    """
+    if not isinstance(request, dict) or request.get("type") != "llm_call":
+        return request
+    model_input = request.get("model_input")
+    if model_input is None or model_input == _OMITTED_MODEL_INPUT_JSON:
+        return request
+    return {**request, "model_input": _OMITTED_MODEL_INPUT_JSON}
+
+
+def _without_model_inputs(
+    transition: RustSessionTransition,
+) -> RustSessionTransition | None:
+    """The transition stripped as ``_without_model_input`` does, or ``None`` if unchanged."""
+    if not isinstance(transition.next, RustActionsNextAction):
+        return None
+    directives = [
+        _directive_without_model_input(directive)
+        for directive in transition.next.directives
+    ]
+    if all(
+        stripped is original
+        for stripped, original in zip(
+            directives, transition.next.directives, strict=True
+        )
+    ):
+        return None
+    return transition.model_copy(
+        update={"next": RustActionsNextAction(directives=directives)}
+    )
+
+
+def _directive_without_model_input(
+    directive: RustActionDirective,
+) -> RustActionDirective:
+    if isinstance(directive, RustKeepActionDirective):
+        return directive
+    action = directive.action
+    if (
+        not isinstance(action, RustLLMCallAction)
+        or action.model_input == _OMITTED_MODEL_INPUT
+    ):
+        return directive
+    return directive.model_copy(
+        update={
+            "action": action.model_copy(update={"model_input": _OMITTED_MODEL_INPUT})
+        }
+    )
 
 
 def _apply_journal(  # noqa: PLR0912, PLR0914, PLR0915 - one branch per journal record

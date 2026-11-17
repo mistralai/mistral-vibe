@@ -213,7 +213,6 @@ fn show(app: &mut App) {
     match preview {
         Some(text) => {
             crate::long_paste::load_collapsed(app, text);
-            crate::composer_paths::rewrite_image_paths(&mut app.chat_input);
         }
         None => search.draft.clone().restore(&mut app.chat_input),
     }
