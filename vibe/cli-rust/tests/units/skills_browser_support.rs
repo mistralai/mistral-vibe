@@ -81,7 +81,7 @@ pub fn open(
     if catalog.is_some() {
         registry_on(app);
     }
-    skills_browser::apply_event(app, client, Event::Opened(Ok(pins(installed))));
+    skills_browser::apply_event(app, client, Event::Opened(Ok(pins(installed).into())));
     if let Some(catalog) = catalog {
         let generation = app.skills_browser.generation;
         let answer = Event::Catalog {
@@ -244,7 +244,7 @@ pub fn notice(app: &App) -> Option<&str> {
 
 /// The body the pane shows, `None` when the highlight shows none.
 pub fn shown_body(app: &App) -> Option<Body> {
-    bodies::view(&app.skills_browser).map(|(_, body)| body)
+    bodies::view(&app.skills_browser)
 }
 
 /// The answer to a preview fetch of `version` of `skill_id`.

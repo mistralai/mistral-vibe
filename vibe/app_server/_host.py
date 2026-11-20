@@ -20,6 +20,7 @@ from vibe.app_server._experiments_service import ExperimentsService
 from vibe.app_server._history_projection import project_message_history
 from vibe.app_server._local_plugins_controller import (
     LOCAL_PLUGIN_METHODS,
+    ConnectorCatalogReader,
     LocalPluginsController,
 )
 from vibe.app_server._local_projects_controller import (
@@ -32,7 +33,7 @@ from vibe.app_server._local_skills_controller import (
 )
 from vibe.app_server._missing_layers import MissingLayerFetches
 from vibe.app_server._model import ProtocolModel, validate_wire
-from vibe.app_server._model_catalog_service import ModelCatalogService
+from vibe.app_server._model_catalog_service import ModelCatalogKey, ModelCatalogService
 from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigService
 from vibe.app_server._project_links import (
@@ -41,8 +42,8 @@ from vibe.app_server._project_links import (
     ProjectLinksInvalidRequest,
 )
 from vibe.app_server._projection import (
-    project_agent_summaries,
     project_config_view,
+    project_selection,
     project_skill_summaries,
 )
 from vibe.app_server._session_config_cache import (
@@ -133,6 +134,7 @@ from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layers.admin import AdminConfigLayer, enforced_keys
 from vibe.core.config.layers.environment import EnvironmentLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.vibe_schema import DEFAULT_PROVIDERS, VIBE_BOT_KEYS
 from vibe.core.git.errors import (
     GitError,
     GitRepositoryNotFoundError,
@@ -201,7 +203,7 @@ _HOST_METHODS = frozenset({
 
 
 class HostRequestHandler:
-    def __init__(
+    def __init__(  # noqa: PLR0913 - one collaborator per concern, all keyword-only
         self,
         harness_files: HarnessFilesManager,
         *,
@@ -214,6 +216,7 @@ class HostRequestHandler:
         builtin_plugin_roots: Sequence[Path] | None = None,
         open_sessions: OpenSessions | None = None,
         config_changes: ConfigChanges | None = None,
+        connector_catalog: ConnectorCatalogReader | None = None,
     ) -> None:
         self._harness_files = harness_files
         # Reached by a setting written without a session; None when nothing
@@ -237,6 +240,7 @@ class HostRequestHandler:
             self._local_skill_files,
             self._load_orchestrator,
             self._resolved_builtin_plugin_roots,
+            connector_catalog,
         )
         self._missing_layers = MissingLayerFetches(
             org_config, experiments, model_catalog, self._credentials
@@ -244,6 +248,10 @@ class HostRequestHandler:
 
     def handles(self, method: str) -> bool:
         return method in _HOST_METHODS
+
+    def harness_trust_store(self) -> TrustedFoldersManager:
+        """The trust a worktree removal asked for no session judges with."""
+        return self._harness_files.trust_store
 
     async def dispatch(
         self,
@@ -438,10 +446,7 @@ class HostRequestHandler:
                 self._session_files(None), org_config=False
             )
             agents = AgentManager(orchestrator, None, harness_files=harness_files)
-        active, available = project_agent_summaries(
-            agents.active_profile, agents.available_agents.values()
-        )
-        return AgentsListResponse(active=active, agents=available)
+        return AgentsListResponse(**project_selection(agents)._asdict())
 
     async def _list_skills(
         self,
@@ -498,6 +503,12 @@ class HostRequestHandler:
             params.cwd, client_info=client_info, attached_session_id=attached_session_id
         )
         config = orchestrator.config
+        # A plan upgrade unlocks models: the picker's read refreshes an old
+        # catalog (one showing an upsell is old after 30 s), and
+        # `config/changed` tells the client once it lands.
+        await self._model_catalog.check_for_picker(
+            ModelCatalogKey.current(config, self._credentials)
+        )
         view = project_config_view(
             config,
             active_model_pinned=active_model_is_pinned(orchestrator),
@@ -778,6 +789,16 @@ class HostRequestHandler:
             credentials=self._credentials,
         )
 
+    async def mistral_api_origin(self) -> str:
+        """The origin of the signed-in account's Mistral API (a tenant's own)."""
+        provider = (await self._load_config(None)).get_mistral_provider()
+        api_base = (provider or DEFAULT_PROVIDERS[0]).api_base
+        return api_base.rstrip("/").removesuffix("/v1")
+
+    async def user_config_orchestrator(self) -> ConfigOrchestrator[VibeConfigSchema]:
+        """The user's own config, with no project's, as a host read applies it."""
+        return await self._load_orchestrator(self._user_config_files())
+
     async def _load_config(self, cwd: str | None) -> VibeConfigSchema:
         return (await self._load_orchestrator(self._session_files(cwd))).config
 
@@ -925,6 +946,8 @@ _LOCKED_REASON_FALLBACK = "Usage telemetry is set where this setting cannot chan
 @lru_cache(maxsize=1)
 def config_schema_response() -> ConfigSchemaReadResponse:
     schema = config_json_schema(VibeConfigSchema)
+    for key in VIBE_BOT_KEYS:
+        schema["properties"].pop(key, None)
     encoded = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode()
     version = hashlib.sha256(encoded, usedforsecurity=False).hexdigest()
     return ConfigSchemaReadResponse.model_validate({

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from e2e.app_server.config import COLUMNS, ROWS
 from e2e.app_server.events import artifact, artifact_created
 from e2e.app_server.scenario import Timeline
 
@@ -26,11 +25,7 @@ on_request = {
     "artifacts/list": [artifact_created(_record("artifact-b", "2026-08-27T10:00:00Z"))]
 }
 request_methods = {"artifacts/list"}
+screen_contains = ("● PR #72279",)
 screen_excludes = ("PRs (2)",)
-
-_LEFT = "/test/workdir  "
-_LINK = "● PR #72279 draft"
-_RIGHT = "ctx        0/600k"
-screen_rows = {ROWS - 1: (_LEFT + _LINK).ljust(COLUMNS - len(_RIGHT)) + _RIGHT}
 
 timeline: Timeline = ["a"]

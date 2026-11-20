@@ -5,8 +5,10 @@
 Every Vibe-owned connection that verifies TLS certificates must respect the
 effective `enable_system_trust_store` setting.
 
+The setting is enabled by default.
+
 - When disabled, use the bundled Certifi roots.
-- When enabled, use the operating system trust store.
+- When enabled, use the operating system trust store and the bundled roots.
 - In both cases, add certificates from `SSL_CERT_FILE` and `SSL_CERT_DIR`.
 
 Resolve and apply this policy before constructing a network client, including

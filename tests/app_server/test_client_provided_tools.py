@@ -54,7 +54,7 @@ from vibe.app_server.protocol import (
     SessionOptions,
 )
 from vibe.app_server.session import AppServerSession
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 
 pytestmark = [
     pytest.mark.timeout(60),
@@ -168,7 +168,7 @@ def _options(project: Path, client_tools: ClientTools) -> LocalHarnessOptions:
     return LocalHarnessOptions(
         session_options=SessionOptions(
             cwd=str(project),
-            agent=BuiltinAgentName.AUTO_APPROVE,
+            approval_policy=ApprovalPolicyName.AUTO_APPROVE,
             trust_workspace=True,
             headless=True,
         ),

@@ -4,7 +4,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::notice::Notice;
@@ -77,7 +77,6 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     ]);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
         .border_style(primary)
         .title(title);
     f.render_widget(block, box_area);
@@ -86,17 +85,20 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let cy = by + 2; // border + padding-top 1
 
     draw_search(app, f, Rect::new(cx, cy, w - 6, 1));
-    draw_options(app, f, bx, cy + 2, w, by + h - 2);
+    let search = &app.config_screen.search;
+    let help = search_field::hints(search.focused, !search.query.is_empty(), HELP);
+    let footer = match app.config_screen.status {
+        Some(_) => 1,
+        None => super::hint_line::height(&help, w - 6),
+    };
+    let footer_y = (by + h - 1).saturating_sub(footer);
+    draw_options(app, f, bx, cy + 2, w, footer_y);
     match &mut app.config_screen.status {
         Some(status) => {
             let covered = app.config_screen.edit.is_some();
             draw_status(f, Rect::new(cx, by + h - 2, w - 6, 1), status, covered)
         }
-        None => {
-            let search = &app.config_screen.search;
-            let help = search_field::hints(search.focused, !search.query.is_empty(), HELP);
-            super::hint_line::draw_clipped(f, cx, by + h - 2, w - 6, &help);
-        }
+        None => super::hint_line::draw(f, Rect::new(cx, footer_y, w - 6, footer), &help),
     }
     config_edit::draw(app, f, area);
 }

@@ -8,6 +8,7 @@ use crate::utils::paths::collapse_home;
 const DIGEST_WIDTH: usize = 8;
 pub const UNKNOWN: &str = "—";
 pub const NOTHING_CHANGED: &str = "Plugins reloaded. Nothing changed.";
+pub const DEFERRED: &str = "Plugins will reload when the current turn ends.";
 
 /// One plugin whose pinned content digest moved across a reload.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,38 +95,64 @@ pub fn matches(entry: &PluginCatalogEntry, query: &str) -> bool {
             .contains(query)
 }
 
-/// The detail view's lines.
-pub fn detail_lines(entry: &PluginCatalogEntry) -> Vec<String> {
-    let mut lines = vec![
-        format!("  Author: {}", or_unknown(entry.author.as_deref())),
-        format!("  Version: {}", or_unknown(entry.version.as_deref())),
-    ];
+/// The label column of the detail's facts.
+pub const LABEL_WIDTH: usize = 12;
+
+/// One line of a plugin's detail, by the role it plays so the view can style it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DetailLine {
+    Blank,
+    /// What the plugin does, in the foreground.
+    Description(String),
+    /// A fact: its dim label in a column, its value in the foreground.
+    Fact {
+        label: &'static str,
+        value: String,
+    },
+    /// A section heading, such as `Components`.
+    Heading(&'static str),
+    /// A component kind and its names: the kind in the accent color.
+    Components {
+        kind: &'static str,
+        names: String,
+    },
+}
+
+/// The detail view: what the plugin does, its facts in a label column, then its components by kind.
+pub fn detail_lines(entry: &PluginCatalogEntry) -> Vec<DetailLine> {
+    let mut lines = Vec::new();
     if !entry.description.is_empty() {
-        lines.push(String::new());
-        lines.push(format!("  {}", entry.description));
+        lines.push(DetailLine::Description(entry.description.clone()));
+        lines.push(DetailLine::Blank);
     }
-    lines.push(String::new());
-    lines.push(match &entry.installed_root {
-        Some(root) => format!("  Location: {}", collapse_home(root)),
-        None => "  Location: (uninstalled since pin)".to_owned(),
-    });
-    lines.push(format!("  Scope: {}", or_unknown(entry.scope.as_deref())));
-    lines.push(format!("  Format: {}", entry.source_format));
-    lines.push(format!(
-        "  Pinned: {}",
-        short_digest(entry.content_sha256.as_deref())
+    let fact = |label, value: &str| DetailLine::Fact {
+        label,
+        value: value.to_owned(),
+    };
+    lines.push(fact("Author", or_unknown(entry.author.as_deref())));
+    lines.push(fact("Version", or_unknown(entry.version.as_deref())));
+    lines.push(fact("Scope", or_unknown(entry.scope.as_deref())));
+    let location = match &entry.installed_root {
+        Some(root) => collapse_home(root),
+        None => "(uninstalled since pin)".to_owned(),
+    };
+    lines.push(fact("Location", &location));
+    lines.push(fact("Format", &entry.source_format));
+    lines.push(fact(
+        "Pinned",
+        &short_digest(entry.content_sha256.as_deref()),
     ));
     if entry.components.is_empty() {
         return lines;
     }
-    lines.push(String::new());
-    lines.push("  Components:".to_owned());
+    lines.push(DetailLine::Blank);
+    lines.push(DetailLine::Heading("Components"));
     lines.extend(component_lines(&entry.components));
     lines
 }
 
-/// One `● Kind: a, b` line per component kind, in first-seen order.
-fn component_lines(components: &[PluginCatalogComponent]) -> Vec<String> {
+/// One line per component kind, in first-seen order.
+fn component_lines(components: &[PluginCatalogComponent]) -> Vec<DetailLine> {
     let mut grouped: Vec<(&str, Vec<String>)> = Vec::new();
     for component in components {
         let name = match &component.status {
@@ -139,7 +166,10 @@ fn component_lines(components: &[PluginCatalogComponent]) -> Vec<String> {
     }
     grouped
         .into_iter()
-        .map(|(kind, names)| format!("  ● {}: {}", component_label(kind), names.join(", ")))
+        .map(|(kind, names)| DetailLine::Components {
+            kind: component_label(kind),
+            names: names.join(", "),
+        })
         .collect()
 }
 

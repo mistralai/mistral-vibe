@@ -174,6 +174,14 @@ class TestResolveRoot:
         result = await controller.resolve_root(str(REPO_ROOT))
         assert result["rejectReason"] == "nested_unresolvable"
 
+    @pytest.mark.asyncio
+    async def test_disk_root_is_not_eligible(
+        self, controller: ProjectLinksController, tmp_path: Path
+    ) -> None:
+        result = await controller.resolve_root(tmp_path.anchor)
+
+        assert result == {"eligible": False, "rejectReason": "disk_root", "root": None}
+
 
 class TestInspectRootWithoutGit:
     @pytest.fixture(autouse=True)
@@ -196,6 +204,17 @@ class TestInspectRootWithoutGit:
             "directoryName": "notes",
             "git": None,
         }
+
+    @pytest.mark.asyncio
+    async def test_disk_root_is_not_eligible(
+        self, controller: ProjectLinksController, tmp_path: Path
+    ) -> None:
+        # Windows users pick `C:\`; projects/create refuses a disk root.
+        result = await controller.inspect_root(tmp_path.anchor)
+
+        assert result["eligible"] is False
+        assert result["rejectReason"] == "disk_root"
+        assert result["root"] is None
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("marker_is_file", [False, True])

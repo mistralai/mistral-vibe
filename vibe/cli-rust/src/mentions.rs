@@ -205,14 +205,6 @@ impl ChatInput {
         expand_range(&before, &spans, lo, hi)
     }
 
-    /// Where a cut starts when it takes the caret line, as it does without a
-    /// selection: that line's start.
-    pub fn line_cut_start(&self) -> Option<usize> {
-        crate::chat_input::selection_range(&self.input, self.cursor, self.anchor)
-            .is_none()
-            .then(|| crate::utils::input_edit::line_bounds(&self.input, self.cursor).0)
-    }
-
     /// Replace the selection before an insertion, removing whole mentions.
     pub fn widen_selection(&mut self) {
         self.sync_mentions();

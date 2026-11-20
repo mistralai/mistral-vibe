@@ -1,4 +1,4 @@
-"""Resuming a session without todos drops the previous session's pinned todo row."""
+"""Resuming a session without todos drops the previous session's rail todo item."""
 
 from __future__ import annotations
 
@@ -32,4 +32,4 @@ timeline: Timeline = [
 ]
 
 screen_contains = ("Saved session restored.",)
-screen_excludes = ("File the follow-ups",)
+screen_excludes = ("File the follow-ups", "≡ 1/2")

@@ -1,24 +1,25 @@
 //! Pure views of a storage snapshot: session rows, their badges, and the archive estimate.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::server::{StorageSession, StorageSnapshot, StorageWorktree};
 
 const DAY_MS: u64 = 86_400_000;
 
-/// One session row, joined with its worktree.
-#[derive(Clone, Copy)]
+/// One session row, joined with every worktree its session claims, the primary first.
+#[derive(Clone)]
 pub struct Row<'a> {
     pub session: &'a StorageSession,
-    pub worktree: Option<&'a StorageWorktree>,
+    pub worktrees: Vec<&'a StorageWorktree>,
     /// The attached session of this CLI.
     pub current: bool,
 }
 
 impl<'a> Row<'a> {
-    /// History plus the full worktree size, shared or not.
+    /// History plus the full size of every claimed worktree, shared or not.
     pub fn bytes(&self) -> u64 {
-        self.session.history_bytes + self.worktree.and_then(|w| w.bytes).unwrap_or(0)
+        let worktrees: u64 = self.worktrees.iter().filter_map(|w| w.bytes).sum();
+        self.session.history_bytes + worktrees
     }
 
     pub fn title(&self) -> &'a str {
@@ -31,7 +32,8 @@ impl<'a> Row<'a> {
     /// The repository name, else the last folder of the session's cwd.
     pub fn project(&self) -> &'a str {
         let cwd = self.session.cwd.as_deref().unwrap_or_default();
-        self.worktree
+        self.worktrees
+            .first()
             .and_then(|w| w.repo_name.as_deref())
             .unwrap_or_else(|| {
                 cwd.rsplit(['/', '\\'])
@@ -45,7 +47,7 @@ impl<'a> Row<'a> {
         self.current || self.session.open
     }
 
-    /// The trailing state words: `open · shared by 2`.
+    /// The trailing state words: `open · 2 worktrees · shared by 2`.
     pub fn badges(&self) -> String {
         let mut badges = Vec::new();
         if self.current {
@@ -56,16 +58,17 @@ impl<'a> Row<'a> {
         if self.session.archived {
             badges.push("archived".to_owned());
         }
-        match self.worktree {
-            None => badges.push("no worktree".to_owned()),
-            Some(worktree) => {
-                if worktree.session_ids.len() > 1 {
-                    badges.push(format!("shared by {}", worktree.session_ids.len()));
-                }
-                if worktree.bytes.is_none() {
-                    badges.push("not measured yet".to_owned());
-                }
-            }
+        match self.worktrees.len() {
+            0 => badges.push("no worktree".to_owned()),
+            1 => {}
+            n => badges.push(format!("{n} worktrees")),
+        }
+        let shared = self.worktrees.iter().map(|w| w.session_ids.len()).max();
+        if let Some(shared) = shared.filter(|n| *n > 1) {
+            badges.push(format!("shared by {shared}"));
+        }
+        if self.worktrees.iter().any(|w| w.bytes.is_none()) {
+            badges.push("not measured yet".to_owned());
         }
         badges.join(" · ")
     }
@@ -73,47 +76,77 @@ impl<'a> Row<'a> {
 
 /// Every session row, largest first.
 pub fn rows<'a>(snapshot: &'a StorageSnapshot, current: Option<&str>) -> Vec<Row<'a>> {
+    let by_id: HashMap<&str, &StorageWorktree> = snapshot
+        .worktrees
+        .iter()
+        .map(|w| (w.id.as_str(), w))
+        .collect();
     let mut rows: Vec<Row> = snapshot
         .sessions
         .iter()
-        .map(|session| Row {
-            session,
-            worktree: session
-                .worktree_id
-                .as_deref()
-                .and_then(|id| snapshot.worktrees.iter().find(|w| w.id == id)),
-            current: current == Some(session.session_id.as_str()),
+        .map(|session| {
+            let ids = match session.worktree_ids.is_empty() {
+                true => session.worktree_id.as_slice(),
+                false => session.worktree_ids.as_slice(),
+            };
+            Row {
+                session,
+                worktrees: ids
+                    .iter()
+                    .filter_map(|id| by_id.get(id.as_str()).copied())
+                    .collect(),
+                current: current == Some(session.session_id.as_str()),
+            }
         })
         .collect();
     rows.sort_by_key(|row| std::cmp::Reverse(row.bytes()));
     rows
 }
 
-/// The suggested sessions still listed, by size or oldest activity first.
-pub fn review_order(snapshot: &StorageSnapshot, by_date: bool) -> Vec<String> {
-    let suggested: HashSet<&str> = snapshot
-        .archive_suggestion
-        .session_ids
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let mut rows: Vec<Row> = rows(snapshot, None)
-        .into_iter()
-        .filter(|row| suggested.contains(row.session.session_id.as_str()))
-        .collect();
-    if by_date {
-        rows.sort_by_key(|row| row.session.last_activity_at);
-    }
-    rows.into_iter()
-        .map(|row| row.session.session_id.clone())
-        .collect()
-}
-
-/// Space archiving `selected` frees; `at_least` when a worktree it frees is not measured yet.
+/// Space an action frees; `at_least` when part of it is not measured yet.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Estimate {
     pub bytes: u64,
     pub at_least: bool,
+}
+
+impl Estimate {
+    /// `about 1.8 GB` or `at least 1.8 GB`.
+    pub fn amount(&self) -> String {
+        format!(
+            "{} {}",
+            self.about(),
+            crate::utils::bytes::decimal(self.bytes)
+        )
+    }
+
+    /// `about` or `at least`, for a line that styles the size apart.
+    pub fn about(&self) -> &'static str {
+        if self.at_least {
+            "at least"
+        } else {
+            "about"
+        }
+    }
+}
+
+/// `Frees about 1.8 GB.` before an action, `Freed about 1.8 GB.` after it; nothing when unknown.
+pub fn space(verb: Space, estimate: Option<Estimate>) -> String {
+    let Some(estimate) = estimate else {
+        return String::new();
+    };
+    let verb = match verb {
+        Space::Frees => "Frees",
+        Space::Freed => "Freed",
+    };
+    format!("{verb} {}.", estimate.amount())
+}
+
+/// Whether a size is an estimate shown before acting or a result written after.
+#[derive(Clone, Copy)]
+pub enum Space {
+    Frees,
+    Freed,
 }
 
 /// A worktree counts once every session using it is selected or already archived; histories stay.
@@ -134,12 +167,16 @@ pub fn estimate(snapshot: &StorageSnapshot, selected: &HashSet<String>) -> Estim
         if !freed {
             continue;
         }
-        match worktree.bytes {
-            Some(bytes) => estimate.bytes += bytes,
-            None => estimate.at_least = true,
-        }
+        add(&mut estimate, worktree);
     }
     estimate
+}
+
+fn add(estimate: &mut Estimate, worktree: &StorageWorktree) {
+    match worktree.bytes {
+        Some(bytes) => estimate.bytes += bytes,
+        None => estimate.at_least = true,
+    }
 }
 
 /// Space the scan measured freed: the bytes of the worktrees archiving

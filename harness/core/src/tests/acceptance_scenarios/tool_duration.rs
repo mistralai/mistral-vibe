@@ -533,6 +533,12 @@ fn dispatch_program_read(runtime: &mut SynchronousRuntime, turn_id: &str) -> Val
                     "file_system.read_file",
                     json!({"path": "notes.txt"}),
                 ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    "program",
+                    PROGRAM_SOURCE,
+                ))
                 .observe(core_tool_execution_started(turn_id, "program")),
         )
         .only_action()

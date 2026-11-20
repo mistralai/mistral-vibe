@@ -207,6 +207,7 @@ fn apply_ready(
     app.subagents.status_list_enabled = startup::read_show_subagent_status_list(&runtime);
     app.artifacts_modal.enabled = startup::read_pr_monitoring(&runtime);
     app.view.sticky_prompt_enabled = startup::read_enable_sticky_prompt(&runtime);
+    app.view.collapse_turn_details = startup::read_collapse_turn_details(&runtime);
     app.quit.ask_confirmation_on_exit = startup::read_ask_confirmation_on_exit(&runtime);
     // Later picker resumes resend this config, so it must keep naming the
     // settled worktree, not the checkout the run started in. Parking must land
@@ -330,6 +331,7 @@ fn record_startup(app: &mut App, attach: &startup::Attach, is_cold_start: bool) 
         "is_cold_start": is_cold_start,
         "mouse_capture": app.session.startup_config.enable_mouse_capture,
         "vim_keybindings": app.vim.enabled,
+        "environment": crate::telemetry::environment::properties(),
     }));
     app.session.startup_telemetry = Some(properties);
     flush_startup_telemetry(app);
@@ -369,6 +371,12 @@ pub fn apply_runtime_value(app: &mut App, runtime: &Value) {
     app.subagents.status_list_enabled = startup::read_show_subagent_status_list(runtime);
     app.artifacts_modal.enabled = startup::read_pr_monitoring(runtime);
     app.view.sticky_prompt_enabled = startup::read_enable_sticky_prompt(runtime);
+    let collapse = startup::read_collapse_turn_details(runtime);
+    // Turned on under a bulk-unfolded Ctrl+O state, the new groups open unfolded too.
+    if collapse && !app.view.collapse_turn_details && !app.view.tools_collapsed {
+        app.view.expanded.extend(app.view.transcript.details_keys());
+    }
+    app.view.collapse_turn_details = collapse;
     app.quit.ask_confirmation_on_exit = startup::read_ask_confirmation_on_exit(runtime);
     crate::vim::apply_runtime(app, runtime);
     let show_thinking = startup::read_show_thinking_nodes(runtime);
@@ -433,7 +441,7 @@ fn show_startup_config(app: &mut App, config: startup_cache::StartupConfig) {
     completion_manager::refresh(app);
 }
 
-/// A live reasoning row or loop prompt starts with the bulk fold state.
+/// A live reasoning row, loop prompt or turn's details start with the bulk fold state.
 fn expand_live_foldable(app: &mut App, entry: &EntryHead) {
     if app.view.tools_collapsed {
         return;
@@ -443,10 +451,14 @@ fn expand_live_foldable(app: &mut App, entry: &EntryHead) {
     };
     let transcript = &app.view.transcript;
     let unfolded = match transcript.is_reasoning(id) {
-        true => Some(id),
-        false => transcript.loop_prompt_of(id),
+        true => Some(id.to_owned()),
+        false => (transcript.loop_prompt_of(id).map(str::to_owned)).or_else(|| {
+            (app.view.collapse_turn_details)
+                .then(|| transcript.details_key(id))
+                .flatten()
+        }),
     };
-    if let Some(unfolded) = unfolded.map(str::to_owned) {
+    if let Some(unfolded) = unfolded {
         app.view.expanded.insert(unfolded);
         app.view.transcript_cache.invalidate_layouts();
     }
@@ -744,6 +756,11 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             crate::goal::turn_started(app, turn.id.clone(), turn.queue_item_id.is_some());
             app.session.active_turn_id = turn.id;
             let interrupt = message_queue::take_interrupt_on_start(app);
+            // A take-back belongs to the turn it interrupts, never to a later one:
+            // any other start gives it up and mounts the marker it skipped.
+            if !interrupt {
+                crate::rewind::give_up_take_back(app);
+            }
             if let Some(queue_item_id) = turn.queue_item_id {
                 if message_queue::turn_started(app, client, &queue_item_id) {
                     feedback::maybe_show(app, client, app.session.session_id.clone());
@@ -782,6 +799,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             app.view.transcript.settle_reasoning();
             app.view.transcript.settle_compactions(None);
             app.session.active_turn_id = None;
+            crate::rewind::turn_settled(app, client, turn.id.as_deref(), status);
             if retry::auto_continue_incomplete_stream(app, client, &turn) {
                 return true;
             }
@@ -798,8 +816,11 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 );
                 id
             });
-            // An interrupted turn can be retried too, as the marker Esc left says.
-            if retryable || status == Some("interrupted") {
+            // An interrupted turn can be retried too, as the marker Esc left says;
+            // one whose prompt is taken back is rewound instead.
+            if app.session.taking_back {
+                retry::cancel(app);
+            } else if retryable || status == Some("interrupted") {
                 retry::offer(app, turn.id.as_deref(), error_row.filter(|_| retryable));
             } else {
                 retry::cancel(app);

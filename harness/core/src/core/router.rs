@@ -79,6 +79,14 @@ pub(crate) fn reduce(
         HarnessCommand::ContextMessage { content } => {
             dispatch(state, TurnEvent::ContextMessage { content }, determinism)
         }
+        HarnessCommand::InstructionsUpsert { key, content } => dispatch(
+            state,
+            TurnEvent::InstructionsUpsert { key, content },
+            determinism,
+        ),
+        HarnessCommand::InstructionsDelete { key } => {
+            dispatch(state, TurnEvent::InstructionsDelete { key }, determinism)
+        }
         HarnessCommand::Notification { notification } => state.receive_notification(notification),
         HarnessCommand::Compact { extra_instructions } => dispatch(
             state,

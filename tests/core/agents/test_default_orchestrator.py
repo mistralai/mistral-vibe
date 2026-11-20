@@ -7,7 +7,7 @@ import tomllib
 import pytest
 
 from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 from vibe.core.config import (
     MissingAPIKeyError,
     RawConfig,
@@ -15,7 +15,10 @@ from vibe.core.config import (
     build_default_orchestrator,
 )
 from vibe.core.config.builder import ConfigBuilder
-from vibe.core.config.layers.agent_profile import AgentProfileLayer
+from vibe.core.config.layers.agent_profile import (
+    APPROVAL_POLICY_LAYER,
+    AgentProfileLayer,
+)
 from vibe.core.config.layers.discovered import DiscoveredConfigLayer
 from vibe.core.config.patch import AddOperationPatch
 from vibe.core.tools.base import ToolPermission
@@ -65,20 +68,6 @@ async def test_build_default_orchestrator_builds_layer_stack_once(
     assert build_calls == 1
 
 
-async def _switch_profile_with_agent_layer(
-    manager: AgentManager, orchestrator, name: str
-) -> None:
-    profile = manager.get_agent(name)
-    result = await orchestrator.set_field(
-        "",
-        profile.overrides,
-        reason=f"agent profile changed to {profile.name}",
-        target_layer=AgentProfileLayer.NAME,
-    )
-    assert result == []
-    manager.switch_profile(profile.name)
-
-
 @pytest.mark.asyncio
 async def test_build_default_orchestrator_uses_standard_layer_priority(
     config_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_working_directory: Path
@@ -109,7 +98,7 @@ ask_confirmation_on_exit = true
 
     orchestrator = await build_default_orchestrator({"default_agent": "auto-approve"})
 
-    assert orchestrator.config.default_agent == "auto-approve"
+    assert orchestrator.config.default_approval_policy == "auto-approve"
     assert orchestrator.config.context_warnings is True
     assert orchestrator.config.ask_confirmation_on_exit is False
     assert orchestrator.config.displayed_workdir == "user-only"
@@ -435,42 +424,33 @@ async def test_agent_profile_layer_overrides_runtime_overrides() -> None:
 
 
 @pytest.mark.asyncio
-async def test_agent_manager_switch_profile_updates_agent_profile_layer() -> None:
+async def test_switching_the_policy_updates_the_policy_layer() -> None:
     orchestrator = await build_default_orchestrator()
+    manager = AgentManager(orchestrator, initial_policy=ApprovalPolicyName.ASK)
 
-    manager = AgentManager(orchestrator, initial_agent=BuiltinAgentName.ASK)
+    manager.switch_policy(ApprovalPolicyName.ACCEPT_EDITS)
 
-    await _switch_profile_with_agent_layer(
-        manager, orchestrator, BuiltinAgentName.ACCEPT_EDITS
-    )
-
-    assert manager.active_profile.name == BuiltinAgentName.ACCEPT_EDITS
+    assert manager.active_policy.name == ApprovalPolicyName.ACCEPT_EDITS
     assert orchestrator.config.tools["write_file"]["permission"] == "always"
-    assert manager.config.tools["write_file"]["permission"] == "always"
-
     tool_manager = ToolManager(lambda: orchestrator.config)
-
     assert (
         tool_manager.get_tool_config("write_file").permission == ToolPermission.ALWAYS
     )
 
+    manager.switch_policy(ApprovalPolicyName.ASK)
+
+    assert manager.active_policy.name == ApprovalPolicyName.ASK
+    assert "write_file" not in orchestrator.config.tools
+
 
 @pytest.mark.asyncio
-async def test_agent_manager_switch_profile_replaces_agent_profile_layer() -> None:
+async def test_the_policy_layer_sits_between_the_agents_and_the_orgs() -> None:
     orchestrator = await build_default_orchestrator()
-    manager = AgentManager(orchestrator, initial_agent=BuiltinAgentName.ASK)
 
-    await _switch_profile_with_agent_layer(
-        manager, orchestrator, BuiltinAgentName.ACCEPT_EDITS
-    )
+    AgentManager(orchestrator)
 
-    assert orchestrator.config.tools["write_file"]["permission"] == "always"
-
-    await _switch_profile_with_agent_layer(manager, orchestrator, BuiltinAgentName.ASK)
-
-    assert manager.active_profile.name == BuiltinAgentName.ASK
-    assert "write_file" not in orchestrator.config.tools
-    assert "write_file" not in manager.config.tools
+    names = [layer.name for layer in orchestrator.layers]
+    assert names[-3:] == [AgentProfileLayer.NAME, APPROVAL_POLICY_LAYER, "admin"]
 
 
 @pytest.mark.asyncio
@@ -493,7 +473,6 @@ async def test_agent_manager_switch_writes_discovered_agent_profile_layer(
         "\n".join([
             'display_name = "Review"',
             'description = "Review profile"',
-            "bypass_tool_permissions = true",
             'disabled_tools = ["bash"]',
         ]),
         encoding="utf-8",
@@ -505,18 +484,18 @@ async def test_agent_manager_switch_writes_discovered_agent_profile_layer(
     orchestrator = await build_default_orchestrator()
     manager = AgentManager(orchestrator)
 
-    await _switch_profile_with_agent_layer(manager, orchestrator, "scout")
+    manager.switch_agent("scout")
 
-    assert manager.active_profile.name == "scout"
+    assert manager.active_agent.name == "scout"
     assert orchestrator.config.enabled_tools == ["grep"]
     assert orchestrator.config.tools["write_file"]["permission"] == "never"
 
-    await _switch_profile_with_agent_layer(manager, orchestrator, "review")
+    manager.switch_agent("review")
 
-    assert manager.active_profile.name == "review"
+    assert manager.active_agent.name == "review"
+    assert manager.active_policy.name == ApprovalPolicyName.ACCEPT_EDITS
     assert orchestrator.config.enabled_tools == []
-    assert "write_file" not in orchestrator.config.tools
-    assert orchestrator.config.bypass_tool_permissions is True
+    assert orchestrator.config.tools["write_file"]["permission"] == "always"
     assert orchestrator.config.disabled_tools == ["bash"]
 
 

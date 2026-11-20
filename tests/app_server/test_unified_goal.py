@@ -256,6 +256,39 @@ async def test_a_turn_left_running_at_close_is_not_counted_again_on_reopen(
 
 
 @pytest.mark.asyncio
+async def test_a_turn_the_reopen_carries_on_is_charged_once_when_it_ends(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session whose process died while a goal turn that spent 500
+    tokens ran, reopened with that turn still running.
+    *Do*: Let the carried-on turn spend 300 more tokens, then end it.
+    *Assert*: The goal comes back paused and is charged the whole turn once,
+    800 tokens, when it ends.
+    """
+    # Prepare
+    closed = _session_goal(tmp_path, _FakeGoalHooks())
+    await closed.restore()
+    await _set_goal(closed, objective="Keep going")
+    await closed.turn_started("t-1", TurnOrigin.CONTINUATION)
+    await closed.turn_progressed("t-1", tokens=500, time_ms=3_000)
+    await closed.suspend()
+    reopened = _session_goal(tmp_path, _FakeGoalHooks())
+    await reopened.restore(running_turn_id="t-1")
+
+    # Do
+    await reopened.turn_progressed("t-1", tokens=800, time_ms=5_000)
+    await reopened.turn_ended(_turn_end("t-1"))
+
+    # Assert
+    live = reopened.live_goal
+    assert live is not None
+    assert live.status is GoalStatus.PAUSED
+    assert live.tokens_used == 800
+    assert live.time_used_seconds == 5
+    assert reopened.store.accounting.turns == {}
+
+
+@pytest.mark.asyncio
 async def test_a_goal_completed_then_replaced_in_one_turn_still_shows_complete(
     tmp_path: Path,
 ) -> None:

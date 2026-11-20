@@ -43,7 +43,8 @@ timeline: Timeline = [
     child_session_updated("idle", context_tokens=18_000),
     turn_completed(),
     {"release": 5},  # the running turn plus the running child; the rest held
-    "\x1b[B",  # Down — focus the list on the Main row
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the subagent list on the Main row
     "\x1b[B",  # Down — highlight the child row
     "\r",  # Enter — the child's Running loader and 12.5k context replace the main ones
     {

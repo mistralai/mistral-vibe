@@ -203,8 +203,12 @@ class UnifiedSessionGoal:
     def goal(self) -> PublicGoal | None:
         return self.store.goal
 
-    async def restore(self) -> None:
-        """Load the goal; an active one comes back paused, waiting for the user."""
+    async def restore(self, *, running_turn_id: str | None = None) -> None:
+        """Load the goal; an active one comes back paused, waiting for the user.
+
+        ``running_turn_id`` is a turn the reopened session carries on, which
+        stays bound so its end charges it.
+        """
         try:
             await self.store.restore()
         except GoalStoreError as exc:
@@ -222,7 +226,11 @@ class UnifiedSessionGoal:
             return
         if self.store.accounting.turns:
             try:
-                await self.store.update(settle_abandoned_turns)
+                await self.store.update(
+                    lambda goal, accounting: settle_abandoned_turns(
+                        goal, accounting, running_turn_id=running_turn_id
+                    )
+                )
             except GoalStoreError as exc:
                 logger.warning(
                     "Failed to settle the goal's abandoned turns", exc_info=exc

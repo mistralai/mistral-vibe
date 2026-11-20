@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Set as AbstractSet
 from typing import Any
 
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 from vibe.core.config._defaults import SHELL_TOOLS
 from vibe.core.config._retry import retry_on_conflict
 from vibe.core.config.layer import (
@@ -26,8 +26,6 @@ BASH_READ_ONLY_MIGRATION = "bash_read_only_defaults_v1"
 # Old tool name -> new tool name. The new tools replaced these in-place, so
 # existing user configs keyed by the old names need their settings moved over.
 RENAMED_TOOLS: dict[str, str] = {"read": "read_file", "search_replace": "edit"}
-
-RENAMED_AGENTS: dict[str, str] = {"default": "ask"}
 
 # The value older versions wrote for an unset ``auto_compact_threshold``.
 UNSET_AUTO_COMPACT_THRESHOLD = -1
@@ -411,34 +409,17 @@ def _migrate_renamed_tools(data: dict[str, Any]) -> bool:
 
 
 def _migrate_renamed_agents(data: dict[str, Any]) -> bool:
-    changed = False
-
-    default_agent = data.get("default_agent")
-    if isinstance(default_agent, str) and default_agent in RENAMED_AGENTS:
-        data["default_agent"] = RENAMED_AGENTS[default_agent]
-        changed = True
-
-    for list_key in ("enabled_agents", "disabled_agents", "installed_agents"):
-        names = data.get(list_key)
-        if not isinstance(names, list):
-            continue
-        renamed = [
-            RENAMED_AGENTS.get(name, name) if isinstance(name, str) else name
-            for name in names
-        ]
-        if renamed != names:
-            data[list_key] = renamed
-            changed = True
-
-    if "default_agent" not in data:
-        ask = RENAMED_AGENTS["default"]
-        if _agent_filters_exclude(
-            data, BuiltinAgentName.ACCEPT_EDITS
-        ) and not _agent_filters_exclude(data, ask):
-            data["default_agent"] = ask
-            changed = True
-
-    return changed
+    # A config excluding accept-edits, the default policy, starts on ask. It is
+    # written as default_agent, which builds from before agents and policies
+    # split read too.
+    if "default_agent" in data or "default_approval_policy" in data:
+        return False
+    if _agent_filters_exclude(
+        data, ApprovalPolicyName.ACCEPT_EDITS
+    ) and not _agent_filters_exclude(data, ApprovalPolicyName.ASK):
+        data["default_agent"] = ApprovalPolicyName.ASK.value
+        return True
+    return False
 
 
 def _agent_filters_exclude(data: dict[str, Any], agent: str) -> bool:

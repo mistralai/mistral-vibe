@@ -3,7 +3,7 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::{AgentSummary, SessionStats};
+use super::{AgentSummary, ApprovalPolicySummary, SessionStats};
 
 #[derive(Default, Deserialize)]
 #[serde(default)]
@@ -23,6 +23,9 @@ pub struct RuntimeSnapshot {
     /// `None` when the server sent no list.
     #[serde(deserialize_with = "crate::utils::json::lenient_opt")]
     pub agents: Option<Vec<AgentSummary>>,
+    /// `None` when the server sent no list.
+    #[serde(deserialize_with = "crate::utils::json::lenient_opt")]
+    pub approval_policies: Option<Vec<ApprovalPolicySummary>>,
 }
 
 impl RuntimeSnapshot {
@@ -37,7 +40,7 @@ impl RuntimeSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct ConfigIssue {
     #[serde(default)]
     pub file: String,
@@ -58,10 +61,14 @@ pub struct ConfigView {
     #[serde(default)]
     pub default_model_alias: String,
     pub default_agent: Option<String>,
+    pub default_approval_policy: Option<String>,
     pub theme: Option<String>,
     pub log_level: Option<String>,
     #[serde(default)]
     pub disable_welcome_banner_animation: bool,
+    /// Older app servers do not send it: the selection keeps animating (ADR 0014).
+    #[serde(default)]
+    pub disable_selection_animation: bool,
     #[serde(default = "yes")]
     pub cursor_blink: bool,
     #[serde(default = "yes")]
@@ -73,6 +80,9 @@ pub struct ConfigView {
     /// Absent on an older server: the prompt stays pinned, per ADR 0014.
     #[serde(default = "yes")]
     pub enable_sticky_prompt: bool,
+    /// Absent on an older server: every turn keeps its details shown, per ADR 0014.
+    #[serde(default)]
+    pub collapse_turn_details: bool,
     /// Absent on an older server: completion stays on, per ADR 0014.
     #[serde(default = "yes")]
     pub enable_file_autocomplete: bool,

@@ -19,6 +19,7 @@ mod output_type;
 mod permissions;
 mod post_tool_results;
 mod program_timing;
+mod read_file_images;
 mod recovery;
 mod repeated_tool_failure;
 mod runtime_driver;
@@ -230,6 +231,23 @@ fn assistant_tool_calls_committed(turn_id: &str, action: &Value, calls: &[Value]
         "action_id": action_id(action),
         "candidate": tool_calls_candidate(calls),
     })
+}
+
+fn assistant_program_committed(
+    turn_id: &str,
+    action: &Value,
+    call_id: &str,
+    source: &str,
+) -> Value {
+    assistant_tool_calls_committed(
+        turn_id,
+        action,
+        &[tool_call(
+            call_id,
+            "run_typescript",
+            json!({"code": source}),
+        )],
+    )
 }
 
 fn tool_result_committed(turn_id: &str, action: &Value, result: Value) -> Value {

@@ -80,6 +80,9 @@ from mistralai_vibe_local_harness.session_api.app_server.session.procedures impo
     TurnSteerParams,
     TurnSteerResponse,
 )
+from mistralai_vibe_local_harness.session_api.app_server.session.transport import (
+    SessionCallbackRejectedError,
+)
 from mistralai_vibe_local_harness.session_protocol import (
     JsonObject,
     PublicSessionState,
@@ -89,8 +92,10 @@ from mistralai_vibe_local_harness.vibe._errors import (
     HarnessCallbackClosedError,
     HarnessCallbackConflictError,
     HarnessCallbackNotFoundError,
+    HarnessCallbackRejectedError,
     HarnessContextCompactionError,
     HarnessStaleTurnError,
+    HarnessTurnConflictError,
 )
 from mistralai_vibe_local_harness.vibe._fact_recorder import FactRecorder
 from mistralai_vibe_local_harness.vibe._runtime_config import (
@@ -580,14 +585,17 @@ class LocalSessionApiTransport:
             else await self._steer_running_turn(params, params.message, entry_id)
         )
         if turn_id is None:
-            started = await self._start_turn(
-                TurnStartParams(
-                    idempotency_key=params.idempotency_key,
-                    session_id=params.session_id,
-                    message_entry_id=entry_id,
-                    message=params.message,
+            try:
+                started = await self._start_turn(
+                    TurnStartParams(
+                        idempotency_key=params.idempotency_key,
+                        session_id=params.session_id,
+                        message_entry_id=entry_id,
+                        message=params.message,
+                    )
                 )
-            )
+            except HarnessTurnConflictError as exc:
+                raise SessionTurnConflictError(str(exc)) from exc
             turn_id = started.turn.id
         response = MessageSendResponse(message_entry_id=entry_id, turn_id=turn_id)
         await self._record_receipt(params.idempotency_key, fingerprint, response)
@@ -722,6 +730,8 @@ class LocalSessionApiTransport:
                 "session_id": params.session_id,
                 "result": params.result,
             })
+        except HarnessCallbackRejectedError as exc:
+            raise SessionCallbackRejectedError(str(exc)) from exc
         except (
             HarnessCallbackClosedError,
             HarnessCallbackConflictError,

@@ -20,13 +20,11 @@ class QuestionModel(BaseModel):
 
 class QuestionChoice(QuestionModel):
     label: str = Field(description="Short label for the choice (1-5 words)")
-    description: str = Field(
-        default="", description="Optional explanation of this choice"
-    )
+    description: str = Field(default="", description="What choosing this option does")
 
 
 class UserQuestion(QuestionModel):
-    question: str = Field(description="The question text")
+    question: str = Field(description="The question, naming what it is about")
     header: str = Field(
         default="",
         description="Short chip/tag label for the question (max 20 chars)",
@@ -46,7 +44,7 @@ class UserQuestion(QuestionModel):
 
 class UserQuestionRequest(QuestionModel):
     questions: list[UserQuestion] = Field(
-        description="Questions to ask (1-4 recommended). Displayed as tabs if multiple.",
+        description="Questions to ask, one per decision. Displayed as tabs if multiple.",
         min_length=1,
     )
     footer_note: str | None = Field(

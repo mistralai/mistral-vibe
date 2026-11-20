@@ -36,10 +36,7 @@ class UnifiedSessionImportWriter:
     """Creates native Unified sessions without attaching or resuming them."""
 
     def __init__(
-        self,
-        session_config: SessionLoggingConfig,
-        # None while the local projects flag is off: stamps keep the cloud id.
-        local_projects: LocalProjectStore | None = None,
+        self, session_config: SessionLoggingConfig, local_projects: LocalProjectStore
     ) -> None:
         self._session_config = session_config
         self._local_project_store = local_projects
@@ -97,11 +94,10 @@ class UnifiedSessionImportWriter:
         )
 
     async def _session_project(self, project_id: str) -> SessionProject:
-        store = self._local_project_store
-        if store is None:
-            return SessionProject(kind="cloud", id=project_id)
         if self._local_projects is None:
-            self._local_projects = await asyncio.to_thread(list_local_projects, store)
+            self._local_projects = await asyncio.to_thread(
+                list_local_projects, self._local_project_store
+            )
         return session_project(self._local_projects, project_id)
 
 

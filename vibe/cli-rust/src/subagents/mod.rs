@@ -6,7 +6,6 @@ pub mod fetch;
 pub mod list;
 pub mod transcripts;
 mod view;
-mod waiting;
 
 pub use child::{
     Event, FetchState, Severity, HISTORY_PAGE_LIMIT, HISTORY_RESUME_TAIL_MESSAGES,
@@ -15,8 +14,8 @@ pub use child::{
 pub use display::StatusTone;
 pub use display::{display_name, is_active, status_label, status_tone, subagent_loading_status};
 pub use list::{
-    active_batch, focus_first, focus_input, handle_list_key, leave_list, page_rows, refresh,
-    select, show_main_chat, show_subagent_chat, ListState, MAIN_SESSION_ID, MAX_ROWS,
+    active_batch, focus_first, focus_input, handle_list_key, leave_list, refresh, select,
+    show_main_chat, show_subagent_chat, ListState, MAIN_SESSION_ID, MAX_ROWS,
 };
 pub use transcripts::{merge_history_tail, SubagentTranscripts};
 
@@ -27,7 +26,7 @@ pub use view::{
 
 use std::time::Instant;
 
-use crate::server::PublicChildSession;
+use crate::server::{PublicChildSession, SessionStatus};
 
 /// The child sessions plus the subagent list and view state.
 pub struct Subagents {
@@ -89,21 +88,29 @@ impl Subagents {
         } else {
             Vec::new()
         };
-        let rows = list::active_batch(
+        let mut rows = list::active_batch(
             &mut self.list.known_session_ids,
             &mut self.list.batch_session_ids,
             &sessions,
             self.viewed_subagent_id.as_deref(),
         );
-        let (rows, waiting) = waiting::hide(
-            rows,
-            &self.list.batch_session_ids,
-            self.viewed_subagent_id.as_deref(),
-            self.list.show_waiting,
-        );
-        self.list.waiting_count = waiting;
-        self.list.shown =
-            self.status_list_enabled && (self.list.shown || !rows.is_empty() || waiting > 0);
+        // Running children first, ready ones last; rows hold still while the list has focus or the mouse.
+        let hovered = self.list.mouse_session_id.as_deref();
+        let frozen = self.list.focused
+            || hovered.is_some_and(|id| id == MAIN_SESSION_ID || rows.iter().any(|r| r.id == id));
+        let previous = &self.list.rows;
+        rows.sort_by_cached_key(|row| {
+            let kept = frozen
+                .then(|| previous.iter().position(|shown| shown.id == row.id))
+                .flatten();
+            let rank = match row.status {
+                status if is_active(status) => 0,
+                SessionStatus::Idle => 2,
+                _ => 1,
+            };
+            (kept.unwrap_or(usize::MAX), rank)
+        });
+        self.list.shown = self.status_list_enabled && (self.list.shown || !rows.is_empty());
         rows
     }
 }

@@ -26,4 +26,4 @@ timeline: Timeline = [
     take_snapshot(),
 ]
 
-screen_contains = ("12.5K / 200K · 4m",)
+screen_contains = ("▶ goal 4m",)

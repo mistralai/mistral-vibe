@@ -53,6 +53,7 @@ ui_events! {
     OlderHistory(older_history::Event),
     DebugConsole(debug_console::Event),
     Account(usage_gauge::AccountRead),
+    CodePreview(crate::code_preview::Event),
     Loops(crate::loops::Event),
     Goal(crate::goal::Event),
 }
@@ -94,6 +95,7 @@ pub fn apply(app: &mut App, client: &Arc<Client>, event: UiEvent) {
         UiEvent::OlderHistory(event) => older_history::apply_event(app, event),
         UiEvent::DebugConsole(event) => debug_console::apply_event(app, client, event),
         UiEvent::Account(read) => usage_gauge::apply(app, read),
+        UiEvent::CodePreview(event) => crate::code_preview::apply_event(app, event),
         UiEvent::Loops(event) => crate::loops::apply_event(app, event),
         UiEvent::Goal(event) => crate::goal::apply_event(app, event),
     }

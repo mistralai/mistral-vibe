@@ -65,9 +65,17 @@ class _GitUnavailableInCheckout(GitRepositoryError):
     pass
 
 
+# Likewise: projects/create refuses a disk root (`C:\`, `/`, a bare UNC share),
+# so inspection rejects it before the client asks.
+class _DiskRoot(GitRepositoryError):
+    pass
+
+
 def _reject_reason(error: GitRepositoryError) -> ProjectLinksResolveRootRejectReason:
     if isinstance(error, _GitUnavailableInCheckout):
         return "git_unavailable"
+    if isinstance(error, _DiskRoot):
+        return "disk_root"
     return "nested_unresolvable"
 
 
@@ -110,6 +118,8 @@ def _read_inspected_directory(path: Path) -> _InspectedDirectory:
         raise GitRepositoryError(str(exc)) from exc
     if not directory_path.is_dir():
         raise GitRepositoryError("Not a directory")
+    if directory_path.parent == directory_path:
+        raise _DiskRoot("A disk root can't be a project")
 
     plain_directory = _InspectedDirectory(
         path=directory_path, name=directory_path.name, git=None

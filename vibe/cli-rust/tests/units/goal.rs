@@ -38,19 +38,13 @@ fn the_row_detail_follows_the_status() {
     let mut unbounded = goal("active");
     unbounded.token_budget = None;
     assert_eq!(format::row_detail(&unbounded), "12.5K · 4m");
-    assert_eq!(format::row_detail(&goal("paused")), "paused · /goal resume");
-    assert_eq!(
-        format::row_detail(&goal("blocked")),
-        "blocked · /goal resume"
-    );
+    assert_eq!(format::row_detail(&goal("paused")), "paused");
+    assert_eq!(format::row_detail(&goal("blocked")), "blocked");
     assert_eq!(
         format::row_detail(&goal("budget_limited")),
-        "budget reached · /goal edit"
+        "budget reached"
     );
-    assert_eq!(
-        format::row_detail(&goal("usage_limited")),
-        "usage limit · /goal resume"
-    );
+    assert_eq!(format::row_detail(&goal("usage_limited")), "usage limit");
     assert_eq!(
         format::row_detail(&goal("complete")),
         "complete · 12.5K · 4m"

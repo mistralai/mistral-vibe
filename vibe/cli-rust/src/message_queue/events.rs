@@ -105,6 +105,7 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: QueueEvent) -> Op
             if app.session.active_turn_id.is_none() && (head || app.queue.is_empty()) {
                 // The interrupted turn will never start; later prompts were queued after it.
                 if app.queue.interrupt_on_start.take().is_some() {
+                    crate::rewind::give_up_take_back(app);
                     crate::commands::retry::drop_pending_interrupt(app);
                 }
             }

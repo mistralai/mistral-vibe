@@ -31,7 +31,7 @@ handshake = {
 request_methods = frozenset({"session/read"})
 
 # The child view's banner names the model the child's agent type selects, not the session's.
-screen_contains = ("Viewing Explore 1 · read-only · Esc to return", "deepseek[off]")
+screen_contains = ("Viewing Explore 1 read-only", "deepseek[off]")
 screen_excludes = ("mistral-medium-3.5",)
 
 timeline: Timeline = [
@@ -42,7 +42,8 @@ timeline: Timeline = [
     child_session_updated(model={"displayName": "deepseek", "thinking": "off"}),
     turn_completed(),
     {"release_after": 6},
-    "\x1b[B",  # Down — focus the list on the Main row
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the subagent list on the Main row
     "\x1b[B",  # Down — highlight the child row
     "\r",  # Enter — open the read-only child view
 ]

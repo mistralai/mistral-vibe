@@ -8,6 +8,7 @@ import pytest
 
 from mistralai_vibe_local_harness.vibe._host import UnifiedHarnessSessionBackendHost
 from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
+from vibe.app_server._local_projects import LocalProjectStore
 from vibe.app_server._unified_import_writer import UnifiedSessionImportWriter
 from vibe.core.config import SessionLoggingConfig
 from vibe.core.imports.adapters.claude_session import (
@@ -85,7 +86,8 @@ async def test_imports_a_claude_transcript_into_a_native_unified_session(
     assert translated.source_session_id == str(source_id)
     assert translated.source_cwd is None
     writer = UnifiedSessionImportWriter(
-        SessionLoggingConfig(enabled=True, save_dir=str(tmp_path / "vibe"))
+        SessionLoggingConfig(enabled=True, save_dir=str(tmp_path / "vibe")),
+        LocalProjectStore(),
     )
 
     # Do

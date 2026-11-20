@@ -13,6 +13,6 @@ handshake = {
 }
 request_methods = METHODS
 
-timeline: Timeline = ["/skills\r", " ", "j "]
+timeline: Timeline = ["/skills\r", "j ", "k "]
 
 screen_contains = ("'legacy' is set by a",)

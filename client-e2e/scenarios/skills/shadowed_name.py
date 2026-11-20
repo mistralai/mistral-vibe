@@ -26,7 +26,7 @@ handshake = {
 }
 request_methods = METHODS
 
-timeline: Timeline = ["/skills\r", "j", "\r"]
+timeline: Timeline = ["/skills\r", "\r"]
 
-screen_contains = ("launch", "(shadowed)", "Remove")
-screen_excludes = ("Enabled",)
+screen_contains = ("launch", "(shadowed)", "r remove")
+screen_excludes = ("Space",)

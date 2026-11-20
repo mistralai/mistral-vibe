@@ -3,8 +3,8 @@ from __future__ import annotations
 from e2e.app_server.events import edit_file, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline
 
-# A wrapped diff row keeps the result's `⎢` border and hangs under the line-number gutter.
-screen_contains = (f"⎢ {' ' * 8}{'x' * 32}!",)
+# A wrapped diff row keeps the result's `│` border and hangs under the line-number gutter.
+screen_contains = (f"│ {' ' * 8}{'x' * 32}!",)
 screen_excludes = ("▉", "▊", "▋", "▌", "▍", "▎", "▏")
 
 _PROMPT = "extend the long line"

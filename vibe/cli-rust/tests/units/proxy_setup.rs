@@ -142,3 +142,19 @@ fn a_single_visible_line_shows_the_focused_input_not_its_label() {
     state.move_focus(false);
     assert_eq!(state.reconcile_scroll(1), 1);
 }
+
+#[test]
+fn ctrl_x_cuts_in_proxy_setup_even_over_a_rail() {
+    let mut app = App::default();
+    crate::rail::with_tasks(&mut app, &["watch"]);
+    app.proxy_setup = ProxySetupApp::new(settings());
+    let field = &mut app.proxy_setup.inputs[0].field;
+    field.edit(Action::SelectAll);
+    crate::support::redraw(&mut app);
+
+    crate::support::send_key(&mut app, crate::support::ctrl('x'));
+
+    assert_eq!(app.proxy_setup.inputs[0].field.text, "");
+    assert!(app.proxy_setup.open);
+    assert!(!app.rail.focused);
+}

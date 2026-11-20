@@ -92,7 +92,7 @@ pub enum CheckOutcome {
 }
 
 /// The CI checks summary (`checks` on the details): an overall state plus the
-/// per-check entries rendered in the artifacts modal.
+/// per-check entries rendered in the PR window.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChecksSummary {

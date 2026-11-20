@@ -19,6 +19,8 @@ mod external_editor;
 mod handoff;
 mod helpers;
 pub(crate) mod keys;
+#[doc(hidden)]
+pub use keys::route_key;
 pub mod notifications;
 mod steady;
 mod suspend;

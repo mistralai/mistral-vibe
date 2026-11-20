@@ -24,6 +24,7 @@ from vibe.app_server.models import (
     PublicNoticeEntry,
 )
 from vibe.utils.io import atomic_replace, file_write_lock, read_safe, read_safe_async
+from vibe.utils.platform import PRIVATE_DIRECTORY_MODE
 
 __all__ = [
     "GOAL_NOTICES_FILENAME",
@@ -118,7 +119,9 @@ class GoalNoticeStore:
         if not self._notices:
             await asyncio.to_thread(self._path.unlink, missing_ok=True)
             return
-        self._path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        self._path.parent.mkdir(
+            parents=True, mode=PRIVATE_DIRECTORY_MODE, exist_ok=True
+        )
         # The notices quote the objective, which is session content.
         self._path.touch(mode=0o600, exist_ok=True)
         payload = _StoredNoticesV1(notices=self._notices).model_dump_json(

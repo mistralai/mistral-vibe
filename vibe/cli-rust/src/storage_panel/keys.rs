@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{actions, bulk, has_suggestion, model, Target, View};
+use super::{actions, bulk, review, suggestions, ReviewKind, Target, View};
 use crate::app::App;
 use crate::server::{Client, StorageRefreshParams};
 
@@ -35,9 +35,16 @@ fn busy_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+/// `y` confirms; Enter too, unless the action removes something for good.
 fn confirm_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+    let destructive = app
+        .storage
+        .confirm
+        .as_ref()
+        .is_some_and(|c| c.destructive());
     match key.code {
-        KeyCode::Char('y') | KeyCode::Enter => actions::confirm(app, client),
+        KeyCode::Char('y') => actions::confirm(app, client),
+        KeyCode::Enter if !destructive => actions::confirm(app, client),
         KeyCode::Char('n') | KeyCode::Esc => app.storage.confirm = None,
         _ => {}
     }
@@ -49,7 +56,7 @@ fn panel_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Up | KeyCode::Char('k') => step(app, false),
         KeyCode::Down | KeyCode::Char('j') => step(app, true),
         KeyCode::Enter => match super::target(app) {
-            Some(Target::Suggestion) => open_review(app),
+            Some(Target::Suggestion(kind)) => open_review(app, kind),
             Some(Target::Session(_)) => app.storage.view = View::Details,
             None => {}
         },
@@ -97,7 +104,7 @@ fn review_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         }
         KeyCode::Char('a') if review.selected.len() == len => review.selected.clear(),
         KeyCode::Char('a') => review.selected = review.order.iter().cloned().collect(),
-        KeyCode::Char('s') => sort(app),
+        KeyCode::Char('s') if review.kind != ReviewKind::Cleanup => sort(app),
         KeyCode::Enter => bulk::start_bulk(app, client),
         _ => {}
     }
@@ -107,17 +114,19 @@ fn step(app: &mut App, down: bool) {
     let Some(snapshot) = app.storage.usage.snapshot.as_ref() else {
         return;
     };
-    let len = snapshot.sessions.len() + usize::from(has_suggestion(&app.storage.usage));
+    let len = snapshot.sessions.len() + suggestions(app).len();
     app.storage.list.step(down, len, true, |_| true);
 }
 
-/// Enter on the suggestion: every suggested session selected, largest first.
-fn open_review(app: &mut App) {
+/// Enter on a suggestion: every offered item selected, sessions largest first.
+fn open_review(app: &mut App, kind: ReviewKind) {
     let Some(snapshot) = app.storage.usage.snapshot.as_ref() else {
         return;
     };
-    let order = model::review_order(snapshot, false);
+    let current = app.session.session_id.as_deref();
+    let order = review::review_order(snapshot, kind, current, false);
     let review = &mut app.storage.review;
+    review.kind = kind;
     review.selected = order.iter().cloned().collect();
     review.order = order;
     review.by_date = false;
@@ -133,7 +142,8 @@ fn sort(app: &mut App) {
     let review = &mut app.storage.review;
     let kept = review.order.get(review.list.selected()).cloned();
     review.by_date = !review.by_date;
-    review.order = model::review_order(snapshot, review.by_date);
+    let current = app.session.session_id.as_deref();
+    review.order = review::review_order(snapshot, review.kind, current, review.by_date);
     let index = kept
         .and_then(|id| review.order.iter().position(|other| *other == id))
         .unwrap_or(0);

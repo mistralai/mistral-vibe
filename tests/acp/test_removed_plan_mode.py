@@ -42,7 +42,7 @@ async def test_a_client_requesting_plan_mode_keeps_the_current_mode(
                 config_id="mode", session_id=response.session_id, value="plan"
             )
         session = agent.sessions[response.session_id]
-        active = session.app_server.resources.agents.active.name
+        active = session.app_server.resources.agents.active_policy.name
     finally:
         await agent.close()
 

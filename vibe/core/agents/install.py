@@ -3,8 +3,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from vibe.core.agents.manager import FALLBACK_AGENTS, AgentManager
-from vibe.core.agents.models import REMOVED_BUILTIN_AGENTS, AgentType
+from vibe.core.agents.manager import AgentManager
+from vibe.core.agents.models import AgentType
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
 
@@ -54,7 +54,7 @@ def plan_installed_agents_change(
     if writable_installed_agents(orchestrator) is None:
         raise AgentInstallError("The writable config layer is not available.")
     switch_to = None
-    if not installed and agents.active_profile.name == agent_name:
+    if not installed and agents.active_agent.name == agent_name:
         switch_to = _replacement_agent(orchestrator, agents, agent_name)
     return InstalledAgentsChange(switch_to=switch_to)
 
@@ -97,15 +97,11 @@ def _replacement_agent(
     excluded: str,
 ) -> str:
     default = orchestrator.config.default_agent
-    # A removed builtin default (``"plan"``) runs as its replacement, as at
-    # session start.
-    replacement = REMOVED_BUILTIN_AGENTS.get(default, default)
-    for name in (default, replacement, *FALLBACK_AGENTS):
-        if name != excluded and _is_selectable(agents, name):
-            return name
-    for name, profile in agents.available_agents.items():
-        if name != excluded and profile.agent_type is AgentType.AGENT:
-            return name
+    if default != excluded and _is_selectable(agents, default):
+        return default
+    for profile in agents.primary_agents():
+        if profile.name != excluded:
+            return profile.name
     raise AgentInstallError(
         "No selectable agent is available after uninstalling the active agent."
     )

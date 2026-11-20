@@ -31,6 +31,8 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         // bindings); Ctrl+C / Ctrl+D are intercepted before we get here.
         KeyCode::Char('a') if ctrl && !alt => Some(Action::CursorLineStart),
         KeyCode::Char('e') if ctrl && !alt => Some(Action::CursorLineEnd),
+        KeyCode::Char('b') if ctrl && !alt => Some(Action::CursorLeft),
+        KeyCode::Char('f') if ctrl && !alt => Some(Action::CursorRight),
         KeyCode::Char('u') if ctrl && !alt => Some(Action::DeleteToStartOfLine),
         KeyCode::Char('k' | 'K') if ctrl && shift && !alt => Some(Action::DeleteLine),
         KeyCode::Char('k') if ctrl && !alt => Some(Action::DeleteToEndOfLine),
@@ -81,6 +83,16 @@ pub fn action_for(k: &KeyEvent) -> Option<Action> {
         KeyCode::End => Some(Action::CursorLineEnd),
         _ => None,
     }
+}
+
+/// Emacs Ctrl+P / Ctrl+N as the Up / Down they stand for; other keys come back unchanged.
+pub fn line_alias(key: KeyEvent) -> KeyEvent {
+    let code = match key.code {
+        KeyCode::Char('p') if key.modifiers == KeyModifiers::CONTROL => KeyCode::Up,
+        KeyCode::Char('n') if key.modifiers == KeyModifiers::CONTROL => KeyCode::Down,
+        _ => return key,
+    };
+    KeyEvent::new(code, KeyModifiers::NONE)
 }
 
 /// Super bindings always apply; Ctrl bindings are reserved for job control on Unix.

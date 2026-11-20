@@ -609,3 +609,32 @@ async def test_a_project_telemetry_opt_in_is_not_listed_as_a_source(
         False,
     )
     assert [entry.layer for entry in telemetry.layer_values] == ["user-toml", "default"]
+
+
+def test_the_settings_screen_never_shows_the_vibebot_ceiling() -> None:
+    """Vibebot is behind the closed `vibe_bot` flag: its setting stays out of /config and Desktop's settings."""
+    wires = build_field_wires(VibeConfigSchema(), {})
+
+    assert "vibe_bot_max_approval_policy" not in {wire.name for wire in wires}
+
+
+def test_the_config_schema_and_the_effective_config_leave_out_the_vibebot_ceiling() -> (
+    None
+):
+    """Vibebot is behind a closed flag: `vibe config schema` and headless exports stay as they were."""
+    from vibe.app_server._host import config_schema_response
+
+    schema = config_schema_response().config_schema
+    effective = effective_config_response(
+        VibeConfigSchema(), bypass_tool_permissions=False
+    )
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+
+    for key in (
+        "vibe_bot_max_approval_policy",
+        "vibe_bot_local_tools",
+        "vibe_bot_local_tool_max_bytes",
+    ):
+        assert key not in properties
+        assert key not in effective.config

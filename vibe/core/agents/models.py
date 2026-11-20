@@ -18,11 +18,15 @@ from vibe.core.config._defaults import SHELL_TOOLS
 RESERVED_AGENT_NAME = "main"
 
 
-class BuiltinAgentName(StrEnum):
+class ApprovalPolicyName(StrEnum):
     ASK = "ask"
     ACCEPT_EDITS = "accept-edits"
     SMART_APPROVE = "smart-approve"
     AUTO_APPROVE = "auto-approve"
+
+
+class BuiltinAgentName(StrEnum):
+    DEFAULT = "default"
     EXPLORE = "explore"
     LEAN = "lean"
 
@@ -44,6 +48,8 @@ class AgentProfile:
     file behind it, so a profile that reaches that surface has to remember where
     it came from.
     """
+    ignored_settings: tuple[str, ...] = field(default=(), compare=False)
+    """The settings an agent file wrote that an agent may not set, dropped."""
     config_error: str | None = field(default=None, compare=False)
     """The config error the profile's settings make, or ``None`` when they are
     valid. A profile with one stays discovered, so choosing it gives this error
@@ -61,16 +67,95 @@ class AgentProfile:
             data = tomllib.load(f)
         migrate_agent_profile_config(data)
         data.pop(LEGACY_BASE_DISABLED_KEY, None)
+        name = path.stem
+        display_name = data.pop("display_name", name.replace("-", " ").title())
+        description = data.pop("description", "")
+        instructions = data.pop("instructions", None)
+        agent_type = _enum_field(data, "agent_type", AgentType, AgentType.AGENT)
+        ignored: tuple[str, ...] = ()
+        if agent_type is AgentType.AGENT and name not in BUILTIN_APPROVAL_POLICIES:
+            data, ignored = _agent_settings(data)
+            safety = AgentSafety.NEUTRAL
+        else:
+            data.pop("approval_policy", None)
+            safety = _enum_field(data, "safety", AgentSafety, AgentSafety.NEUTRAL)
         return cls(
-            name=path.stem,
-            display_name=data.pop("display_name", path.stem.replace("-", " ").title()),
-            description=data.pop("description", ""),
-            safety=_enum_field(data, "safety", AgentSafety, AgentSafety.NEUTRAL),
-            agent_type=_enum_field(data, "agent_type", AgentType, AgentType.AGENT),
-            instructions=data.pop("instructions", None),
+            name=name,
+            display_name=display_name,
+            description=description,
+            safety=safety,
+            agent_type=agent_type,
+            instructions=instructions,
             overrides=data,
             source_path=path,
+            ignored_settings=ignored,
         )
+
+
+# What an agent may set: what it is, never what runs without asking, which
+# belongs to the approval policy, nor org-level lists.
+_AGENT_KEYS = frozenset({
+    "active_model",
+    "models",
+    "providers",
+    "allowed_models",
+    "compaction_model",
+    "vision_model",
+    "auto_compact_threshold",
+    "enabled_tools",
+    "disabled_tools",
+    "enabled_skills",
+    "disabled_skills",
+    "skill_paths",
+    "system_prompt_id",
+    "system_prompt_behavior",
+    "tools",
+})
+_NOT_CONFIG_KEYS = frozenset({"safety", "approval_policy"})
+_AGENT_TOOL_KEYS = frozenset({"default_timeout", "max_timeout_seconds"})
+_NARROWING_PERMISSIONS = frozenset({"ask", "never"})
+
+
+def _agent_settings(data: dict[str, Any]) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """The settings of an agent file an agent may set, and the dotted keys of
+    the rest. Per tool it keeps the shell timeouts and a ``permission`` that
+    narrows (``ask``, ``never``).
+    """
+    from vibe.core.config.vibe_schema import VibeConfigSchema
+
+    kept: dict[str, Any] = {}
+    ignored: list[str] = []
+    for key, value in data.items():
+        if key not in _AGENT_KEYS and (
+            key in VibeConfigSchema.model_fields or key in _NOT_CONFIG_KEYS
+        ):
+            ignored.append(key)
+        elif key not in _AGENT_KEYS:
+            # Unknown keys stay, so strict_config refuses a typo when the
+            # agent is used, as for any config file.
+            kept[key] = value
+        elif key == "tools" and isinstance(value, dict):
+            tools: dict[str, Any] = {}
+            for tool, settings in value.items():
+                if not isinstance(settings, dict):
+                    ignored.append(f"tools.{tool}")
+                    continue
+                own: dict[str, Any] = {}
+                for setting, setting_value in settings.items():
+                    if setting in _AGENT_TOOL_KEYS or (
+                        setting == "permission"
+                        and setting_value in _NARROWING_PERMISSIONS
+                    ):
+                        own[setting] = setting_value
+                    else:
+                        ignored.append(f"tools.{tool}.{setting}")
+                if own:
+                    tools[tool] = own
+            if tools:
+                kept["tools"] = tools
+        else:
+            kept[key] = value
+    return kept, tuple(sorted(ignored))
 
 
 def _enum_field[E: StrEnum](
@@ -84,14 +169,21 @@ def _enum_field[E: StrEnum](
         raise ValueError(f"{key}: {value!r} is not one of {allowed}") from None
 
 
+DEFAULT = AgentProfile(
+    BuiltinAgentName.DEFAULT,
+    "Default",
+    "Vibe's own instructions, model and tools",
+    AgentSafety.NEUTRAL,
+)
+
 ASK = AgentProfile(
-    BuiltinAgentName.ASK,
+    ApprovalPolicyName.ASK,
     "Ask",
     "Requires approval for tool executions",
     AgentSafety.NEUTRAL,
 )
 ACCEPT_EDITS = AgentProfile(
-    BuiltinAgentName.ACCEPT_EDITS,
+    ApprovalPolicyName.ACCEPT_EDITS,
     "Accept Edits",
     "Auto-approves file edits only",
     AgentSafety.DESTRUCTIVE,
@@ -103,20 +195,20 @@ ACCEPT_EDITS = AgentProfile(
     },
 )
 AUTO_APPROVE = AgentProfile(
-    BuiltinAgentName.AUTO_APPROVE,
+    ApprovalPolicyName.AUTO_APPROVE,
     "Auto Approve",
     "Auto-approves all tool executions",
     AgentSafety.YOLO,
     overrides={"bypass_tool_permissions": True},
 )
 SMART_APPROVE = AgentProfile(
-    BuiltinAgentName.SMART_APPROVE,
+    ApprovalPolicyName.SMART_APPROVE,
     "Smart Approve",
     "Classifies each tool call and auto-runs the safe ones, prompting only for risky ones",
     AgentSafety.SMART,
     # No static permission overrides: a model classifier gates each call via the
     # runtime "classify" tool mode (Unified Harness only). The runtime derives that
-    # gate from the active agent; see build_unified_session_context / _rust_tool_modes.
+    # gate from the active policy; see build_unified_session_context / _rust_tool_modes.
 )
 
 EXPLORE = AgentProfile(
@@ -177,15 +269,21 @@ LEAN = AgentProfile(
 )
 
 BUILTIN_AGENTS: dict[str, AgentProfile] = {
-    BuiltinAgentName.ASK: ASK,
-    BuiltinAgentName.ACCEPT_EDITS: ACCEPT_EDITS,
-    BuiltinAgentName.SMART_APPROVE: SMART_APPROVE,
-    BuiltinAgentName.AUTO_APPROVE: AUTO_APPROVE,
+    BuiltinAgentName.DEFAULT: DEFAULT,
     BuiltinAgentName.EXPLORE: EXPLORE,
     BuiltinAgentName.LEAN: LEAN,
 }
 
-# Builtin agents dropped from the product, mapped to the agent a config that still
+# A file in an agents directory named after one of these overrides the policy,
+# not an agent.
+BUILTIN_APPROVAL_POLICIES: dict[str, AgentProfile] = {
+    ApprovalPolicyName.ASK: ASK,
+    ApprovalPolicyName.ACCEPT_EDITS: ACCEPT_EDITS,
+    ApprovalPolicyName.SMART_APPROVE: SMART_APPROVE,
+    ApprovalPolicyName.AUTO_APPROVE: AUTO_APPROVE,
+}
+
+# Builtin modes dropped from the product, mapped to the policy a config that still
 # names one as `default_agent` starts on. Plan was read-only: ask runs no tool
 # without approval, so the fallback grants no permission the user did not have.
-REMOVED_BUILTIN_AGENTS: dict[str, str] = {"plan": BuiltinAgentName.ASK}
+REMOVED_BUILTIN_AGENTS: dict[str, str] = {"plan": ApprovalPolicyName.ASK}

@@ -199,7 +199,7 @@ async def test_a_switch_turned_off_mid_session_leaves_its_subagents_on_the_api(
 ) -> None:
     """*Prepare*: A root opened with the Session API switch on, then the
         switch turned off and the configuration pushed into the root again,
-        as a rollback of the experiment does.
+        as a rollback of the switch does.
     *Do*: Start the root Turn that spawns a subagent.
     *Assert*: The subagent runs and the root follows it, because the root
         keeps the path it opened with and its subagents inherit it.

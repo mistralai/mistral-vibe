@@ -4,5 +4,5 @@ from __future__ import annotations
 
 from e2e.app_server.scenario import Timeline
 
-screen_contains = ("╭─ enable_telemetry ",)
+screen_contains = ("┌─ enable_telemetry ",)
 timeline: Timeline = ["/config\r", "\x1b[B" * 9 + "\r", "\r", "\r"]

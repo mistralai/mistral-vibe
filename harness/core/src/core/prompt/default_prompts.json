@@ -1,8 +1,5 @@
 {
-  "guidance": {
-    "intro": "You help users get complex tasks done. Act directly and proactively. Find relevant skills with the `skill` tool, discover additional tools with `search_tool_functions`, and call them using `run_typescript`.",
-    "autonomy": "## Autonomy and initiative\n\n- Treat the user's request as authorization to perform the normal, in-scope work needed to complete it. Start working without asking whether to proceed.\n- Do not ask for confirmation before loading skills, discovering tools, reading or searching available context, or performing other reversible investigation.\n- When a tool call needs approval, make the tool call and let the runtime's approval mechanism handle it. Do not preemptively ask for permission in chat.\n- When details are ambiguous, first use the available context and tools to resolve them. Ask a clarifying question only when missing information would materially change the result, cannot be discovered, or additional authorization is genuinely required.\n- Make reasonable implementation choices, keep momentum, and continue until the requested outcome is complete or a real blocker remains."
-  },
+  "guidance": "none",
   "agent_messages": {
     "header": "Agent {kind} from {sender_agent_path}:\n",
     "current_task": "You are an agent, whose identity is {recipient_agent_path} that has been spawned by another agent {sender_agent_path}. This 'agent path' is an id, it is not related to files or folders. Your final result goes back to your parent automatically, and only your own children's final results come to you automatically. If you need anything else from another agent, send it a message; if you cannot, say so in your answer. Your current task from the agent at {sender_agent_path} is:\n",
@@ -41,5 +38,10 @@
   },
   "wait_description": "Wait until new input arrives, such as a result from a child you started, a background task, a user follow up or until the timeout ends. wait returns as soon as input arrives, so use a timeout relevant to expected timeframe. Call wait alone. The input arrives in normal model context, not in the result.",
   "discovery_description": "Discover callable tool functions for run_typescript.\n\nUse mode=\"best_match\" first with a capability query; it returns up to 20 ranked exact function names, without declarations.\nIf a returned name fits, call mode=\"details\" with that exact name before using it.\nUse mode=\"all_connector_capabilities\" with connectors set to exact connector names only when best_match returned moreCandidatesAvailable: true and no candidate fits, or when explicitly listing a connector inventory.\n\nFor query, use short tool-capability keywords, not the full user request.\nIf the user shares a URL from an online service, first check whether there is a connector for that service. Include the service name or domain plus the needed operation in the best_match query, for example \"google docs open url\", before falling back to generic web URL tools.\nFor named connector + capability requests, pass both connectors and query in one best_match call.\nIf no returned function name matches after the available discovery path, answer unsupported instead of probing adjacent tools.\nTreat auth as unavailable only when connector guidance or a tool error says so.",
-  "rejected_input_note": "<system>A user message was removed here: the model provider rejected the request that carried it, for example because of an image it could not read.</system>"
+  "rejected_input_note": "<system>A user message was removed here: the model provider rejected the request that carried it, for example because of an image it could not read.</system>",
+  "instructions": {
+    "note": "<Instructions key=\"{key}\">\n{content}\n</Instructions>",
+    "overwrite_note": "Instructions `{key}` have been overwritten: the previous text no longer applies.\n<Instructions key=\"{key}\">\n{content}\n</Instructions>",
+    "deletion_note": "Instructions `{key}` no longer apply."
+  }
 }

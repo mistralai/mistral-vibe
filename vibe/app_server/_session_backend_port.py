@@ -20,6 +20,7 @@ from vibe.app_server.protocol import (
     AgentInstallParams,
     AgentsListResponse,
     AgentSwitchParams,
+    ApprovalPolicySwitchParams,
     ArtifactsListParams,
     ArtifactsListResponse,
     ArtifactsMarkViewedParams,
@@ -461,6 +462,10 @@ class SessionBackend(Protocol):
         self, params: AgentSwitchParams
     ) -> SessionBackendResult[RuntimeMutationResponse]: ...
 
+    async def switch_approval_policy(
+        self, params: ApprovalPolicySwitchParams
+    ) -> SessionBackendResult[RuntimeMutationResponse]: ...
+
     async def install_agent(
         self, params: AgentInstallParams
     ) -> SessionBackendResult[AgentsListResponse]: ...
@@ -627,6 +632,13 @@ class SessionBackendRunningTurnAnnouncement(Protocol):
     """Optional re-announcement of a running turn to a newly attached client."""
 
     async def announce_running_turn(self) -> None: ...
+
+
+@runtime_checkable
+class SessionBackendHeldEvents(Protocol):
+    """Optional barrier on the events a backend held for its next subscriber."""
+
+    async def wait_for_held_events(self) -> None: ...
 
 
 @runtime_checkable

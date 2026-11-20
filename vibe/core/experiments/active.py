@@ -27,7 +27,6 @@ class ExperimentName(StrEnum):
     CLI_EXTRA_MODELS = "vibe_cli_extra_models"
     REGISTRY_SKILLS = "vibe_cli_registry_skills"
     MISTRAL_MCP_CONNECTOR = "vibe_cli_mistral_mcp_connector"
-    LOCAL_RUNTIME_SESSION_API = "vibe_cli_local_runtime_session_api_migration"
     MODEL_CATALOG = "vibe_cli_model_catalog"
     MODEL_CATALOG_FILTER = "vibe_cli_model_catalog_filter"
     STORAGE_USAGE = "vibe_storage_usage"
@@ -43,7 +42,6 @@ DEFAULT_VARIANTS: Final[dict[ExperimentName, object]] = {
     ExperimentName.CLI_EXTRA_MODELS: {},
     ExperimentName.REGISTRY_SKILLS: False,
     ExperimentName.MISTRAL_MCP_CONNECTOR: False,
-    ExperimentName.LOCAL_RUNTIME_SESSION_API: False,
     ExperimentName.MODEL_CATALOG: False,
     ExperimentName.MODEL_CATALOG_FILTER: {},
     ExperimentName.STORAGE_USAGE: False,
@@ -71,8 +69,6 @@ EXPERIMENT_SURFACES: Final[dict[ExperimentName, frozenset[ExperimentSurface]]] =
     ExperimentName.SMART_APPROVE: frozenset({ExperimentSurface.UNIFIED}),
     ExperimentName.DEFAULT_AGENT: frozenset({ExperimentSurface.UNIFIED}),
     ExperimentName.MISTRAL_MCP_CONNECTOR: frozenset(ExperimentSurface),
-    # Only the Unified backend's app server talks to the local runtime.
-    ExperimentName.LOCAL_RUNTIME_SESSION_API: frozenset({ExperimentSurface.UNIFIED}),
     ExperimentName.MODEL_CATALOG: frozenset(ExperimentSurface),
     ExperimentName.MODEL_CATALOG_FILTER: frozenset(ExperimentSurface),
     ExperimentName.STORAGE_USAGE: frozenset(ExperimentSurface),

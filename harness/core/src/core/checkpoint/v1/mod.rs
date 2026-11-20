@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 use crate::core::config::{ContextSettings, HarnessConfig};
+use crate::core::error::RestoreError;
 use crate::core::features::compaction::{CompactionBudgets, EstimateCorrection};
+use crate::core::features::instructions;
 use crate::core::hooks::HookPoint;
 use crate::core::hooks::hook_action_id;
 use crate::core::model_context::ModelContext;
@@ -16,11 +18,11 @@ use crate::core::wire::message::{Message, StoredMessageSource};
 use crate::core::wire::tool::ToolCall;
 
 use self::context::CheckpointContext;
-use self::notification::CheckpointNotifications;
+use self::pending_input::{CheckpointNotifications, CheckpointPendingInput};
 use self::turn::{CheckpointTurnState, CompactionRestore};
 
 mod context;
-mod notification;
+mod pending_input;
 mod program;
 mod schema;
 mod tool;
@@ -49,6 +51,8 @@ pub(super) struct CheckpointV1 {
     turn: CheckpointTurnState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_finished_turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "CheckpointPendingInput::is_empty")]
+    pending_input: CheckpointPendingInput,
     #[serde(default)]
     notifications: CheckpointNotifications,
 }
@@ -56,6 +60,7 @@ pub(super) struct CheckpointV1 {
 impl CheckpointV1 {
     pub(super) fn capture(state: &HarnessState) -> Result<Self, String> {
         validate_restored_state(state)?;
+        let (pending_input, notifications) = CheckpointPendingInput::capture(&state.pending_input)?;
         Ok(Self {
             _checkpoint_version: CHECKPOINT_VERSION,
             context: CheckpointContext::capture(&state.context)?,
@@ -65,7 +70,8 @@ impl CheckpointV1 {
             rebuilt_since_reply: state.rebuilt_since_reply,
             turn: CheckpointTurnState::capture(&state.turn)?,
             last_finished_turn_id: state.last_finished_turn_id.clone(),
-            notifications: CheckpointNotifications::capture(&state.notifications),
+            pending_input,
+            notifications,
         })
     }
 
@@ -77,9 +83,8 @@ impl CheckpointV1 {
         self,
         config: HarnessConfig,
         moved_from: Option<&ContextSettings>,
-    ) -> Result<HarnessState, String> {
-        let mut state =
-            crate::core::initial_state(config).map_err(|error| error.detail().to_string())?;
+    ) -> Result<HarnessState, RestoreError> {
+        let mut state = crate::core::initial_state(config)?;
         state.context = self.context.restore(
             state.config(),
             state.resolved_tools().tool_group_inventory_prompt_section(),
@@ -89,11 +94,12 @@ impl CheckpointV1 {
         state.estimate_correction = EstimateCorrection::restore(self.estimate_correction)?;
         state.rebuilt_since_reply = self.rebuilt_since_reply;
         if let Some(previous) = moved_from {
-            crate::core::move_from_settings(&mut state, previous)
-                .map_err(|error| error.detail().to_string())?;
+            crate::core::move_from_settings(&mut state, previous)?;
         }
         let generated_system = state.generated_system_message();
-        state.turn = self.turn.restore(
+        let mut turn = self.turn;
+        let legacy_steering = turn.take_legacy_steering();
+        state.turn = turn.restore(
             &state.context,
             CompactionRestore {
                 generated_system,
@@ -107,14 +113,22 @@ impl CheckpointV1 {
             },
         )?;
         state.last_finished_turn_id = self.last_finished_turn_id;
-        state.notifications = self.notifications.restore(
-            state
-                .active()
-                .map_or(0, |active| active.pending_steer.len()),
-        )?;
+        state.pending_input = self
+            .pending_input
+            .restore(legacy_steering, self.notifications)?;
         state
-            .notifications
+            .pending_input
             .retain_recent(state.config().settings.context.notifications.recent_ids);
+        // After the turn, so instructions still waiting for it count too.
+        if moved_from.is_some() {
+            instructions::validate_settings(
+                &state,
+                state.config(),
+                state.resolved_tools(),
+                state.estimate_correction,
+            )
+            .map_err(|error| error.detail().to_string())?;
+        }
         validate_restored_state(&state)?;
         Ok(state)
     }
@@ -146,6 +160,13 @@ fn validate_restored_state(state: &HarnessState) -> Result<(), String> {
         )
     {
         return Err("active checkpoint must contain model context".to_string());
+    }
+    if state.pending_input.has_steering()
+        && state
+            .active()
+            .is_none_or(|active| active.require_steerable().is_err())
+    {
+        return Err("pending steering requires a steerable active turn".to_string());
     }
     if let TurnState::Terminal { turn_id, .. } = &state.turn
         && state.last_finished_turn_id.as_deref() != Some(turn_id)

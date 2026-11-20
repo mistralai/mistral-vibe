@@ -1,4 +1,4 @@
-"""A narrow terminal clips the hint, folds long paths, wraps details, and j scrolls a tall detail."""
+"""A narrow terminal wraps the hints, folds long paths, wraps details, and j scrolls a tall detail."""
 
 from __future__ import annotations
 
@@ -30,4 +30,4 @@ request_methods = METHODS
 
 timeline: Timeline = [resize(30, 48), "/plugins\r", "\r", "jjj"]
 
-screen_contains = ("long-description", "● Tools: delta")
+screen_contains = ("long-description", "Tools       delta")

@@ -48,7 +48,7 @@ pub enum CommandEvent {
         model: String,
         reads: Option<AccountReads>,
     },
-    /// An `artifacts/list` answer for `session_id`, for the bottom-bar PR link.
+    /// An `artifacts/list` answer for `session_id`, for the rail's PR item.
     ArtifactsRead {
         session_id: String,
         artifacts: Vec<crate::server::PublicSessionArtifact>,

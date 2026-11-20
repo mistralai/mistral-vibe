@@ -35,7 +35,9 @@ Transport backpressure must preserve this request/response progress guarantee.
 
 Each connection follows this order:
 
-1. Send `initialize` with client identity and advertised capabilities.
+1. Send `initialize` with client identity and advertised capabilities, and
+   optionally `account` (`{organizationId, workspaceId, userId}` or `null`):
+   opaque strings naming the account the client is signed in to.
 2. Receive server identity, protocol version, methods, callbacks and transports.
 3. Send `initialized`.
 4. Use passive host operations, or open a session through `session/start`,
@@ -64,7 +66,8 @@ route atomically so there is no read/subscribe gap.
 ## Session operations and turns
 
 `session/start` creates an attached session. It can also carry the session's
-agent (`agentConfig.agent`), title, model, reasoning effort and first turn,
+agent (`agentConfig.agent`), approval policy (`agentConfig.approvalPolicy`),
+title, model, reasoning effort and first turn,
 applied and pinned as the matching mid-session changes are: like
 `config/model/write`, the model and level also become the user's default unless
 `sessionOnly` is set. If a choice or the first turn fails, the server deletes
@@ -74,7 +77,9 @@ rewinds and `/clear` replacements inherit their source's stamp. Without it the
 session stays unstamped, as CLI sessions are. Resume loads saved state;
 continue selects the latest eligible session. List, stored read and history
 are passive operations. Fork creates an independent session from a supported
-boundary; `session/stop` flushes and shuts down the attached session.
+boundary; `session/stop` flushes and shuts down the attached session, leaving
+a running turn to resume (see [Reconnect, shutdown and
+security](#reconnect-shutdown-and-security)).
 
 Turn input uses structured entries and content. App-server preparation and
 Runtime execution determine model-visible input; clients do not construct
@@ -215,7 +220,10 @@ retries are no-ops; conflicting second responses fail. Still-open callbacks
 remain in `activeCallbacks` and are redelivered on live reconnect. When
 `session/resume` or `session/continue` attaches a session whose turn is still
 running, such as a turn recovered after a restart, the server first sends that
-turn's `turn/started` again, so the client can follow and interrupt it.
+turn's `turn/started` again, so the client can follow and interrupt it. Its open
+callbacks follow as `callback/call`, after the resume response and after that
+`turn/started`; if the event stream does not deliver `turn/started` within five
+seconds, they are sent anyway.
 
 Client-hosted filesystem/terminal operations require advertised capability.
 The server routes them through its tool-I/O contract, validates responses and
@@ -259,7 +267,7 @@ tool, permission-gated like other Vibe tools (`ask` by default). The tool takes
 and `reasoning_effort` its description lists from the host's models; the server
 checks both. A call sends **`session/spawn`** `{parentSessionId, prompt,
 title?, checkout, idempotencyKey, model, reasoningEffort?, approvalPolicy,
-attached?}` to that client. `attached` is `false` when the model chose `link:
+agent?, attached?}` to that client. `attached` is `false` when the model chose `link:
 "detached"`: the client starts an ordinary top-level session and leaves its
 `startedBySessionId` unset, so it is not archived with the caller and does not
 report back. It is left out when true, and a missing value means attached: the
@@ -268,9 +276,24 @@ client starts the session with `startedBySessionId` set to `parentSessionId`.
 the session runs, resolved from the parent's live directory:
 `{kind: "new_worktree"}`, the parent's Vibe-managed worktree
 `{kind: "managed_worktree", path}`, or the parent's own directory
-`{kind: "directory", path}`. `approvalPolicy` is always the parent's; `model`
+`{kind: "directory", path}`. `approvalPolicy` is always the parent's, and so
+is `agent`, left out on the default agent; `model`
 and `reasoningEffort` are too unless the tool call names them. Another model
 without a level gets that model's default level.
+
+The client passes `parentSessionId` back as `spawnedBySessionId` on the
+`session/start`, attached or detached; it is separate from
+`startedBySessionId`, which only links a child that reports back. The server
+then runs the session on the policy its starter runs when that `session/start`
+is processed, read live when this process holds the starter open and from its
+saved pin otherwise, so a policy the user tightened meanwhile holds; the client
+never chooses it. The start is refused (`invalid_params`, with `data.reason`)
+when it asks for another policy, through `agentConfig.approvalPolicy` or a
+policy name in `agentConfig.agent` (`policy_must_match_starter`), when it sets
+`agentConfig.autoApprove` (`auto_approve_on_spawned_start`), or when the server
+cannot read the starter (`starter_unknown`). A start that names only
+`startedBySessionId`, as older clients send it, is held to the same rules when
+the server can read the starter.
 `idempotencyKey` is stable for one tool call, so a client can recognize a call
 it already served. The client creates and runs the session its own way and
 answers `{sessionId, title?, url?}`; a JSON-RPC error or a malformed answer is
@@ -344,7 +367,58 @@ sessions never keep replying to each other. The reply owed is saved with the
 session before the turn runs and cleared once the client takes it or the
 target is archived or gone; `session/list` with `owesReply: true` lists the
 sessions still owing one, each with `owesReply`, and the client resumes them
-when it starts so a reply a restart interrupted still goes out, once.
+when it starts so a reply a restart interrupted still goes out, once. It leaves
+out the sessions stamped with another owner (see below); a session with no
+stamp is listed.
+
+`session/list` with `interrupted: true` lists the root sessions an app server
+that stopped or died left with a turn still running, in the session or in one
+of its subagents, and no process holding the session. A subagent left mid-turn
+lists its root, since resuming the root carries the subagent on; subagents are
+never listed themselves, and neither are legacy sessions. A client resumes
+them when it starts. A turn whose recovery was started twice without the turn
+settling (the process died again each time) is no longer listed, so a turn
+that crashes the app server is not resumed on every launch; `session/resume`
+by id still continues it. An older app server rejects `interrupted` as invalid
+params; the client then resumes nothing and goes on.
+
+A connection that sent an `account` in `initialize` has an owner: its
+`clientInfo.entrypoint` and that account. One without an account (`null` or
+absent) has none: it stamps nothing and lists nothing under
+`interrupted: true`. The server stamps a root session with the owner of the
+connection that drives it, replacing any earlier stamp: on `session/start`, a
+fork, a rewind fork or a history clear (the new session), and on every
+`turn/start` and `turn/enqueue`. Opening an existing session
+(`session/resume`, `session/continue`) does not stamp it. A session never
+stored yet is stamped when its first turn stores it. `session/list` with
+`interrupted: true` lists only sessions whose stamp equals the listing
+connection's owner exactly, entrypoint and account both. A session with no
+stamp, written by an older server or a connection without an account, is never
+listed. So a client never resumes the turns of another client or another
+account; they stay on disk until their owner lists them.
+
+`session/resume` or `session/continue` of a session stamped with another owner,
+whose tree a stopped process left with a turn running, opens it without
+carrying that turn on: nothing is sent or run, the turn stays as it was, and
+`turn/start`, `turn/steer` and `turn/enqueue` on it fail with `conflict`
+(`harnessCode: turn_conflict`). `turn/interrupt` ends it as interrupted, still
+without running anything, after which the connection may start turns there.
+While that connection holds the session in the same app server, the session
+stays listed under `interrupted: true` for its owner, whose own resume carries
+the turn on. Held by another app server, it is not listed for its owner until
+that server lets it go. A session with no stamp, or a connection with no
+owner, carries the turn on as before.
+
+`session/resume` with `interruptLeftTurn: true` ends a turn a stopped process
+left running in the session, and the turns it left its subagents running, as
+interrupted instead of carrying them on, whoever opens it: no model call is
+sent again, no tool runs, and no question or approval is asked again (the ones
+left open are closed). A client uses it to stop a session it listed under
+`interrupted: true` without running it. An older server rejects the field as
+invalid params.
+
+An older server rejects `account` as an unknown field; the client then
+initializes again without it.
 
 Session ids are the client's: the `clientSessionId` a `session/spawn` answer
 carries, which `start_session` then returns to the model. The model may name a
@@ -456,7 +530,7 @@ sessions, reading no other, and `include: ["pullRequests"]` adds
 only to an app server that asks it for `session/peer/*`, which is as recent.
 
 Every `PublicSession` carries its `project` stamp (`{kind, id}`), null while
-unstamped. With `experimental_enable_local_projects` on, a listing gives an
+unstamped. A listing gives an
 unstamped session, or one stamped with a removed local project, the local
 project whose folder is the session's working folder or contains it, and saves
 that stamp. The deepest project folder wins. A session in a managed worktree
@@ -472,8 +546,8 @@ join the project on their folder, or no project. A listing purges the projects
 an older app server only hid.
 
 `session/move` puts a root session in another project:
-`{sessionId, project: {kind: "local", id} | {kind: "none"}}`. It needs
-`experimental_enable_local_projects` and answers `{state}`. The session is
+`{sessionId, project: {kind: "local", id} | {kind: "none"}}`. It answers
+`{state}`. The session is
 stamped with the project and moved to its primary folder, as `session/relocate`
 moves it, without the same-repository rule. A session that leaves a managed
 worktree releases it; the worktree stays on disk. With `kind: "none"` the
@@ -481,6 +555,25 @@ session keeps its folder. A working session, or one another connection or
 process holds, is refused as a `conflict` before anything moves; an unknown
 project is `not_found`. A session only the
 legacy store has is refused as `invalid_params` until it is opened.
+An open session that leaves a folder no local project claims keeps it as a
+workspace root, unless that folder is the home folder or contains the
+target. A move of an open session patches `/project` on its
+`session/updated` stream.
+
+A client that advertises `capabilities.agentProjects` follows that patch,
+so its local root sessions are offered `list_projects` and
+`move_to_project`. `list_projects` answers each local project's `id`,
+`name`, primary `folder`, whether that folder is `trusted` in
+`trusted_folders.toml`, and whether the session is `current`ly in it.
+`move_to_project {project_id}` only records the move: it lands once the turn
+completes, as `session/move` would, so the project's AGENTS.md, config, MCP
+servers and hooks apply from the next turn. A turn that is interrupted or
+fails drops the move, and so does a call naming the current project or no
+project. A turn started while the move lands waits for it. A move a queued
+turn beats is retried when that turn ends; a move that fails, as when a
+background process runs, posts a notice. The call asks for approval unless the
+target folder is trusted or it cancels; an approval releases that move only. A `permission` set in
+`[tools.move_to_project]` overrides the trust check.
 
 `session/start` takes an optional `startedBySessionId`: the session that started
 this one to hand it `firstTurn`, and `hops`, the `session/spawn` request's, which
@@ -663,6 +756,59 @@ telemetry with ids, statuses and counts, never the objective text.
 status, where `has_objective_changed` and `has_token_budget_changed` say what
 the user changed and `objective_chars` gives the new objective's length.
 
+### Agent and approval policy
+
+Every session runs one agent and one approval policy, chosen independently.
+The agent (`default`, `lean`, a custom or plugin agent) sets instructions,
+model and tools; the policy (`ask`, `accept-edits`, `smart-approve`,
+`auto-approve`, or a file overriding one) sets which tool calls run without
+asking. The server decides which of each a session may run and lists them; a
+client renders those lists and never filters them by its own rules.
+
+- `session/agent/update` `{sessionId, agentName}` switches the agent in place
+  and keeps the policy: same session, same history, with an `agent_change`
+  checkpoint in the transcript. The new agent's model and tools apply from the
+  next turn, and so do its instructions: that turn's system prompt is rebuilt
+  for the running agent, which costs one uncached request. `session/approvalPolicy/update` `{sessionId, approvalPolicy}`
+  switches the policy and keeps the agent, mid-turn included: the running
+  turn's next tool call is gated by the new policy. Both answer a
+  `RuntimeMutationResponse`.
+- `RuntimeSnapshot` and `agents/list` carry `activeAgent`/`agents` (agent
+  summaries `{name, displayName, description, agentType}`, subagents included
+  with `agentType: "subagent"`) and `activeApprovalPolicy`/`approvalPolicies`
+  (`{name, displayName, description, safety}`, in cycle order). A session in
+  `session/list` and `session/read` carries `agent` and `approvalPolicy`.
+- A refused switch or start is `INVALID_PARAMS` with `data.reason`:
+  `not_found`, `disabled_by_organization`, `auto_approve_disabled`,
+  `install_required`, `subagent` or `unavailable`.
+- Compatibility with clients from before the split: a policy name sent as
+  `agentConfig.agent` or `agentName` selects that policy, and
+  `agentConfig.autoApprove` starts the session in `auto-approve`. Without a
+  requested policy, a session starts in `default_approval_policy`, whatever its
+  agent.
+- `session/spawn` carries the caller's `approvalPolicy`, its `agent` unless it
+  runs the default agent; the client starts the child with that agent and
+  `spawnedBySessionId`, and the server gives it the caller's policy.
+
+```json
+// before
+{"method": "session/agent/update", "params": {"sessionId": "s1", "agentName": "auto-approve"}}
+// after
+{"method": "session/approvalPolicy/update", "params": {"sessionId": "s1", "approvalPolicy": "auto-approve"}}
+{"method": "session/agent/update", "params": {"sessionId": "s1", "agentName": "task-lead"}}
+```
+
+An agent file's settings that an agent may not set, and a project's override
+of an approval policy, are dropped and listed in the snapshot's `issues` with a
+machine-readable `code` (left out for issues without one):
+
+```json
+{"file": "/repo/.vibe/agents/loose.toml", "code": "agent.setting_ignored",
+ "message": "Agent 'loose' sets 'tools.bash.allowlist', which an agent may not set; it is ignored. ..."}
+{"file": "/repo/.vibe/agents/ask.toml", "code": "approval_policy.project_override_ignored",
+ "message": "A project cannot redefine the approval policy 'ask'; this file is ignored. ..."}
+```
+
 ## Product resources and child sessions
 
 Resource APIs expose canonical public values rather than managers. When a
@@ -703,11 +849,72 @@ connection) can call them. A client finds support by calling
   (`null` before the first scan), `disk` (total, free, `lowThresholdBytes` =
   the lower of 10% of the disk and 20 GB, `isLow`, read live) and `stale`
   (an archive, delete or worktree removal happened after the scan started).
-  Each session row's `open` and the snapshot's `archiveSuggestion` are
-  computed at read time. A session row's `historyPath` is the absolute path
+  Each session row's `open` and the snapshot's `archiveSuggestion` and
+  `deleteSuggestion` are computed at read time. `archiveSuggestion` lists
+  active sessions idle 30+ days and the worktrees archiving them frees;
+  `deleteSuggestion` lists archived sessions idle as long, and its
+  `reclaimableBytes` adds their histories to the worktrees no session would
+  still use. A worktree not measured yet counts for nothing in
+  `reclaimableBytes`; when one the action would free is unmeasured, both
+  suggestions set `reclaimableAtLeast` (absent, so false, from a server
+  before it) and the number is a lower bound. A new managed worktree no
+  session has joined yet is not offered for cleanup for its first 10
+  minutes. A session row's `historyPath` is the absolute path
   of its own history folder (its subagent children's folders count in
   `historyBytes` but sit beside it), for a local client to reveal; it is
-  `null` from a server before it, and never sent in telemetry.
+  `null` from a server before it, and never sent in telemetry. A row's
+  `worktreeIds` lists every worktree the session claims, `worktreeId` (the
+  one its folder is in) first; it is empty from a server before it.
+  `leftoverCleanup` lists what `storage/leftovers/clean` would remove:
+  `worktreeIds` (managed worktrees no session claims any more) and
+  `unknownFolders` (`id`, `path`, `bytes`: folders of a worktree bucket with
+  no claim and no `.git`), with `reclaimableBytes` their total.
+- `storage/sessions/delete` takes `sessionIds` and is a plain delete of
+  those sessions, archived or not, exactly as `session/delete` deletes one:
+  each goes through it, one at a time, unless a live process holds its
+  lease, checked again right before that session is deleted. Then each
+  worktree a deleted session claimed is removed when no other session
+  claims it any more (the rule `deleteBytes` and `deleteSuggestion` use,
+  applied to the claims on disk at removal time), through the same worktree
+  release as `storage/leftovers/clean`, so every client removes the same
+  worktrees. It answers `removed` and `kept` (`id`, `reason`: `in_use`,
+  `not_found` or `error`), `removedWorktreeIds`, `keptWorktrees` (a worktree
+  that failed is kept with `error`; the others still go) and `freedBytes`
+  (the removed histories and worktrees, as the last measurement sized them;
+  `freedBytesAtLeast` is true when a removed worktree was not measured yet,
+  so `freedBytes` is a lower bound), then refreshes. A session row's `deleteBytes`, set at every read from the
+  snapshot, is what deleting it alone frees: its history and each worktree
+  no other session claims; `deleteBytesAtLeast` is true when one of those
+  worktrees is not measured yet, so `deleteBytes` is a lower bound.
+  `deleteBytes` is `null` (unknown) from a server before it.
+- `storage/leftovers/clean` takes `worktreeIds` and `folderIds` and answers
+  `removed` (ids) and `kept` (`id`, `reason`: `claimed`, `in_use`,
+  `kept_dirty`, `not_found`, `unsafe`, `error` or `too_large_to_check`); one
+  item failing is kept with `error` and never stops the others, and an id no
+  path can hold (a NUL byte, say) is kept as `unsafe`. When the call fails
+  as a whole, what it removed before is still answered in `removed`. Every check runs again at
+  removal time. A worktree is kept while a session folder its claim names
+  is on disk, or while its claim names no session and is younger than 10
+  minutes; then it goes through the plain worktree removal: kept while a
+  live process holds it or it is being created. When it has uncommitted
+  changes, untracked files or commits since it was created, they are saved
+  before its folder goes as one commit, on top of its HEAD, at
+  `refs/vibe/reaped/<name>`, so committed but unpushed work stays reachable
+  from that ref even though the branch Vibe created is deleted; ignored
+  files, and commits no longer reachable from HEAD, are not saved, and a
+  later removal of a worktree with the same name replaces the ref. Nothing
+  else records the removal. A folder must be a real folder directly in a bucket,
+  strictly inside the worktrees root (no symlink), with no claim, no
+  `.git`, no open session working in it, and no folder in it, at any depth,
+  changed in the last 10 minutes (only folder times are read: a build
+  creating files shows, a file rewritten in place does not). That check
+  gives up after 5 seconds or a million entries; a folder it could not
+  finish is kept as `too_large_to_check`, and this app server process then
+  leaves it out of `leftoverCleanup.unknownFolders` (and its
+  `reclaimableBytes`) until the folder's own modification time changes or
+  the process restarts. It still counts in Other Vibe data
+  (`worktrees_unknown`), for the user to remove by hand. A removal starts a
+  refresh.
 - `storage/usage/refresh` takes `maxAgeMs`, `full` and `waitForSessionIds`, all
   optional, and answers `started`, or `started: false` with `reason`
   `fresh`, `already_running` or `running_elsewhere`. A plain refresh while
@@ -761,7 +968,10 @@ turn left running, interrupt them on a stop, then read what each did.
   running subagent. It returns one result per subagent it found running:
   `outcome` is `interrupted`, `notRunning` (it finished first) or `failed`,
   with an `error` when it failed. One subagent's failure does not stop the
-  others.
+  others. An interrupted subagent's turn ends for good, as `turn/interrupt`
+  ends a root's: a later restart or `session/resume` does not carry it on.
+  An app server that predates these methods answers `method_not_found`; a
+  client treats that as nothing to stop.
 - `session/subagents/read` takes an optional `timeoutMs` (default 5000) and
   returns `subagents`, one row per subagent in spawn order: `sessionId`,
   `parentSessionId`, `rootSessionId`, `name`, `agentType`, `spawnActionId`,
@@ -802,6 +1012,39 @@ method remains unary and uses connection detachment for this cleanup.
 state, stop pending work, close children and release owned processes, clients
 and other execution resources. Cleanup must attempt all owned resources even
 when one fails.
+
+`session/stop` does not end a running turn, and neither does closing the
+channel, losing the client or the app server exiting. The turn stops where it
+is and stays saved as running, as a crash leaves it, and the next
+`session/resume` continues it, and the client receives `turn/started` for it:
+
+- A model call the stop cut is sent again. Under a completion budget it is
+  admitted like a new call, so a spent budget ends the turn with `token_limit`.
+  A model call that had already failed is not sent again.
+- A question to the user (`user_input` callback) or a tool approval
+  (`approval` callback) open at the stop stays open: the resume response lists
+  it in `activeCallbacks` with the session `blocked` on it, and the server
+  sends it again as `callback/call` with the same `callbackId`. Its answer
+  carries the turn on; the tool the approval gates runs only once approved. An
+  approval is asked as the approval policy asks it now: its body
+  (`requiredPermissions`, reason, display, input) is rebuilt, only the
+  `callbackId` is kept. When the policy now decides the call without asking (a
+  tool mode changed to allow or deny, or a grant covers it), nothing is asked:
+  the decision applies and the stored approval is settled. An approval whose
+  tool call Core no longer holds is closed as failed.
+- A subagent whose turn was cut continues that turn when its root resumes, and
+  its parent receives the usual subagent notification when the turn ends. A
+  subagent the server cannot reopen does not prevent its root from resuming:
+  its turn is recorded as failed, its parent's model is told it could not be
+  restored after the restart and to spawn a new subagent, and its store is left
+  on disk.
+- A background process is not started again. A stop ends it, and the resumed
+  model is told it stopped because the app server shut down or restarted. A
+  crash leaves it unmanaged and possibly still running, and the model is told
+  to check whether it runs before starting it again.
+
+Only `turn/interrupt` ends a turn: a client that means to end it sends
+`turn/interrupt` before `session/stop`. An interrupted turn is never resumed.
 
 Tool/workspace/network/integration policy is enforced server-side. Rendering
 metadata grants no permission. Public projections redact secrets and unsafe

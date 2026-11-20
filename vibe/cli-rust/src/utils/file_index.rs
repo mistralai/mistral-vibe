@@ -20,7 +20,9 @@ mod lifecycle;
 mod metrics;
 
 pub use git::{git_ls_files, rebuild_index};
-pub use lifecycle::{apply, env_opt_out, reconcile, FileIndexAction, FileIndexHandle};
+pub use lifecycle::{
+    apply, env_opt_out, reconcile, watch_events, FileIndexAction, FileIndexHandle,
+};
 pub use metrics::BatchStats;
 
 #[derive(Clone, Default)]

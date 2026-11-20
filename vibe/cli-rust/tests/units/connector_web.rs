@@ -285,3 +285,46 @@ fn error_result_keeps_the_server_message() {
     );
     assert_eq!(summary(&failed), header("Searched", "boom", ""));
 }
+
+#[test]
+fn projected_calls_keep_the_server_header() {
+    let fetched: EffectEntry = serde_json::from_value(json!({
+        "detail": {"kind": "web_fetch", "toolName": "connector_web_search.open_url",
+            "input": {"url": "https://www.phoronix.com/news/Linux-7.4-rc2-Released"},
+            "display": {"verb": "Fetching", "message": "www.phoronix.com",
+                "settledVerb": "Fetched", "settledMessage": "www.phoronix.com",
+                "statusText": "Fetching URL"}},
+        "state": {"status": "completed",
+            "display": {"success": true, "verb": "Fetched",
+                "message": "https://www.phoronix.com/news/Linux-7.4-rc2-Released (4,500 chars)"},
+            "output": {"url": "https://www.phoronix.com/news/Linux-7.4-rc2-Released",
+                "content": "Linux 7.4-rc2", "contentType": "", "wasTruncated": false}},
+    }))
+    .unwrap();
+    assert_eq!(fetched.kind(), Some("web_fetch"));
+    assert_eq!(
+        summary(&fetched),
+        header(
+            "Fetched",
+            "https://www.phoronix.com/news/Linux-7.4-rc2-Released (4,500 chars)",
+            ""
+        )
+    );
+    assert_eq!(body(&fetched), [row("Linux 7.4-rc2")]);
+
+    let searched: EffectEntry = serde_json::from_value(json!({
+        "detail": {"kind": "web_search", "toolName": "connector_web_search.web_search",
+            "input": {"query": "zidane"},
+            "display": {"verb": "Searching", "message": "the web: 'zidane'",
+                "settledVerb": "Searched", "settledMessage": "the web: 'zidane'"}},
+        "state": {"status": "completed",
+            "display": {"success": true, "verb": "Searched", "message": "'zidane' (1 source)"},
+            "output": {"query": "zidane", "answer": "",
+                "sources": [{"title": "A", "url": "https://a.example"}]}},
+    }))
+    .unwrap();
+    assert_eq!(
+        summary(&searched),
+        header("Searched", "'zidane' (1 source)", "")
+    );
+}

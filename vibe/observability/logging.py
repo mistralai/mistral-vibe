@@ -9,9 +9,11 @@ from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Any
 
 from vibe.config_values import DEFAULT_LOG_LEVEL
+from vibe.utils.platform import PRIVATE_DIRECTORY_MODE
 from vibe.utils.secrets import redact
 
 logger = logging.getLogger("vibe")
@@ -103,11 +105,25 @@ def init_file_logging(
         ):
             continue
         if shared_handler is None:
-            resolved_log_file.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
             max_bytes = int(os.environ.get("LOG_MAX_BYTES", 10 * 1024 * 1024))
-            shared_handler = _VibeFileHandler(
-                resolved_log_file, maxBytes=max_bytes, backupCount=0, encoding="utf-8"
-            )
+            try:
+                resolved_log_file.parent.mkdir(
+                    parents=True, mode=PRIVATE_DIRECTORY_MODE, exist_ok=True
+                )
+                shared_handler = _VibeFileHandler(
+                    resolved_log_file,
+                    maxBytes=max_bytes,
+                    backupCount=0,
+                    encoding="utf-8",
+                )
+            except OSError as error:
+                # A log file the user cannot write, or one another program
+                # locks on Windows, must not stop the process from serving.
+                print(
+                    f"Vibe file logging is off: cannot open {resolved_log_file}: {error}",
+                    file=sys.stderr,
+                )
+                return
             shared_handler.setFormatter(StructuredLogFormatter())
         candidate.setLevel(logging.DEBUG)
         candidate.addHandler(shared_handler)

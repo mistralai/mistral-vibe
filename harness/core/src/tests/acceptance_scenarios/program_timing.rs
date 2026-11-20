@@ -41,6 +41,12 @@ fn program_approval_longer_than_the_time_budget_does_not_stop_the_program() {
             START_MS,
             running(turn_id)
                 .dispatch(json!({"type": "approval", "call_id": operation_id}))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -123,6 +129,12 @@ fn pre_hook_wait_does_not_count_toward_the_time_budget() {
             START_MS,
             running(turn_id)
                 .dispatch(hook_call("pre_tool_call", &["pre-tool"], Value::Null))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -181,6 +193,12 @@ fn a_sleep_a_pre_hook_shortened_is_not_a_budget_stop() {
             START_MS,
             running(turn_id)
                 .dispatch(hook_call("pre_tool_call", &["pre-tool"], Value::Null))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -229,6 +247,12 @@ fn a_sleep_a_pre_hook_lengthened_is_still_cut_to_the_time_budget_across_a_restor
             START_MS,
             running(turn_id)
                 .dispatch(hook_call("pre_tool_call", &["pre-tool"], Value::Null))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -326,6 +350,12 @@ fn a_sleep_the_time_budget_cut_short_is_listed_as_never_started() {
                     "file_system.read_file",
                     json!({"path": "slow.txt"}),
                 ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -406,6 +436,12 @@ fn sleep_beyond_the_time_budget_ends_early_and_the_program_continues() {
             START_MS,
             running(turn_id)
                 .dispatch(runtime_tool("self.sleep", json!({"seconds": 30})))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -563,6 +599,12 @@ fn slow_tool_execution_counts_and_the_program_stops_before_its_next_call() {
                     "file_system.read_file",
                     json!({"path": "slow.txt"}),
                 ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -636,6 +678,12 @@ fn a_call_still_pending_when_the_program_stops_is_committed_as_never_started() {
                     "file_system.read_file",
                     json!({"path": "slow.txt"}),
                 ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -695,6 +743,12 @@ fn steering_reaches_the_model_at_the_first_tool_call_after_the_time_budget() {
                 .dispatch(runtime_tool(
                     "file_system.read_file",
                     json!({"path": "a.txt"}),
+                ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
                 ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
@@ -812,6 +866,12 @@ fn process_output_waits_only_for_the_remaining_time_budget() {
                     "process.output",
                     json!({"processId": "p", "waitMs": 2_000}),
                 ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -882,6 +942,12 @@ fn stopped_program_summary_stays_small_after_many_large_tool_calls() {
                 .dispatch(runtime_tool(
                     "file_system.read_file",
                     json!({"path": "page-0.txt"}),
+                ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
                 ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
@@ -1011,6 +1077,12 @@ fn interrupted_program_result_says_which_tool_calls_ran() {
                     "file_system.read_file",
                     json!({"path": "notes.txt"}),
                 ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -1119,6 +1191,12 @@ fn interrupted_program_result_lists_a_failed_call_waiting_for_its_post_hook_as_f
                     "file_system.read_file",
                     json!({"path": "missing.txt"}),
                 ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -1223,6 +1301,7 @@ fn program_sleep_rejects_requests_above_the_resolved_maximum() {
             run_typescript_completion(action_id(&completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(assistant_program_committed(turn_id, &completion, call_id, source))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(never_started_commit(
                     turn_id,
@@ -1284,6 +1363,7 @@ fn a_program_call_with_non_object_arguments_is_committed_with_empty_arguments() 
             run_typescript_completion(action_id(&completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(assistant_program_committed(turn_id, &completion, call_id, source))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(never_started_commit(
                     turn_id,

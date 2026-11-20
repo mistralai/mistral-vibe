@@ -143,6 +143,7 @@ async fn ready_sends_one_startup_event_with_agent_ready_after_the_first_frame() 
     assert_eq!(properties["is_cold_start"], true);
     assert_eq!(properties["mouse_capture"], true);
     assert_eq!(properties["vim_keybindings"], false);
+    assert!(properties["environment"].is_object());
 }
 
 #[tokio::test]

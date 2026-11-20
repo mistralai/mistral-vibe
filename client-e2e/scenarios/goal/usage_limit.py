@@ -25,6 +25,6 @@ timeline: Timeline = [
 
 screen_contains = (
     "Your account has no credit left. Add credit, then run /goal resume or retry.",
-    "usage limit · /goal resume",
+    "goal usage limit",
 )
 screen_excludes = ("Run /retry",)

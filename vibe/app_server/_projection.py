@@ -18,12 +18,13 @@ from vibe.app_server.config import (
 )
 from vibe.app_server.models import (
     AgentSummary,
+    ApprovalPolicySummary,
     DebugLogEntry,
     DebugLogPage,
     SkillSummary,
 )
 from vibe.config_values import ThinkingLevel
-from vibe.core.agents import AgentProfile
+from vibe.core.agents import AgentManager, AgentProfile
 from vibe.core.config import (
     ModelConfig,
     TranscribeClient,
@@ -47,6 +48,13 @@ from vibe.core.config.layers.user import SuppliedUserConfigLayer, UserConfigLaye
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.log_reader import PaginatedLogs
 from vibe.core.skills.models import InstalledSkill, SkillInfo, SkillScope, SkillSource
+
+
+class Selection(NamedTuple):
+    active: AgentSummary
+    agents: list[AgentSummary]
+    active_approval_policy: ApprovalPolicySummary
+    approval_policies: list[ApprovalPolicySummary]
 
 
 class _RouteFacts(NamedTuple):
@@ -111,15 +119,18 @@ def project_config_view(
         # is in effect.
         default_model_alias=config.resolve_default_model_alias(),
         default_agent=config.default_agent,
+        default_approval_policy=config.default_approval_policy,
         theme=config.theme,
         log_level=config.log_level,
         disable_welcome_banner_animation=config.disable_welcome_banner_animation,
+        disable_selection_animation=config.disable_selection_animation,
         cursor_blink=config.cursor_blink,
         vim_keybindings=config.vim_keybindings,
         show_dangerous_directory_warning=config.show_dangerous_directory_warning,
         autocopy_to_clipboard=config.autocopy_to_clipboard,
         enable_mouse_capture=config.enable_mouse_capture,
         enable_sticky_prompt=config.enable_sticky_prompt,
+        collapse_turn_details=config.collapse_turn_details,
         enable_file_autocomplete=config.enable_file_autocomplete,
         file_watcher_for_autocomplete=config.file_watcher_for_autocomplete,
         ask_confirmation_on_exit=config.ask_confirmation_on_exit,
@@ -135,7 +146,6 @@ def project_config_view(
         experimental_enable_tab_status=config.experimental_enable_tab_status,
         crash_reports_enabled=crash_reports_allowed(config),
         experimental_enable_registry_skills=config.experimental_enable_registry_skills,
-        experimental_enable_local_projects=config.experimental_enable_local_projects,
         enable_pr_monitoring=config.enable_pr_monitoring,
         experimental_enable_storage_usage=config.experimental_enable_storage_usage,
         models=[
@@ -297,12 +307,23 @@ def _project_tts_provider(provider: TTSProviderConfig) -> AudioProviderView:
     )
 
 
-def project_agent_summaries(
-    active: AgentProfile, available: Iterable[AgentProfile]
-) -> tuple[AgentSummary, list[AgentSummary]]:
-    return project_agent_summary(active), [
-        project_agent_summary(profile) for profile in available
-    ]
+def project_selection(agents: AgentManager) -> Selection:
+    """The session's agent and policy with the ones it may switch to.
+
+    Subagents stay listed: clients tell them apart by ``agent_type``.
+    """
+    return Selection(
+        active=project_agent_summary(agents.active_agent),
+        agents=[
+            project_agent_summary(profile)
+            for profile in agents.available_agents.values()
+        ],
+        active_approval_policy=project_policy_summary(agents.active_policy),
+        approval_policies=[
+            project_policy_summary(agents.available_policies[name])
+            for name in agents.get_policy_order()
+        ],
+    )
 
 
 def project_skill_summaries(skills: Iterable[SkillInfo]) -> list[SkillSummary]:
@@ -400,9 +421,24 @@ def project_installed_skill_summaries(
             enabled=_enabled(skill.info),
             locked=_locked(skill.info),
             active=skill.active,
-        )
+        ).model_copy(update=_file_of(skill.info))
         for skill in skills
     ]
+
+
+def _file_of(skill: SkillInfo) -> dict[str, object]:
+    """A local skill's file as its root lists it, so a delete names the link of a
+    linked folder, never the folder it points at.
+    """
+    entry = skill.entry_path
+    if entry is not None:
+        folder = entry.parent
+        return {
+            "path": str(entry),
+            "linked": folder.is_symlink() or folder.is_junction(),
+        }
+    path = skill.skill_path
+    return {"path": None if path is None else str(path), "linked": False}
 
 
 def project_debug_logs(logs: PaginatedLogs) -> DebugLogPage:
@@ -431,6 +467,14 @@ def project_agent_summary(profile: AgentProfile) -> AgentSummary:
         name=profile.name,
         display_name=profile.display_name,
         description=profile.description,
-        safety=profile.safety,
         agent_type=profile.agent_type,
+    )
+
+
+def project_policy_summary(profile: AgentProfile) -> ApprovalPolicySummary:
+    return ApprovalPolicySummary(
+        name=profile.name,
+        display_name=profile.display_name,
+        description=profile.description,
+        safety=profile.safety,
     )

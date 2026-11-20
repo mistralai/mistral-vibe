@@ -7,7 +7,13 @@ from uuid import UUID
 from .models.base import SessionModel
 from .models.common import ProtocolError
 from .models.events import ClientTransportStreamItem
-from .procedures.session import CallbacksTreeParams, CallbacksTreeResponse, EventsReadParams
+from .procedures.session import (
+    BackgroundProcessOutputChunk,
+    BackgroundProcessOutputParams,
+    CallbacksTreeParams,
+    CallbacksTreeResponse,
+    EventsReadParams,
+)
 
 
 class UnsupportedSessionProcedureError(RuntimeError):
@@ -100,6 +106,19 @@ class SessionTurnActiveError(SessionBusyError):
         self.active_turn_id = active_turn_id
 
 
+class SessionInstructionsRejectedError(RuntimeError):
+    """The Session refused these instructions and applied nothing.
+
+    It refuses instructions that would not fit the room it gives them. Send smaller
+    instructions, or remove others first. ``code`` is the Session's refusal code, when the host
+    supplies one.
+    """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class SessionCallbackSettledError(RuntimeError):
     """The callback was already resolved or cancelled, so this answer changed nothing.
 
@@ -175,6 +194,44 @@ class SessionMessageRejection(SessionModel):
     upload_id: UUID | None = None
 
 
+type SessionConfigRejectedCode = Literal["immutable_field", "context_does_not_fit"]
+"""Why a Session refused a configuration write, before applying any of it.
+
+``immutable_field``: the running Session cannot change a field, named in
+``SessionConfigRejectedError.fields``. ``context_does_not_fit``: the Session's context
+cannot move to the new model; Core refuses before anything is applied.
+Clients must still accept codes outside this set: a newer host can add one.
+"""
+
+
+class SessionConfigRejectedError(RuntimeError):
+    """The Session refused this configuration and applied nothing.
+
+    A write applies completely or not at all, so do not retry it unchanged. Images in
+    history becoming placeholders for a model without image input is not a refusal: the
+    write applies and the Session reports it afterwards.
+
+    Args:
+        message: The refusal reason.
+        code: A machine-readable refusal code. Hosts may add codes, so treat an unknown
+            code as a refusal without further detail: nothing was applied.
+        fields: The refused `AgentConfig` fields, when the refusal concerns fields.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: SessionConfigRejectedCode | str,
+        fields: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.code: SessionConfigRejectedCode | str = code
+        """A machine-readable refusal code."""
+        self.fields: tuple[str, ...] = fields
+        """The refused `AgentConfig` fields, when the refusal concerns fields."""
+
+
 class SessionCompactionFailedError(RuntimeError):
     """The compaction ended without a usable summary; the model context is unchanged.
 
@@ -186,6 +243,40 @@ class SessionCompactionFailedError(RuntimeError):
     def __init__(self, error: ProtocolError) -> None:
         super().__init__(f"Context compaction failed: {error.message}")
         self.error = error
+
+
+type BackgroundProcessErrorCode = Literal[
+    "process_not_found",
+    "invalid_cursor",
+    "process_output_unavailable",
+    "process_unavailable",
+]
+
+
+class SessionBackgroundProcessError(RuntimeError):
+    """A background process procedure failed for the process it names.
+
+    ``code`` says why:
+
+    - ``process_not_found``: the Session has no process with this ID. It may never have existed,
+      belong to another Session, or have been dropped from the list. A Session with background
+      processes turned off has none.
+    - ``invalid_cursor``: ``after_cursor`` is not a valid cursor for this stream.
+    - ``process_output_unavailable``: the Runtime no longer keeps the process's output, or never
+      could read it, for example for an ``orphaned`` process.
+    - ``process_unavailable``: the Runtime lists the process as running but cannot reach it,
+      or the process server did not answer; the call can be retried. After a lost sandbox the
+      process is now ``orphaned``; with background processes turned off it is left as it is.
+
+    Clients must still accept codes outside this set: a newer host can add one.
+    """
+
+    def __init__(
+        self, code: BackgroundProcessErrorCode | str, message: str, *, process_id: str
+    ) -> None:
+        super().__init__(message)
+        self.code: BackgroundProcessErrorCode | str = code
+        self.process_id = process_id
 
 
 class SessionEventStreamLostError(RuntimeError):
@@ -245,16 +336,36 @@ class SessionTransport(Protocol):
             reason="this transport cannot follow the callbacks of a Session tree",
         )
 
+    def read_background_process_output(
+        self, params: BackgroundProcessOutputParams
+    ) -> AsyncIterator[BackgroundProcessOutputChunk]:
+        """Follow `app_server/session/backgroundProcess/output`: past output, then new output.
+
+        The stream ends after the chunk whose `ended` is true. If the Session closes first, the
+        stream raises `SessionTerminatedError`; read the Session for how the process ended, or
+        follow again from the last `cursor` received. Transports that cannot stream process
+        output raise `UnsupportedSessionProcedureError`.
+        """
+        raise UnsupportedSessionProcedureError(
+            method="app_server/session/backgroundProcess/output",
+            backend=type(self).__name__,
+            reason="this transport cannot stream background process output",
+        )
+
     async def close(self) -> None: ...
 
 
 __all__ = [
+    "BackgroundProcessErrorCode",
     "CHILD_SESSION_PUBLIC_ACCESS",
     "ChildSessionProcedureRefusedError",
+    "SessionBackgroundProcessError",
     "SessionBusyError",
     "SessionCallbackRejectedError",
     "SessionCallbackSettledError",
     "SessionCompactionFailedError",
+    "SessionConfigRejectedCode",
+    "SessionConfigRejectedError",
     "SessionEventStreamLostError",
     "SessionIdempotencyConflictError",
     "SessionMessageRejectedCode",

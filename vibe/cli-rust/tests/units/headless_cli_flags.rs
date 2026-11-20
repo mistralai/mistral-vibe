@@ -116,6 +116,18 @@ fn agent_flag_parsed() {
 }
 
 #[test]
+fn approval_policy_flag_parsed() {
+    let cli = Cli::parse_from(["vibe-rs", "-p", "hi", "--approval-policy", "ask"]);
+    assert_eq!(
+        cli.headless_options(None)
+            .unwrap()
+            .approval_policy
+            .as_deref(),
+        Some("ask")
+    );
+}
+
+#[test]
 fn enabled_tools_append_repeated() {
     let cli = Cli::parse_from([
         "vibe-rs",

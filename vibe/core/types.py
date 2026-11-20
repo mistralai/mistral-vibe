@@ -145,6 +145,9 @@ class SessionMetadata(BaseModel):
     # opens, so a resume after the switch changed records the new path. ``None``
     # for sessions written before this field existed.
     runtime_path: Literal["session_api", "direct"] | None = None
+    # The runtime that owns this session, fixed at creation. ``None`` for older
+    # sessions, which are local. Opens read it with ``_session_runtime_owner``.
+    runtime: Literal["local", "target"] | None = None
     import_provenance: dict[str, JsonValue] | None = None
     created_worktree: WorktreeContext | None = None
     # The project the session was started in, written once; None for unstamped sessions.

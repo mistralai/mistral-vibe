@@ -28,7 +28,7 @@ from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server._session_backend_port import SessionBackendHost
 from vibe.app_server._unified_import_writer import UnifiedSessionImportWriter
-from vibe.app_server._vibe_projects import VibeProjectService
+from vibe.app_server._vibe_projects import LocalProjectStoreFactory, VibeProjectService
 from vibe.app_server.client import AppServerClient
 from vibe.app_server.models import ImportHarness, ImportJobStatus
 from vibe.app_server.protocol import (
@@ -144,6 +144,13 @@ class RecordingProjectLinks:
             ),
             "staleLinkCleared": False,
         }
+
+
+def _local_projects(store: LocalProjectStore) -> LocalProjectStoreFactory:
+    async def factory() -> LocalProjectStore:
+        return store
+
+    return factory
 
 
 class CanonicalizingProjectProvisioner(RecordingProjectProvisioner):
@@ -393,7 +400,8 @@ async def test_claude_runner_imports_every_session_from_existing_projects(
 
     async def build_writer() -> UnifiedSessionImportWriter:
         return UnifiedSessionImportWriter(
-            SessionLoggingConfig(enabled=True, save_dir=str(tmp_path / "sessions"))
+            SessionLoggingConfig(enabled=True, save_dir=str(tmp_path / "sessions")),
+            LocalProjectStore(),
         )
 
     provisioner = CanonicalizingProjectProvisioner(canonical_workspace)
@@ -572,7 +580,8 @@ async def test_claude_runner_skips_an_invalid_transcript_and_continues(
 
     async def build_writer() -> UnifiedSessionImportWriter:
         return UnifiedSessionImportWriter(
-            SessionLoggingConfig(enabled=True, save_dir=str(tmp_path / "sessions"))
+            SessionLoggingConfig(enabled=True, save_dir=str(tmp_path / "sessions")),
+            LocalProjectStore(),
         )
 
     runner = ClaudeImportService(
@@ -599,7 +608,7 @@ async def test_claude_runner_skips_an_invalid_transcript_and_continues(
 async def test_claude_runner_stamps_imported_sessions_with_their_project(
     tmp_path: Path,
 ) -> None:
-    await _claude_importer(tmp_path, local_projects=None).run()
+    await _claude_importer(tmp_path, local_projects=LocalProjectStore()).run()
 
     metadata = json.loads(_imported_meta(tmp_path).read_text(encoding="utf-8"))
     assert metadata["project"] == {"kind": "cloud", "id": "project-id"}
@@ -607,12 +616,16 @@ async def test_claude_runner_stamps_imported_sessions_with_their_project(
 
 
 @pytest.mark.asyncio
-async def test_claude_runner_imports_an_unlinked_folder_without_a_project(
+async def test_claude_runner_stamps_an_unlinked_folder_with_a_new_local_project(
     tmp_path: Path,
 ) -> None:
-    await _claude_importer(tmp_path, local_projects=None, linked_project_id=None).run()
+    store = LocalProjectStore()
 
-    assert not _imported_meta(tmp_path).exists()
+    await _claude_importer(tmp_path, local_projects=store, linked_project_id=None).run()
+
+    [local] = store.list_projects()
+    metadata = json.loads(_imported_meta(tmp_path).read_text(encoding="utf-8"))
+    assert metadata["project"] == {"kind": "local", "id": local.id}
 
 
 @pytest.mark.asyncio
@@ -641,7 +654,7 @@ async def test_claude_runner_stamps_the_local_project_backed_by_the_import_proje
 async def test_claude_runner_rerun_leaves_an_imported_sessions_metadata_alone(
     tmp_path: Path,
 ) -> None:
-    importer = _claude_importer(tmp_path, local_projects=None)
+    importer = _claude_importer(tmp_path, local_projects=LocalProjectStore())
     await importer.run()
     meta_path = _imported_meta(tmp_path)
     # As if Desktop opened and pinned the session since.
@@ -657,7 +670,7 @@ async def test_claude_runner_rerun_leaves_an_imported_sessions_metadata_alone(
 def _claude_importer(
     tmp_path: Path,
     *,
-    local_projects: LocalProjectStore | None,
+    local_projects: LocalProjectStore,
     linked_project_id: str | None = "project-id",
 ) -> ClaudeImportService:
     workspace = tmp_path / "workspace"
@@ -692,7 +705,8 @@ def _claude_importer(
                 {str(workspace): linked_project_id}
                 if linked_project_id is not None
                 else None
-            )
+            ),
+            local_projects=_local_projects(local_projects),
         ),
         build_writer,
     )
@@ -727,7 +741,8 @@ async def test_app_server_discovers_claude_projects_and_their_sessions(
 
     async def build_writer() -> UnifiedSessionImportWriter:
         return UnifiedSessionImportWriter(
-            SessionLoggingConfig(enabled=True, save_dir=str(tmp_path / "sessions"))
+            SessionLoggingConfig(enabled=True, save_dir=str(tmp_path / "sessions")),
+            LocalProjectStore(),
         )
 
     _, transport = memory_transport_pair()
@@ -771,7 +786,9 @@ async def test_vibe_project_service_reuses_saved_links() -> None:
         saved_links={"/workspace/one": "project-one"},
         canonical_roots={"/workspace/one": "/repos/one"},
     )
-    service = VibeProjectService(project_links)
+    service = VibeProjectService(
+        project_links, local_projects=_local_projects(LocalProjectStore())
+    )
     projects = [ImportProject(name="One", cwd=Path("/workspace/one"))]
 
     # Do
@@ -790,34 +807,31 @@ async def test_vibe_project_service_reuses_saved_links() -> None:
 
 
 @pytest.mark.asyncio
-async def test_vibe_project_service_leaves_unlinked_and_failed_folders_unlinked() -> (
-    None
-):
-    """*Prepare*: One unlinked source project and one whose inspection fails.
-    *Do*: Resolve the import projects without local projects.
-    *Assert*: Both stay importable without a project.
+async def test_vibe_project_service_leaves_a_failed_folder_unlinked() -> None:
+    """*Prepare*: One source project whose inspection fails.
+    *Do*: Resolve the import projects.
+    *Assert*: It stays importable without a project.
     """
     # Prepare
+    store = LocalProjectStore()
     project_links = RecordingProjectLinks(failing_roots={"/workspace/two"})
-    service = VibeProjectService(project_links)
-    projects = [
-        ImportProject(name="One", cwd=Path("/workspace/one")),
-        ImportProject(name="Two", cwd=Path("/workspace/two")),
-    ]
+    service = VibeProjectService(project_links, local_projects=_local_projects(store))
+    projects = [ImportProject(name="Two", cwd=Path("/workspace/two"))]
 
     # Do
     resolved = await service.ensure_projects(projects)
 
     # Assert
-    assert project_links.calls == ["/workspace/one", "/workspace/two"]
+    assert project_links.calls == ["/workspace/two"]
     assert resolved == projects
+    assert store.list_projects() == []
 
 
 @pytest.mark.asyncio
 async def test_vibe_project_service_creates_one_local_project_per_unlinked_folder(
     tmp_path: Path, config_dir: Path
 ) -> None:
-    """*Prepare*: An unlinked folder with local projects enabled.
+    """*Prepare*: An unlinked folder.
     *Do*: Resolve the import projects twice.
     *Assert*: One local project is created and reused on the second run.
     """
@@ -825,11 +839,9 @@ async def test_vibe_project_service_creates_one_local_project_per_unlinked_folde
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     store = LocalProjectStore(config_dir / "local_projects.toml")
-
-    async def local_projects() -> LocalProjectStore:
-        return store
-
-    service = VibeProjectService(RecordingProjectLinks(), local_projects)
+    service = VibeProjectService(
+        RecordingProjectLinks(), local_projects=_local_projects(store)
+    )
     projects = [ImportProject(name="Workspace", cwd=workspace)]
 
     # Do

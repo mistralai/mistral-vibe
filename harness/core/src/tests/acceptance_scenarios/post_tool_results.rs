@@ -230,6 +230,12 @@ fn post_tool_hook_results_reach_the_program_as_returned() {
             run_typescript_completion(action_id(&completion), call_id, source),
             running(turn_id)
                 .dispatch(customer_action(json!({"id": 1})))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();

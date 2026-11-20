@@ -29,6 +29,7 @@ from vibe.app_server._admin_config import (
 from vibe.app_server._agent_types import (
     AgentToolCatalogue,
     AgentTypeSource,
+    agent_file_issues,
     resolve_agent_types,
     workspace_agent_rejections,
     workspace_agent_types,
@@ -51,6 +52,7 @@ from vibe.app_server._client_provided_tools import (
 )
 from vibe.app_server._connection_credentials import ConnectionCredentials
 from vibe.app_server._connection_protocol import AgentPlugin, ClientToolDefinitionParams
+from vibe.app_server._credential_selection import DesktopCredentialUnavailable
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._host_hooks import (
     SESSION_START_CONTEXT_BINDING_ID,
@@ -66,8 +68,8 @@ from vibe.app_server._imports import build_local_imports_service
 from vibe.app_server._launch_context import client_launch_context
 from vibe.app_server._legacy_import import LegacySessionStore
 from vibe.app_server._projection import (
-    project_agent_summaries,
     project_config_view,
+    project_selection,
     project_skill_summaries,
 )
 from vibe.app_server._provided_tools import enter_worktree_offered, vibe_tool_groups
@@ -111,8 +113,8 @@ from vibe.app_server.protocol import (
 from vibe.app_server.run_export import HeadlessUsageError, RunOutcome
 from vibe.app_server.transport import JsonRpcTransport, memory_transport_pair
 from vibe.core.agents.manager import AgentManager
-from vibe.core.agents.models import AgentProfile, BuiltinAgentName
-from vibe.core.agents.registry import apply_profile_overrides
+from vibe.core.agents.models import AgentProfile, ApprovalPolicyName
+from vibe.core.agents.registry import agent_refused_tools, apply_profile_overrides
 from vibe.core.config import (
     DefaultConfigLayer,
     GrowthbookLayer,
@@ -581,7 +583,9 @@ def _require_active_provider_credential(
 
     A Mistral provider's model calls send the connection's credential, so it
     is that credential that must exist: a Desktop sign-in, the CLI's own OIDC
-    session, or the API key. Any other provider, and a run that brings its own
+    session, or the API key. A Desktop connection without a sign-in starts
+    anyway: its first model call reports ``credential_unavailable``, which an
+    API key would not fix. Any other provider, and a run that brings its own
     key, is checked for its key as before.
     """
     try:
@@ -595,6 +599,10 @@ def _require_active_provider_credential(
     ):
         selected = platform_credentials(provider.api_key_env_var)
         if not isinstance(selected, CachedPrincipal) or selected.has_credential():
+            return
+        # Desktop's missing sign-in fails the first model call with its own
+        # reason; asking for an API key would be wrong advice.
+        if isinstance(selected, DesktopCredentialUnavailable):
             return
     config.require_active_provider_api_key()
 
@@ -1189,6 +1197,17 @@ class HarnessProcess:
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         self._experimental_harness_host = candidate
+        self.mcp_authentication = MCPAuthenticationService()
+        self.mcp_catalog = MCPCatalogService(
+            self.mcp_authentication,
+            sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
+        )
+        self.connector_catalog = ConnectorCatalogService(
+            services.connector_catalog,
+            implicit_source_enabled=self._experimental_harness_host is not None,
+            sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
+            credentials=self.credentials,
+        )
         self.host_handler = HostRequestHandler(
             self.harness_files,
             org_config=services.org_config,
@@ -1200,17 +1219,7 @@ class HarnessProcess:
             builtin_plugin_roots=self._builtin_plugin_roots,
             open_sessions=services.open_sessions,
             config_changes=services.config_changes,
-        )
-        self.mcp_authentication = MCPAuthenticationService()
-        self.mcp_catalog = MCPCatalogService(
-            self.mcp_authentication,
-            sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
-        )
-        self.connector_catalog = ConnectorCatalogService(
-            services.connector_catalog,
-            implicit_source_enabled=self._experimental_harness_host is not None,
-            sessionless_catalog_factory=self.build_sessionless_mcp_catalog,
-            credentials=self.credentials,
+            connector_catalog=self.connector_catalog.read_cached_catalog,
         )
         self.plugin_catalog = PluginCatalogService()
         self._connector_warm_up: asyncio.Task[None] | None = None
@@ -1327,6 +1336,7 @@ class HarnessProcess:
                 session_spawner=session_spawner_for(services),
                 session_peers=session_peers_for(services),
                 agent_worktrees=services.client_capabilities().agent_worktrees,
+                agent_projects=services.client_capabilities().agent_projects,
             )
             return replace(context, host_hooks=host_hooks)
 
@@ -1430,19 +1440,12 @@ class HarnessProcess:
 
         session_config = await self._build_session_config(SessionOptions())
         config = session_config.config_orchestrator.config
-        return UnifiedSessionImportWriter(
-            config.session_logging,
-            LocalProjectStore() if config.experimental_enable_local_projects else None,
-        )
+        return UnifiedSessionImportWriter(config.session_logging, LocalProjectStore())
 
-    async def build_import_local_projects(self) -> LocalProjectStore | None:
+    async def build_import_local_projects(self) -> LocalProjectStore:
         from vibe.app_server._local_projects import LocalProjectStore
 
-        session_config = await self._build_session_config(SessionOptions())
-        config = session_config.config_orchestrator.config
-        return (
-            LocalProjectStore() if config.experimental_enable_local_projects else None
-        )
+        return LocalProjectStore()
 
     async def build_unified_read_context(
         self, options: SessionOptions
@@ -1461,6 +1464,7 @@ class HarnessProcess:
                 config_orchestrator,
                 options.agent,
                 harness_files=session_config.harness_files,
+                initial_policy=options.approval_policy,
             )
 
         return UnifiedReadContext(
@@ -1484,6 +1488,7 @@ class HarnessProcess:
         session_spawner: SessionSpawner | None = None,
         session_peers: SessionPeers | None = None,
         agent_worktrees: bool = False,
+        agent_projects: bool = False,
     ) -> UnifiedSessionContext:
         """Build a session context; no build fails because of the org config.
 
@@ -1518,6 +1523,7 @@ class HarnessProcess:
                     session_spawner=session_spawner,
                     session_peers=session_peers,
                     agent_worktrees=agent_worktrees,
+                    agent_projects=agent_projects,
                 )
                 await _accept_org_config(context)
                 break
@@ -1559,6 +1565,7 @@ class HarnessProcess:
         session_spawner: SessionSpawner | None,
         session_peers: SessionPeers | None,
         agent_worktrees: bool,
+        agent_projects: bool,
     ) -> UnifiedSessionContext:
         from mistralai_vibe_local_harness import HarnessSession
         from mistralai_vibe_local_harness.protocol import (
@@ -1576,6 +1583,7 @@ class HarnessProcess:
             RustHarnessSettings,
             RustPowerShellCommandEnvironment,
             RustProgrammaticToolSettings,
+            RustPromptSettings,
             RustProvidedToolDefinition,
             RustRetryOutputLimitRecovery,
             RustToolGroupDefinition,
@@ -1632,6 +1640,7 @@ class HarnessProcess:
             ProvidedToolNames,
             UnifiedPermissionResolver,
         )
+        from vibe.core.tools.builtins.ask_user_question import AskUserQuestion
         from vibe.questions import UserQuestionRequest, UserQuestionResult
 
         # A rebuild for a live session adopts the previous context's slot
@@ -1699,7 +1708,10 @@ class HarnessProcess:
         # read the orchestrator lazily, so they stay correct across every config
         # mutation and must outlive any single derivation.
         agents = AgentManager(
-            config_orchestrator, options.agent, harness_files=harness_files
+            config_orchestrator,
+            options.agent,
+            harness_files=harness_files,
+            initial_policy=options.approval_policy,
         )
         # Derivation reads the probe's answer synchronously, so it must finish
         # first. Only features on at open are probed; one turned on later falls
@@ -1709,7 +1721,7 @@ class HarnessProcess:
             for feature, enabled in (
                 (
                     UtilityFeature.SMART_APPROVE,
-                    agents.active_profile.name == BuiltinAgentName.SMART_APPROVE,
+                    agents.active_policy.name == ApprovalPolicyName.SMART_APPROVE,
                 ),
             )
             if enabled
@@ -2005,7 +2017,7 @@ class HarnessProcess:
                 config_orchestrator if candidate is None else candidate.orchestrator
             )
             agent_view = agents if candidate is None else candidate.agents
-            active_profile = agent_view.active_profile
+            active_profile = agent_view.active_agent
             active_model = config.get_active_model()
             provider = config.get_provider_for_model(active_model)
             compaction_model = config.get_compaction_model()
@@ -2059,9 +2071,15 @@ class HarnessProcess:
             bypass_approval = _effective_bypass_tool_permissions(
                 config, options.auto_approve
             )
-            # Recomputed on every derivation (including switch_agent) so entering or
-            # leaving smart-approve mid-session re-derives the gate live.
-            smart_approve = active_profile.name == BuiltinAgentName.SMART_APPROVE
+            if bypass_approval:
+                # A bypass skips every prompt, never a refusal: the tools the
+                # agent sets to `never` are off, as under the auto-approve policy.
+                available_tools -= agent_refused_tools(active_profile)
+            # Recomputed on every derivation (including a policy switch) so entering
+            # or leaving smart-approve mid-session re-derives the gate live.
+            smart_approve = (
+                agent_view.active_policy.name == ApprovalPolicyName.SMART_APPROVE
+            )
             gate = (
                 ToolGate.BYPASS
                 if bypass_approval
@@ -2112,6 +2130,7 @@ class HarnessProcess:
                             rejection.issue()
                             for rejection in workspace_agent_rejections(agent_view)
                         ),
+                        *agent_file_issues(agent_view),
                         *agent_types.issues,
                         *([prompt_issue] if prompt_issue is not None else []),
                         *_hook_config_issues(hook_result),
@@ -2173,6 +2192,7 @@ class HarnessProcess:
                         else None,
                     ),
                     settings=RustHarnessSettings(
+                        prompts=RustPromptSettings(guidance="stock"),
                         turn=RustTurnSettings(
                             max_iterations=max_iterations,
                             # A cut-off answer is discarded and asked for again
@@ -2235,10 +2255,7 @@ class HarnessProcess:
                                         tools=[
                                             RustProvidedToolDefinition(
                                                 name="ask_user_question",
-                                                description=(
-                                                    "Ask the user one or more questions and "
-                                                    "wait for their answers."
-                                                ),
+                                                description=AskUserQuestion.get_full_description(),
                                                 input_schema=UserQuestionRequest.model_json_schema(),
                                                 output_schema=UserQuestionResult.model_json_schema(),
                                                 exposure="direct",
@@ -2260,6 +2277,8 @@ class HarnessProcess:
                                 ),
                                 session_peers=session_peers is not None,
                                 enter_worktree=agent_worktrees,
+                                # A sandbox cannot reach the user's project folders.
+                                projects=agent_projects and sandbox is None,
                                 session_peer_restore=(
                                     session_peers is not None
                                     and session_peers.client_capabilities().session_peer_restore
@@ -2484,7 +2503,9 @@ class HarnessProcess:
             org_config_service=self.services.org_config,
             experiments_service=self.services.experiments,
             skill_store=self.services.skill_store,
+            keep_awake=self.services.keep_awake,
             model_catalog_service=self.services.model_catalog,
+            config_changes=self.services.config_changes,
             org_config_key=OrgConfigKeySlot(session_config.org_config_key),
             completion_budget=completion_budget,
             workspace=workspace_slot,
@@ -2829,6 +2850,7 @@ async def create_harness_server(
         imports_service=process.imports,
         storage_usage=process.services.storage_usage,
         config_changes=process.services.config_changes,
+        vibe_bot_sessions=process.services.vibe_bot_sessions,
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
         oidc_tenants=process.services.oidc_tenants,
@@ -3114,7 +3136,10 @@ def build_runtime_snapshot(
     issues: Sequence[ConfigIssue] = (),
 ) -> RuntimeSnapshot:
     agents = AgentManager(
-        config_orchestrator, options.agent, harness_files=harness_files
+        config_orchestrator,
+        options.agent,
+        harness_files=harness_files,
+        initial_policy=options.approval_policy,
     )
     return build_unified_runtime_snapshot(
         config_orchestrator, agents, issues=issues, auto_approve=options.auto_approve
@@ -3145,10 +3170,14 @@ def build_unified_runtime_snapshot(
     """
     config = config_orchestrator.config
     active_model = config.get_active_model()
-    active, available = project_agent_summaries(
-        agents.active_profile, agents.available_agents.values()
-    )
-    runtime_issues = list(issues)
+    selection = project_selection(agents)
+    runtime_issues = [
+        *issues,
+        *(
+            ConfigIssue(file="approval policy", message=warning)
+            for warning in agents.restore_warnings
+        ),
+    ]
     if auto_approve and not config.enable_auto_approve:
         runtime_issues.append(
             ConfigIssue(
@@ -3172,8 +3201,10 @@ def build_unified_runtime_snapshot(
             active_model_pinned=active_model_is_pinned(config_orchestrator),
             image_fallback=True,
         ),
-        active_agent=active,
-        agents=available,
+        active_agent=selection.active,
+        agents=selection.agents,
+        active_approval_policy=selection.active_approval_policy,
+        approval_policies=selection.approval_policies,
         skills=project_skill_summaries(skills),
         tools=[ToolSummary(name=name) for name in tools],
         stats=AgentStatsSnapshot(

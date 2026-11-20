@@ -4,14 +4,8 @@ use crate::core::features::background_processes;
 use crate::core::features::model_wait;
 use crate::core::features::skills;
 use crate::core::features::subagents;
+#[cfg(test)]
 use crate::core::prompt::PromptSettings;
-
-// Pieces of the default guidance in `default_prompts.json`, combined per enabled feature.
-const SKILLS_IDENTITY_GUIDANCE: &str = "Find relevant skills with the `skill` tool";
-const SKILLS_AUTONOMY_ACTIVITY: &str = "loading skills";
-const PROGRAMMATIC_IDENTITY_GUIDANCE: &str =
-    "discover additional tools with `search_tool_functions`, and call them using `run_typescript`";
-const PROGRAMMATIC_AUTONOMY_ACTIVITY: &str = "discovering tools";
 
 pub(crate) fn configuration_update_changes_system_prompt(
     current: &HarnessConfig,
@@ -61,6 +55,7 @@ pub(crate) fn build_system_prompt(
         sections.push(section);
     }
     sections.extend(capabilities::render_sections(config));
+    sections.retain(|section| !section.trim().is_empty());
     sections.join("\n\n")
 }
 
@@ -70,24 +65,7 @@ fn build_generic_system_prompt(config: &HarnessConfig) -> String {
     let skill_mode = config.settings.tools.skills;
     // Name the `skill` tool only when the Session exposes it.
     let skills_on = skill_mode.exposes(config.skills());
-    // The default guidance names the skill and programmatic tools, so it is rebuilt for the
-    // features this Session has. An override is prompt research and is used as written.
-    let (intro, autonomy) = if prompts.guidance == PromptSettings::default().guidance {
-        (
-            build_intro_prompt(skills_on, programmatic),
-            build_autonomy_prompt(skills_on, programmatic),
-        )
-    } else {
-        (
-            prompts.guidance.intro.clone(),
-            prompts.guidance.autonomy.clone(),
-        )
-    };
-    // An empty intro or autonomy section is suppressed rather than left as an empty paragraph.
-    let mut sections: Vec<String> = [intro, autonomy]
-        .into_iter()
-        .filter(|section| !section.trim().is_empty())
-        .collect();
+    let mut sections = prompts.guidance.sections(skills_on, programmatic);
     if programmatic {
         sections.push(prompts.programs.tool_use.clone());
     }
@@ -143,47 +121,6 @@ fn build_generic_system_prompt(config: &HarnessConfig) -> String {
     sections.join("\n\n")
 }
 
-fn build_intro_prompt(skills: bool, programmatic: bool) -> String {
-    let intro = "You help users get complex tasks done. Act directly and proactively.";
-    match (skills, programmatic) {
-        (true, true) => format!(
-            "{intro} {}, {}.",
-            SKILLS_IDENTITY_GUIDANCE, PROGRAMMATIC_IDENTITY_GUIDANCE,
-        ),
-        (true, false) => format!("{intro} {}.", SKILLS_IDENTITY_GUIDANCE),
-        (false, true) => format!("{intro} {}.", capitalize(PROGRAMMATIC_IDENTITY_GUIDANCE)),
-        (false, false) => intro.to_string(),
-    }
-}
-
-fn capitalize(text: &str) -> String {
-    let mut characters = text.chars();
-    characters
-        .next()
-        .map(|first| first.to_uppercase().chain(characters).collect())
-        .unwrap_or_default()
-}
-
-fn build_autonomy_prompt(skills: bool, programmatic: bool) -> String {
-    let activities = [
-        skills.then_some(SKILLS_AUTONOMY_ACTIVITY),
-        programmatic.then_some(PROGRAMMATIC_AUTONOMY_ACTIVITY),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|activity| format!("{activity}, "))
-    .collect::<String>();
-    format!(
-        r#"## Autonomy and initiative
-
-- Treat the user's request as authorization to perform the normal, in-scope work needed to complete it. Start working without asking whether to proceed.
-- Do not ask for confirmation before {activities}reading or searching available context, or performing other reversible investigation.
-- When a tool call needs approval, make the tool call and let the runtime's approval mechanism handle it. Do not preemptively ask for permission in chat.
-- When details are ambiguous, first use the available context and tools to resolve them. Ask a clarifying question only when missing information would materially change the result, cannot be discovered, or additional authorization is genuinely required.
-- Make reasonable implementation choices, keep momentum, and continue until the requested outcome is complete or a real blocker remains."#
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,15 +128,40 @@ mod tests {
         HarnessCapabilitySet, KnowledgeFolderAccess, KnowledgeFolderDefinition,
         PluginContextDefinition,
     };
+    use crate::core::prompt::settings::GuidanceSettings;
     use crate::core::testing::*;
     use crate::core::tools::resolved::ResolvedTools;
 
-    #[test]
-    fn guidance_with_every_feature_is_the_default_guidance() {
-        let defaults = PromptSettings::default().guidance;
+    fn prompt_with_research_skill(guidance: GuidanceSettings) -> String {
+        let mut config = config();
+        config.settings.prompts.guidance = guidance;
+        config.capabilities.skills.push(SkillDefinition {
+            name: "research".to_string(),
+            description: "Research unfamiliar topics.".to_string(),
+            path: "/skills/research/SKILL.md".to_string(),
+        });
+        let resolved_tools = ResolvedTools::compile(&config).expect("tools resolve");
+        build_system_prompt(
+            &config,
+            resolved_tools.tool_group_inventory_prompt_section(),
+        )
+    }
 
-        assert_eq!(build_intro_prompt(true, true), defaults.intro);
-        assert_eq!(build_autonomy_prompt(true, true), defaults.autonomy);
+    /// *Prepare*: A Session with skills and searchable tools and the default prompts.
+    /// *Do*: Build its system prompt.
+    /// *Assert*: It has no intro stance and no autonomy section, but still says how to reach
+    /// skills and tools, in its own paragraph at the start.
+    #[test]
+    fn default_guidance_renders_no_intro_or_autonomy_section() {
+        let prompt = prompt_with_research_skill(PromptSettings::default().guidance);
+
+        assert!(prompt.starts_with(
+            "Find relevant skills with the `skill` tool, discover additional tools with `search_tool_functions`, and call them using `run_typescript`.\n\n## Using tool functions via run_typescript"
+        ));
+        assert!(!prompt.contains("You help users get complex tasks done."));
+        assert!(!prompt.contains("## Autonomy and initiative"));
+        assert!(!prompt.contains("approval mechanism"));
+        assert!(!prompt.contains("\n\n\n"));
     }
     /// *Prepare*: One agent with every agent operation and one that can only send messages,
     /// as on the deepest allowed level.
@@ -403,26 +365,18 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_keeps_generic_intro_autonomy_and_time_guidance() {
-        let mut config = config();
-        config.capabilities.skills.push(SkillDefinition {
-            name: "research".to_string(),
-            description: "Research unfamiliar topics.".to_string(),
-            path: "/skills/research/SKILL.md".to_string(),
-        });
-
-        let resolved_tools = ResolvedTools::compile(&config).expect("tools resolve");
-        let prompt = build_system_prompt(
-            &config,
-            resolved_tools.tool_group_inventory_prompt_section(),
-        );
+    fn stock_guidance_keeps_generic_intro_autonomy_and_time_guidance() {
+        let prompt = prompt_with_research_skill(GuidanceSettings::Stock);
 
         assert!(prompt.starts_with("You help users get complex tasks done."));
         assert!(prompt.contains("discover additional tools with `search_tool_functions`"));
         assert!(!prompt.contains("You are an expert agent"));
         assert!(prompt.contains("## Autonomy and initiative"));
         assert!(prompt.contains("Do not ask for confirmation before loading skills"));
-        assert!(prompt.contains("let the runtime's approval mechanism handle it"));
+        assert!(prompt.contains("Do the requested work within the user’s stated scope."));
+        assert!(prompt.contains("Clarify missing authorization before taking those actions."));
+        assert!(!prompt.contains("When a tool call needs approval"));
+        assert!(!prompt.contains("For authorized actions, submit the concrete tool call"));
         assert!(!prompt.contains("## Process"));
         assert!(!prompt.contains("Complete the task using tools as needed."));
         assert!(prompt.contains("call `run_typescript` to read `new Date().toISOString()`"));
@@ -469,10 +423,16 @@ mod tests {
     }
 
     #[test]
-    fn empty_intro_and_autonomy_leave_no_empty_paragraphs() {
+    fn a_session_without_generic_sections_opens_with_its_instructions() {
         let mut config = config();
-        config.settings.prompts.guidance.intro = String::new();
-        config.settings.prompts.guidance.autonomy = " \n".to_string();
+        let mut programmatic = serde_json::to_value(&config.settings.tools.programmatic).unwrap();
+        programmatic["mode"] = json!("disabled");
+        config.settings.tools.programmatic = serde_json::from_value(programmatic).unwrap();
+        config.settings.tools.skills = skills::Mode::WhenConfigured;
+        config.settings.tools.background_processes = background_processes::Mode::Disabled;
+        config.settings.tools.subagents =
+            serde_json::from_value(json!({"mode": "disabled"})).unwrap();
+        config.system_instructions = "Product instructions.".to_string();
 
         let resolved_tools = ResolvedTools::compile(&config).expect("tools resolve");
         let prompt = build_system_prompt(
@@ -480,10 +440,68 @@ mod tests {
             resolved_tools.tool_group_inventory_prompt_section(),
         );
 
-        assert!(prompt.starts_with(&config.settings.prompts.programs.tool_use));
+        assert!(
+            prompt.starts_with("## Use-case instructions\n\nProduct instructions."),
+            "{prompt:?}"
+        );
+    }
+
+    #[test]
+    fn empty_intro_and_autonomy_leave_no_empty_paragraphs() {
+        let mut config = config();
+        config.settings.prompts.guidance = GuidanceSettings::Custom {
+            intro: String::new(),
+            autonomy: " \n".to_string(),
+        };
+
+        let resolved_tools = ResolvedTools::compile(&config).expect("tools resolve");
+        let prompt = build_system_prompt(
+            &config,
+            resolved_tools.tool_group_inventory_prompt_section(),
+        );
+
+        assert!(prompt.starts_with(&format!(
+            "Discover additional tools with `search_tool_functions`, and call them using `run_typescript`.\n\n{}",
+            config.settings.prompts.programs.tool_use
+        )));
         assert!(!prompt.contains("You help users get complex tasks done."));
         assert!(!prompt.contains("## Autonomy and initiative"));
         assert!(!prompt.contains("\n\n\n"));
+    }
+
+    #[test]
+    fn custom_guidance_is_used_as_written_around_the_capability_pointers() {
+        let prompt = prompt_with_research_skill(GuidanceSettings::Custom {
+            intro: "Work carefully.".to_string(),
+            autonomy: "## Approvals\n\nWait for explicit confirmation.".to_string(),
+        });
+
+        assert!(prompt.starts_with(
+            "Work carefully.\n\nFind relevant skills with the `skill` tool, discover additional tools with `search_tool_functions`, and call them using `run_typescript`.\n\n## Approvals\n\nWait for explicit confirmation.\n\n"
+        ));
+        assert!(!prompt.contains("## Autonomy and initiative"));
+    }
+
+    #[test]
+    fn changing_guidance_rebuilds_the_system_prompt() {
+        let current = config();
+        let update = |change: &dyn Fn(&mut crate::core::config::HarnessSettings)| {
+            let mut settings = current.settings.clone();
+            change(&mut settings);
+            HarnessConfigUpdate {
+                settings: Some(settings),
+                ..HarnessConfigUpdate::default()
+            }
+        };
+
+        assert!(configuration_update_changes_system_prompt(
+            &current,
+            &update(&|settings| settings.prompts.guidance = GuidanceSettings::Stock)
+        ));
+        assert!(!configuration_update_changes_system_prompt(
+            &current,
+            &update(&|_| {})
+        ));
     }
 
     #[test]

@@ -3,6 +3,8 @@
 pub mod bodies;
 pub mod catalog;
 mod changes;
+pub mod files;
+mod help;
 mod keys;
 pub mod labels;
 pub mod list;
@@ -23,10 +25,11 @@ use crate::app::App;
 use crate::clock::UiInstant;
 use crate::commands::spawn_session;
 use crate::commands::submission::new_message_id;
-use crate::hints::Hint;
 use crate::option_list::{MultiAction, OptionList, OptionView};
 use crate::search_field::Search;
-use crate::server::{Client, InstalledSkill, SkillCatalog, SkillUpdate};
+use crate::server::{
+    Client, ConfigIssue, InstalledSkill, InstalledSkills, SkillCatalog, SkillUpdate,
+};
 use crate::transcript::local;
 use crate::ui::visual_lines::VisualLine;
 use bodies::{BodyKey, BodyPane};
@@ -37,6 +40,8 @@ use page::Page;
 use picker::Picker;
 
 pub use bodies::{scroll_body_to, wheel_body};
+pub use files::reread;
+pub use help::help;
 pub use keys::{handle_key, mouse, paste};
 pub use list::Tab;
 pub use request::{Event, Opening, Outcome};
@@ -48,6 +53,8 @@ pub struct State {
     pub open: bool,
     /// Every installed pin in server order, the shadowed ones too.
     pub installed: Vec<InstalledSkill>,
+    /// The skill files and manifests that failed to load, listed under the skills.
+    pub issues: Vec<ConfigIssue>,
     /// The shared skills sorted by name, and what the session can do with them.
     pub catalog: Catalog,
     /// The catalog is still being read.
@@ -66,14 +73,16 @@ pub struct State {
     pub tab: Tab,
     /// Where each tab was drawn, for clicks.
     pub tab_areas: Vec<(Tab, Rect)>,
-    /// The skill whose removal waits for a second `d`.
-    pub removing: Option<String>,
+    /// The local skill whose deletion waits for the user to confirm it.
+    pub confirm: Option<files::Confirm>,
     /// Where and when a click last opened a screen, so the second press of that double-click lands nowhere.
     pub screen_click: Option<((u16, u16), UiInstant)>,
     /// The press being dropped, until its release.
     pub dropping: bool,
     /// The label of the change in flight; another is refused until it answers.
     pub busy: Option<String>,
+    /// What to say once the change in flight succeeds, as `r` says a skill was removed.
+    pub done: Option<String>,
     /// Counts the openings, so a body fetched for an earlier one is dropped.
     pub generation: u64,
     /// The list or page waiting for its answer.
@@ -84,6 +93,8 @@ pub struct State {
     pub pane: BodyPane,
     /// The body pane's lines and the width they were wrapped to, until the next change drops them.
     body_lines: Option<(usize, Rc<Vec<VisualLine>>)>,
+    /// The box's lines under its title on the list, fixed at the first draw for that screen height, so a search, a tab or a late catalog never resizes it.
+    pub pinned: Option<(u16, usize)>,
 }
 
 /// What the browser shows: the list, a skill's page, or one of its scope pickers.
@@ -178,20 +189,12 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             body,
         } => bodies::loaded(app, generation, key, body),
         Event::Changed { outcome, installed } => changes::changed(app, outcome, installed),
+        Event::Reread(installed) => changes::reread(app, installed),
         Event::Updates(Ok(updates)) if !updates.is_empty() => announce_updates(app, &updates),
         Event::Updates(_) => {}
     }
     bodies::sync(app, client);
     resume_loading(app);
-}
-
-/// The footer of whichever list is on screen.
-pub fn help(state: &State) -> Vec<Hint> {
-    match state.screen() {
-        Screen::List => list::help(state),
-        Screen::Page(page) => page::help(state, page),
-        Screen::Picker(_, picker) => picker::help(picker),
-    }
 }
 
 /// The list on screen, for the shared wheel, scrollbar and hover.
@@ -202,16 +205,18 @@ pub fn visible_list(state: &mut State) -> &mut dyn OptionView {
     }
 }
 
-fn open(app: &mut App, installed: Vec<InstalledSkill>, registry: bool) {
+fn open(app: &mut App, installed: InstalledSkills, registry: bool) {
     if app.skills_browser.open {
         return;
     }
     app.skills_browser = State {
         open: true,
-        installed,
+        installed: installed.skills,
+        issues: installed.issues,
         catalog_pending: registry,
         registry,
         busy: app.skills_browser.busy.take(),
+        done: app.skills_browser.done.take(),
         generation: app.skills_browser.generation + 1,
         ..State::default()
     };
@@ -243,10 +248,11 @@ fn catalog_loaded(app: &mut App, generation: u64, catalog: SkillCatalog) {
 }
 
 /// Close the browser; a change in flight outlives it and keeps the spinner under its label, and the spinner of a screen still loading ends.
-pub(super) fn close(app: &mut App) {
+pub(crate) fn close(app: &mut App) {
     let opening = app.skills_browser.opening.take();
     app.skills_browser = State {
         busy: app.skills_browser.busy.take(),
+        done: app.skills_browser.done.take(),
         generation: app.skills_browser.generation,
         ..State::default()
     };

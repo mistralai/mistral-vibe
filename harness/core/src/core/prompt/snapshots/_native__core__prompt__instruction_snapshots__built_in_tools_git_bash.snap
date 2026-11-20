@@ -350,54 +350,80 @@ expression: reviewable(snapshot)
         ]
       },
       "output_schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string"
+        "description": "The text a read returned, or the media type and size of an image whose bytes go only to the model.",
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              },
+              "file_size_bytes": {
+                "type": "integer",
+                "description": "Size of the file in bytes; for a directory, of its whole listing."
+              },
+              "returned_bytes": {
+                "type": "integer"
+              },
+              "offset": {
+                "type": "integer"
+              },
+              "lines_read": {
+                "type": "integer"
+              },
+              "was_truncated": {
+                "type": "boolean",
+                "description": "Whether the file has more content past what was returned."
+              },
+              "total_lines": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "Number of lines in the file, or of entries in a directory, or null when the file is too large to count."
+              },
+              "next_offset": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "The `offset` to read the rest of the file from, or null when the read reached the end of the file."
+              }
+            },
+            "required": [
+              "path",
+              "content",
+              "file_size_bytes",
+              "returned_bytes",
+              "offset",
+              "lines_read",
+              "was_truncated"
+            ]
           },
-          "content": {
-            "type": "string"
-          },
-          "file_size_bytes": {
-            "type": "integer",
-            "description": "Size of the file in bytes; for a directory, of its whole listing."
-          },
-          "returned_bytes": {
-            "type": "integer"
-          },
-          "offset": {
-            "type": "integer"
-          },
-          "lines_read": {
-            "type": "integer"
-          },
-          "was_truncated": {
-            "type": "boolean",
-            "description": "Whether the file has more content past what was returned."
-          },
-          "total_lines": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "description": "Number of lines in the file, or of entries in a directory, or null when the file is too large to count."
-          },
-          "next_offset": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "description": "The `offset` to read the rest of the file from, or null when the read reached the end of the file."
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "mime_type": {
+                "type": "string",
+                "description": "The image's media type, such as `image/png`."
+              },
+              "file_size_bytes": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "path",
+              "mime_type",
+              "file_size_bytes"
+            ]
           }
-        },
-        "required": [
-          "path",
-          "content",
-          "file_size_bytes",
-          "returned_bytes",
-          "offset",
-          "lines_read",
-          "was_truncated"
         ]
       }
     },

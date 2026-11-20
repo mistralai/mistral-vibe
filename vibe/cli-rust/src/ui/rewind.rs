@@ -20,7 +20,7 @@ type Row = Vec<(String, Style)>;
 
 /// Draw the whole screen with the panel replacing the input box.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    let rows = rows(app);
+    let rows = rows(app, area.width.saturating_sub(4));
     let box_height = (rows.len() as u16 + 2).min(area.height);
     let kind = super::bottom_app::Kind::Rewind;
     super::bottom_app::draw(app, f, area, box_height, kind, |_, f, area| {
@@ -61,7 +61,7 @@ fn draw_box(f: &mut Frame, area: Rect, rows: &[Row]) {
 }
 
 /// Every content row, in order: title, gap, options, gap, hint.
-fn rows(app: &App) -> Vec<Row> {
+fn rows(app: &App, width: u16) -> Vec<Row> {
     let title = Style::default()
         .fg(theme::primary())
         .add_modifier(Modifier::BOLD);
@@ -92,16 +92,16 @@ fn rows(app: &App) -> Vec<Row> {
         rows.push(vec![(format!("  {}. {label}", index + 1), style)]);
     }
     rows.push(Vec::new());
-    rows.push(help(app));
+    rows.extend(super::hint_line::styled_rows(help(app), width));
     rows
 }
 
-/// The hint line for the current step.
-fn help(app: &App) -> Row {
+/// The hints for the current step.
+fn help(app: &App) -> &'static [Hint] {
     const PICK: Hint = (key::NAV, action::PICK_OPTION);
     const CONFIRM: Hint = (key::ENTER, action::CONFIRM);
     const QUIT: Hint = ("q", action::QUIT);
-    let list: &[Hint] = match app.rewind.step {
+    match app.rewind.step {
         Step::Persistence => &[PICK, CONFIRM, hints::BACK, QUIT],
         Step::Action => &[
             (key::LEFT_ESC, action::PREVIOUS),
@@ -110,6 +110,5 @@ fn help(app: &App) -> Row {
             CONFIRM,
             QUIT,
         ],
-    };
-    super::hint_line::styled(list)
+    }
 }

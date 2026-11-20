@@ -10,7 +10,13 @@ from uuid import UUID
 from pydantic import ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
-from .session_values import ForwardCompatibleModel, ProtocolError, Termination
+from .session_values import (
+    EXPERIMENTAL,
+    EncryptedValue,
+    ForwardCompatibleModel,
+    ProtocolError,
+    Termination,
+)
 
 
 class AgentMessageValue(ForwardCompatibleModel):
@@ -68,9 +74,29 @@ class AgentSessionEndedInput(AgentInputIdentity):
     error: ProtocolError
 
 
+class EncryptedAgentInput(AgentInputIdentity):
+    """The input that an encrypted agent request gives the recipient's Runtime.
+
+    The control plane writes it from an encrypted agent request. It copies the request's sealed
+    value into ``encrypted`` unchanged, and names the kind of request in ``input_kind``. It resolves
+    ``message_id``, ``source`` and ``recipient`` itself, so they stay in plain text. The recipient's
+    worker decrypts the request, and builds the plain input from it and these ids before its Runtime
+    admits it.
+
+    This model is experimental: a minor release can change it without a compatibility path.
+    """
+
+    model_config = ConfigDict(json_schema_extra=EXPERIMENTAL)
+
+    kind: Literal["encrypted"] = "encrypted"
+    input_kind: Literal["task", "message", "result"]
+    encrypted: EncryptedValue
+
+
 type AgentInput = Annotated[AgentMessageInput | AgentResultInput, Field(discriminator="kind")]
 
 type AgentCommandInput = Annotated[
-    AgentMessageInput | AgentResultInput | AgentSessionEndedInput, Field(discriminator="kind")
+    AgentMessageInput | AgentResultInput | AgentSessionEndedInput | EncryptedAgentInput,
+    Field(discriminator="kind"),
 ]
 """Input a Runtime admits from another Session: public agent input, or a child's end."""

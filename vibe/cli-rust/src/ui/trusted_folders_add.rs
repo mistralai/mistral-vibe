@@ -67,13 +67,21 @@ fn plain(chars: Vec<super::visual_lines::Sc>) -> VisualLine {
     }
 }
 
-/// Rows the box needs around `lines`.
-pub fn chrome() -> u16 {
-    browser_box::chrome(true)
+/// Rows a box `width` wide needs around `lines`.
+pub fn chrome(add: &Add, width: u16) -> u16 {
+    browser_box::chrome(true, width, &add_text::help(add))
 }
 
 pub fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
-    if area.height < chrome() {
+    let Some(chrome) = app
+        .trusted_folders
+        .add
+        .as_ref()
+        .map(|add| chrome(add, area.width))
+    else {
+        return;
+    };
+    if area.height < chrome {
         return;
     }
     draw_frame(f, area, "Trust a folder");
@@ -94,7 +102,7 @@ pub fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) 
     app.view
         .bottom_app_selection_chrome
         .push((row.y, row.x, row.right().saturating_sub(1)));
-    let visible = area.height.saturating_sub(chrome());
+    let visible = area.height.saturating_sub(chrome);
     let pane = Rect::new(
         area.x + 1,
         area.y + HEAD,

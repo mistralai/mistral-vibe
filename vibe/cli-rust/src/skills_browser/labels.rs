@@ -25,13 +25,22 @@ pub const SHADOWED: &str = "(shadowed)";
 pub const ALWAYS_NEWEST: &str = "always newest";
 pub const NEWEST: &str = "(latest)";
 pub const ENABLED: &str = "Enabled";
-pub const REMOVE: &str = "Remove";
+pub const DISABLED: &str = "Disabled";
 pub const ADD: &str = "Add to My Skills";
-/// An armed removal's prompt around the key that confirms it, like `/resume`'s delete.
-pub const REMOVE_AGAIN: (&str, &str) = ("Press ", " again to remove");
+pub const STATUS: &str = "Status";
+pub const SOURCE: &str = "Source";
+pub const SCOPE: &str = "Scope";
+pub const FILE: &str = "File";
+pub const LATEST_LABEL: &str = "Latest";
+pub const NO_DESCRIPTION: &str = "No description";
+pub const BODY_RULE: &str = "SKILL.md";
 pub const PLUGIN_LOCK: &str = "Plugin skills are managed via /plugins.";
 pub const BUSY: &str = "Wait for the current change to finish.";
 pub const LOADING: &str = "Loading skills";
+pub const NEXT_TURN: &str = crate::thinking_picker::PARKED_MESSAGE;
+pub const FAILED_TO_LOAD: &str = "Failed to load";
+pub const NEW_SKILL: &str = "/vibe:skill-creator Create a new skill: ";
+pub const DRAFT_KEPT: &str = "Send or clear your draft first; n would replace it.";
 
 /// The Shared tab's note when it lists nothing.
 pub fn shared_note(state: &State) -> &'static str {
@@ -43,15 +52,6 @@ pub fn shared_note(state: &State) -> &'static str {
         "Could not load the shared skills catalog"
     } else {
         "No shared skills to add"
-    }
-}
-
-/// `yes` or `no`.
-pub fn yes_no(on: bool) -> &'static str {
-    if on {
-        "yes"
-    } else {
-        "no"
     }
 }
 
@@ -79,6 +79,31 @@ pub fn opening(name: &str) -> String {
 /// The spinner while a skill is removed from every scope.
 pub fn removing(name: &str) -> String {
     format!("Removing {name}")
+}
+
+/// The spinner while a local skill's folder is deleted.
+pub fn deleting(name: &str) -> String {
+    format!("Deleting {name}")
+}
+
+/// Said once a shared skill is removed, and how to bring it back.
+pub fn removed(name: &str) -> String {
+    format!("Removed {name} from My Skills. Add it again from Shared.")
+}
+
+/// The confirmation's question and what deleting does.
+pub fn delete_question(name: &str) -> String {
+    format!("Delete the skill {name}?")
+}
+
+pub fn delete_warning(path: &str, linked: bool) -> String {
+    let folder = std::path::Path::new(path)
+        .parent()
+        .map_or(path.into(), |dir| dir.display().to_string());
+    match linked {
+        true => format!("This removes the link {folder}; the folder it points at is kept."),
+        false => format!("This deletes {folder} and every file in it. It cannot be undone."),
+    }
 }
 
 /// The spinner while a skill is added to My Skills, one import per scope.
@@ -237,7 +262,7 @@ pub fn unpin(page: &Page, scope: SkillScope) -> String {
 /// Why the picker's last scope cannot be left.
 pub fn unpin_refused(page: &Page) -> &'static str {
     if page.subject.installed() {
-        "the only pin; Remove deletes the skill"
+        "the only pin; r removes the skill"
     } else {
         "Add to My Skills needs a scope"
     }

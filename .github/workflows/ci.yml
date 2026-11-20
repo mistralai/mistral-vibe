@@ -32,10 +32,18 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # rust-toolchain.toml pins the version every CI and dev machine uses.
+      - name: Read the pinned Rust toolchain
+        id: rust
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.channel }}
+          # The cli-rust-lint hook runs `cargo fmt --check` and clippy.
+          components: rustfmt, clippy
 
       - name: Sync dependencies
         run: uv sync --all-extras
@@ -81,10 +89,17 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # rust-toolchain.toml pins the version every CI and dev machine uses.
+      - name: Read the pinned Rust toolchain
+        id: rust
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.channel }}
+          components: rustfmt, clippy
 
       - name: Sync dependencies
         run: uv sync --all-extras
@@ -183,10 +198,17 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # rust-toolchain.toml pins the version every CI and dev machine uses.
+      - name: Read the pinned Rust toolchain
+        id: rust
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.channel }}
+          components: rustfmt, clippy
 
       - name: Build wheel
         shell: bash

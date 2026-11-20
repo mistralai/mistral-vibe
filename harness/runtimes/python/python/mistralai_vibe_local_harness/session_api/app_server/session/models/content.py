@@ -20,8 +20,9 @@ from pydantic import (
     model_validator,
 )
 
+from ....session_values import EXPERIMENTAL
 from .base import SessionModel, read_unknown_variant, write_unknown_variant
-from .common import Uri
+from .common import EncryptedValue, Uri
 
 # Open: a newer Runtime may name an audience this reader does not know yet.
 type ContentAudience = Literal["user", "assistant"] | str
@@ -252,6 +253,22 @@ def sniff_image_media_type(data: bytes) -> str | None:
     return None
 
 
+class EncryptedContentBlock(SessionModel):
+    """A content block of an encrypted Session, with its content sealed.
+
+    The client sends it instead of a block, such as a block of a user message. ``encrypted`` holds
+    the whole block as JSON, ``annotations`` and ``meta`` included. The worker decrypts it before a
+    Turn reads it: a Turn refuses a block that is still sealed.
+
+    This model is experimental: a minor release can change it without a compatibility path.
+    """
+
+    model_config = ConfigDict(json_schema_extra=EXPERIMENTAL)
+
+    type: Literal["encrypted"] = "encrypted"
+    encrypted: EncryptedValue
+
+
 class UnknownContentBlock(SessionModel):
     """A content block of a type added after your SDK version.
 
@@ -295,6 +312,7 @@ type ContentBlock = Annotated[
     | Annotated[AudioContentBlock, Tag("audio")]
     | Annotated[ResourceLinkContentBlock, Tag("resource_link")]
     | Annotated[EmbeddedResourceContentBlock, Tag("embedded_resource")]
+    | Annotated[EncryptedContentBlock, Tag("encrypted")]
     | Annotated[UnknownContentBlock, Tag("unknown")],
     Discriminator(_content_block_variant),
 ]
@@ -328,6 +346,10 @@ def refuse_unsupported_blocks(
     for block in blocks:
         if isinstance(block, UnknownContentBlock):
             raise ValueError(f"content block type {block.original_type!r} is not supported")
+        if isinstance(block, EncryptedContentBlock):
+            # The worker decrypts this block. A Turn refuses it while it is still sealed
+            # (``to_core_content``).
+            continue
         if block._core_origin is not None:
             # Read from the Turn, so the Turn runs it; ``to_core_content`` refuses it if changed.
             continue
@@ -347,7 +369,7 @@ AUDIO_NOT_SUPPORTED = "audio content is not supported yet"
 def drop_refused_metadata(block: ContentBlock) -> ContentBlock:
     """Return ``block`` without the annotations or ``meta`` that ``refuse_unsupported_blocks``
     refuses, for a client that dropped them before the Session checked them."""
-    if isinstance(block, UnknownContentBlock):
+    if isinstance(block, UnknownContentBlock | EncryptedContentBlock):
         return block
     update: dict[str, object] = {}
     if _annotations_refusal(block.annotations) is not None:

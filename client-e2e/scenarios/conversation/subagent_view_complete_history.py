@@ -61,7 +61,8 @@ timeline: Timeline = [
     turn_completed(),
     {"release_after": 6},
     resize(80, 120),  # tall enough to show the whole child transcript at once
-    "\x1b[B",  # Down — focus the list on the Main row
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the subagent list on the Main row
     "\x1b[B",  # Down — highlight the child row
     "\r",  # Enter — tail read, then the older page merged ahead of it
 ]

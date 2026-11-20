@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use super::bottom_app::Kind;
 use super::question_layout::{chrome_gaps, draw_box, visible_folds, Row};
 use super::question_other::{self, other_rows};
-use super::question_rows::{help_row, option_prefix, style_marker, submit_row};
+use super::question_rows::{help_rows, option_prefix, style_marker, submit_row};
 use super::theme;
 use crate::app::App;
 use crate::question_app::{
@@ -157,7 +157,7 @@ fn rows(app: &App, width: usize) -> (Vec<Row>, OptionRows, ChromeRows, FoldRows)
         push_wrapped(&mut rows, &mut folds, note, footer_note_style(), width);
     }
     rows.push(Vec::new());
-    rows.push(help_row(app));
+    rows.extend(help_rows(app, width as u16));
     option_rows.resize(rows.len(), None);
     (rows, option_rows, chrome, folds)
 }

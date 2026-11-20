@@ -1,4 +1,4 @@
-//! Shift+Tab moves back wherever Tab moves through something, and cycles agents elsewhere.
+//! Shift+Tab moves back wherever Tab moves through something, and cycles approval policies elsewhere.
 
 use std::sync::Arc;
 
@@ -25,10 +25,11 @@ fn ready() -> App {
     let mut app = App::default();
     vibe_rs::agents::apply_runtime(
         &mut app,
-        &json!({"runtime": {"activeAgent": {"name": "default", "displayName": "default"},
-        "agents": [
-            {"name": "default", "displayName": "default", "agentType": "agent"},
-            {"name": "plan", "displayName": "plan", "agentType": "agent"},
+        &json!({"runtime": {
+        "activeApprovalPolicy": {"name": "ask", "displayName": "ask"},
+        "approvalPolicies": [
+            {"name": "ask", "displayName": "ask"},
+            {"name": "accept-edits", "displayName": "accept-edits"},
         ]}}),
     );
     app.session.session_id = Some("session".into());
@@ -37,15 +38,15 @@ fn ready() -> App {
 }
 
 #[tokio::test]
-async fn shift_tab_cycles_agents_where_tab_navigates_nothing() {
+async fn shift_tab_cycles_approval_policies_where_tab_navigates_nothing() {
     let mut app = ready();
     assert!(!tab_navigates(&app));
     assert_eq!(
         handle_priority_key(&mut app, &Arc::new(Client::stub()), back_tab()),
         Some(false)
     );
-    assert_eq!(app.agents.desired.as_deref(), Some("plan"));
-    // The loop list takes no Tab, so Shift+Tab still switches agents over it.
+    assert_eq!(app.agents.desired.as_deref(), Some("accept-edits"));
+    // The loop list takes no Tab, so Shift+Tab still switches policies over it.
     let mut app = ready();
     loops::open(&mut app);
     assert!(!tab_navigates(&app));

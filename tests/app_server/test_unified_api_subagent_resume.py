@@ -203,11 +203,11 @@ async def test_a_resumed_root_lists_a_subagent_it_left_running(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A stored root whose subagent "researcher" of type "reviewer" was
-        still running when the first Host shut down, which cancelled its Turn.
+        still waiting on its model when the first Host shut down.
     *Do*: Resume the root on a new Host, read it, then subscribe to it.
-    *Assert*: The stored record still says running, but the read and the
-        subscription list the subagent with its name, its type and the failed
-        status of its own Session, and the root references it.
+    *Assert*: The read and the subscription list the subagent with its name,
+        its type and the running status of its own Session, which carries its
+        Turn on, and the root references it.
     """
     # Prepare
     stored = await _store_root_with_subagent(tmp_path, monkeypatch, process_services)
@@ -215,12 +215,12 @@ async def test_a_resumed_root_lists_a_subagent_it_left_running(
 
     async with _resumed(tmp_path, stored.root_id, process_services) as adapter:
         # Do
-        read, subscribed = await _listed(adapter, settled_status="failed")
+        read, subscribed = await _listed(adapter, settled_status="running")
 
         # Assert
         for listed in (read, subscribed):
             assert [
                 (child.id, child.name, child.agent_type, child.status.type)
                 for child in listed
-            ] == [(stored.child_id, SUBAGENT, AGENT_TYPE, "failed")]
+            ] == [(stored.child_id, SUBAGENT, AGENT_TYPE, "running")]
         assert adapter.references_child(stored.child_id)

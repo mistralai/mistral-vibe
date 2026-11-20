@@ -65,7 +65,9 @@ fn benchmark(options: &Options) -> Result<serde_json::Value, String> {
             let serialized =
                 serde_json::to_string(checkpoint).map_err(|error| error.to_string())?;
             let decoded = crate::core::decode_checkpoint(&serialized)?;
-            engine.restore(config(index), decoded, 0, None)
+            engine
+                .restore(config(index), decoded, 0, None)
+                .map_err(|error| error.to_string())
         })
         .collect::<Result<Vec<_>, String>>()?;
     let restore_elapsed = restore_started.elapsed();

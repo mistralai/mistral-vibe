@@ -1,3 +1,4 @@
+mod guidance;
 mod settings;
 mod system;
 

@@ -55,6 +55,12 @@ def system_trust_store_enabled() -> bool:
 def build_ssl_context() -> ssl.SSLContext:
     if _use_system_trust_store:
         ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        try:
+            ctx.load_verify_locations(cafile=certifi.where())
+        except (OSError, ssl.SSLError):
+            from vibe.observability.logging import logger
+
+            logger.warning("Failed to load the certifi CA bundle")
     else:
         ctx = ssl.create_default_context(cafile=certifi.where())
         # Match the Python 3.13+ defaults on 3.12: strict RFC 5280 checks, and

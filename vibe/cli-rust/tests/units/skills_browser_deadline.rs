@@ -11,7 +11,11 @@ use vibe_rs::server::Client;
 use vibe_rs::skills_browser;
 use vibe_rs::skills_browser::model::Body;
 
-use crate::skills_browser_support::{next, opened, press, shared, shown_body};
+use vibe_rs::skills_browser::{Event, Opening};
+
+use crate::skills_browser_support::{
+    catalog_row, highlight, next, opened, press, shared, shown_body, versions,
+};
 
 #[tokio::test(start_paused = true)]
 async fn a_body_that_never_answers_fails_after_thirty_seconds_and_the_next_is_fetched() {
@@ -21,8 +25,17 @@ async fn a_body_that_never_answers_fails_after_thirty_seconds_and_the_next_is_fe
     app.command_tx = Some(events);
     let (client, mut frames) = Client::stub_silent();
     let client = Arc::new(client);
+    highlight(&mut app, &catalog_row("id-deploy"));
+    app.skills_browser.opening = Some(Opening::Page {
+        row: catalog_row("id-deploy"),
+        label: String::new(),
+    });
     let start = Instant::now();
-    press(&mut app, &client, KeyCode::Tab);
+    let page = Event::Page {
+        row: catalog_row("id-deploy"),
+        versions: Ok(versions()),
+    };
+    skills_browser::apply_event(&mut app, &client, page);
     let first = next(&mut frames).await;
     assert_eq!(first.0, "skills/detail");
     let late = tokio::time::timeout(Duration::from_secs(60), delivered.recv());
@@ -38,11 +51,7 @@ async fn a_body_that_never_answers_fails_after_thirty_seconds_and_the_next_is_fe
     skills_browser::apply_event(&mut app, &client, *event);
     let failed = Body::Failed("skills/detail timed out".to_owned());
     assert_eq!(shown_body(&app), Some(failed));
-    press(&mut app, &client, KeyCode::Char('j'));
+    press(&mut app, &client, KeyCode::Enter);
     let second = next(&mut frames).await;
-    assert_eq!(second.0, "skills/detail");
-    assert_ne!(
-        second.1["skillId"], first.1["skillId"],
-        "the next row's body is asked for"
-    );
+    assert_eq!(second.0, "skills/detail", "the next screen asks again");
 }

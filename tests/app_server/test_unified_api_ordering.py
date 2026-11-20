@@ -57,7 +57,7 @@ from vibe.app_server.models import (
     TurnUserInputEntry,
 )
 from vibe.app_server.protocol import (
-    AgentSwitchParams,
+    ApprovalPolicySwitchParams,
     PageRequest,
     SessionCompactParams,
     SessionReadParams,
@@ -198,12 +198,12 @@ async def test_a_read_replies_with_the_cursor_of_the_batch_holding_its_bookmark(
 
 
 @pytest.mark.asyncio
-async def test_an_agent_switch_reaches_the_client_with_the_agent_it_picked(
+async def test_a_policy_switch_reaches_the_client_with_the_policy_it_picked(
     tmp_path: Path, model_gate: asyncio.Event, process_services: ProcessServices
 ) -> None:
     """*Prepare*: A subscribed adapter whose events are forwarded, after one Turn.
-    *Do*: Switch the agent twice, flushing events after each switch.
-    *Assert*: After each switch, the last ``SessionUpdated`` carries the agent
+    *Do*: Switch the approval policy twice, flushing events after each switch.
+    *Assert*: After each switch, the last ``SessionUpdated`` carries the policy
         just picked, not the one picked before it.
     """
     # Prepare
@@ -211,19 +211,19 @@ async def test_an_agent_switch_reaches_the_client_with_the_agent_it_picked(
         adapter = harness.adapter
         async with forwarding(harness) as forwarded:
             await _answer_one_turn(adapter, forwarded)
-            for agent_name in ("auto-approve", "accept-edits"):
+            for policy in ("auto-approve", "accept-edits"):
                 # Do
-                await adapter.switch_agent(
-                    AgentSwitchParams(
-                        session_id=adapter.session_id, agent_name=agent_name
+                await adapter.switch_approval_policy(
+                    ApprovalPolicySwitchParams(
+                        session_id=adapter.session_id, approval_policy=policy
                     )
                 )
                 await adapter.flush_events()
 
                 # Assert
                 updates = _of_type(forwarded, SessionUpdated)
-                assert updates[-1].session.agent is not None
-                assert updates[-1].session.agent.name == agent_name
+                assert updates[-1].session.approval_policy is not None
+                assert updates[-1].session.approval_policy.name == policy
 
 
 @pytest.mark.asyncio

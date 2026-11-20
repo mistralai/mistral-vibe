@@ -10,10 +10,12 @@ import os
 from pathlib import Path
 import shutil
 
+from vibe.app_server._storage_usage.rules import frees_worktree
 from vibe.app_server.protocol import (
     StorageArchiveSuggestion,
     StorageDiskSpace,
     StorageUsageSnapshot,
+    StorageWorktreeUsage,
 )
 from vibe.core.utils.file_lock import acquire_file_lock, release_file_lock
 
@@ -158,26 +160,95 @@ def archive_suggestion(
     ]
     chosen = set(suggested)
     archived = {row.session_id for row in snapshot.sessions if row.archived}
-    reclaimable = sum(
-        worktree.bytes
+    freed = [
+        worktree
         for worktree in snapshot.worktrees
-        if worktree.bytes is not None
-        and not worktree.leftover
+        if not worktree.leftover
         and worktree.session_ids
         and all(item in chosen or item in archived for item in worktree.session_ids)
         and any(item in chosen for item in worktree.session_ids)
-    )
+    ]
+    reclaimable, at_least = _sum_sizes(freed)
     return StorageArchiveSuggestion(
         inactive_days=SUGGEST_AFTER_DAYS,
         session_ids=suggested,
         reclaimable_bytes=reclaimable,
+        reclaimable_at_least=at_least,
     )
+
+
+def delete_suggestion(
+    snapshot: StorageUsageSnapshot,
+    open_ids: set[str],
+    never_suggested: set[str],
+    now_ms: int,
+) -> StorageArchiveSuggestion:
+    """Archived sessions not open and idle for 30 days or more, and the space
+    deleting them all would free: their histories, and each worktree no
+    session would still use once they are gone, as a delete removes it.
+    """
+    cutoff = now_ms - SUGGEST_AFTER_DAYS * _DAY_MS
+    rows = [
+        row
+        for row in snapshot.sessions
+        if row.archived
+        and row.session_id not in open_ids
+        and row.session_id not in never_suggested
+        and row.last_activity_at <= cutoff
+    ]
+    chosen = {row.session_id for row in rows}
+    worktrees, at_least = _sum_sizes(_freed_worktrees(snapshot, chosen))
+    return StorageArchiveSuggestion(
+        inactive_days=SUGGEST_AFTER_DAYS,
+        session_ids=[row.session_id for row in rows],
+        reclaimable_bytes=sum(row.history_bytes for row in rows) + worktrees,
+        reclaimable_at_least=at_least,
+    )
+
+
+def delete_bytes(snapshot: StorageUsageSnapshot, session_id: str) -> tuple[int, bool]:
+    """What deleting ``session_id`` alone frees: its history, and each
+    worktree no other session claims, which the delete removes. The flag is
+    true when one of those worktrees is not measured yet, so the number is a
+    lower bound.
+    """
+    row = next(
+        (item for item in snapshot.sessions if item.session_id == session_id), None
+    )
+    if row is None:
+        return 0, False
+    worktrees, at_least = _sum_sizes(_freed_worktrees(snapshot, {session_id}))
+    return row.history_bytes + worktrees, at_least
+
+
+def _freed_worktrees(
+    snapshot: StorageUsageSnapshot, deleting: set[str]
+) -> list[StorageWorktreeUsage]:
+    return [
+        worktree
+        for worktree in snapshot.worktrees
+        if frees_worktree(worktree.session_ids, deleting)
+    ]
+
+
+def _sum_sizes(worktrees: Iterable[StorageWorktreeUsage]) -> tuple[int, bool]:
+    """The measured sizes, and whether one is not measured yet."""
+    total = 0
+    at_least = False
+    for worktree in worktrees:
+        if worktree.bytes is None:
+            at_least = True
+        else:
+            total += worktree.bytes
+    return total, at_least
 
 
 __all__ = [
     "LOW_DISK_CAP_BYTES",
     "SUGGEST_AFTER_DAYS",
     "archive_suggestion",
+    "delete_bytes",
+    "delete_suggestion",
     "disk_space",
     "low_disk_threshold",
     "open_sessions",

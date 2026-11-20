@@ -254,6 +254,7 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
         }
         MouseTarget::Trust => app.trust.scroll = position,
         MouseTarget::ReleaseNotes => app.release_notes.scroll = position,
+        MouseTarget::CodePreview => crate::code_preview::scroll_to(app, position),
         MouseTarget::ProxySetup => {
             app.proxy_setup.scroll = position;
             app.proxy_setup.free_scroll = true;

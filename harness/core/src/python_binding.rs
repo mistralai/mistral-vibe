@@ -5,6 +5,7 @@ use pyo3::prelude::*;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::core::RestoreError;
 use crate::engine::HarnessEngine;
 use crate::engine::SHARED_ENGINE;
 use crate::engine::SessionHandle;
@@ -75,7 +76,7 @@ impl PyHarnessSession {
                     engine.restore(config, checkpoint, resume_input_id, moved_from)
                 }
             })
-            .map_err(PyValueError::new_err)?;
+            .map_err(|error| restore_error(py, error))?;
         Ok(Self {
             engine,
             handle: Some(handle),
@@ -154,6 +155,8 @@ pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyHarnessSession>()?;
     module.add_function(wrap_pyfunction!(hook_tool_catalog, module)?)?;
     module.add_function(wrap_pyfunction!(direct_tool_key, module)?)?;
+    module.add_function(wrap_pyfunction!(direct_tool_keys, module)?)?;
+    module.add_function(wrap_pyfunction!(core_tool_names, module)?)?;
     module.add_function(wrap_pyfunction!(process_tools_timeout_advice, module)?)?;
     module.add_function(wrap_pyfunction!(process_tools_shell_guidance, module)?)?;
     module.add_function(wrap_pyfunction!(restored_bash_call, module)?)?;
@@ -242,6 +245,30 @@ fn direct_tool_key(config_json: &str, name: &str) -> PyResult<Option<String>> {
         .transpose()
 }
 
+/// `direct_tool_key` for each of `names`, in order, decoding the config and
+/// building the routes once. A Runtime uses it to name every tool a model call
+/// offers without paying for the config once per tool.
+#[pyfunction]
+fn direct_tool_keys(config_json: &str, names: Vec<String>) -> PyResult<Vec<Option<String>>> {
+    let config = decode_json(config_json, "harness config").map_err(PyValueError::new_err)?;
+    crate::core::direct_tool_keys(&config, &names)
+        .into_iter()
+        .map(|key| {
+            key.map(|key| encode_json(&key).map_err(PyValueError::new_err))
+                .transpose()
+        })
+        .collect()
+}
+
+/// The model-facing names of the tools Core runs itself under the config. A
+/// Runtime uses them to leave such a call out of history as soon as the model
+/// starts it, before Core sees the call.
+#[pyfunction]
+fn core_tool_names(config_json: &str) -> PyResult<Vec<&'static str>> {
+    let config = decode_json(config_json, "harness config").map_err(PyValueError::new_err)?;
+    Ok(crate::core::core_tool_names(&config))
+}
+
 /// What ends the note on a bash command stopped at its timeout, or `None`
 /// where the process tools are not available; see `background_advice` on
 /// `CommandEnvironment`. `command_environment` is its `mode`.
@@ -279,6 +306,19 @@ fn background_advice(
         serde_json::from_value(serde_json::json!({ "mode": command_environment }))
             .map_err(|error| PyValueError::new_err(format!("command environment: {error}")))?;
     Ok(environment.background_advice(background_processes))
+}
+
+fn restore_error(py: Python<'_>, error: RestoreError) -> PyErr {
+    match error {
+        RestoreError::Invalid(detail) => PyValueError::new_err(detail),
+        RestoreError::InvalidConfiguration { field, detail } => {
+            let error = PyValueError::new_err(detail);
+            if let Err(attribute_error) = error.value(py).setattr("field", field) {
+                return attribute_error;
+            }
+            error
+        }
+    }
 }
 
 fn decode_json<'a, T: Deserialize<'a>>(value: &'a str, label: &str) -> Result<T, String> {

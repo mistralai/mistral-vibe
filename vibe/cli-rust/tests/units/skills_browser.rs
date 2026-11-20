@@ -113,7 +113,7 @@ fn the_filter_matches_name_or_description_in_each_tab_and_the_tabs_count_them() 
     assert!(rows.contains(&installed_row("lint")) && !rows.contains(&installed_row("pdf")));
     let labels: Vec<String> = list::tabs(&app.skills_browser)
         .into_iter()
-        .map(|(_, label)| label)
+        .map(|(_, label)| label.text())
         .collect();
     assert_eq!(
         labels,
@@ -144,7 +144,7 @@ fn the_list_opens_before_the_catalog_and_shared_fills_when_it_answers() {
     let mut app = App::default();
     registry_on(&mut app);
     let installed = pins(vec![registry("deploy", "global", 2, None)]);
-    skills_browser::apply_event(&mut app, &client, Event::Opened(Ok(installed)));
+    skills_browser::apply_event(&mut app, &client, Event::Opened(Ok(installed.into())));
     press(&mut app, &client, KeyCode::Tab);
     let loading = [Row::Note("Loading shared skills")];
     assert_eq!(app.skills_browser.rows(), loading);
@@ -177,27 +177,27 @@ fn the_footer_offers_only_what_the_highlighted_row_does() {
     let pinned = registry("deploy", "global", 2, None);
     let mut app = opened(vec![off, locked, pinned], Some(shared()));
     let footer = |app: &App| help(&app.skills_browser);
-    let (view, add) = ((key::ENTER, action::VIEW), (key::ENTER, action::ADD));
+    let (view, add) = ((key::ENTER, action::VIEW), ("a", action::ADD));
     let (enable, disable) = ((key::SPACE, action::ENABLE), (key::SPACE, action::DISABLE));
-    let remove = ("d", action::REMOVE);
-    let tab = (key::TAB, action::SWITCH_TAB);
+    let remove = ("r", action::REMOVE);
+    let tab = (key::TAB_LEFT_RIGHT, action::SWITCH_TAB);
     let with = |verbs: &[(&'static str, &'static str)]| {
-        let tail = [tab, hints::SEARCH, hints::CLOSE];
+        let tail = [("n", action::NEW), tab, hints::SEARCH, hints::CLOSE];
         [[hints::NAVIGATE].as_slice(), verbs, &tail].concat()
     };
+    assert_eq!(footer(&app), with(&[view, disable, remove]));
+    press(&mut app, &client, KeyCode::Down);
     assert_eq!(footer(&app), with(&[view, enable]));
     press(&mut app, &client, KeyCode::Down);
     assert_eq!(footer(&app), with(&[view]), "a locked skill has no switch");
-    press(&mut app, &client, KeyCode::Down);
-    assert_eq!(footer(&app), with(&[view, disable, remove]));
     press(&mut app, &client, KeyCode::Tab);
-    assert_eq!(footer(&app), with(&[add]));
+    assert_eq!(footer(&app), with(&[view, add]));
     press(&mut app, &client, KeyCode::Char('/'));
     let leave = (key::ESC, action::LEAVE_SEARCH);
     assert_eq!(
         footer(&app),
-        [(key::ARROWS, action::NAVIGATE), add, leave],
-        "Space, d and Tab stay with the field"
+        [(key::ARROWS, action::NAVIGATE), view, leave],
+        "the letters, Space and Tab stay with the field"
     );
 }
 
@@ -277,7 +277,7 @@ async fn show_reads_the_installed_skills_with_the_spinner_on() {
 }
 
 #[test]
-fn a_narrow_footer_drops_navigation_then_tab_and_still_ends_with_esc() {
+fn a_narrow_footer_drops_navigation_then_tab_then_new_and_still_ends_with_esc() {
     let mut app = opened(vec![registry("deploy", "global", 2, None)], Some(shared()));
     for width in [80, 64] {
         let screen = rows(&render(width, 30, |frame| app.draw(frame)));

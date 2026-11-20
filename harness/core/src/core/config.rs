@@ -7,6 +7,7 @@ use crate::core::capabilities::PluginContextDefinition;
 use crate::core::features::background_processes;
 use crate::core::features::compaction::CompactionPolicy;
 use crate::core::features::file_system;
+use crate::core::features::instructions;
 use crate::core::features::large_output;
 pub(crate) use crate::core::features::notifications::Settings as NotificationSettings;
 pub(crate) use crate::core::features::output_limit_recovery::Settings as OutputLimitRecovery;
@@ -92,9 +93,9 @@ impl ToolGroupDefinition {
 #[serde(deny_unknown_fields)]
 pub(crate) struct TurnSettings {
     pub max_iterations: Option<u32>,
-    /// How many model replies in a row may fail the same tool call the same way before Core
-    /// completes the Turn with `repeated_tool_failure`. `None` sets no limit. Omitted when
-    /// unset, so settings without it serialize unchanged.
+    /// How many tool calls in a row, counting identical parallel calls one by one, may fail the
+    /// same tool call the same way before Core completes the Turn with `repeated_tool_failure`.
+    /// `None` sets no limit. Omitted when unset, so settings without it serialize unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_identical_tool_failures: Option<u32>,
     #[serde(default, skip_serializing_if = "OutputLimitRecovery::is_disabled")]
@@ -112,6 +113,10 @@ pub(crate) struct ContextSettings {
     /// model's `model_facts.input_modalities`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_model_input_modalities: Option<Vec<InputModality>>,
+    /// The bound on the live instructions, which every compaction carries.
+    /// Absent means the defaults.
+    #[serde(default, skip_serializing_if = "instructions::Settings::is_default")]
+    pub instructions: instructions::Settings,
 }
 
 impl ContextSettings {
@@ -130,6 +135,7 @@ impl ContextSettings {
 
     fn validate(&self) -> Result<(), CoreError> {
         self.model_facts.validate()?;
+        self.instructions.validate()?;
         if let Some(modalities) = &self.compaction_model_input_modalities {
             validate_input_modalities(
                 "settings.context.compaction_model_input_modalities",

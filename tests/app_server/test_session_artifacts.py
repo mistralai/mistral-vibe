@@ -18,6 +18,7 @@ from tests.conftest import build_test_vibe_config
 from tests.stubs.app_server import FakeSessionBackendServices
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from tests.stubs.process_services import fake_process_services
+from vibe.app_server._config_changes import ConfigChanges
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._mcp_auth import MCPAuthenticationService
 from vibe.app_server._plugin_mcp import PluginMCPCatalog
@@ -1208,6 +1209,8 @@ def _artifact_adapter(
         org_config_service=fake_process_services().org_config,
         experiments_service=fake_process_services().experiments,
         model_catalog_service=fake_process_services().model_catalog,
+        keep_awake=fake_process_services().keep_awake,
+        config_changes=ConfigChanges(),
     )
     derivation = UnifiedRuntimeDerivation(
         runtime=cast(Any, object()),

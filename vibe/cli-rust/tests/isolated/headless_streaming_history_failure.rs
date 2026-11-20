@@ -110,6 +110,7 @@ fn headless_options(output: OutputFormat, output_dir: &std::path::Path) -> Headl
         model: None,
         thinking: None,
         agent: None,
+        approval_policy: None,
         auto_approve: false,
         enabled_tools: Vec::new(),
         disabled_tools: Vec::new(),

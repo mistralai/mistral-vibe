@@ -1,13 +1,12 @@
 //! The `/skills` list as styled lines.
 
 use ratatui::style::Style;
-use unicode_width::UnicodeWidthStr;
 
 use super::columns::{
     self, Columns, GAP, INSTALLED_HEADINGS, MARKER_WIDTH, NAME_HEADING, SHARING_GAP,
     SHARING_HEADING, VERSION_HEADING,
 };
-use crate::skills_browser::labels::{self, REMOVE_AGAIN};
+use crate::skills_browser::labels;
 use crate::skills_browser::list::Row;
 use crate::skills_browser::pins::{listed, update};
 use crate::skills_browser::State;
@@ -25,6 +24,11 @@ pub(super) fn lay_out(state: &State, width: usize) -> Vec<VisualLine> {
         let (base, dim) = list_cursor::styles(highlighted);
         let wrapped = match row {
             Row::Note(note) => note_lines(note, base.fg(theme::muted()), width),
+            Row::Broken(index) => broken_lines(state, *index, width),
+            Row::BrokenHeading => vec![
+                Vec::new(),
+                text(&format!("  {}", labels::FAILED_TO_LOAD), dim),
+            ],
             _ => vec![chars(state, row, &columns, base, dim)],
         };
         let option = row.selectable().then_some(index);
@@ -37,17 +41,23 @@ pub(super) fn lay_out(state: &State, width: usize) -> Vec<VisualLine> {
     out
 }
 
-/// How many lines `rows` take `width` wide.
-pub(super) fn height(rows: &[Row], width: usize) -> usize {
-    let lines = |row: &Row| match row {
-        Row::Note(note) => note_lines(note, Style::default(), width).len(),
-        _ => 1,
-    };
-    rows.iter().map(lines).sum()
-}
-
 fn note_lines(note: &str, style: Style, width: usize) -> Vec<Vec<Sc>> {
     wrap_indented(&format!("  {note}"), style, width)
+}
+
+/// `  ✕ file`, then its reason wrapped under it.
+fn broken_lines(state: &State, index: usize, width: usize) -> Vec<Vec<Sc>> {
+    let Some(issue) = state.issues.get(index) else {
+        return Vec::new();
+    };
+    let (base, dim) = list_cursor::styles(false);
+    let mut lines = wrap_indented(
+        &format!("  ✕ {}", issue.file),
+        base.fg(theme::text_error()),
+        width,
+    );
+    lines.extend(wrap_indented(&format!("    {}", issue.message), dim, width));
+    lines
 }
 
 fn chars(state: &State, row: &Row, columns: &Columns, base: Style, dim: Style) -> Vec<Sc> {
@@ -56,7 +66,7 @@ fn chars(state: &State, row: &Row, columns: &Columns, base: Style, dim: Style) -
         Row::CatalogColumns => catalog_heading(columns, dim),
         Row::Installed(name) => installed(state, name, columns, base, dim),
         Row::Catalog(skill_id) => catalog(state, skill_id, columns, base, dim),
-        Row::Note(_) => Vec::new(),
+        Row::Note(_) | Row::Broken(_) | Row::BrokenHeading => Vec::new(),
     }
 }
 
@@ -76,25 +86,20 @@ fn catalog_heading(columns: &Columns, dim: Style) -> Vec<Sc> {
     chars
 }
 
-/// `  ● name  Scope  Source  Version  ● New vN`: ● on, ○ off, colored by whether it is locked; `(shadowed)` when another pin loads its version under another name.
+/// `  ● name  Scope  Source  Version  ● New vN`: ● on, ○ off, colored by whether it is locked, on the cursor bar too so the highlighted row still shows its state; `(shadowed)` when another pin loads its version under another name.
 fn installed(state: &State, name: &str, columns: &Columns, base: Style, dim: Style) -> Vec<Sc> {
     let Some(pin) = listed(state, name) else {
         return Vec::new();
     };
     let glyph = if pin.enabled { "●" } else { "○" };
     let glyph_style = match (pin.locked, pin.enabled) {
-        (true, true) => list_cursor::accent(base, theme::text_warning()),
-        (true, false) => list_cursor::accent(dim, theme::text_warning()),
-        (false, true) => list_cursor::accent(base, list_cursor::current_color()),
+        (true, _) => base.fg(theme::text_warning()),
+        (false, true) => base.fg(list_cursor::current_color()),
         (false, false) => dim,
     };
     let mut chars = text("  ", base);
     chars.extend(text(glyph, glyph_style));
     chars.extend(text(" ", base));
-    if state.removing.as_deref() == Some(name) {
-        chars.extend(armed(&pin.name, columns, base));
-        return chars;
-    }
     chars.extend(text(&list_cursor::padded(&pin.name, columns.name), base));
     chars.extend(cells(&labels::cells(pin), &columns.installed, dim));
     if !pin.active {
@@ -106,32 +111,6 @@ fn installed(state: &State, name: &str, columns: &Columns, base: Style, dim: Sty
         chars.extend(text(&" ".repeat(GAP), base));
         chars.extend(text(&columns::badge(version), badge));
     }
-    chars
-}
-
-/// An armed row: the prompt where the row's values go, else right after the name, else in the name's place, whichever fits first.
-fn armed(name: &str, columns: &Columns, base: Style) -> Vec<Sc> {
-    let prompt = remove_again("d", base);
-    let room = columns
-        .pane
-        .saturating_sub(MARKER_WIDTH + GAP + prompt.len());
-    let shown = match () {
-        _ if columns.name <= room => list_cursor::padded(name, columns.name),
-        _ if name.width() <= room => name.to_owned(),
-        _ => return prompt,
-    };
-    let mut chars = text(&shown, base);
-    chars.extend(text(&" ".repeat(GAP), base));
-    chars.extend(prompt);
-    chars
-}
-
-/// An armed removal in place of a row's values, its `key` styled as a shortcut like `/resume`'s delete.
-pub(super) fn remove_again(key: &str, base: Style) -> Vec<Sc> {
-    let (head, tail) = REMOVE_AGAIN;
-    let mut chars = text(head, base);
-    chars.extend(text(key, list_cursor::accent(base, theme::primary())));
-    chars.extend(text(tail, base));
     chars
 }
 

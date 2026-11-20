@@ -22,7 +22,7 @@ pub(crate) enum TurnStopReason {
     /// output-limit recovery was off, out of retries, or at the Turn's last iteration; the Turn's
     /// output is the cut-off reply, or a hook's replacement of it.
     OutputLimit,
-    /// The newest model replies failed the same tool call the same way as many times in a row as
+    /// The newest tool calls failed the same call the same way as many times in a row as
     /// `settings.turn.max_identical_tool_failures` allows; the Turn's output is a fixed message
     /// that asks the user for a new message.
     RepeatedToolFailure,

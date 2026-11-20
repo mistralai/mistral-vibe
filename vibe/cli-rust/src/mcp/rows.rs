@@ -54,6 +54,7 @@ pub struct SourceRow {
 
 pub struct ToolRow {
     pub name: String,
+    /// The description on one line, whitespace runs collapsed.
     pub description: String,
     pub enabled: bool,
 }
@@ -77,7 +78,7 @@ impl Row {
 /// The rows of the current view: the source list, or one source's tools.
 pub fn rows(app: &MCPApp) -> Vec<Row> {
     match viewing_source(app) {
-        Some(source) => detail_rows(app, source),
+        Some(source) => super::detail::rows(app, source),
         None => list_rows(&app.state, &app.search.query),
     }
 }
@@ -274,59 +275,4 @@ fn add_source_group(
             blocked,
         }));
     }
-}
-
-fn detail_rows(app: &MCPApp, source: &MCPSourceSummary) -> Vec<Row> {
-    let state = &app.state;
-    if let Some(error) = &source.error {
-        return vec![
-            Row::Note("Failed to bootstrap".to_owned()),
-            Row::Detail(error.clone()),
-        ];
-    }
-    if scope::blocked(state, source) {
-        return vec![scope::blocked_hint(source)];
-    }
-    match source.status {
-        // The auth flows own these views; the browser shows no options for them.
-        MCPSourceStatus::NeedsAuth => return Vec::new(),
-        MCPSourceStatus::NeedsConnect => {
-            let note = if app.connecting.as_ref() == Some(&source.name) {
-                "Connecting..."
-            } else {
-                "Not connected"
-            };
-            return vec![Row::Note(note.to_owned())];
-        }
-        MCPSourceStatus::NeedsSetup => {
-            return vec![Row::Hint {
-                before: "Set up credentials in the Mistral dashboard, then press ".to_owned(),
-                key: "r".to_owned(),
-                after: " to refresh.".to_owned(),
-            }]
-        }
-        _ => {}
-    }
-    if source.tools.is_empty() {
-        if source.kind == MCPSourceKind::Server && source.status == MCPSourceStatus::Unavailable {
-            let mut rows = vec![Row::Note("Tool discovery failed".to_owned())];
-            if let Some(error) = state.discovery_errors.get(&source.name) {
-                rows.push(Row::Detail(error.clone()));
-            }
-            return rows;
-        }
-        return vec![Row::Note("No tools discovered".to_owned())];
-    }
-    let mut tools: Vec<_> = source.tools.iter().collect();
-    tools.sort_by(|a, b| a.name.cmp(&b.name));
-    tools
-        .into_iter()
-        .map(|tool| {
-            Row::Tool(ToolRow {
-                name: tool.name.clone(),
-                description: tool.description.clone(),
-                enabled: tool.enabled,
-            })
-        })
-        .collect()
 }

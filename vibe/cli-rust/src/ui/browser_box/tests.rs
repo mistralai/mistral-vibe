@@ -3,10 +3,19 @@ use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use super::{chrome, draw_tabs, fit, halves, pane, GUTTER, SCROLLBAR_GUTTER};
+use crate::hints;
+use crate::tab_bar::Label;
 
 #[test]
 fn the_search_row_costs_one_more_row_of_chrome() {
-    assert_eq!((chrome(false), chrome(true)), (6, 7));
+    let help = [hints::SELECT, hints::CLOSE];
+    assert_eq!((chrome(false, 80, &help), chrome(true, 80, &help)), (6, 7));
+}
+
+#[test]
+fn a_help_too_wide_for_the_box_wraps_into_more_rows_of_chrome() {
+    let help = [hints::NAVIGATE, hints::SELECT, hints::SEARCH, hints::CLOSE];
+    assert_eq!(chrome(false, 30, &help), 6 + 2);
 }
 
 #[test]
@@ -37,7 +46,8 @@ fn an_odd_width_gives_its_extra_column_to_the_right_half() {
 
 #[test]
 fn a_title_row_too_narrow_for_every_tab_keeps_the_open_one() {
-    let tabs = [(0, "Mine".to_owned()), (1, "Shared".to_owned())];
+    let label = |name| Label { name, count: None };
+    let tabs = [(0, label("Mine")), (1, label("Shared"))];
     let mut terminal = Terminal::new(TestBackend::new(22, 3)).unwrap();
     let mut areas = Vec::new();
     terminal

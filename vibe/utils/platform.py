@@ -40,6 +40,14 @@ def is_windows() -> bool:
     return sys.platform == "win32"
 
 
+# The mode for directories only their user may open. On Windows, CPython turns
+# mkdir(mode=0o700) into an ACL for the token's default owner, which is
+# Administrators in an elevated process: the same user, unelevated, then cannot
+# open the directory. Any other mode inherits the user profile's ACL, which is
+# already private.
+PRIVATE_DIRECTORY_MODE: Final = 0o777 if sys.platform == "win32" else 0o700
+
+
 def _is_executable_file(path: Path) -> bool:
     return path.is_file() and (is_windows() or os.access(path, os.X_OK))
 

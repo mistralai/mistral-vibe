@@ -35,6 +35,7 @@ fn options() -> HeadlessOptions {
         model: None,
         thinking: None,
         agent: None,
+        approval_policy: None,
         auto_approve: false,
         enabled_tools: Vec::new(),
         disabled_tools: Vec::new(),

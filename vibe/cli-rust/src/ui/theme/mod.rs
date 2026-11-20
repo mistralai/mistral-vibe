@@ -6,6 +6,8 @@ pub mod color_system;
 mod context;
 pub mod fixed;
 mod markdown;
+pub mod oklab;
+pub mod palette;
 mod registry;
 pub(crate) mod syntax;
 
@@ -16,9 +18,10 @@ pub use markdown::{
     md_table_header, md_widget_code_inline, md_widget_fence_bg, md_widget_marker,
     md_widget_quote_bar,
 };
+pub use palette::channels;
 
 pub use registry::{
-    active, active_index, ansi_background, chip_background, resolve, selection_fg,
+    active, active_index, ansi_background, chip_background, resolve, selection_fg, selection_fg_of,
     set_active_index, ALL, AUTO_NAME,
 };
 
@@ -218,12 +221,9 @@ pub fn gauge_track() -> Color {
     }
 }
 
-/// Scrollbar thumb ($scrollbar) and track ($scrollbar-background).
+/// Scrollbar thumb ($scrollbar).
 pub fn scrollbar() -> Color {
     active().scrollbar
-}
-pub fn scrollbar_bg() -> Color {
-    active().scrollbar_bg
 }
 
 // Blends computed at render time rather than stored in the theme table.

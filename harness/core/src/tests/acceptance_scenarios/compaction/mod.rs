@@ -11,6 +11,7 @@ use crate::core::{InputModality, Message};
 mod check;
 mod cut_off;
 mod image;
+mod instructions;
 mod rebuild;
 mod refusal;
 mod rejected;

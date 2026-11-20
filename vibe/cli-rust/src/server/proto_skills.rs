@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::method;
+use super::{method, ConfigIssue};
 
 /// The registry skill a pin points at, the version it resolves to, and the alias it tracks if any.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -48,6 +48,12 @@ pub struct InstalledSkill {
     /// The pin the agent resolves the name to; a shadowed pin is still listed so it can be managed.
     #[serde(default = "true_by_default")]
     pub active: bool,
+    /// The skill's `SKILL.md`, absent for an older server.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// The listed folder is a link: deleting it drops the link and keeps what it points at.
+    #[serde(default)]
+    pub linked: bool,
 }
 
 impl InstalledSkill {
@@ -68,13 +74,29 @@ impl InstalledSkill {
     pub fn in_scope(&self, scope: SkillScope) -> bool {
         self.scope == scope.as_str()
     }
+
+    /// The file of a skill this machine holds as a folder of its own, which can be opened and deleted.
+    pub fn local_file(&self) -> Option<&str> {
+        (self.source == "local").then_some(self.path.as_deref()?)
+    }
 }
 
-/// A `skills/installed` answer, one entry per pin in server order.
+/// A `skills/installed` answer, one entry per pin in server order, and the skills that failed to load.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct InstalledSkills {
     #[serde(default, deserialize_with = "crate::utils::json::lenient")]
     pub skills: Vec<InstalledSkill>,
+    #[serde(default, deserialize_with = "crate::utils::json::lenient")]
+    pub issues: Vec<ConfigIssue>,
+}
+
+impl From<Vec<InstalledSkill>> for InstalledSkills {
+    fn from(skills: Vec<InstalledSkill>) -> Self {
+        Self {
+            skills,
+            issues: Vec::new(),
+        }
+    }
 }
 
 /// A registry skill the session could import.
@@ -211,6 +233,10 @@ pub enum SkillChange {
         alias: Option<String>,
         scope: SkillScope,
     },
+    /// Deletes the folder of the local skill whose `SKILL.md` is `path`.
+    DeleteLocal {
+        path: String,
+    },
 }
 
 impl SkillChange {
@@ -219,6 +245,7 @@ impl SkillChange {
             Self::SetEnabled { .. } => method::SKILLS_SET_ENABLED,
             Self::Remove { .. } => method::SKILLS_REMOVE,
             Self::Import { .. } => method::SKILLS_IMPORT,
+            Self::DeleteLocal { .. } => method::SKILLS_DELETE_LOCAL,
         }
     }
 }

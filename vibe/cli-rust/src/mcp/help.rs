@@ -2,6 +2,7 @@
 
 use crate::app::App;
 use crate::hints::{self, action, key, Hint};
+use crate::mcp::detail;
 use crate::mcp::rows::{self, Row};
 use crate::search_field;
 
@@ -37,22 +38,21 @@ const DETAIL_VIEW_HELP: &[Hint] = &[
     ("d", action::DISABLE),
     ("e", action::ENABLE),
     ("r", action::REFRESH),
+    hints::SEARCH,
     hints::BACK,
 ];
 const DETAIL_VIEW_HELP_NO_TOOLS: &[Hint] = &[hints::NAVIGATE, ("r", action::REFRESH), hints::BACK];
 
 /// The hint for the current view: list or detail, with or without tools.
 pub fn help_text(app: &App) -> Vec<Hint> {
-    let rows = rows::rows(&app.mcp);
     if app.mcp.viewing_name.is_some() {
-        let has_tools = rows.iter().any(|row| matches!(row, Row::Tool(_)));
-        let help = if has_tools {
-            DETAIL_VIEW_HELP
-        } else {
-            DETAIL_VIEW_HELP_NO_TOOLS
-        };
-        return help.to_vec();
+        if !detail::searchable(&app.mcp) {
+            return DETAIL_VIEW_HELP_NO_TOOLS.to_vec();
+        }
+        let search = &app.mcp.tool_search;
+        return search_field::hints(search.focused, !search.query.is_empty(), DETAIL_VIEW_HELP);
     }
+    let rows = rows::rows(&app.mcp);
     let help = match rows.get(app.mcp.list.selected()) {
         Some(Row::Source(row)) if row.action.is_some() => LIST_VIEW_HELP_AUTH,
         Some(Row::Source(row)) if row.blocked => LIST_VIEW_HELP_BLOCKED,

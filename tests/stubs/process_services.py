@@ -10,11 +10,13 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+import time
 from typing import Any
 
 from vibe.app_server._background_worker import BackgroundWorker
 from vibe.app_server._config_changes import ConfigChanges
 from vibe.app_server._experiments_service import ExperimentsService
+from vibe.app_server._keep_awake import KeepAwake
 from vibe.app_server._mcp_discovery_service import MCPDiscoveryService
 from vibe.app_server._missing_model_warnings import MissingModelWarnings
 from vibe.app_server._model_catalog_service import ModelCatalogService
@@ -24,10 +26,12 @@ from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._skill_shadows import ShadowWarnings
 from vibe.app_server._skill_store_cleanup import SkillStoreCleanup
 from vibe.app_server._storage_usage import StorageUsageService
+from vibe.app_server._vibe_bot import VIBE_BOT_CLIENT_ID_FILE, VibeBotLocalSessions
 from vibe.app_server._worktree_housekeeping import WorktreeHousekeeping
 from vibe.app_server.connector_catalog import SharedConnectorCatalog
 from vibe.core.config.admin_config import ManagedConfig, ManagedConfigResult
 from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
+from vibe.core.paths import VIBE_HOME
 from vibe.core.platform_auth import PlatformCredentialProvider
 from vibe.setup.auth._oidc_tenant import OidcTenantResolver
 
@@ -68,6 +72,23 @@ class FakeOrgConfigServer:
         if not answer:
             return ManagedConfigResult(config=ManagedConfig(state="disabled"))
         return ManagedConfigResult(config=ManagedConfig(state="enabled", toml=answer))
+
+
+def locked_catalog(*model_ids: str) -> ModelCatalogResponse:
+    """A catalog of models the user's plan does not include."""
+    parsed = parse_model_catalog_response({
+        "models": [
+            {
+                "id": model_id,
+                "label": model_id,
+                "capabilities": {"function_calling": True},
+                "requires": {"kind": "higher_plan"},
+            }
+            for model_id in model_ids
+        ]
+    })
+    assert parsed is not None
+    return parsed
 
 
 def runnable_catalog(*model_ids: str) -> ModelCatalogResponse:
@@ -120,20 +141,24 @@ def fake_process_services(
     connector_catalog: SharedConnectorCatalog | None = None,
     experiments: ExperimentsService | None = None,
     model_catalog_server: FakeModelCatalogServer | None = None,
+    clock: Callable[[], float] = time.time,
+    keep_awake: KeepAwake | None = None,
     **org_config: Any,
 ) -> ProcessServices:
-    """``org_config`` goes to ``OrgConfigService`` (policy, first wait...). The
+    """``org_config`` goes to ``OrgConfigService`` (policy, first wait...), as
+    does ``clock``. The
     connector catalog fetches from the bootstrap endpoint unless given: tests
     mock it with ``respx``, and connectors are off by default. So does the
     experiments service: the shared test config keeps telemetry off, so a test
     about experiments turns it on and mocks the eval endpoint. The model
-    catalog fetches from ``model_catalog_server``, offline unless given.
+    catalog fetches from ``model_catalog_server``, offline unless given, and
+    ages what it holds by ``clock`` too.
     """
     server = org_server or FakeOrgConfigServer()
     catalog_server = model_catalog_server or FakeModelCatalogServer()
     background = BackgroundWorker()
     return ProcessServices(
-        org_config=OrgConfigService(fetch=server.fetch, **org_config),
+        org_config=OrgConfigService(fetch=server.fetch, clock=clock, **org_config),
         connector_catalog=connector_catalog or SharedConnectorCatalog(),
         oidc_tenants=OidcTenantResolver(),
         background=background,
@@ -146,11 +171,17 @@ def fake_process_services(
         open_sessions=OpenSessions(),
         storage_usage=StorageUsageService(background),
         config_changes=ConfigChanges(),
+        # Never asks the OS: a test about keeping awake passes its own.
+        keep_awake=keep_awake or KeepAwake(acquire=lambda: None),
+        vibe_bot_sessions=VibeBotLocalSessions(
+            client_id_file=VIBE_HOME.path / VIBE_BOT_CLIENT_ID_FILE
+        ),
         # Looked up per fetch, so a test can patch the server's answers.
         model_catalog=ModelCatalogService(
             fetch=lambda api_base, credentials: catalog_server.fetch(
                 api_base, credentials
-            )
+            ),
+            clock=clock,
         ),
     )
 
@@ -159,5 +190,6 @@ __all__ = [
     "FakeModelCatalogServer",
     "FakeOrgConfigServer",
     "fake_process_services",
+    "locked_catalog",
     "runnable_catalog",
 ]

@@ -275,7 +275,7 @@ async fn run() -> Result<std::process::ExitCode> {
         None => vibe_rs::server::signal::install().context("install signal handlers")?,
     };
     // The probe only queries the terminal, so capture can be turned on later with pixel reports.
-    vibe_rs::mouse::pixels::probe();
+    vibe_rs::terminal_probe::run();
     // The cached setting decides capture from the first frame; each redraw then follows the live config.
     let (mut terminal, mut terminal_guard) = terminal::init(startup_config.enable_mouse_capture)?;
     timings.record("terminal_ready");

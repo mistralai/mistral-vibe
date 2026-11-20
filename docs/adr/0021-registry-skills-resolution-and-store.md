@@ -40,13 +40,16 @@ follow these rules:
   cloud skills without turning on manifest pins. It ranks after every file and
   pin, so it never shadows one; it only replaces a pin of the same skill under
   the same name. A pick whose name another skill holds, even a disabled one,
-  loads as `<name>-cloud`. The session's lease holds the versions it loads, picks
-  included, with the flag on or off, and a reopened session fetches again a
-  picked version a cleanup took. Without the flag a session syncs no manifest
-  but still runs the daily cleanup, once its lease holds what it loads. A
-  refused or failed pick leaves the session on the picks it had. A pick has no
-  toggle in `skills/installed` and stays until the session is
-  deleted; a sandboxed session refuses picks.
+  loads as `<name>-cloud`. The session's lease holds the versions it loads,
+  picks included, with the flag on or off. A reopened session fetches again,
+  after it opens, a picked version a cleanup took; its first turn waits for
+  it, at most 5 seconds, and it loads once it arrives. A download that fails
+  warns the client which picks the session runs without, is tried again after
+  30 s, 2 min and 10 min, and tells the client whether they arrived or not.
+  Without the flag a session syncs no manifest but still runs the daily
+  cleanup, once its lease holds what it loads. A refused or failed pick leaves
+  the session on the picks it had. A pick has no toggle in `skills/installed`
+  and stays until the session is deleted; a sandboxed session refuses picks.
 
 ## Rationale
 

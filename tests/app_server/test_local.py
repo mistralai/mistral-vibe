@@ -1034,14 +1034,14 @@ async def test_config_load_is_bound_to_harness_cwd(
     config_dir = project / ".vibe"
     config_dir.mkdir(parents=True)
     with (config_dir / "config.toml").open("wb") as file:
-        tomli_w.dump({"default_agent": "ask"}, file)
+        tomli_w.dump({"default_approval_policy": "ask"}, file)
     trusted_folders_manager.trust_for_session(project)
     monkeypatch.chdir(tmp_path)
 
     harness_files = HarnessFilesManager(sources=("project",), cwd=project)
 
     loaded = await runtime.build_default_orchestrator(harness_files=harness_files)
-    assert loaded.config.default_agent == "ask"
+    assert loaded.config.default_approval_policy == "ask"
 
     monkeypatch.setenv("VIBE_DEFAULT_AGENT", "lean")
     loaded = await runtime.build_default_orchestrator(harness_files=harness_files)

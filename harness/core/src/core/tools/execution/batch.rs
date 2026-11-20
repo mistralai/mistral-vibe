@@ -431,13 +431,32 @@ enum CoreTool {
 /// programmatic tool calling there is none: `search_tool_functions` and
 /// `run_typescript` fall through to the direct routes and fail as unsupported.
 fn core_tool(tools: ToolContext<'_>, call: &ToolCall) -> Option<CoreTool> {
-    if !tools.programmatic_enabled() {
+    core_tool_named(tools.programmatic_enabled(), &call.name)
+}
+
+/// Each tool Core runs itself, by model-facing name, from the names its feature
+/// offers. Routing and `core_tool_names` both read it, so a name a feature adds
+/// is routed to Core and exported alike.
+fn core_tools() -> impl Iterator<Item = (&'static str, CoreTool)> {
+    tool_discovery::direct_names()
+        .map(|name| (name, CoreTool::ToolDiscovery))
+        .chain(programmatic_tool_calling::direct_names().map(|name| (name, CoreTool::Program)))
+}
+
+fn core_tool_named(programmatic_enabled: bool, name: &str) -> Option<CoreTool> {
+    if !programmatic_enabled {
         return None;
     }
-    if tool_discovery::is_direct_name(&call.name) {
-        return Some(CoreTool::ToolDiscovery);
+    core_tools().find_map(|(core_name, tool)| (core_name == name).then_some(tool))
+}
+
+/// The model-facing names of the tools Core runs itself, so a Runtime can tell
+/// such a call from its name alone.
+pub(crate) fn core_tool_names(programmatic_enabled: bool) -> Vec<&'static str> {
+    if !programmatic_enabled {
+        return Vec::new();
     }
-    programmatic_tool_calling::is_direct_name(&call.name).then_some(CoreTool::Program)
+    core_tools().map(|(name, _)| name).collect()
 }
 
 fn tool_execution_started(turn_id: &str, call_id: &str, executed_by_core: bool) -> Observation {
@@ -949,6 +968,7 @@ pub(crate) fn fail_tool_batch_hook(
 mod tests {
     use super::*;
     use crate::core::testing::*;
+
     #[test]
     fn multiple_model_tool_calls_are_preserved_and_executed_in_order() {
         let mut config = config();

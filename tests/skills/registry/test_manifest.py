@@ -72,6 +72,29 @@ async def test_load_malformed_returns_empty(tmp_path: Path) -> None:
     assert (await _manifest.load(path)).skills == []
 
 
+@pytest.mark.parametrize(
+    ("content", "reason"),
+    [
+        ("this is = = not valid toml [[[", "invalid TOML"),
+        ('[[skills]]\nname = "a"\n', "skills.0.skill_id: Field required"),
+    ],
+)
+def test_read_refuses_a_manifest_it_cannot_parse(
+    tmp_path: Path, content: str, reason: str
+) -> None:
+    path = tmp_path / "skills.toml"
+    path.write_text(content)
+
+    with pytest.raises(_manifest.ManifestReadError) as exc_info:
+        _manifest.read_sync(path)
+
+    assert reason in exc_info.value.reason
+
+
+def test_read_missing_manifest_is_empty(tmp_path: Path) -> None:
+    assert _manifest.read_sync(tmp_path / "nope.toml").skills == []
+
+
 @pytest.mark.asyncio
 async def test_project_manifest_paths_dedups_and_drops_global(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

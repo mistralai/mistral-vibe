@@ -20,7 +20,12 @@ logger = logging.getLogger(__name__)
 @cache
 def build_ssl_context(*, use_system_trust_store: bool = False) -> ssl.SSLContext:
     if use_system_trust_store:
-        return _add_custom_roots(truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        try:
+            context.load_verify_locations(cafile=certifi.where())
+        except (OSError, ssl.SSLError):
+            logger.warning("Failed to load the certifi CA bundle", exc_info=True)
+        return _add_custom_roots(context)
 
     # certifi is layered on top of the platform roots rather than passed as
     # `create_default_context(cafile=...)`: that argument suppresses

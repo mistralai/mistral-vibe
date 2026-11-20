@@ -52,6 +52,7 @@ _COMPARED_METHODS = frozenset({
     "mcp_catalog/logout",
     "mcp_catalog/toggle",
     "session/agent/update",
+    "session/approvalPolicy/update",
     "session/compact",
     "session/shellCommand",
     "session/turn/enqueue",
@@ -130,6 +131,7 @@ def capture_scenario(scenario: Scenario, launch: Launcher = exec_launch) -> Capt
                 (trigger.encode(), reply.encode())
                 for trigger, reply in scenario.exit_responses.items()
             ),
+            typeahead=scenario.typeahead,
         )
         try:
             frames = capture(

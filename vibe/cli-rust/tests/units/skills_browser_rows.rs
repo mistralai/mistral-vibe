@@ -37,7 +37,7 @@ fn the_highlight_stays_on_its_skill_when_a_row_above_goes() {
     let left = vec![pin("b", "local", "global"), pin("c", "local", "global")];
     let event = Event::Changed {
         outcome: Outcome::default(),
-        installed: Ok(pins(left)),
+        installed: Ok(pins(left).into()),
     };
     skills_browser::apply_event(&mut app, &client, event);
     assert_eq!(highlighted(&app), Some(installed_row("c")));
@@ -68,7 +68,7 @@ fn a_locked_registry_row_offers_remove_but_no_switch() {
     locked["locked"] = json!(true);
     let app = opened(vec![locked], Some(shared()));
     let footer = help(&app.skills_browser);
-    assert!(footer.contains(&("d", action::REMOVE)));
+    assert!(footer.contains(&("r", action::REMOVE)));
     assert!(!footer.iter().any(|(name, _)| *name == key::SPACE));
 }
 
@@ -119,7 +119,7 @@ fn a_name_whose_pin_another_name_loads_keeps_a_row_that_reaches_it() {
     open_page(&mut app, installed_row("launch"));
     let state = &app.skills_browser;
     let page = page(&app);
-    assert!(page.rows.contains(&Property::Remove));
+    assert!(page.rows.contains(&Property::Scope(SkillScope::Global)));
     assert_eq!(
         labels::scope_tail(state, page, SkillScope::Global),
         Some(labels::SHADOWED)
@@ -139,4 +139,20 @@ async fn space_switches_nothing_on_a_row_whose_pin_another_name_loads() {
     press(&mut app, &client, KeyCode::Char(' '));
     let sent = tokio::time::timeout(std::time::Duration::from_millis(200), frames.recv()).await;
     assert!(sent.is_err(), "nothing is switched");
+}
+
+#[test]
+fn my_skills_are_listed_by_name_whatever_their_scope_or_source() {
+    let installed = vec![
+        pin("zed", "local", "project"),
+        registry("Deploy", "global", 2, None),
+        pin("vibe:import", "plugin", "global"),
+        pin("alpha", "local", "global"),
+    ];
+    let app = opened(installed, None);
+    let names: Vec<Row> = ["alpha", "Deploy", "vibe:import", "zed"]
+        .map(installed_row)
+        .to_vec();
+    let rows = app.skills_browser.rows();
+    assert_eq!(rows[1..], names[..]);
 }

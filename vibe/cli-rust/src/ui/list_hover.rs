@@ -29,17 +29,22 @@ pub(super) fn paint(app: &mut App, f: &mut Frame) {
     };
     let buffer = f.buffer_mut();
     for row in list.rows_of(option) {
-        let row = row.intersection(buffer.area);
-        if row.is_empty() {
-            continue;
-        }
-        let base = buffer[(row.x, row.y)].bg;
-        let hover = theme::block_hover_bg(base);
-        for position in row.positions() {
-            let cell = &mut buffer[position];
-            if cell.bg == base {
-                cell.set_bg(hover);
-            }
+        tint(buffer, row);
+    }
+}
+
+/// The faint hover background alone, for a clickable area that is not the active one.
+pub(super) fn tint(buffer: &mut Buffer, area: Rect) {
+    let area = area.intersection(buffer.area);
+    if area.is_empty() {
+        return;
+    }
+    let base = buffer[(area.x, area.y)].bg;
+    let hover = theme::block_hover_bg(base);
+    for position in area.positions() {
+        let cell = &mut buffer[position];
+        if cell.bg == base {
+            cell.set_bg(hover);
         }
     }
 }

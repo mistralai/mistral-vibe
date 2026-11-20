@@ -113,13 +113,12 @@ fn a_shown_list_stays_on_screen_until_the_session_changes() {
     subagents::refresh(&mut app);
     assert!(app.subagents.list.rows.is_empty());
     assert!(app.subagents.list.shown, "the Main row stays");
-    assert!(app.subagents.list.focused);
-    subagents::reset_views(&mut app);
-    assert!(!app.subagents.list.shown);
     assert!(
         !app.subagents.list.focused,
-        "a hidden list hands focus back"
+        "an emptied list leaves the rail, so its window hands focus back"
     );
+    subagents::reset_views(&mut app);
+    assert!(!app.subagents.list.shown);
 }
 
 #[test]
@@ -128,8 +127,6 @@ fn switching_to_a_session_without_children_hides_the_list() {
     upsert(&mut app, running("a"));
     upsert(&mut app, child("a", SessionStatus::Idle));
     subagents::focus_first(&mut app);
-    subagents::handle_list_key(&mut app, key(KeyCode::Char('a')));
-    assert!(app.subagents.list.show_waiting);
 
     // `/resume` and a context clear seed the new children, then reset the views.
     app.subagents.seed_snapshot(Vec::new());
@@ -138,10 +135,6 @@ fn switching_to_a_session_without_children_hides_the_list() {
     assert!(
         !app.subagents.list.shown,
         "the old session's Main row is gone"
-    );
-    assert!(
-        !app.subagents.list.show_waiting,
-        "waiting children hide again"
     );
     assert!(!app.subagents.list.focused);
 }
@@ -392,67 +385,74 @@ fn ids(rows: &[PublicChildSession]) -> Vec<&str> {
 }
 
 #[test]
-fn waiting_children_hide_once_their_batch_ends_and_a_shows_them() {
+fn running_children_list_first_and_ready_ones_last() {
+    let mut app = App::default();
+    for id in ["a", "b", "c", "d"] {
+        upsert(&mut app, running(id));
+    }
+    upsert(&mut app, child("a", SessionStatus::Idle));
+    upsert(&mut app, child("b", SessionStatus::Failed));
+    upsert(&mut app, child("d", SessionStatus::Blocked));
+    assert_eq!(ids(&app.subagents.list.rows), ["c", "d", "b", "a"]);
+}
+
+#[test]
+fn a_focused_list_keeps_its_order_until_focus_leaves() {
+    let mut app = App::default();
+    for id in ["a", "b", "c", "d", "e", "f", "g", "h"] {
+        upsert(&mut app, running(id));
+    }
+    subagents::focus_first(&mut app);
+    app.subagents.list.options.wheel(true, 2);
+    upsert(&mut app, child("a", SessionStatus::Idle));
+    assert!(app.subagents.list.options.free_scroll());
+    assert_eq!(app.subagents.list.options.scroll(), 2);
+    upsert(&mut app, running("i"));
+    assert_eq!(
+        ids(&app.subagents.list.rows),
+        ["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+        "rows hold still and a new child goes last"
+    );
+
+    subagents::leave_list(&mut app);
+    assert_eq!(
+        ids(&app.subagents.list.rows),
+        ["b", "c", "d", "e", "f", "g", "h", "i", "a"]
+    );
+}
+
+#[test]
+fn a_hover_on_a_row_that_left_no_longer_holds_the_order() {
+    let mut app = App::default();
+    for id in ["a", "b", "c"] {
+        upsert(&mut app, running(id));
+    }
+    app.subagents.list.mouse_session_id = Some("c".into());
+    upsert(&mut app, child("a", SessionStatus::Idle));
+    assert_eq!(ids(&app.subagents.list.rows), ["a", "b", "c"]);
+    app.subagents.sessions.retain(|session| session.id != "c");
+    subagents::refresh(&mut app);
+    assert_eq!(ids(&app.subagents.list.rows), ["b", "a"]);
+}
+
+#[test]
+fn waiting_children_stay_listed_once_their_batch_ends() {
     let mut app = App::default();
     upsert(&mut app, running("a"));
     upsert(&mut app, running("b"));
     upsert(&mut app, child("a", SessionStatus::Idle));
     assert_eq!(
         ids(&app.subagents.list.rows),
-        ["a", "b"],
+        ["b", "a"],
         "the running batch holds it"
     );
 
     upsert(&mut app, child("b", SessionStatus::Failed));
     assert_eq!(
         ids(&app.subagents.list.rows),
-        ["b"],
-        "failed stays, waiting hides"
+        ["b", "a"],
+        "failed and waiting both stay"
     );
-    assert_eq!(app.subagents.list.waiting_count, 1);
-
-    assert!(subagents::focus_first(&mut app));
-    assert!(subagents::handle_list_key(
-        &mut app,
-        key(KeyCode::Char('a'))
-    ));
-    assert_eq!(ids(&app.subagents.list.rows), ["a", "b"]);
-    assert!(subagents::handle_list_key(
-        &mut app,
-        key(KeyCode::Char('a'))
-    ));
-    assert_eq!(ids(&app.subagents.list.rows), ["b"]);
-}
-
-#[test]
-fn a_list_of_only_hidden_waiting_children_stays_focusable() {
-    let mut app = App::default();
-    upsert(&mut app, running("a"));
-    upsert(&mut app, child("a", SessionStatus::Idle));
-    subagents::refresh(&mut app);
-    assert!(app.subagents.list.rows.is_empty());
-    assert!(
-        subagents::focus_first(&mut app),
-        "Main and the summary remain"
-    );
-    assert!(subagents::handle_list_key(
-        &mut app,
-        key(KeyCode::Char('a'))
-    ));
-    assert_eq!(ids(&app.subagents.list.rows), ["a"]);
-}
-
-#[test]
-fn a_without_waiting_children_changes_nothing() {
-    let mut app = App::default();
-    upsert(&mut app, running("a"));
-    subagents::focus_first(&mut app);
-    assert!(subagents::handle_list_key(
-        &mut app,
-        key(KeyCode::Char('a'))
-    ));
-    assert!(!app.subagents.list.show_waiting);
-    assert_eq!(app.subagents.list.waiting_count, 0);
 }
 
 #[test]
@@ -477,7 +477,7 @@ fn killing_the_viewed_child_keeps_it_listed_until_the_view_closes() {
 }
 
 #[tokio::test]
-async fn submitting_a_recalled_prompt_leaves_the_next_down_free() {
+async fn submitting_a_recalled_prompt_leaves_the_next_down_empty() {
     let mut app = App::default();
     app.chat_input.history.add("earlier prompt");
     upsert(&mut app, running("a"));
@@ -489,11 +489,12 @@ async fn submitting_a_recalled_prompt_leaves_the_next_down_free() {
     press(&mut app, KeyCode::Enter);
     assert!(app.chat_input.input.is_empty());
 
-    // The very next Down focuses the list instead of feeding a stale recall.
+    // The very next Down feeds no stale recall into the cleared composer.
     press(&mut app, KeyCode::Down);
+    assert!(app.chat_input.input.is_empty());
     assert!(
-        app.subagents.list.focused,
-        "Down focuses the list after a submit"
+        !app.subagents.list.focused,
+        "the list opens from the rail only"
     );
 }
 
@@ -534,47 +535,4 @@ fn a_config_write_toggles_the_status_list_live() {
 
     vibe_rs::model_picker::apply_event(&mut app, written(true));
     assert_eq!(ids(&app.subagents.list.rows), ["a"]);
-}
-
-#[test]
-fn hiding_waiting_children_moves_a_highlight_on_one_back_to_main() {
-    let mut app = App::default();
-    upsert(&mut app, running("a"));
-    upsert(&mut app, child("a", SessionStatus::Idle));
-    subagents::focus_first(&mut app);
-    subagents::handle_list_key(&mut app, key(KeyCode::Char('a')));
-    subagents::handle_list_key(&mut app, key(KeyCode::Down));
-    app.subagents.list.mouse_session_id = Some("a".into());
-    assert_eq!(app.subagents.list.options.selected(), 1);
-
-    subagents::handle_list_key(&mut app, key(KeyCode::Char('a')));
-    assert!(app.subagents.list.rows.is_empty());
-    assert_eq!(app.subagents.list.options.selected(), 0, "back on Main");
-    assert_eq!(app.subagents.list.mouse_session_id, None, "no stale hover");
-}
-
-#[test]
-fn a_page_moves_by_the_rows_left_beside_the_waiting_row() {
-    let mut app = App::default();
-    for id in ["a", "b", "c", "d", "e", "f", "g", "h"] {
-        upsert(&mut app, running(id));
-    }
-    upsert(&mut app, child("w", SessionStatus::Idle));
-    for id in ["a", "b", "c", "d", "e", "f", "g", "h"] {
-        upsert(&mut app, running(id));
-    }
-    assert_eq!(
-        app.subagents.list.waiting_count, 0,
-        "w is in the running batch"
-    );
-    upsert(&mut app, child("w", SessionStatus::Archived));
-    upsert(&mut app, child("x", SessionStatus::Idle));
-    app.subagents.list.batch_session_ids.remove("x");
-    subagents::refresh(&mut app);
-    assert_eq!(app.subagents.list.waiting_count, 1);
-    assert_eq!(subagents::page_rows(&app), 6, "7 rows less the waiting row");
-
-    subagents::focus_first(&mut app);
-    assert!(subagents::handle_list_key(&mut app, key(KeyCode::PageDown)));
-    assert_eq!(app.subagents.list.options.selected(), 6);
 }

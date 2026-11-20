@@ -865,6 +865,34 @@ def child_session_updated(
     model: dict[str, str] | None = None,
 ) -> AppServerEvent:
     """Build a `session/childSessionUpdated` notification (PublicChildSession)."""
+    child = child_session(
+        status,
+        child_session_id=child_session_id,
+        name=name,
+        agent_type=agent_type,
+        total_tokens=total_tokens,
+        context_tokens=context_tokens,
+        created_at=created_at,
+        model=model,
+    )
+    return _event(
+        "session/childSessionUpdated",
+        {"sessionId": SESSION_ID, "emittedAt": _TIMESTAMP, "childSession": child},
+    )
+
+
+def child_session(
+    status: str = "running",
+    *,
+    child_session_id: str = "child-session",
+    name: str = "explore-1",
+    agent_type: str = "explore",
+    total_tokens: int = 0,
+    context_tokens: int | None = None,
+    created_at: int = _TIMESTAMP,
+    model: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build a `PublicChildSession`, as session state and child updates carry it."""
     status_union: dict[str, Any] = {"type": status}
     if status in {"running", "blocked"}:
         status_union["activeTurnId"] = TURN_ID
@@ -895,10 +923,7 @@ def child_session_updated(
         child["contextUsage"] = usage(context_tokens)
     if model is not None:
         child["model"] = model
-    return _event(
-        "session/childSessionUpdated",
-        {"sessionId": SESSION_ID, "emittedAt": _TIMESTAMP, "childSession": child},
-    )
+    return child
 
 
 def subagent_notification(response: str) -> AppServerEvent:
@@ -1503,6 +1528,8 @@ def web_connector_call(
     if tool == "open_url":
         url = str(arguments.get("url", ""))
         content = str(structured_content.get("content", ""))
+        page_url = str(structured_content.get("url", url))
+        readable = structured_content.get("can_open", True) is not False
         domain = urlparse(url).netloc or url[:50]
         return _added(
             _entry(
@@ -1526,7 +1553,7 @@ def web_connector_call(
                 state={
                     "status": "completed",
                     "output": {
-                        "url": str(structured_content.get("url", url)),
+                        "url": page_url,
                         "content": content,
                         "contentType": "",
                         "wasTruncated": False,
@@ -1534,8 +1561,10 @@ def web_connector_call(
                     "display": {
                         "success": True,
                         "verb": "Fetched",
-                        "message": f"{structured_content.get('url', url)} ({len(content):,} chars)",
-                        "suffix": "",
+                        "message": f"{page_url} ({len(content):,} chars)"
+                        if readable
+                        else page_url,
+                        "suffix": "" if readable else "(unreadable)",
                     },
                 },
             )

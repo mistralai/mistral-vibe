@@ -512,6 +512,12 @@ impl SynchronousRuntime {
         let expected = expected_actions
             .into_iter()
             .fold(running(turn_id), ExpectedTransition::dispatch)
+            .observe(assistant_program_committed(
+                turn_id,
+                completion_action,
+                call_id,
+                source,
+            ))
             .observe(core_tool_execution_started(turn_id, call_id));
         self.apply(
             run_typescript_completion(action_id(completion_action), call_id, source),

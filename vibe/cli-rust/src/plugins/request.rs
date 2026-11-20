@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::sync::Arc;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use super::{text, Event};
 use crate::app::App;
@@ -22,19 +22,26 @@ where
     crate::commands::spawn_session(app, client, task)
 }
 
-/// Two reads either side of `plugin/reload`.
-pub(super) async fn reload_diff(client: &Client, session_id: &str) -> Result<Diff, String> {
-    let Some(before) = read(client, session_id).await? else {
-        return Ok(None);
+/// Two reads either side of `plugin/reload`; one when a running turn defers it.
+pub(super) async fn reload(client: &Client, session_id: &str) -> Event {
+    let before = match read(client, session_id).await {
+        Ok(Some(before)) => before,
+        other => return Event::Reloaded(other.map(|_| None)),
     };
-    client
+    let answer = match client
         .request(method::PLUGIN_RELOAD, json!({"sessionId": session_id}))
         .await
-        .map_err(|error| describe(&error))?;
-    let Some(after) = read(client, session_id).await? else {
-        return Ok(None);
+    {
+        Ok(answer) => answer,
+        Err(error) => return Event::Reloaded(Err(describe(&error))),
     };
-    Ok(Some((text::changes(&before, &after), after)))
+    if answer.get("deferred").and_then(Value::as_bool) == Some(true) {
+        return Event::ReloadDeferred;
+    }
+    Event::Reloaded(match read(client, session_id).await {
+        Ok(Some(after)) => Ok(Some((text::changes(&before, &after), after))),
+        other => other.map(|_| None),
+    })
 }
 
 pub(super) async fn read(

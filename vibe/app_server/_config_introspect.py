@@ -27,7 +27,7 @@ from vibe.core.config.patch import (
     escape_json_pointer_token,
     unescape_json_pointer_token,
 )
-from vibe.core.config.vibe_schema import VibeConfigSchema
+from vibe.core.config.vibe_schema import VIBE_BOT_KEYS, VibeConfigSchema
 
 DEFAULT_ORIGIN = "default"
 AUTO_COMPACT_THRESHOLD = "auto_compact_threshold"
@@ -42,8 +42,11 @@ _MCP_SERVERS_KEY = "mcp_servers"
 _MCP_COMMAND_KEY = "command"
 
 # Internal fields never rendered in the settings UI: those a runtime layer
-# populates, plus tools.
-HIDDEN_SETTINGS: frozenset[str] = VibeConfigSchema.RUNTIME_INJECTED_FIELDS | {"tools"}
+# populates, tools, and Vibebot's ceiling while Vibebot is behind its flag.
+HIDDEN_SETTINGS: frozenset[str] = VibeConfigSchema.RUNTIME_INJECTED_FIELDS | {
+    "tools",
+    *VIBE_BOT_KEYS,
+}
 
 POPULAR_SETTINGS: frozenset[str] = frozenset({
     "active_model",
@@ -341,6 +344,8 @@ def effective_config_response(
     config: VibeConfigSchema, *, bypass_tool_permissions: bool
 ) -> ConfigEffectiveReadResponse:
     dumped = config.model_dump(mode="json")
+    for key in VIBE_BOT_KEYS:
+        dumped.pop(key, None)
     # Auto-approve is a session option rather than a config layer, so the
     # session's own decision replaces the configured value.
     dumped["bypass_tool_permissions"] = bypass_tool_permissions

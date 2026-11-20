@@ -18,11 +18,10 @@
   }
  },
  {
-  "method": "skills/detail",
+  "method": "skills/versions",
   "params": {
    "sessionId": "00000000-0000-4000-8000-000000000001",
-   "skillId": "skill-changelog",
-   "version": 2
+   "skillId": "skill-translate"
   }
  },
  {
@@ -31,13 +30,6 @@
    "sessionId": "00000000-0000-4000-8000-000000000001",
    "skillId": "skill-translate",
    "version": 4
-  }
- },
- {
-  "method": "skills/versions",
-  "params": {
-   "sessionId": "00000000-0000-4000-8000-000000000001",
-   "skillId": "skill-translate"
   }
  }
 ]

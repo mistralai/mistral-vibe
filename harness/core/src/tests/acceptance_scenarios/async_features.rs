@@ -357,6 +357,69 @@ fn keeps_notification_pending_after_iteration_limit() {
 }
 
 ///
+/// *Prepare*: A notification arrives while the turn's first completion is still running.
+/// *Do*: Interrupt the turn before any model call carries it, restart, then start the next turn.
+/// *Assert*: The next turn's first completion already carries the notification, before the new user message.
+///
+#[test]
+fn notification_left_by_an_interrupted_turn_reaches_the_next_turns_first_completion() {
+    // Prepare
+    let turn_id = "turn-notification-then-interrupt";
+    let reason = "user pressed stop";
+    let mut runtime = SynchronousRuntime::new(config());
+    let completion = runtime.start_turn(turn_id, "start work");
+    let notification = process_notification(
+        "notification-before-interrupt",
+        "process-before-interrupt",
+        "background work completed",
+    );
+    runtime.receive_notification(turn_id, &notification, &[&completion]);
+
+    // Do
+    runtime.apply(
+        json!({
+            "type": "interrupt",
+            "expected_turn_id": turn_id,
+            "reason": reason,
+        }),
+        interrupted(turn_id, reason)
+            .observe(agent_completion_candidate_discarded(
+                turn_id,
+                &completion,
+                "interrupt",
+            ))
+            .observe(turn_interrupted(turn_id, reason))
+            .observe(action_abandoned(turn_id, &completion, "interrupt")),
+    );
+    runtime.restart_from_checkpoint();
+    let next_turn_id = "turn-after-interrupt";
+    let next_completion = runtime
+        .apply(
+            user_message(next_turn_id, "continue", "queue"),
+            running(next_turn_id)
+                .dispatch(llm_call(0))
+                .observe(turn_started(next_turn_id, "continue"))
+                .observe(notification_delivered(
+                    next_turn_id,
+                    observed_notification(&notification),
+                )),
+        )
+        .only_action();
+
+    // Assert
+    runtime.assert_last_model_message_update(
+        &next_completion,
+        "replace",
+        &[
+            model_system(),
+            model_user_text("start work"),
+            model_notifications(&[&notification]),
+            model_user_text("continue"),
+        ],
+    );
+}
+
+///
 /// *Prepare*: A model starts two subagents in parallel and later sends each one a follow-up message.
 /// *Do*: Resolve both tool batches, deliver both completion notifications while the model is pending, and complete after the notifications are injected.
 /// *Assert*: Every unfinished sibling is retained, both notifications are observed, and the final model cache contains both reports.

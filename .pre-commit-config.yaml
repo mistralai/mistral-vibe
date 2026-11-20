@@ -63,3 +63,11 @@ repos:
         entry: sh -c 'if [ -f vibe/Makefile ]; then make -C vibe lint_test; else make lint_test; fi'
         pass_filenames: false
         files: ^(vibe/)?vibe/cli-rust/
+
+      # Dashboard only: Buildkite runs this check in its own step, and the public repo lacks the script.
+      - id: vibe-changelog-fragment-content-policy
+        name: vibe changelog fragment content policy
+        language: system
+        entry: sh -c '[ -z "$BUILDKITE" ] || exit 0; if [ -f vibe/Makefile ]; then s=.github/scripts; else s=../.github/scripts; fi; [ -f "$s/validate_vibe_release_terms.py" ] || exit 0; uv run --frozen --project "$s" python "$s/validate_vibe_release_terms.py" --source-sha ""'
+        pass_filenames: false
+        files: ^(vibe/)?changelog\.d/.*\.toml$

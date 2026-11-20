@@ -96,8 +96,6 @@ fn needs_resync(cell: &Cell) -> bool {
     let symbol = cell.symbol();
     let mut chars = symbol.chars();
     match (chars.next(), chars.next()) {
-        // Transcript border pieces, drawn one cell wide: skip the move on every bordered row.
-        (Some('⎢' | '⎣'), None) => false,
         // Single codepoint: resync inside emoji-prone symbol blocks and above the BMP.
         (Some(c), None) => matches!(c,
             '\u{2100}'..='\u{24FF}' | '\u{25A0}'..='\u{27FF}' | '\u{2900}'..='\u{2BFF}' | '\u{10000}'..),

@@ -1,4 +1,4 @@
-//! The composer's top-border title: the active model, its thinking level muted, then the agent mode.
+//! The composer's top-border title: the active model, its thinking level muted, then the agent and approval policy.
 
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -11,12 +11,12 @@ use crate::app::App;
 use crate::server::AgentSafety;
 use crate::utils::text::ellipsize;
 
-/// Between the model and the mode.
+/// Between the model, the agent and the policy.
 const SEP: &str = " · ";
 /// The model's name shrinks to this many cells before it hides.
 const MODEL_FLOOR: usize = 12;
 
-/// The mode label's color per agent safety; the borders stay neutral.
+/// The policy label's color per safety; the borders stay neutral.
 fn safety_color(safety: AgentSafety) -> Color {
     match safety {
         AgentSafety::Safe => theme::success(),
@@ -33,12 +33,16 @@ pub struct Title {
     pub model: (u16, u16),
 }
 
-/// ` mistral-medium-3.5[high] · accept edits ─`, narrowing the model first: no thinking level, an elided name, then none.
+/// ` mistral-medium-3.5[high] · lean · accept edits ─`, narrowing the model first: no thinking level, an elided name, then none.
 pub fn title(app: &App, width: u16) -> Title {
-    let profile = agents::displayed(app);
+    let policy = agents::displayed(app);
     let bypass = agents::bypass_tool_permissions(app);
-    let mode = agents::indicator_agent_name(profile, bypass);
-    let mode_style = theme::text(safety_color(agents::indicator_safety(profile, bypass)));
+    let policy_name = agents::indicator_policy_name(policy, bypass);
+    let mode = match agents::indicator_agent_name(app) {
+        Some(agent) => format!("{agent}{SEP}{policy_name}"),
+        None => policy_name,
+    };
+    let mode_style = theme::text(safety_color(agents::indicator_safety(policy, bypass)));
     let border = theme::border_style();
     let model = app.session.startup_config.active_model.as_str();
     let (name, thinking) = model.find('[').map_or((model, ""), |at| model.split_at(at));

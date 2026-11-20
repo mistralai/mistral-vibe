@@ -28,7 +28,7 @@ def _wide_reply(lines: int) -> str:
     )
 
 
-# A composer cut (F7 select all, Ctrl+X) seeds the clipboard: the selection must not replace it.
+# A composer copy (F7 select all, Cmd+C) seeds the clipboard: the selection must not replace it.
 expected_clipboard = "sentinel"
 
 timeline: Timeline = [
@@ -37,6 +37,6 @@ timeline: Timeline = [
     user_msg("tell me a story"),
     assistant_msg(_wide_reply(30)),
     turn_completed(),
-    "sentinel\x1b[18~\x18",
+    "sentinel\x1b[18~\x1b[99;9u",
     _SELECT,
 ]

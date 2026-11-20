@@ -342,7 +342,7 @@ async fn run_update(
                 break;
             }
             _ = cat.tick() => {
-                chat.tick();
+                chat.spin();
             }
             _ = frame.tick() => {
                 view::draw(terminal, state, chat);

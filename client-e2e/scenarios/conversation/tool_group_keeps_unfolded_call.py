@@ -15,7 +15,7 @@ _PROMPT = "run two commands"
 # The lone call's header row while the turn is still running.
 _UNFOLD = "\x1b[<0;1;11M\x1b[<0;1;11m"
 
-screen_contains = ("⏷ Ran 2 commands", "⏷ Ran echo one", "⎢ ⎣ one")
+screen_contains = ("⏷ Ran 2 commands", "⏷ Ran echo one", "│ └ one")
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

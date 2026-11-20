@@ -4,5 +4,49 @@
   "params": {
    "sessionId": "00000000-0000-4000-8000-000000000001"
   }
+ },
+ {
+  "method": "artifacts/sync",
+  "params": {
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "artifacts/markViewed",
+  "params": {
+   "artifactIds": [
+    "artifact-pr-129",
+    "artifact-pr-128",
+    "artifact-pr-127",
+    "artifact-pr-126",
+    "artifact-pr-125",
+    "artifact-pr-124",
+    "artifact-pr-123",
+    "artifact-pr-122",
+    "artifact-pr-121",
+    "artifact-pr-120",
+    "artifact-pr-119",
+    "artifact-pr-118",
+    "artifact-pr-117",
+    "artifact-pr-116",
+    "artifact-pr-115",
+    "artifact-pr-114",
+    "artifact-pr-113",
+    "artifact-pr-112",
+    "artifact-pr-111",
+    "artifact-pr-110",
+    "artifact-pr-109",
+    "artifact-pr-108",
+    "artifact-pr-107",
+    "artifact-pr-106",
+    "artifact-pr-105",
+    "artifact-pr-104",
+    "artifact-pr-103",
+    "artifact-pr-102",
+    "artifact-pr-101",
+    "artifact-pr-100"
+   ],
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
  }
 ]

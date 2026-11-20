@@ -11,7 +11,7 @@ use crate::server::{
     method, ArtifactsListResponse, Client, PrState, PrStatus, PrStatusReason, PublicSessionArtifact,
 };
 
-/// Read the session's artifacts; the bottom bar link renders from the
+/// Read the session's artifacts; the rail's PR item renders from the
 /// answer. A failed read is an empty list, never a notice.
 pub fn fetch(app: &mut App, client: &Arc<Client>) {
     let Some(session_id) = app.session.session_id.clone() else {
@@ -67,8 +67,8 @@ pub fn on_notification(
     // A PR/MR created while the user looks at the list is seen as it lands.
     let seen = (method == crate::server::notification::ARTIFACTS_CREATED
         && artifact.viewed_at.is_none()
-        && app.artifacts_modal.open)
-        .then(|| artifact.id.clone());
+        && crate::artifacts_modal::is_open(app))
+    .then(|| artifact.id.clone());
     upsert(app, artifact);
     if let Some(id) = seen {
         crate::artifacts_modal::mark_viewed(app, client, vec![id]);
@@ -80,7 +80,7 @@ pub fn on_notification(
 /// so a string compare orders them. An open modal keeps its highlighted artifact.
 pub fn upsert(app: &mut App, mut artifact: PublicSessionArtifact) {
     let highlighted = crate::artifacts_modal::selected(app).map(|known| known.external_key.clone());
-    let seen = app.artifacts_modal.open;
+    let seen = crate::artifacts_modal::is_open(app);
     let list = &mut app.session.artifacts;
     let same = |known: &PublicSessionArtifact| {
         known.id == artifact.id || known.external_key == artifact.external_key
@@ -112,11 +112,6 @@ pub fn latest(app: &App) -> Option<&PublicSessionArtifact> {
     app.session.artifacts.first()
 }
 
-/// Whether the PR/MR is still in play: neither merged nor closed.
-pub fn is_active(artifact: &PublicSessionArtifact) -> bool {
-    !matches!(state(artifact), Some(PrState::Merged | PrState::Closed))
-}
-
 /// The synced lifecycle state, `None` before the first sync.
 pub fn state(artifact: &PublicSessionArtifact) -> Option<PrState> {
     artifact.details.as_ref()?.state
@@ -130,21 +125,6 @@ pub fn pr_status(artifact: &PublicSessionArtifact) -> Option<PrStatus> {
 /// Why the status is what it is, `None` when the server does not say.
 pub fn reason(artifact: &PublicSessionArtifact) -> Option<PrStatusReason> {
     artifact.details.as_ref()?.pr_status_reason
-}
-
-/// The artifacts the bar shows: the active ones, or all of them once none is active.
-pub fn bar_artifacts(app: &App) -> Vec<&PublicSessionArtifact> {
-    let active: Vec<_> = app
-        .session
-        .artifacts
-        .iter()
-        .filter(|a| is_active(a))
-        .collect();
-    if active.is_empty() {
-        app.session.artifacts.iter().collect()
-    } else {
-        active
-    }
 }
 
 /// Never opened in the modal, or its status changed since the modal was last open.
@@ -235,23 +215,21 @@ pub fn labeled(artifact: &PublicSessionArtifact) -> String {
     }
 }
 
-/// The bar label when several artifacts share the one link slot: `PRs (2)`,
-/// `MRs (3)`, or `PRs/MRs (2)` across providers.
-pub fn count_label<A: Borrow<PublicSessionArtifact>>(artifacts: &[A]) -> String {
+/// The noun several artifacts share: `PRs`, `MRs`, or `PRs/MRs` across providers.
+pub fn kinds<A: Borrow<PublicSessionArtifact>>(artifacts: &[A]) -> &'static str {
     let mrs = artifacts
         .iter()
         .filter(|a| Borrow::<PublicSessionArtifact>::borrow(*a).provider == "gitlab")
         .count();
     let prs = artifacts.len() - mrs;
-    let kinds = match (prs > 0, mrs > 0) {
+    match (prs > 0, mrs > 0) {
         (true, true) => "PRs/MRs",
         (true, false) => "PRs",
         _ => "MRs",
-    };
-    format!("{kinds} ({})", artifacts.len())
+    }
 }
 
-/// The artifacts modal's title: the provider(s) present, in full.
+/// The PR window's title: the provider(s) present, in full.
 pub fn modal_title(artifacts: &[PublicSessionArtifact]) -> &'static str {
     let mrs = artifacts.iter().any(|a| a.provider == "gitlab");
     let prs = artifacts.iter().any(|a| a.provider != "gitlab");

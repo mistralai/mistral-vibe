@@ -485,6 +485,9 @@ class PluginCatalogDiff:
     changes: tuple[PluginCatalogChange, ...]
     state: PluginCatalogState
     """The catalogue after the reload, so a re-render costs no third read."""
+    deferred: bool = False
+    """A turn is running: the reload lands when it ends, so nothing moved yet
+    and ``state`` is the catalogue before it."""
 
 
 def _plugin_changes(
@@ -537,12 +540,14 @@ class PluginCatalogResource:
         if before is None:
             return None
         client = await self._connection.connect()
-        validate_wire(
+        reloaded = validate_wire(
             PluginReloadResponse,
             await client.request(
                 "plugin/reload", PluginReloadParams(session_id=self._state.session_id)
             ),
         )
+        if reloaded.deferred:
+            return PluginCatalogDiff(changes=(), state=before, deferred=True)
         after = await self.read()
         if after is None:
             return None

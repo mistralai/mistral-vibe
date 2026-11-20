@@ -1065,6 +1065,12 @@ fn oversized_outer_run_typescript_result_uses_the_private_write_action() {
             run_typescript_completion(action_id(&first_completion), call_id, &source),
             running(turn_id)
                 .dispatch(filesystem_write(relative_path))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &first_completion,
+                    call_id,
+                    &source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(serialized_observation(
                     turn_id,
@@ -1139,6 +1145,12 @@ fn oversized_run_typescript_stdout_is_included_in_the_private_write() {
             run_typescript_completion(action_id(&first_completion), call_id, &source),
             running(turn_id)
                 .dispatch(filesystem_write(relative_path))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &first_completion,
+                    call_id,
+                    &source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(serialized_observation(
                     turn_id,

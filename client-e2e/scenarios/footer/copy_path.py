@@ -1,4 +1,4 @@
-"""The footer's cwd gets a copy icon only once shortened: hovering shows the hand and a click copies the whole path."""
+"""The footer's cwd gets a copy icon only once shortened: hovering shows the hand and a click, even on the cell its glyph overflows, copies the whole path."""
 
 from __future__ import annotations
 
@@ -15,7 +15,8 @@ screen_rows = {ROWS - 1: _LEFT.ljust(_COLUMNS - len(_RIGHT)) + _RIGHT}
 # SGR mouse coordinates are 1-indexed; the icon is the cell after the cwd and its space.
 _ICON_COL = len(_LEFT)
 _HOVER = f"\x1b[<35;{_ICON_COL};{ROWS}M"
-_CLICK = f"\x1b[<0;{_ICON_COL};{ROWS}M\x1b[<0;{_ICON_COL};{ROWS}m"
+# Many fonts draw the icon two cells wide, so the click lands on its right half.
+_CLICK = f"\x1b[<0;{_ICON_COL + 1};{ROWS}M\x1b[<0;{_ICON_COL + 1};{ROWS}m"
 
 expected_clipboard = "/test/workdir"
 screen_contains = ("Copied",)

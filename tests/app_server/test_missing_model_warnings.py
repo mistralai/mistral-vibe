@@ -12,7 +12,7 @@ from tests.stubs.local_sandbox import build_trusted_project
 from vibe.app_server import _cached_layers as cached_layers_module
 from vibe.app_server.local import LocalHarnessHost, LocalHarnessOptions
 from vibe.app_server.protocol import SessionOptions
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 
 pytestmark = [
     pytest.mark.timeout(60),
@@ -46,7 +46,7 @@ async def _log_of_two_sessions(
     options = LocalHarnessOptions(
         session_options=SessionOptions(
             cwd=str(project),
-            agent=BuiltinAgentName.AUTO_APPROVE,
+            approval_policy=ApprovalPolicyName.AUTO_APPROVE,
             trust_workspace=True,
             headless=True,
         )

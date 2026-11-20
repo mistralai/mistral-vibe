@@ -1,4 +1,4 @@
-"""Without `enable_pr_monitoring` the footer hides the PR, and `/pr` names the flag even over a skill named `pr`."""
+"""Without `enable_pr_monitoring` the rail hides the PR, and `/pr` names the flag even over a skill named `pr`."""
 
 from __future__ import annotations
 

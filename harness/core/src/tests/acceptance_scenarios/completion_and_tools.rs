@@ -22,6 +22,40 @@ fn plain_completion_ends_one_turn_without_tools() {
 }
 
 ///
+/// *Prepare*: A completion contains only a private program call.
+/// *Do*: Accept the completion through the Step Protocol and finish the next model call.
+/// *Assert*: The completion commits its candidate with the Action identity before its tool lifecycle.
+///
+#[test]
+fn private_program_completion_commits_before_its_tool_lifecycle() {
+    // Prepare
+    let turn_id = "turn-private-program-completion";
+    let mut runtime = SynchronousRuntime::new(config());
+    let completion = runtime.start_turn(turn_id, "calculate privately");
+    let source = "async function main() { return 42; }";
+
+    // Do
+    let next = runtime
+        .apply(
+            run_typescript_completion(action_id(&completion), "program", source),
+            running(turn_id)
+                .dispatch(llm_call(1))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &completion,
+                    "program",
+                    source,
+                ))
+                .observe(core_tool_execution_started(turn_id, "program"))
+                .observe_tool_execution_finished("program", run_typescript_success(json!(42))),
+        )
+        .only_action();
+
+    // Assert
+    runtime.finish_turn_with_text(turn_id, &next, "42");
+}
+
+///
 /// *Prepare*: Four sessions select Unix, Git Bash, PowerShell, or in-memory Bash while background processes are enabled.
 /// *Do*: Inspect the first model request, dispatch the selected command directly, restore it, then dispatch the same command through `run_typescript` and restore again.
 /// *Assert*: Each environment owns its model-facing name and guidance while every foreground command keeps the `file_system.bash` Runtime route across restoration.
@@ -856,6 +890,12 @@ fn invalid_unicode_in_programmatic_arguments_finishes_without_a_runtime_tool_act
             run_typescript_completion(action_id(&first_completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &first_completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(tool_execution_finished(turn_id, call_id, failure_result)),
         )
@@ -916,6 +956,12 @@ fn a_thrown_object_with_a_code_fails_the_program_as_an_execution_error() {
             run_typescript_completion(action_id(&first_completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &first_completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(tool_execution_finished(turn_id, call_id, failure_result)),
         )
@@ -1077,7 +1123,7 @@ fn completed_programmatic_sibling_is_observed_before_another_sibling_resumes() {
     // Do
     let callback_action = runtime
         .apply(
-            tool_call_completion(action_id(&first_completion), calls),
+            tool_call_completion(action_id(&first_completion), calls.clone()),
             running(turn_id)
                 .dispatch(json!({
                     "type": "provided_tool_call",
@@ -1089,6 +1135,11 @@ fn completed_programmatic_sibling_is_observed_before_another_sibling_resumes() {
                     },
                     "parent_call_id": pending_call_id,
                 }))
+                .observe(assistant_tool_calls_committed(
+                    turn_id,
+                    &first_completion,
+                    &calls,
+                ))
                 .observe(core_tool_execution_started(turn_id, completed_call_id))
                 .observe(core_tool_execution_started(turn_id, pending_call_id))
                 .observe(tool_execution_finished(

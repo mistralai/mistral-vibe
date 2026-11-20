@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from cachetools import TTLCache
 
 from vibe.observability.logging import OwnerOnlyRotatingFileHandler
+from vibe.utils.platform import PRIVATE_DIRECTORY_MODE
 
 if TYPE_CHECKING:
     from acp.connection import StreamEvent
@@ -43,7 +44,7 @@ def _get_logger() -> logging.Logger:
 
     # ACP transcripts hold full session messages, so the directory and file
     # are created owner-only.
-    ACP_LOG_DIR.mkdir(parents=True, mode=0o700, exist_ok=True)
+    ACP_LOG_DIR.mkdir(parents=True, mode=PRIVATE_DIRECTORY_MODE, exist_ok=True)
 
     logger = logging.getLogger("acp_messages")
     logger.setLevel(logging.INFO)

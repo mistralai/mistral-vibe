@@ -11,9 +11,15 @@ if TYPE_CHECKING:
 
 
 def excluded_agent_message(
-    name: str, config: VibeConfigSchema, discovered: dict[str, AgentProfile]
+    name: str,
+    config: VibeConfigSchema,
+    discovered: dict[str, AgentProfile],
+    *,
+    policy: bool = False,
 ) -> str:
-    """Generate a message explaining why an agent is not available based on the config."""
+    """Generate a message explaining why an agent, or with ``policy`` an
+    approval policy, is not available based on the config.
+    """
     profile = discovered.get(name)
     if (
         profile is not None
@@ -33,10 +39,15 @@ def excluded_agent_message(
             f"Agent '{name}' requires installation. Run it once via --agent "
             f"'{name}', or add it to 'installed_agents'."
         )
-    is_default = name == config.default_agent
-    label = "default_agent" if is_default else "Agent"
+    key, default = (
+        ("default_approval_policy", config.default_approval_policy)
+        if policy
+        else ("default_agent", config.default_agent)
+    )
+    is_default = name == default
+    label = key if is_default else "Agent"
     fix = (
-        "set 'default_agent' to an enabled agent"
+        f"set '{key}' to an enabled {'policy' if policy else 'agent'}"
         if is_default
         else "select an enabled agent"
     )

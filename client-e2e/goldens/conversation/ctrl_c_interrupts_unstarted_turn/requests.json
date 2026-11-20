@@ -32,5 +32,14 @@
    "expectedTurnId": "00000000-0000-4000-8000-000000000002",
    "sessionId": "00000000-0000-4000-8000-000000000001"
   }
+ },
+ {
+  "method": "session/rewind",
+  "params": {
+   "entryId": "<client-message-id>",
+   "inplace": true,
+   "restoreFiles": false,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
  }
 ]

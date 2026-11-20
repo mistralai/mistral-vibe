@@ -3,7 +3,7 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Padding, Paragraph};
+use ratatui::widgets::{Block, Padding, Paragraph};
 
 use super::{UpdateChoice, UpdatePromptState};
 use crate::hints::{self, action, key};
@@ -24,11 +24,10 @@ pub fn draw<B: ratatui::backend::Backend>(
     let _ = terminal.draw(|frame| {
         let area = frame.area();
         frame.buffer_mut().set_style(area, theme::screen_style());
-        // `#update-dialog`: rounded `$border-blurred`, transparent inside,
+        // `#update-dialog`: square `$border-blurred`, transparent inside,
         // padding 1 vertical / 5 horizontal.
         let dialog = centered(area, state.updating);
         let block = Block::bordered()
-            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme::border_blurred()))
             .padding(Padding::new(5, 5, 1, 1));
         let inner = block.inner(dialog);
@@ -52,7 +51,11 @@ pub fn draw<B: ratatui::backend::Backend>(
         } else {
             lines.push(options(state));
             lines.push(Line::from("").centered());
-            lines.push(hint_line::line(HELP).centered());
+            lines.extend(
+                hint_line::lines(HELP, inner.width)
+                    .into_iter()
+                    .map(Line::centered),
+            );
         }
         frame.render_widget(Paragraph::new(lines).centered(), inner);
     });

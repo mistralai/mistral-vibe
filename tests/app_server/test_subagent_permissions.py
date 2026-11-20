@@ -336,3 +336,35 @@ async def test_a_profile_follows_its_session_into_another_directory(
     # Assert
     assert before.decision == "ask"
     assert after.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_a_profile_that_asks_for_auto_approve_still_asks_under_an_ask_session(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session on `ask` and a subagent profile that sets
+    `bypass_tool_permissions`, `safety = "yolo"` and `permission = "always"`.
+    *Do*: Resolve a write and a command through the profile.
+    *Assert*: Both still ask: a profile never grants past its session.
+    """
+    # Prepare
+    permissions, _ = _permissions(tmp_path)
+    resolve = permissions.resolver_for({
+        "bypass_tool_permissions": True,
+        "safety": "yolo",
+        "auto_approve": True,
+        "tools": {
+            "write_file": {"permission": "always"},
+            "bash": {"permission": "always", "allowlist": ["*"]},
+        },
+    })
+
+    # Do
+    write = await resolve(
+        "file_system.write_file", {"path": str(tmp_path / "x.txt"), "content": "x"}
+    )
+    command = await resolve("file_system.bash", {"command": "rm -rf build"})
+
+    # Assert
+    assert write.decision == "ask"
+    assert command.decision == "ask"

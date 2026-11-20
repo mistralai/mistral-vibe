@@ -1,12 +1,13 @@
-//! Single archive and delete, and the rows they write in the conversation.
+//! Single archive and delete, the y/n confirmations, and the rows an archive writes in the conversation.
 
 use std::sync::Arc;
 
-use super::model;
-use super::{request, warn, Action, Confirm, Target, View};
+use super::model::{self, space, Space};
+use super::review::review_estimate;
+use super::{request, warn, Action, Confirm, ReviewKind, Target};
 use crate::app::{App, Severity};
 use crate::commands::submission::new_message_id;
-use crate::server::{Client, StorageRefreshParams, WorktreeRemoveResponse};
+use crate::server::{Client, StorageRefreshParams};
 use crate::transcript::local;
 
 const OPEN_ELSEWHERE: &str = "This session is open in another app. Close it there first.";
@@ -20,21 +21,11 @@ pub enum Outcome {
     Failed(String),
 }
 
+/// An archive or unarchive the server answered.
 pub struct Acted {
     pub action: Action,
     pub session_id: String,
     pub outcome: Outcome,
-    /// What happened to a deleted session's worktree.
-    pub worktree: Worktree,
-}
-
-/// A deleted session's worktree, decided once the delete is done.
-pub enum Worktree {
-    None,
-    /// Other saved sessions use it: never removed.
-    Shared(usize),
-    /// Removal asked: the server's answer, `None` when the call failed.
-    Removal(Option<WorktreeRemoveResponse>),
 }
 
 /// `a` or `d` on the highlighted session: ask first, unless a process holds it.
@@ -51,53 +42,91 @@ pub(super) fn ask(app: &mut App, archive: bool) {
         (true, false) => Action::Archive,
         (false, _) => Action::Delete,
     };
-    let confirm = Confirm {
+    let frees = super::delete::row_estimate(row.session);
+    app.storage.confirm = Some(Confirm::Row {
         action,
         session_id: row.session.session_id.clone(),
         title: row.title().to_owned(),
-    };
-    app.storage.confirm = Some(confirm);
+        frees,
+    });
 }
 
-/// The question a confirmation asks, in Desktop's words.
-pub fn question(confirm: &Confirm) -> String {
-    let title = &confirm.title;
-    match confirm.action {
-        Action::Archive => format!("Archive \"{title}\"? Its worktree is removed once no other session uses it; uncommitted work is saved to a git ref."),
-        Action::Unarchive => format!("Unarchive \"{title}\"?"),
-        Action::Delete => format!("Delete \"{title}\"? The session history is deleted. Uncommitted work in its worktree is saved to a git ref."),
-    }
-}
-
-/// `y`: run the confirmed action; a delete removes the worktree no other session shares.
-pub(super) fn confirm(app: &mut App, client: &Arc<Client>) {
-    let Some(confirm) = app.storage.confirm.take() else {
+/// Enter in the delete or cleanup review: ask before removing anything for good.
+pub(super) fn ask_review(app: &mut App) {
+    let Some(snapshot) = app.storage.usage.snapshot.as_ref() else {
         return;
     };
-    let worktree = match confirm.action {
-        Action::Delete => worktree_of(app, &confirm.session_id),
-        _ => None,
-    };
-    let verb = match confirm.action {
-        Action::Archive => "Archiving",
-        Action::Unarchive => "Unarchiving",
-        Action::Delete => "Deleting",
-    };
-    app.storage.busy = Some(format!("{verb} \"{}\"…", confirm.title));
-    request::act(app, client, confirm.action, confirm.session_id, worktree);
+    let review = &app.storage.review;
+    let count = review
+        .order
+        .iter()
+        .filter(|id| review.selected.contains(*id))
+        .count();
+    if count == 0 {
+        return warn(app, "Select at least one item first.");
+    }
+    let frees = review_estimate(snapshot, review.kind, &review.selected);
+    let kind = review.kind;
+    app.storage.confirm = Some(Confirm::Review { kind, count, frees });
 }
 
-/// The session's worktree path, read from the snapshot.
-fn worktree_of(app: &App, id: &str) -> Option<String> {
-    let snapshot = app.storage.usage.snapshot.as_ref()?;
-    let worktree_id = snapshot
-        .sessions
-        .iter()
-        .find(|s| s.session_id == id)?
-        .worktree_id
-        .as_deref()?;
-    let worktree = snapshot.worktrees.iter().find(|w| w.id == worktree_id)?;
-    Some(worktree.path.clone())
+/// The question a confirmation asks, in Desktop's words; a size the server does not know is left out.
+pub fn question(confirm: &Confirm) -> String {
+    let text = match confirm {
+        Confirm::Row { action, title, frees, .. } => match action {
+            Action::Archive => format!("Archive \"{title}\"? Its worktree is removed once no other session uses it; uncommitted work is saved to a git ref."),
+            Action::Unarchive => format!("Unarchive \"{title}\"?"),
+            Action::Delete => format!(
+                "Delete \"{title}\"? The session history is deleted. Uncommitted work in its worktree is saved to a git ref. {}",
+                space(Space::Frees, *frees)
+            ),
+        },
+        Confirm::Review { kind, count, frees } => match kind {
+            ReviewKind::Cleanup => format!(
+                "Remove {} in worktrees for good? {}",
+                plural(*count, "item", "items"),
+                space(Space::Frees, *frees)
+            ),
+            _ => format!(
+                "Delete {}? Their history is deleted for good. {}",
+                plural(*count, "archived session", "archived sessions"),
+                space(Space::Frees, *frees)
+            ),
+        },
+    };
+    text.trim_end().to_owned()
+}
+
+/// `y`: run the confirmed action.
+pub(super) fn confirm(app: &mut App, client: &Arc<Client>) {
+    match app.storage.confirm.take() {
+        Some(Confirm::Row {
+            action: Action::Delete,
+            session_id,
+            title,
+            ..
+        }) => super::delete::start(app, client, Some((session_id, title))),
+        Some(Confirm::Row {
+            action,
+            session_id,
+            title,
+            ..
+        }) => {
+            let verb = if action == Action::Archive {
+                "Archiving"
+            } else {
+                "Unarchiving"
+            };
+            app.storage.busy = Some(format!("{verb} \"{title}\"…"));
+            request::act(app, client, action, session_id);
+        }
+        Some(Confirm::Review {
+            kind: ReviewKind::Cleanup,
+            ..
+        }) => super::leftovers::start(app, client),
+        Some(Confirm::Review { .. }) => super::delete::start(app, client, None),
+        None => {}
+    }
 }
 
 pub(super) fn acted(app: &mut App, client: &Arc<Client>, acted: Acted) {
@@ -110,63 +139,27 @@ pub(super) fn acted(app: &mut App, client: &Arc<Client>, acted: Acted) {
         }
         Outcome::Done => {}
     }
-    let text = match acted.action {
-        Action::Archive => format!("Archived \"{title}\". Its worktree is removed once no other session uses it; uncommitted work is saved to a git ref."),
-        Action::Unarchive => format!("Unarchived \"{title}\"."),
-        Action::Delete => delete_text(&title, &acted.worktree),
+    let archived = acted.action == Action::Archive;
+    let text = match archived {
+        true => format!("Archived \"{title}\". Its worktree is removed once no other session uses it; uncommitted work is saved to a git ref."),
+        false => format!("Unarchived \"{title}\"."),
     };
     status(app, &text);
-    apply_locally(app, acted.action, &acted.session_id);
+    let mut usage = app.storage.usage.clone();
+    if let Some(snapshot) = usage.snapshot.as_mut() {
+        let id = &acted.session_id;
+        snapshot.archive_suggestion.session_ids.retain(|s| s != id);
+        snapshot.delete_suggestion.session_ids.retain(|s| s != id);
+        if let Some(row) = snapshot.sessions.iter_mut().find(|s| s.session_id == *id) {
+            row.archived = archived;
+        }
+    }
+    super::replace(app, usage);
     let params = StorageRefreshParams {
         wait_for_session_ids: vec![acted.session_id],
         ..Default::default()
     };
     super::refresh(app, client, params);
-}
-
-/// Show the action at once, until the scan that follows replaces the numbers.
-fn apply_locally(app: &mut App, action: Action, id: &str) {
-    let mut usage = app.storage.usage.clone();
-    if let Some(snapshot) = usage.snapshot.as_mut() {
-        snapshot.archive_suggestion.session_ids.retain(|s| s != id);
-        match action {
-            Action::Delete => {
-                snapshot.sessions.retain(|s| s.session_id != id);
-                for worktree in &mut snapshot.worktrees {
-                    worktree.session_ids.retain(|s| s != id);
-                }
-                app.storage.view = View::Panel;
-            }
-            Action::Archive | Action::Unarchive => {
-                let row = snapshot.sessions.iter_mut().find(|s| s.session_id == id);
-                if let Some(row) = row {
-                    row.archived = action == Action::Archive;
-                }
-            }
-        }
-    }
-    super::replace(app, usage);
-}
-
-fn delete_text(title: &str, worktree: &Worktree) -> String {
-    let deleted = format!("Deleted \"{title}\".");
-    match worktree {
-        Worktree::None => deleted,
-        Worktree::Shared(n) => {
-            let sessions = plural(*n, "other session uses", "other sessions use");
-            format!("{deleted} Its worktree stays: {sessions} it.")
-        }
-        Worktree::Removal(Some(r)) if r.outcome == "removed" => {
-            format!("{deleted} Its worktree was removed.")
-        }
-        Worktree::Removal(Some(r)) => format!(
-            "{deleted} Its worktree was kept: {}.",
-            crate::worktree_exit::removal_reason(r)
-        ),
-        Worktree::Removal(None) => {
-            format!("{deleted} Its worktree was kept: it could not be removed.")
-        }
-    }
 }
 
 pub(super) fn title_of(app: &App, id: &str) -> String {

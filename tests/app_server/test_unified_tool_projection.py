@@ -2124,6 +2124,27 @@ def test_projects_unified_connector_open_url_result() -> None:
     assert unified_tool_category(entry) == "web_fetch"
 
 
+def test_projects_unreadable_connector_open_url_page() -> None:
+    entry = _effect(
+        "connector_web_search.open_url",
+        {"url": "https://google.com"},
+        result={
+            "structured_content": {
+                "url": "https://google.com",
+                "content": "This page could not be read.",
+                "can_open": False,
+            }
+        },
+    )
+
+    projected = project_unified_history_entry(entry)
+
+    assert isinstance(projected, PublicEffectEntry)
+    assert isinstance(projected.state, CompletedEffectState)
+    assert projected.state.display.message == "https://google.com"
+    assert projected.state.display.suffix == "(unreadable)"
+
+
 def test_projects_unified_grep_result() -> None:
     entry = _effect(
         "grep",

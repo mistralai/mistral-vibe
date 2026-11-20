@@ -42,6 +42,8 @@ class CaptureSpec:
     """Terminal output queries and the input replies they trigger."""
     exit_responses: tuple[tuple[bytes, bytes], ...] = ()
     """Post-exit output triggers and the input replies they unlock, FIFO."""
+    typeahead: str = ""
+    """Input typed at launch, before the client takes the terminal."""
 
 
 # Keys whose effect depends on what the UI already shows (a submit acts on the
@@ -111,6 +113,7 @@ def capture(
 ) -> Frames:
     """Drive every step, capturing the settled frames that carry a label."""
     pid, fd = launch(spec)
+    _write_all(fd, spec.typeahead.encode())
     client = _Client(
         fd, spec, Terminal(spec.rows, spec.columns), (spec.rows, spec.columns)
     )

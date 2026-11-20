@@ -84,6 +84,12 @@ fn restores_pending_programmatic_approval_and_continues_after_approval() {
                         "command": "sleep 10",
                     },
                 }))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &first_completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id)),
         )
         .only_action();
@@ -862,6 +868,12 @@ fn rejects_programmatic_tool_call_with_permission_denied() {
             run_typescript_completion(action_id(&first_completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &first_completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(programmatic_permission_result_committed(
                     turn_id,
@@ -912,6 +924,12 @@ async function main() {
     let expected = (0..100).fold(
         running(turn_id)
             .dispatch(llm_call(1))
+            .observe(assistant_program_committed(
+                turn_id,
+                &first_completion,
+                call_id,
+                source,
+            ))
             .observe(core_tool_execution_started(turn_id, call_id)),
         |expected, index| {
             expected.observe(programmatic_permission_result_committed(
@@ -973,6 +991,12 @@ fn skips_post_tool_hook_for_denied_programmatic_tool_call() {
             run_typescript_completion(action_id(&first_completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &first_completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(programmatic_permission_result_committed(
                     turn_id,
@@ -1191,6 +1215,12 @@ async function main() {
                     "file_system.read_file",
                     json!({"path": "public.txt"}),
                 ))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &first_completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(programmatic_permission_result_committed(
                     turn_id,
@@ -1253,6 +1283,12 @@ async function main() {
             run_typescript_completion(action_id(&first_completion), call_id, source),
             running(turn_id)
                 .dispatch(llm_call(1))
+                .observe(assistant_program_committed(
+                    turn_id,
+                    &first_completion,
+                    call_id,
+                    source,
+                ))
                 .observe(core_tool_execution_started(turn_id, call_id))
                 .observe(programmatic_permission_result_committed(
                     turn_id,

@@ -87,6 +87,12 @@ pub fn submit(
     if matches!(app.session.status, Status::Failed) {
         return false;
     }
+    // An interrupt taking its prompt back is still rewinding: the input waits for it.
+    if app.session.take_back_sent {
+        let text = "Restoring the interrupted prompt…";
+        crate::ui::notice::show(app, Severity::Information, text, NOTICE_TIMEOUT_SECS);
+        return false;
+    }
     // A held queue takes a bare Enter as "send it now"; an active turn takes it
     // as "steer the accepted queue into this turn". Neither applies while editing.
     if value.is_empty() {
@@ -307,10 +313,13 @@ pub fn interrupt_turn(app: &mut App, client: &Arc<Client>) {
         return;
     }
     crate::telemetry::user_cancelled_action(app, "interrupt_agent");
-    let marker = new_message_id();
-    local::add_interrupt(&mut app.view.transcript, &marker);
-    // A `/retry` of the interrupted turn replaces the marker with its reply.
-    super::retry::track_interrupt(app, marker);
+    // Before any answer, the prompt comes back to the input instead of leaving a marker.
+    if !crate::rewind::take_back_on_interrupt(app, unstarted) {
+        let marker = new_message_id();
+        local::add_interrupt(&mut app.view.transcript, &marker);
+        // A `/retry` of the interrupted turn replaces the marker with its reply.
+        super::retry::track_interrupt(app, marker);
+    }
     if unstarted {
         crate::message_queue::interrupt_on_start(app);
         return;

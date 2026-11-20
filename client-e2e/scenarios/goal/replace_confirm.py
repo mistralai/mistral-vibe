@@ -26,4 +26,4 @@ timeline: Timeline = [
     take_snapshot(),
 ]
 
-screen_contains = ("Write the docs", "0 · 0s")
+screen_contains = ("▶ goal 0s",)

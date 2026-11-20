@@ -47,7 +47,8 @@ BACKGROUND_PROCESSES_UPDATED = "vibe.background_processes_updated"
 TURN_DETAILS = "vibe.turn_details"
 """Turn fields the API's ``TurnState`` lacks: input entry, queue item, ``length`` stop."""
 CALLBACK_DETAILS = "vibe.callback_details"
-"""Callback fields the API's callbacks lack: required permissions, question request."""
+"""Callback fields the API's callbacks lack: opening time, required permissions,
+question request."""
 NOTICE = "vibe.notice"
 AUTHORIZATION_REQUIRED = "vibe.authorization_required"
 TOOL_CLASSIFICATION = "vibe.tool_classification"
@@ -288,9 +289,17 @@ def _turn_details(state: PublicSessionState) -> dict[str, JsonValue] | None:
 
 
 def _callback_details(callback: JsonObject) -> dict[str, JsonValue] | None:
-    """A callback's fields the API's callback cannot carry, or None if none."""
+    """A callback's fields the API's callback cannot carry, or None if none.
+
+    ``openedAt`` is the time the Runtime opened the callback. The API callback
+    has no time, so a client takes it from here on the stream and on a read
+    alike, and both give an open callback the same time.
+    """
     detail = cast(dict[str, JsonValue], callback["detail"])
     details: dict[str, JsonValue] = {"callbackId": _callback_id(callback)}
+    opened_at = callback.get("createdAt")
+    if isinstance(opened_at, int):
+        details["openedAt"] = opened_at
     if detail["kind"] == "user_input":
         details["request"] = detail.get("request")
         details["relatedEntryId"] = detail.get("relatedEntryId")

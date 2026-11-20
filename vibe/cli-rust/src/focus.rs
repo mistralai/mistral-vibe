@@ -26,11 +26,19 @@ pub enum Focus {
     ModelPicker,
     LogLevelPicker,
     ThinkingPicker,
-    ArtifactsModal,
     Loops,
     Goal,
+    RailWindow,
     SubagentList,
+    Rail,
     Composer,
+}
+
+impl Focus {
+    /// The rail, an open rail window or the subagent list: the surfaces Ctrl+X and window switching reach.
+    pub fn is_rail_surface(self) -> bool {
+        matches!(self, Focus::Rail | Focus::RailWindow | Focus::SubagentList)
+    }
 }
 
 impl App {
@@ -59,10 +67,12 @@ impl App {
             (self.model_picker.open, Focus::ModelPicker),
             (self.log_level_picker.open, Focus::LogLevelPicker),
             (self.thinking_picker.open, Focus::ThinkingPicker),
-            (self.artifacts_modal.open, Focus::ArtifactsModal),
+            (self.rail.focused && self.rail.letters, Focus::Rail),
             (self.loops.open, Focus::Loops),
             (self.goal.panel.is_some(), Focus::Goal),
+            (crate::rail::window(self).is_some(), Focus::RailWindow),
             (self.subagents.list.focused, Focus::SubagentList),
+            (self.rail.focused, Focus::Rail),
         ]
         .into_iter()
         .find_map(|(open, focus)| open.then_some(focus))
@@ -73,7 +83,7 @@ impl App {
     pub fn picker_focused(&self) -> bool {
         !matches!(
             self.focus(),
-            Focus::Approval | Focus::Question | Focus::Composer | Focus::SubagentList
+            Focus::Approval | Focus::Question | Focus::Composer | Focus::SubagentList | Focus::Rail
         )
     }
 }
@@ -83,7 +93,14 @@ pub fn tab_navigates(app: &App) -> bool {
     match app.focus() {
         Focus::Loops => app.loops.form.is_some(),
         Focus::Goal | Focus::ProxySetup => true,
-        Focus::Skills => app.skills_browser.registry && app.skills_browser.page.is_none(),
+        // A child view is no rail surface: Shift+Tab cycles agents there.
+        Focus::SubagentList if app.subagents.viewed_subagent_id.is_some() => false,
+        // The rail and its windows walk their items with Tab and Shift+Tab.
+        focus if focus.is_rail_surface() => true,
+        Focus::Skills => {
+            let browser = &app.skills_browser;
+            browser.confirm.is_some() || (browser.registry && browser.page.is_none())
+        }
         Focus::Config => app.config_screen.edit.is_some() && !app.config_screen.targets.is_empty(),
         _ => false,
     }

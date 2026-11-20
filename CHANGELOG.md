@@ -5,6 +5,99 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.4] - 2026-11-20
+
+### Added
+
+- `/mcp <source>` has a search field that filters its tools by name and description
+- `/thinking <level>` sets the thinking level directly, without opening the picker
+- Each rail item opens a window in place of the input box: subagents, background tasks (`s` stops one), pull requests, the goal and its actions, and the todo list
+- `collapse_turn_details = true` collapses a settled turn's intermediate messages, reasoning and tool calls into a `Worked for` group above its final answer; a click or Ctrl+O expands it
+- `keep_awake` setting that keeps the machine from idle-sleeping while a turn runs or waits for your answer
+- Links in `/release-notes` open on click
+- Emacs `Ctrl+P` / `Ctrl+N` move to the previous / next line of the prompt (recalling history at its edges) and `Ctrl+B` / `Ctrl+F` move the caret by one character
+- Hovering a link to a local file previews its code in a popup
+- Clicking a `zed://` editor link opens it in Zed
+- Copying a selection plays a short, subtle animation: a soft band sweeps across it
+- `disable_selection_animation` turns the copy animation off
+- `/skills` lists the skills that failed to load, with their file and the reason
+- `/skills` shows each skill's file, opens a local skill in your editor with `e`, and deletes it with `x` after a confirmation naming its folder
+- `n` in `/skills` starts a new skill with the skill creator
+- `a` in the `/skills` Shared tab adds the highlighted skill, and `r` removes a shared skill at once
+- `--approval-policy` and the `default_approval_policy` setting choose how tool calls are approved (ask, accept-edits, smart-approve, auto-approve), independently of the agent.
+- `/agent` lists your agents and switches to one, keeping the current approval policy.
+- Vibe is now also available as a desktop app: [download it](https://mistral.ai/products/vibe)
+
+### Changed
+
+- The agent now explains what its questions are about, so they make sense without scrolling back
+- Local sessions now run on the Session API engine by default; set `experimental_local_runtime_session_api = false` (or `VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API=false`) to go back to the previous engine
+- `/mcp` keeps every server, connector and tool on one line: tool descriptions show dimmed after the name and end with an ellipsis, and narrow terminals drop columns before shortening names
+- Text typed while Vibe starts is now sent as soon as the session is ready when it ends with Enter, instead of waiting in the input
+- Vibe now trusts the operating system's certificates as well as its own by default, so it works behind corporate proxies without extra setup.
+- The agent asks about every decision it needs from you in one question dialog, no longer stopping at four
+- Subagents, background tasks, pull requests, the goal and the todo list now share one status rail of compact chips above the input box, replacing the goal and todo lines, the always-open subagent list and the footer's PR link
+- Waiting subagents stay in the subagent list instead of hiding behind `a`
+- The subagent list shows running subagents first and ready ones last
+- Press Ctrl+X then a letter, or click a chip, to open a rail item's window, even while another one is open
+- In the subagent and PR lists, Shift+Tab now moves to the previous rail window instead of cycling approval policies
+- The queue's Enter steer and Ctrl+C cancel hints moved from the loading line to the `» Queued` header
+- The tmux `mouse off` startup warning now hides with Ctrl+X then `h`, since Ctrl+X opens the status rail
+- The `/branch` and `/fork` panel now says its command opens the forked session
+- Dialogs, panels and onboarding screens now draw square border corners, matching the rest of the interface
+- Models that don't set `temperature` now use 1.0 instead of 0.2
+- Interrupting with `Esc` or `Ctrl+C` before Vibe answers takes the turn back and puts your prompt back in the input to edit and resend
+- Clarified task authorization and removed conflicting chat confirmation rules.
+- The scrollbar shows only its thumb, without a track.
+- `/skills` opens while the agent works; a change made during a turn applies when the turn ends
+- The `/skills` list shows the highlighted skill's description above its rows instead of its body, and the tabs show their counts and switch with `Tab`, `Shift+Tab`, `←` and `→`
+- A skill's page in `/skills` opens on its description, then its status, source, scope and file, then its `SKILL.md` rendered as markdown; the arrows scroll it when there is no row to move to
+- My Skills in `/skills` is sorted by name, and the box keeps the height it opened with
+- A plugin's page in `/plugins` leads with its description, then its facts under dim labels, then its components by kind, and long paths wrap instead of being cut
+- Keyboard hints wrap onto more rows in a narrow terminal instead of being cut off, in every dialog, the loading line and the history search
+- Each session now runs an agent (`default`, `lean`, or a custom one) and an approval policy, changed independently: Shift+Tab cycles approval policies only, and the composer shows the agent next to the policy when it is not the default.
+- Old settings keep working: `default_agent`, `--agent` and saved sessions that name ask, accept-edits, smart-approve or auto-approve now set the approval policy.
+- An agent no longer decides what runs without asking: its `safety`, `bypass_tool_permissions` and `permission = "always"` settings are ignored, and a session runs your `default_approval_policy` whatever its agent. To keep a custom agent running in auto-approve, set `default_approval_policy = "auto-approve"` or pass `--approval-policy auto-approve`. An agent can still narrow a tool to `ask` or `never`. Other settings an agent may not set (such as a tool `allowlist`, `sensitive_patterns`, `enabled_agents` or `enable_auto_approve`) are ignored and listed as config issues.
+- A project's `.vibe/agents/` can no longer redefine an approval policy (`ask.toml`, `auto-approve.toml`, ...): the file is ignored with a config issue. Overrides in `~/.vibe/agents/` still apply.
+- An `enabled_agents` list that names only agents allows only those agents, the `default` one included; one that also names approval policies, as lists from before the split do, keeps the `default` agent; one that names no approval policy allows only `ask`.
+- Under auto-approve, tools a custom agent sets to `permission = "never"` are disabled rather than auto-run.
+- A model picked for a new session no longer overrides the model its agent names, such as leanstral for `lean`.
+- Sessions started by another session, and forks, run the approval policy of the session they come from; a start that asks for another policy or for auto-approve is refused.
+- A reopened session whose approval policy is no longer available continues in `ask` rather than the default policy, and says so.
+- Switching agents mid-session keeps the session and its history: the next turn runs the new agent's model, tools and instructions, with its system prompt rebuilt.
+- Hooks with `match` select agents only; a `match` naming an approval policy no longer matches.
+- Tool result and tool group borders now render the same in every terminal
+- `/reload-plugins` during a turn says the plugins will reload when the turn ends, instead of reporting that nothing changed; `plugin/reload` answers `deferred: true` in that case
+- Quitting with Ctrl+D or `/exit` while the agent is replying no longer ends its turn: resuming the session carries the turn on, asking the model again and keeping an open question or approval waiting for your answer, unless `--max-tokens` or `--max-price` is already spent; Ctrl+C still stops the turn
+- After a resume, the agent is told which background processes the restart stopped, or that a crash may have left them running, so it can start them again
+- A resumed turn is marked in the conversation, and the agent is told the app restarted so it checks the current state before repeating actions
+
+### Fixed
+
+- Vibe starts when it cannot write its log file, and runs without file logging
+- On Windows, Vibe no longer locks the user out of the folders under `~/.vibe` that it creates while running as administrator
+- A session with many images, such as screenshots, no longer fails with "Total number of images exceeds the maximum allowed" on Mistral models: only the 8 most recent images are sent to the model
+- Approving or reverting review hunks no longer changes a file's line endings when its original content had no line break
+- A file revert or rewind that fails while writing now leaves the file unchanged instead of empty or partial
+- Clicking anywhere on the footer's copy-path icon now copies the path, not only its left half
+- The cat on the update screen no longer freezes after one round: it keeps animating until the update finishes
+- A long working directory no longer overflows the `/resume` picker border
+- A loop scheduled in a new session before its first prompt now keeps the session: closing it no longer loses the session or the loop, and `vibe --resume` reopens both. A session started in a worktree is still saved by its first prompt
+- Subagents whose start failed or that were closed, as happens after losing the network, no longer stay listed forever
+- `vibe-acp` no longer occasionally hangs when its editor stops it
+- Reopening a local session no longer waits to re-download a picked cloud skill, and retries one that failed to download, warning when it gives up
+- A finished web fetch shows the full URL and page size and marks unreadable pages, and a finished web search shows its source count
+- The scrollbar no longer leaves a notch in the window padding of terminals that fill it with the edge colors.
+- A skill whose `metadata` or `allowed-tools` frontmatter has the wrong type is reported instead of breaking plugin loading or a sandboxed session
+- Adding or removing a shared skill no longer erases the other pins of a `skills.toml` that cannot be parsed; the file is reported instead
+- A skill edited from `/skills` shows its new content once the editor closes
+- Deleting a wide character such as `萎` in the input no longer leaves a stray shaded cell next to the caret
+
+### Removed
+
+- `Ctrl+X` no longer cuts the prompt selection or line; copy with `Ctrl+Shift+C` then delete, or kill and yank within the prompt with `Ctrl+K` and `Ctrl+Y`
+- Custom compaction prompts: `compaction_prompt_id` no longer has an effect, and Vibe now warns when a config sets it
+
 ## [3.1.3] - 2026-11-17
 
 ### Added

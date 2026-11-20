@@ -70,10 +70,17 @@ jobs:
         shell: bash
         run: uv python install 3.12
 
+      # rust-toolchain.toml pins the version every CI and dev machine uses.
+      - name: Read the pinned Rust toolchain
+        id: rust
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.channel }}
+          components: rustfmt, clippy
 
       - name: Inject Sentry DSN
         shell: bash
@@ -163,10 +170,17 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
+      # rust-toolchain.toml pins the version every CI and dev machine uses.
+      - name: Read the pinned Rust toolchain
+        id: rust
+        shell: bash
+        run: echo "channel=$(sed -n 's/^channel *= *"\([^"]*\)".*/\1/p' rust-toolchain.toml)" >> "$GITHUB_OUTPUT"
+
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: stable
+          toolchain: ${{ steps.rust.outputs.channel }}
+          components: rustfmt, clippy
 
       # uv unpacks the sdist into a clean temporary directory before building.
       # Pin the build to the interpreter the smoke venv below validates on:

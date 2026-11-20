@@ -1,25 +1,29 @@
-//! The bulk archive: one session at a time, then the scan that measures it, then the result rows.
+//! Enter in a review: the archive runs one session at a time, then waits for the scan that measures
+//! it; the delete and cleanup reviews ask y/n first.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use super::actions::{plural, status, title_of, Outcome};
+use super::actions::{plural, title_of, Acted, Outcome};
+use super::bulk_result::finish_bulk;
 use super::model::{self, Estimate};
-use super::{report, request, warn};
+use super::{request, warn, ReviewKind};
 use crate::app::App;
 use crate::server::{Client, StorageRefreshParams, StorageSnapshot, StorageUsageUpdated};
-use crate::utils::bytes;
+
+pub use super::bulk_result::freed_estimate;
 
 /// A bulk archive in flight, then waiting for the scan that measures it.
 pub(super) struct Bulk {
-    suggested: usize,
-    selected: Vec<String>,
-    titles: Vec<(String, String)>,
-    estimate: Estimate,
-    /// The numbers the archive started from: later scans can replace the panel's.
-    start: StorageSnapshot,
-    archived: Vec<String>,
-    outcomes: Vec<(String, Outcome)>,
+    pub(super) suggested: usize,
+    pub(super) selected: Vec<String>,
+    pub(super) titles: Vec<(String, String)>,
+    pub(super) estimate: Estimate,
+    /// The numbers the bulk started from: later scans can replace the panel's.
+    pub(super) start: StorageSnapshot,
+    /// The sessions archived.
+    pub(super) done: Vec<String>,
+    pub(super) acted: Vec<Acted>,
     /// When the last archive answered: an older server's scan measures them if it started later.
     sent_at: u64,
     /// The measuring refresh's answer: `Some(None)` from a server without scan ids.
@@ -28,9 +32,16 @@ pub(super) struct Bulk {
     early: Vec<StorageUsageUpdated>,
 }
 
-/// Enter in the review: archive the selection, one session at a time.
+/// Enter in a review: the archive review archives its selection one session at a time; the delete
+/// and cleanup reviews open their y/n question instead.
 pub(super) fn start_bulk(app: &mut App, client: &Arc<Client>) {
+    if app.storage.review.kind != ReviewKind::Archive {
+        return super::actions::ask_review(app);
+    }
     let review = &app.storage.review;
+    let Some(snapshot) = app.storage.usage.snapshot.as_ref() else {
+        return;
+    };
     let selected: Vec<String> = review
         .order
         .iter()
@@ -40,62 +51,57 @@ pub(super) fn start_bulk(app: &mut App, client: &Arc<Client>) {
     if selected.is_empty() {
         return warn(app, "Select at least one session to archive.");
     }
-    let Some(snapshot) = app.storage.usage.snapshot.as_ref() else {
-        return;
-    };
     let titles = review
         .order
         .iter()
         .map(|id| (id.clone(), title_of(app, id)))
         .collect();
+    let chosen: HashSet<String> = selected.iter().cloned().collect();
     let bulk = Bulk {
         suggested: review.order.len(),
-        estimate: model::estimate(snapshot, &review.selected),
+        estimate: model::estimate(snapshot, &chosen),
         start: snapshot.clone(),
         selected: selected.clone(),
         titles,
-        archived: Vec::new(),
-        outcomes: Vec::new(),
+        done: Vec::new(),
+        acted: Vec::new(),
         sent_at: 0,
         scan_id: None,
         early: Vec::new(),
     };
-    app.storage.busy = Some(format!(
-        "Archiving {}…",
-        plural(selected.len(), "session", "sessions")
-    ));
+    let count = plural(selected.len(), "session", "sessions");
+    app.storage.busy = Some(format!("Archiving {count}…"));
     app.storage.bulk = Some(bulk);
     request::bulk(app, client, selected);
 }
 
 /// Every archive answered: wait for the scan that measures them, unless none was archived.
-pub(super) fn bulk_done(app: &mut App, client: &Arc<Client>, outcomes: Vec<(String, Outcome)>) {
+pub(super) fn bulk_done(app: &mut App, client: &Arc<Client>, acted: Vec<Acted>) {
     let Some(bulk) = app.storage.bulk.as_mut() else {
         return;
     };
-    bulk.archived = outcomes
+    bulk.done = acted
         .iter()
-        .filter(|(_, o)| matches!(o, Outcome::Done))
-        .map(|(id, _)| id.clone())
+        .filter(|a| matches!(a.outcome, Outcome::Done))
+        .map(|a| a.session_id.clone())
         .collect();
-    bulk.outcomes = outcomes;
+    bulk.acted = acted;
     bulk.sent_at = crate::utils::now_ms();
-    if bulk.archived.is_empty() {
+    if bulk.done.is_empty() {
         return finish_bulk(app, None);
     }
-    let count = plural(bulk.archived.len(), "session", "sessions");
-    let wait_for_session_ids = bulk.archived.clone();
-    app.storage.busy = Some(format!("Archived {count}. Measuring the space freed…"));
     let params = StorageRefreshParams {
-        wait_for_session_ids,
+        wait_for_session_ids: bulk.done.clone(),
         ..Default::default()
     };
+    let count = plural(bulk.done.len(), "session", "sessions");
+    app.storage.busy = Some(format!("Archived {count}. Measuring the space freed…"));
     request::refresh(app, client, params, true);
 }
 
 /// The measuring refresh answered with its scan; a failed request ends the wait without a measure.
 pub(super) fn scan_answered(app: &mut App, answer: Result<Option<u64>, ()>) {
-    let Some(bulk) = app.storage.bulk.as_mut().filter(|b| !b.archived.is_empty()) else {
+    let Some(bulk) = app.storage.bulk.as_mut().filter(|b| !b.done.is_empty()) else {
         return;
     };
     let Ok(scan_id) = answer else {
@@ -113,7 +119,7 @@ pub(super) fn scan_answered(app: &mut App, answer: Result<Option<u64>, ()>) {
 /// Before the answer, a result with a scan id waits for it; a server without ids is matched by
 /// its first success that started after the archives.
 pub(super) fn bulk_measured(app: &mut App, update: &StorageUsageUpdated) -> bool {
-    let Some(bulk) = app.storage.bulk.as_mut().filter(|b| !b.archived.is_empty()) else {
+    let Some(bulk) = app.storage.bulk.as_mut().filter(|b| !b.done.is_empty()) else {
         return false;
     };
     let ours = match matches(bulk.scan_id, bulk.sent_at, update) {
@@ -173,109 +179,12 @@ pub fn waiting_for_scan(app: &App) -> bool {
     app.storage
         .bulk
         .as_ref()
-        .is_some_and(|bulk| !bulk.archived.is_empty())
+        .is_some_and(|bulk| !bulk.done.is_empty())
 }
 
 /// Esc while the scan measures a bulk archive: write the result without the measure.
 pub(super) fn stop_waiting(app: &mut App) {
     if waiting_for_scan(app) {
         finish_bulk(app, None);
-    }
-}
-
-/// The result row's space: the measured drop once the scan saw every worktree go, else the
-/// estimate on the numbers the archive started from.
-pub fn freed_estimate(measured: Option<u64>, estimate: Estimate) -> Estimate {
-    match measured {
-        Some(bytes) if bytes > 0 => Estimate {
-            bytes,
-            at_least: false,
-        },
-        _ => estimate,
-    }
-}
-
-/// Close the panel and write the result rows; `measured` is `None` when the user did not wait.
-pub(super) fn finish_bulk(app: &mut App, measured: Option<&StorageUsageUpdated>) {
-    let Some(bulk) = app.storage.bulk.take() else {
-        return;
-    };
-    let archived: HashSet<String> = bulk.archived.iter().cloned().collect();
-    let freed = model::estimate(&bulk.start, &archived);
-    let measured_freed = measured
-        .and_then(|update| update.usage.snapshot.as_ref())
-        .map(|after| model::measured_freed(&bulk.start, after, &archived));
-    let complete = measured.is_some_and(|update| update.complete);
-    report::bulk_archive(
-        app,
-        &report::BulkCounts {
-            suggested: bulk.suggested,
-            selected: bulk.selected.len(),
-            archived: bulk.archived.len(),
-            refused: bulk
-                .outcomes
-                .iter()
-                .filter(|(_, o)| matches!(o, Outcome::Busy))
-                .count(),
-            estimated: bulk.estimate.bytes,
-            measured: measured_freed,
-            complete,
-        },
-    );
-    super::close(app);
-    let title = |id: &String| {
-        bulk.titles
-            .iter()
-            .find(|(t, _)| t == id)
-            .map(|(_, t)| t.clone())
-            .unwrap_or_default()
-    };
-    if !bulk.archived.is_empty() {
-        let count = plural(bulk.archived.len(), "session", "sessions");
-        status(app, &match freed_estimate(measured_freed.filter(|_| complete), freed) {
-            Estimate { bytes: 0, at_least: false } => format!("Archived {count}. Their history is kept."),
-            Estimate { bytes, at_least } => format!(
-                "Archived {count}. {} {} is freed as their worktrees are removed; uncommitted work is saved to a git ref.",
-                if at_least { "At least" } else { "About" },
-                bytes::decimal(bytes)
-            ),
-        });
-    }
-    let busy: Vec<String> = bulk
-        .outcomes
-        .iter()
-        .filter(|(_, o)| matches!(o, Outcome::Busy))
-        .map(|(id, _)| title(id))
-        .collect();
-    if !busy.is_empty() {
-        status(
-            app,
-            &format!(
-                "Kept {}, busy (working or open in another app): {}.",
-                plural(busy.len(), "session", "sessions"),
-                busy.join(", ")
-            ),
-        );
-    }
-    for (id, outcome) in &bulk.outcomes {
-        if let Outcome::Failed(error) = outcome {
-            crate::notices::failed(
-                app,
-                &format!("Failed to archive \"{}\": {error}", title(id)),
-            );
-        }
-    }
-    let unselected: Vec<String> = bulk
-        .titles
-        .iter()
-        .filter(|(id, _)| !bulk.selected.contains(id))
-        .map(|(_, t)| t.clone())
-        .collect();
-    if !unselected.is_empty() {
-        let count = plural(unselected.len(), "session", "sessions");
-        status(
-            app,
-            &format!("Kept {count} you unselected: {}.", unselected.join(", ")),
-        );
     }
 }

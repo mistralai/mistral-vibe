@@ -10,6 +10,7 @@ from vibe.app_server.models import (
     AccountView,
     AgentStatsSnapshot,
     AgentSummary,
+    ApprovalPolicySummary,
     ConfigIssue,
     ConnectorCounts,
     IdentityView,
@@ -25,6 +26,7 @@ from vibe.app_server.protocol import (
     AgentsListParams,
     AgentsListResponse,
     AgentSwitchParams,
+    ApprovalPolicySwitchParams,
     AppServerResponseError,
     ConfigMutationResponse,
     ConfigProxyReadParams,
@@ -311,8 +313,16 @@ class AgentResource:
     def all(self) -> list[AgentSummary]:
         return self._state.agents
 
-    def next(self, current_name: str | None = None) -> AgentSummary:
-        return self._state.next_agent(current_name)
+    @property
+    def active_policy(self) -> ApprovalPolicySummary:
+        return self._state.active_approval_policy
+
+    @property
+    def policies(self) -> list[ApprovalPolicySummary]:
+        return self._state.approval_policies
+
+    def next_policy(self, current_name: str | None = None) -> ApprovalPolicySummary:
+        return self._state.next_policy(current_name)
 
     async def read(self) -> None:
         client = await self._connection.connect()
@@ -337,6 +347,20 @@ class AgentResource:
         )
         self._state.apply_runtime(response.runtime)
         return response.runtime.active_agent
+
+    async def switch_policy(self, name: str) -> ApprovalPolicySummary:
+        client = await self._connection.connect()
+        response = validate_wire(
+            RuntimeMutationResponse,
+            await client.request(
+                "session/approvalPolicy/update",
+                ApprovalPolicySwitchParams(
+                    session_id=self._state.session_id, approval_policy=name
+                ),
+            ),
+        )
+        self._state.apply_runtime(response.runtime)
+        return response.runtime.active_approval_policy
 
     async def set_installed(self, agent_name: str, *, installed: bool) -> None:
         client = await self._connection.connect()

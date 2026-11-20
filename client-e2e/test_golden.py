@@ -60,6 +60,14 @@ _LIVE_DIR = golden_path("_live")
 _BLANK = Snapshot("final", ())
 
 
+def _screen_row(snapshot: Snapshot, row: int, text: str) -> str:
+    """Row `row` as `text` sees it: a row shorter than the screen skips the scrollbar column."""
+    cells = snapshot.cells[row]
+    if len(text) >= len(cells):
+        return snapshot.rows[row]
+    return "".join(cell.character for cell in cells[:-1]).rstrip()
+
+
 def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None:
     if (expected := scenario.expected_actions) is not None:
         assert len(captured.actions) == len(expected) and all(
@@ -76,7 +84,7 @@ def _assert_scenario_expectations(captured: Capture, scenario: Scenario) -> None
     for text in scenario.screen_excludes:
         assert text not in screen, f"screen contains {text!r}"
     for row, text in scenario.screen_rows.items():
-        assert snapshot.rows[row] == text, f"screen row {row} differs"
+        assert _screen_row(snapshot, row, text) == text, f"screen row {row} differs"
     if (cursor := scenario.screen_cursor) is not None:
         assert snapshot.cursor == cursor, f"cursor {snapshot.cursor} != {cursor}"
     if (links := scenario.screen_hyperlinks) is not None:
@@ -179,6 +187,20 @@ def test_screen_expectations_check_the_final_frame_without_snapshots() -> None:
     with pytest.raises(AssertionError, match="bye"):
         _assert_scenario_expectations(
             Capture([], [], [], terminal.snapshot("final")), scenario
+        )
+
+
+def test_short_screen_rows_skip_the_scrollbar_column() -> None:
+    terminal = Terminal(2, 10)
+    terminal.feed(b"hello    \xe2\x94\x82")
+    captured = Capture([], [], [], terminal.snapshot("final"))
+
+    _assert_scenario_expectations(
+        captured, Scenario(name="test", steps=[], screen_rows={0: "hello"})
+    )
+    with pytest.raises(AssertionError, match="row 0"):
+        _assert_scenario_expectations(
+            captured, Scenario(name="test", steps=[], screen_rows={0: "hello    █"})
         )
 
 

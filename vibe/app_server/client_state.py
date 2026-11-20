@@ -6,6 +6,7 @@ from vibe.app_server.events import ClientProjection
 from vibe.app_server.models import (
     AgentSummary,
     AgentType,
+    ApprovalPolicySummary,
     PublicSessionState,
     SkillSummary,
     TokenUsage,
@@ -53,27 +54,37 @@ class ClientSessionState:
     def has_tool(self, name: str) -> bool:
         return any(tool.name == name for tool in self.tools)
 
-    def next_agent(self, current_name: str | None = None) -> AgentSummary:
-        primary = [
-            agent for agent in self.agents if agent.agent_type is AgentType.AGENT
-        ]
-        if not primary:
-            raise RuntimeError("The app server returned no primary agents")
-        current = current_name or self.active_agent.name
+    def next_policy(self, current_name: str | None = None) -> ApprovalPolicySummary:
+        if not self.approval_policies:
+            raise RuntimeError("The app server returned no approval policies")
+        current = current_name or self.active_approval_policy.name
         index = next(
-            (index for index, agent in enumerate(primary) if agent.name == current), -1
+            (
+                index
+                for index, policy in enumerate(self.approval_policies)
+                if policy.name == current
+            ),
+            -1,
         )
-        return primary[(index + 1) % len(primary)]
+        return self.approval_policies[(index + 1) % len(self.approval_policies)]
+
+    def primary_agents(self) -> list[AgentSummary]:
+        return [agent for agent in self.agents if agent.agent_type is AgentType.AGENT]
 
     def apply_agents(self, response: AgentsListResponse) -> None:
         self.active_agent = response.active
         self.agents = list(response.agents)
+        self.active_approval_policy = response.active_approval_policy
+        self.approval_policies = list(response.approval_policies)
         self.state.session.agent = response.active
+        self.state.session.approval_policy = response.active_approval_policy
 
     def apply_runtime(self, snapshot: RuntimeSnapshot) -> None:
         self.config = snapshot.config
         self.active_agent = snapshot.active_agent
         self.agents = list(snapshot.agents)
+        self.active_approval_policy = snapshot.active_approval_policy
+        self.approval_policies = list(snapshot.approval_policies)
         self.skills = list(snapshot.skills)
         self.tools = list(snapshot.tools)
         self.stats = snapshot.stats
@@ -104,6 +115,7 @@ class ClientSessionState:
         self.bypass_tool_permissions = snapshot.bypass_tool_permissions
         self.state.session.model = snapshot.config.active_model.alias
         self.state.session.agent = snapshot.active_agent
+        self.state.session.approval_policy = snapshot.active_approval_policy
         self.state.session.token_usage = snapshot.stats.token_usage
 
     def apply_runtime_read(self, response: RuntimeReadResponse) -> None:

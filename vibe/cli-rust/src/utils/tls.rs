@@ -63,7 +63,7 @@ pub fn apply_tls_trust_for(
 ) -> reqwest::ClientBuilder {
     let custom = custom_root_certificates();
     match trust {
-        TlsTrustStore::System => builder.tls_certs_merge(custom),
+        TlsTrustStore::System => builder.tls_certs_merge(bundled_root_certificates().chain(custom)),
         TlsTrustStore::BundledWebPki => {
             builder.tls_certs_only(bundled_root_certificates().chain(custom))
         }

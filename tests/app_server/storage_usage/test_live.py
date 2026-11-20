@@ -10,6 +10,8 @@ from tests.app_server.storage_usage._tree import NOW_MS
 from vibe.app_server._storage_usage import live
 from vibe.app_server._storage_usage.live import (
     archive_suggestion,
+    delete_bytes,
+    delete_suggestion,
     low_disk_threshold,
     open_sessions,
 )
@@ -92,6 +94,120 @@ def test_the_suggestion_lists_idle_sessions_and_what_archiving_them_frees() -> N
     assert suggestion.session_ids == ["idle", "idle-peer", "unmeasured"]
     assert suggestion.reclaimable_bytes == 2000
     assert suggestion.inactive_days == 30
+
+
+def test_the_delete_suggestion_lists_old_archived_sessions_and_what_goes() -> None:
+    """*Prepare*: Old and recent archived sessions, an open one, an active one,
+    a worktree only old archived sessions use, and one an active session shares.
+    *Do*: Compute the delete suggestion.
+    *Assert*: Only old, closed, archived sessions; their histories count, and
+    a worktree only when no session left would still use it.
+    """
+
+    # Prepare
+    def row(session_id: str, idle_days: float, archived: bool) -> StorageSessionUsage:
+        return _row(session_id, idle_days=idle_days, archived=archived).model_copy(
+            update={"history_bytes": 100}
+        )
+
+    snapshot = StorageUsageSnapshot(
+        scan_started_at=NOW_MS,
+        measured_at=NOW_MS,
+        sessions=[
+            row("old", 40, True),
+            row("old-peer", 35, True),
+            row("old-shared", 50, True),
+            row("recent", 3, True),
+            row("open", 60, True),
+            row("active", 90, False),
+        ],
+        worktrees=[
+            _worktree("only-old", 1000, "old", "old-peer"),
+            _worktree("with-active", 2000, "old-shared", "active"),
+        ],
+    )
+
+    # Do
+    suggestion = delete_suggestion(snapshot, {"open"}, set(), NOW_MS)
+
+    # Assert
+    assert suggestion.session_ids == ["old", "old-peer", "old-shared"]
+    assert suggestion.reclaimable_bytes == 3 * 100 + 1000
+
+
+def test_a_session_delete_frees_its_history_and_only_its_own_worktrees() -> None:
+    """*Prepare*: A session with a worktree only it claims and one it shares.
+    *Do*: Compute what deleting it alone frees.
+    *Assert*: Its history and its own worktree, never the shared one.
+    """
+    # Prepare
+    snapshot = StorageUsageSnapshot(
+        scan_started_at=NOW_MS,
+        measured_at=NOW_MS,
+        sessions=[
+            _row("a", idle_days=40).model_copy(update={"history_bytes": 100}),
+            _row("b", idle_days=40),
+        ],
+        worktrees=[
+            _worktree("own", 1000, "a"),
+            _worktree("shared", 2000, "a", "b"),
+            _worktree("unmeasured", None, "a"),
+        ],
+    )
+
+    # Do
+    freed = delete_bytes(snapshot, "a")
+
+    # Assert
+    assert freed == (100 + 1000, True)
+    assert delete_bytes(snapshot, "gone") == (0, False)
+
+
+def test_an_unmeasured_worktree_the_action_frees_makes_the_number_a_lower_bound() -> (
+    None
+):
+    """*Prepare*: Old archived sessions, one alone in an unmeasured worktree,
+    one sharing an unmeasured worktree with an active session; idle active
+    sessions likewise.
+    *Do*: Compute the delete and archive suggestions and each delete size.
+    *Assert*: Flagged as a lower bound only when an unmeasured worktree would
+    be freed; an unmeasured worktree that stays never flags it.
+    """
+    # Prepare
+    snapshot = StorageUsageSnapshot(
+        scan_started_at=NOW_MS,
+        measured_at=NOW_MS,
+        sessions=[
+            _row("old-alone", idle_days=40, archived=True),
+            _row("old-shared", idle_days=40, archived=True),
+            _row("idle-alone", idle_days=40),
+            _row("idle-shared", idle_days=40),
+            _row("recent", idle_days=1),
+        ],
+        worktrees=[
+            _worktree("alone", None, "old-alone"),
+            _worktree("shared", None, "old-shared", "recent"),
+            _worktree("idle-alone", None, "idle-alone"),
+            _worktree("idle-shared", None, "idle-shared", "recent"),
+        ],
+    )
+    only_shared = snapshot.model_copy(
+        update={"worktrees": [snapshot.worktrees[1], snapshot.worktrees[3]]}
+    )
+
+    # Do
+    deleting = delete_suggestion(snapshot, set(), set(), NOW_MS)
+    archiving = archive_suggestion(snapshot, set(), set(), NOW_MS)
+
+    # Assert
+    assert deleting.reclaimable_at_least
+    assert archiving.reclaimable_at_least
+    assert delete_bytes(snapshot, "old-alone") == (0, True)
+    assert delete_bytes(snapshot, "old-shared") == (0, False)
+    assert not delete_suggestion(only_shared, set(), set(), NOW_MS).reclaimable_at_least
+    assert not archive_suggestion(
+        only_shared, set(), set(), NOW_MS
+    ).reclaimable_at_least
 
 
 def test_a_probe_in_a_loop_never_makes_a_lease_acquire_fail(tmp_path: Path) -> None:

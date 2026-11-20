@@ -6,7 +6,7 @@ from typing import Any, Final
 
 from pydantic import ValidationError
 
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 from vibe.core.config._catalog_filter import CATALOG_FILTER_KEY, parse_catalog_filter
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
@@ -23,9 +23,9 @@ _ON_TOKENS = frozenset({"on", "true"})  # accept boolean and string authoring
 # An experiment never moves a cohort into auto-approve, which skips every
 # permission prompt.
 _DEFAULT_AGENT_ROLLOUT_MODES: Final = frozenset({
-    BuiltinAgentName.ASK,
-    BuiltinAgentName.ACCEPT_EDITS,
-    BuiltinAgentName.SMART_APPROVE,
+    ApprovalPolicyName.ASK,
+    ApprovalPolicyName.ACCEPT_EDITS,
+    ApprovalPolicyName.SMART_APPROVE,
 })
 
 
@@ -141,9 +141,6 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
     ExperimentName.REGISTRY_SKILLS: (("experimental_enable_registry_skills", _map_on),),
     ExperimentName.MISTRAL_MCP_CONNECTOR: (
         ("experimental_enable_mistral_mcp_connector", _map_on),
-    ),
-    ExperimentName.LOCAL_RUNTIME_SESSION_API: (
-        ("experimental_local_runtime_session_api", _map_on),
     ),
     ExperimentName.MODEL_CATALOG: (("experimental_enable_model_catalog", _map_on),),
     ExperimentName.STORAGE_USAGE: (("experimental_enable_storage_usage", _map_on),),

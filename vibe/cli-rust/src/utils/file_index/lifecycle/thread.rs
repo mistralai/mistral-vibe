@@ -1,11 +1,12 @@
 //! The index thread: watcher install, the burst loop and the one-shot build.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, RwLock};
 use std::time::Duration;
 
-use notify::{Config as WatcherConfig, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config as WatcherConfig, Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::watch;
 
 use super::super::metrics::{report_batch, report_started};
@@ -23,7 +24,7 @@ const BURST_CAP: Duration = Duration::from_millis(400);
 /// `build` keeps the client busy until the initial build is published.
 pub(super) fn run_thread(
     root: PathBuf,
-    paths: Arc<RwLock<std::collections::BTreeMap<String, bool>>>,
+    paths: Arc<RwLock<BTreeMap<String, bool>>>,
     version: watch::Sender<u64>,
     watcher_on: bool,
     stop: Arc<AtomicBool>,
@@ -54,42 +55,54 @@ pub(super) fn run_thread(
         build_once(&root, &paths, &version, &stop);
         return;
     }
-    let mut git_backed = build_once(&root, &paths, &version, &stop);
+    let git_backed = build_once(&root, &paths, &version, &stop);
     drop(build);
-    let mut ignore = ignore_matcher(&root);
+    watch_events(&root, &paths, &version, &stop, &event_rx, git_backed);
+}
+
+/// Apply `events` one settled burst at a time until stop or the source closes.
+pub fn watch_events(
+    root: &Path,
+    paths: &RwLock<BTreeMap<String, bool>>,
+    version: &watch::Sender<u64>,
+    stop: &AtomicBool,
+    events: &mpsc::Receiver<notify::Result<Event>>,
+    mut git_backed: bool,
+) {
+    let mut ignore = ignore_matcher(root);
     loop {
         // A drain timeout is not the end: it is the window the stop signal is
         // observed in. Only a dropped watcher (or stop) ends the thread.
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let first = match event_rx.recv_timeout(DRAIN_WAIT) {
+        let first = match events.recv_timeout(DRAIN_WAIT) {
             Ok(first) => first,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
         // Busy from the first event: the burst's quiet window must not let an ack beat the update.
         let _batch = Work::start();
-        let burst = crate::utils::settle::drain_settled(&event_rx, first, BURST_QUIET, BURST_CAP);
-        let events: Vec<_> = burst.into_iter().filter_map(Result::ok).collect();
-        if events.is_empty() {
+        let burst = crate::utils::settle::drain_settled(events, first, BURST_QUIET, BURST_CAP);
+        let burst: Vec<_> = burst.into_iter().filter_map(Result::ok).collect();
+        if burst.is_empty() {
             continue;
         }
         let applied = crate::clock::real_now();
         let (still_git, stats) = apply_events_tracked(
-            &root,
-            &paths,
-            events,
-            &version,
+            root,
+            paths,
+            burst,
+            version,
             &mut ignore,
             git_backed,
-            Some(&stop),
+            Some(stop),
         );
         git_backed = still_git;
         report_batch(
             &stats,
             crate::clock::real_now().duration_since(applied),
-            &paths,
+            paths,
         );
     }
 }
@@ -101,7 +114,7 @@ pub(super) fn run_thread(
 /// the handle this thread feeds is being replaced or dropped.
 fn build_once(
     root: &Path,
-    paths: &Arc<RwLock<std::collections::BTreeMap<String, bool>>>,
+    paths: &Arc<RwLock<BTreeMap<String, bool>>>,
     version: &watch::Sender<u64>,
     stop: &AtomicBool,
 ) -> bool {

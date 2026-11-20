@@ -1038,10 +1038,13 @@ def _failure_details(
         "purpose": action.purpose,
         "exceptionType": type(exc).__name__,
     }
-    response = read_provider_failure(exc).response
+    failure = read_provider_failure(exc)
+    response = failure.response
     if response is None:
         return details
     details["httpStatus"] = response.status
+    if failure.error_code is not None:
+        details["apiErrorCode"] = failure.error_code
     # Only the failed response identifies this request; a previous response's
     # correlation ID belongs to a different completion or retry attempt.
     if correlation_id := response.headers.get(CORRELATION_ID_HEADER):

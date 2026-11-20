@@ -99,9 +99,6 @@ from vibe.acp.models import (
     ConnectorsListResponse,
     ConnectorsRefreshRequest,
     ConnectorsToggleRequest,
-    ProjectLinksListRequest,
-    ProjectLinksResolveRootRequest,
-    ProjectLinksUnlinkRequest,
 )
 from vibe.acp.session import AcpSession
 from vibe.acp.session_updates import replay_session_updates, session_updates_for_event
@@ -112,6 +109,7 @@ from vibe.acp.user_display_content import (
 )
 from vibe.acp.utils import (
     ToolOption,
+    build_agent_config,
     build_mode_state,
     build_model_config,
     build_permission_options,
@@ -121,10 +119,6 @@ from vibe.acp.utils import (
 from vibe.acp.voice import VoiceController
 from vibe.app_server._auth_context import OnboardingContextReader
 from vibe.app_server._integration_resources import MCPResource
-from vibe.app_server._project_links import (
-    ProjectLinksController,
-    ProjectLinksInvalidRequest,
-)
 from vibe.app_server.config import ConfigView
 from vibe.app_server.events import (
     AppServerEvent,
@@ -181,6 +175,7 @@ from vibe.app_server.protocol import (
     SessionOptions,
 )
 from vibe.app_server.session import AppServerSession, AppServerTurnError
+from vibe.core.utils.signals import waking_loop_on_signals
 from vibe.observability.logging import logger
 from vibe.observability.sentry import capture_sentry_exception
 from vibe.questions import UserAnswer, UserQuestionRequest, UserQuestionResult
@@ -191,11 +186,13 @@ NON_INTERACTIVE_DISABLED_TOOLS: tuple[str, ...] = ("ask_user_question",)
 
 
 def _session_agent_changed(event: SessionUpdated) -> bool:
-    previous = event.previous.agent
-    current = event.session.agent
-    if not current:
-        return False
-    return not previous or previous.name != current.name
+    for previous, current in (
+        (event.previous.agent, event.session.agent),
+        (event.previous.approval_policy, event.session.approval_policy),
+    ):
+        if current and (not previous or previous.name != current.name):
+            return True
+    return False
 
 
 INITIAL_AVAILABLE_COMMANDS_DELAY_SECONDS = 0.1
@@ -1081,7 +1078,7 @@ class VibeAcpAgent(AcpAgent):
         session = self._get_session(session_id)
         if not self._is_primary_mode(session, mode_id):
             return None
-        await session.app_server.resources.agents.switch(mode_id)
+        await session.app_server.resources.agents.switch_policy(mode_id)
         return SetSessionModeResponse()
 
     @override
@@ -1093,7 +1090,9 @@ class VibeAcpAgent(AcpAgent):
         try:
             match config_id, value:
                 case "mode", str(mode) if self._is_primary_mode(session, mode):
-                    await session.app_server.resources.agents.switch(mode)
+                    await session.app_server.resources.agents.switch_policy(mode)
+                case "agent", str(agent) if self._is_primary_agent(session, agent):
+                    await session.app_server.resources.agents.switch(agent)
                 case "model", str(model) if model.strip():
                     # The app-server resolves the name, a catalog alias included,
                     # and refuses a model it does not offer.
@@ -1256,8 +1255,6 @@ class VibeAcpAgent(AcpAgent):
                 result = await self._review_extension(method, params)
             case _ if method.startswith("connectors/"):
                 result = await self._connectors_extension(method, params)
-            case _ if method.startswith("projectLinks/"):
-                result = await self._project_links_extension(method, params)
             case _ if method.startswith("identity/") or method.startswith("account/"):
                 result = await self._whoami_extension(method, params)
             case _ if method.startswith("logLevel/"):
@@ -1326,48 +1323,6 @@ class VibeAcpAgent(AcpAgent):
         return ConfigSchemaResponse(
             version=response.config_schema_version, schema=response.config_schema
         ).model_dump(mode="json", by_alias=True)
-
-    # -- projectLinks ----------------------------------------------------------
-    #
-    # The ACP runtime must not import vibe.core, so the projectLinks lifecycle
-    # lives in the app-server ProjectLinksController. These handlers only
-    # validate params, delegate, and map controller errors to ACP errors.
-
-    @staticmethod
-    def _project_links_request[RequestT: BaseModel](
-        model: type[RequestT], params: dict
-    ) -> RequestT:
-        try:
-            return model.model_validate(params)
-        except ValidationError as exc:
-            raise InvalidRequestError(
-                f"Invalid ACP project links request: {exc}"
-            ) from exc
-
-    async def _project_links_extension(
-        self, method: str, params: dict
-    ) -> dict[str, Any]:
-        controller = ProjectLinksController()
-        try:
-            match method:
-                case "projectLinks/list":
-                    self._project_links_request(ProjectLinksListRequest, params)
-                    result = await controller.list_links()
-                case "projectLinks/resolveRoot":
-                    resolve = self._project_links_request(
-                        ProjectLinksResolveRootRequest, params
-                    )
-                    result = await controller.resolve_root(resolve.root_path)
-                case "projectLinks/unlink":
-                    unlink = self._project_links_request(
-                        ProjectLinksUnlinkRequest, params
-                    )
-                    result = await controller.unlink(unlink.root_path)
-                case _:
-                    raise NotImplementedMethodError(method)
-        except ProjectLinksInvalidRequest as exc:
-            raise InvalidRequestError(str(exc)) from exc
-        return result
 
     # -- whoami (identity + account) ----------------------------------------
 
@@ -1761,11 +1716,21 @@ class VibeAcpAgent(AcpAgent):
         self, session: AcpSession
     ) -> tuple[SessionModeState, SessionConfigOptionSelect]:
         agents = session.app_server.resources.agents
-        return build_mode_state(agents.all, agents.active)
+        return build_mode_state(agents.policies, agents.active_policy)
 
     def _is_primary_mode(self, session: AcpSession, mode_id: str) -> bool:
         modes, _ = self._mode_state(session)
         return any(mode.id == mode_id for mode in modes.available_modes)
+
+    def _agent_option(self, session: AcpSession) -> SessionConfigOptionSelect | None:
+        agents = session.app_server.resources.agents
+        return build_agent_config(agents.all, agents.active)
+
+    def _is_primary_agent(self, session: AcpSession, name: str) -> bool:
+        option = self._agent_option(session)
+        return option is not None and any(
+            choice.value == name for choice in option.options
+        )
 
     @staticmethod
     def _record_skill_command(session: AcpSession, text: str) -> None:
@@ -1792,7 +1757,13 @@ class VibeAcpAgent(AcpAgent):
     ) -> list[SessionConfigOptionSelect | SessionConfigOptionBoolean]:
         _, mode = self._mode_state(session)
         config = session.app_server.resources.config.current
-        return [mode, build_model_config(config), make_thinking_response(config)]
+        agent = self._agent_option(session)
+        return [
+            mode,
+            *([agent] if agent is not None else []),
+            build_model_config(config),
+            make_thinking_response(config),
+        ]
 
     def _usage(self, session: AcpSession) -> Usage:
         usage = session.app_server.resources.runtime.stats.token_usage
@@ -1891,7 +1862,8 @@ def run_acp_server(
     async def serve() -> None:
         nonlocal server
         server = asyncio.current_task()
-        await _serve_acp_agent(agent)
+        with waking_loop_on_signals():
+            await _serve_acp_agent(agent)
 
     def handle_sigterm(_signum: int, _frame: Any) -> None:
         nonlocal terminating

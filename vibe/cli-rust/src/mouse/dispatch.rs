@@ -29,6 +29,9 @@ pub(super) fn dispatch(
         MouseTarget::Transcript | MouseTarget::Composer => selection_event(app, target, event),
         MouseTarget::BottomBar => bottom_bar_event(app, client, event),
         MouseTarget::Loading => loading_event(app, event),
+        MouseTarget::CodePreview => owned_region_event(app, event, |app, at| {
+            selection::press_owned(app, at, RegionId::CodePreview)
+        }),
         MouseTarget::GoalRow => owned_region_event(app, event, |app, at| {
             selection::press_owned(app, at, selection::RegionId::Goal)
         }),
@@ -56,6 +59,12 @@ pub(super) fn dispatch(
         MouseTarget::ThemePicker => {
             if picked(app, event, |app| &mut app.theme_picker.list) {
                 crate::input::select_theme(app, client);
+            }
+        }
+        // A click only highlights a task: stopping one takes `s`.
+        MouseTarget::TasksPanel => {
+            if let Some(index) = app.tasks_panel.list.mouse(event) {
+                app.tasks_panel.list.select(index);
             }
         }
         MouseTarget::ThinkingPicker => {
@@ -110,10 +119,14 @@ pub(super) fn dispatch(
                 app.view.scroll_to_entry = app.view.sticky_prompt.map(|(index, _)| index);
             }
         }
-        // A click on the pinned todo line opens the full plan.
-        MouseTarget::TodoRow => {
-            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
-                app.todo_sidebar.open = true;
+        MouseTarget::RailWindow => owned_region_event(app, event, |app, at| {
+            selection::press_owned(app, at, selection::RegionId::RailWindow)
+        }),
+        MouseTarget::Rail => {
+            let press = matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+                && crate::rail::item_at(app, event.column, event.row).is_some();
+            if press && crate::rail::leave_box(app, client) {
+                crate::rail::click(app, client, event.column, event.row);
             }
         }
         MouseTarget::TodoSidebar => {}
@@ -159,6 +172,7 @@ pub(crate) fn option_list(app: &mut App, target: MouseTarget) -> Option<&mut dyn
         MouseTarget::ThemePicker => &mut app.theme_picker.list,
         MouseTarget::ModelPicker => &mut app.model_picker.list,
         MouseTarget::ThinkingPicker => &mut app.thinking_picker.list,
+        MouseTarget::TasksPanel => &mut app.tasks_panel.list,
         MouseTarget::LogLevelPicker => &mut app.log_level_picker.list,
         MouseTarget::ArtifactsModal => &mut app.artifacts_modal.list,
         MouseTarget::Loops => &mut app.loops.list,
@@ -226,10 +240,11 @@ fn subagent_list_event(app: &mut App, event: MouseEvent) {
         .index_at((event.column, event.row));
     match event.kind {
         MouseEventKind::Moved => {
-            app.subagents.list.mouse_session_id = index.map(|index| {
+            let hover = index.map(|index| {
                 crate::subagents::list::session_id_at(app, index)
                     .unwrap_or_else(|| crate::subagents::MAIN_SESSION_ID.to_owned())
             });
+            crate::subagents::list::set_hover(app, hover);
         }
         MouseEventKind::Down(MouseButton::Left) if index.is_some() => {
             crate::reverse_search::cancel(app);
@@ -288,21 +303,12 @@ fn bottom_bar_event(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
             let pressed = app.selection.press;
             let dragged = app.selection.dragged;
             let release = selection::release(app);
-            // A plain click on a painted link toggles the PR/MR list or copies the cwd.
-            if pressed == Some(at) && !matches!(release, Release::Selected) {
-                let action =
-                    crate::ui::bottom_bar::link_at(app, at).map(|link| link.action.clone());
+            // A press and release on the copy icon copies the cwd.
+            if !matches!(release, Release::Selected) {
+                let action = crate::ui::bottom_bar::link_at(app, at)
+                    .filter(|link| pressed.is_some_and(|press| link.area.contains(press.into())))
+                    .map(|link| link.action.clone());
                 match action {
-                    Some(crate::ui::bottom_bar::BarLinkAction::ListArtifacts) => {
-                        // A quick second click toggles again instead of selecting a word.
-                        app.selection.chain = Default::default();
-                        if app.artifacts_modal.open {
-                            artifacts_modal::close(app);
-                        } else {
-                            artifacts_modal::show(app, client);
-                            crate::telemetry::slash_command_clicked(app, "/pr", "footer");
-                        }
-                    }
                     Some(crate::ui::bottom_bar::BarLinkAction::CopyPath(path)) => {
                         crate::ui::notice::copied(app, &path)
                     }
@@ -335,6 +341,9 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
             // clicking the composer hands it focus.
             if target == MouseTarget::Composer && app.subagents.list.focused {
                 crate::subagents::focus_input(app);
+            }
+            if target == MouseTarget::Composer {
+                crate::rail::leave(app);
             }
             // The inline notice survives a transcript mouse-down
             // (it clears only via its own timeout or a queue-mode event).
@@ -440,7 +449,8 @@ pub fn toggle_effect_at(app: &mut App, row: u16) {
     };
     let reveal = !app.view.expanded.remove(&id);
     // A lone call carries its fold into the group a later call may open under its id.
-    if lone && !id.starts_with(KEY_PREFIX) {
+    let turn = id.starts_with(crate::transcript::TURN_DETAILS_PREFIX);
+    if lone && !turn && !id.starts_with(KEY_PREFIX) {
         let group_key = format!("{KEY_PREFIX}{id}");
         app.view.expanded.remove(&group_key);
         if reveal {

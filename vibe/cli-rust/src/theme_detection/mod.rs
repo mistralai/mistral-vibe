@@ -78,19 +78,8 @@ pub fn classify_windows_appearance(success: bool, output: &str) -> Option<bool> 
 }
 
 pub fn classify_osc11_response(response: &[u8]) -> Option<bool> {
-    let start = response
-        .windows(OSC11_RESPONSE_PREFIX.len())
-        .position(|window| window == OSC11_RESPONSE_PREFIX)?;
-    let mut payload = &response[start + OSC11_RESPONSE_PREFIX.len()..];
-    let (red, consumed) = parse_hex_component(payload)?;
-    payload = payload
-        .get(consumed + 1..)
-        .filter(|_| payload.get(consumed) == Some(&b'/'))?;
-    let (green, consumed) = parse_hex_component(payload)?;
-    payload = payload
-        .get(consumed + 1..)
-        .filter(|_| payload.get(consumed) == Some(&b'/'))?;
-    let (blue, _) = parse_hex_component(payload)?;
+    let [red, green, blue] = crate::terminal_colors::rgb_reply(response, OSC11_RESPONSE_PREFIX)?
+        .map(|channel| f64::from(channel) / 255.0);
     Some(relative_luminance(red, green, blue) < LUMINANCE_DARK_THRESHOLD)
 }
 
@@ -103,23 +92,6 @@ pub(super) fn is_complete_osc11_response(response: &[u8]) -> bool {
     };
     let payload = &response[start + OSC11_RESPONSE_PREFIX.len()..];
     payload.contains(&b'\x07') || payload.windows(2).any(|window| window == b"\x1b\\")
-}
-
-fn parse_hex_component(input: &[u8]) -> Option<(f64, usize)> {
-    let length = input
-        .iter()
-        .take_while(|byte| byte.is_ascii_hexdigit())
-        .count();
-    if length == 0 {
-        return None;
-    }
-    let mut value = 0.0;
-    let mut maximum = 0.0;
-    for byte in &input[..length] {
-        value = value * 16.0 + char::from(*byte).to_digit(16)? as f64;
-        maximum = maximum * 16.0 + 15.0;
-    }
-    Some((value / maximum, length))
 }
 
 fn relative_luminance(red: f64, green: f64, blue: f64) -> f64 {

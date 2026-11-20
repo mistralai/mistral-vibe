@@ -33,6 +33,7 @@ from vibe.app_server.models import (
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
     PublicMessageEntry,
+    PublicTurn,
     ResourceContentBlock,
     SubagentEffectDetail,
     TextContentBlock,
@@ -772,6 +773,23 @@ async def _await_entry(
     raise AssertionError("the expected history entry never arrived")
 
 
+async def _await_latest_turn(
+    session: AppServerSession, *, timeout: float = 5.0
+) -> PublicTurn:
+    """The turn the session started, once the client holds it.
+
+    Through the Session API the turn runs before its `turn/start` reply
+    reaches the client, so the provider can be called before the client
+    knows the turn.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if (turn := session.state.latest_turn) is not None:
+            return turn
+        await asyncio.sleep(0.01)
+    raise AssertionError("the started turn never reached the client")
+
+
 @pytest.mark.asyncio
 async def test_interrupting_a_streamed_answer_closes_it_instead_of_dropping_it(
     backend_contract_partial_mistral_response: Callable[..., httpx.Response],
@@ -854,8 +872,7 @@ async def test_steering_adds_a_public_user_message_to_an_active_turn(
     turn = asyncio.create_task(consume_turn())
     try:
         await asyncio.wait_for(started.wait(), timeout=5)
-        active_turn = backend_contract_session.state.latest_turn
-        assert active_turn is not None
+        active_turn = await _await_latest_turn(backend_contract_session)
         await backend_contract_session.inject_user_context(
             "follow up", as_message=True, client_message_id="steer-user"
         )
@@ -1132,3 +1149,65 @@ async def test_a_background_process_shows_in_the_state_while_the_agent_waits(
     # Assert
     [process] = session.state.background_processes
     assert process.command == "sleep 30"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "backend_contract_capabilities", [ClientCapabilities(callback_kinds=["approval"])]
+)
+async def test_rejects_unsupported_approval_scope_without_closing_the_callback(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+    tmp_path: Path,
+) -> None:
+    note = tmp_path / "note.txt"
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response(
+                "",
+                tool_calls=[
+                    {
+                        "id": "write-1",
+                        "index": 0,
+                        "function": {
+                            "name": "write_file",
+                            "arguments": json.dumps({
+                                "path": str(note),
+                                "content": "hello\n",
+                            }),
+                        },
+                    }
+                ],
+            ),
+            backend_contract_mistral_response("Wrote the note"),
+        ]
+    )
+    await backend_contract_session.resources.agents.switch("ask")
+    saw_approval = False
+
+    async for event in backend_contract_session.act("Write a note"):
+        if not isinstance(event, CallbackRequested):
+            continue
+
+        saw_approval = True
+        result = {
+            "callbackId": event.callback.callback_id,
+            "output": {"decision": "allow", "scope": "session"},
+        }
+        params = {"sessionId": backend_contract_session.session_id, "result": result}
+
+        with pytest.raises(AppServerResponseError) as refused:
+            await backend_contract_connection.client.request("callback/result", params)
+
+        assert refused.value.error.code == ProtocolErrorCode.INVALID_PARAMS
+        assert "session" in str(refused.value)
+        assert "once" in str(refused.value)
+        assert not note.exists()
+
+        result["output"] = {"decision": "allow", "scope": "once"}
+        await backend_contract_connection.client.request("callback/result", params)
+
+    assert saw_approval
+    assert note.read_text() == "hello\n"

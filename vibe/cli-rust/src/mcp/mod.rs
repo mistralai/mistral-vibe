@@ -4,6 +4,7 @@ pub mod add_args;
 mod browser;
 pub mod commands;
 mod connect;
+pub mod detail;
 mod help;
 mod labels;
 mod notices;
@@ -220,6 +221,7 @@ fn open(app: &mut App, mut state: MCPState, initial_source: &str, reopened: bool
     let viewing =
         viewing.filter(|source| !(reopened && rows::pending_action(&state, source).is_some()));
     app.mcp.search = crate::search_field::Search::default();
+    app.mcp.tool_search = crate::search_field::Search::default();
     app.mcp.viewing_name = viewing.map(|source| source.name.clone());
     app.mcp.viewing_kind = viewing.map(|source| source.kind);
     app.mcp.list.reset();

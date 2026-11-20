@@ -5,6 +5,7 @@ from dataclasses import replace
 import os
 from urllib.parse import urlsplit
 
+from vibe.config_values import ThinkingLevel
 from vibe.core.config import (
     ModelConfig,
     ProviderConfig,
@@ -156,6 +157,9 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
     session_id: str | None = None,
     telemetry: TelemetryClient | None = None,
     credentials: UtilityCredentials | None = None,
+    fixed_model: tuple[ModelConfig, ProviderConfig] | None = None,
+    use_model_temperature: bool = False,
+    thinking: ThinkingLevel | None = None,
 ) -> str | None:
     """Run a single completion for a background nicety.
 
@@ -179,11 +183,23 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
     real backend failure instead of a silent no-op. A keyless local provider
     (empty ``api_key_env_var``, e.g. llama-server) is never skipped, since it
     needs no key to reach.
+
+    The rest keep a caller's own settings, and change nothing when left out:
+
+    - ``fixed_model`` runs this model on this provider, with no fallback to a
+      fast model; ``feature`` then only labels the call.
+    - ``use_model_temperature`` samples at the model's own temperature and
+      ``top_p`` instead of greedily.
+    - ``thinking`` replaces the model's configured thinking level for this
+      request, sent as if the config had written it; pass a level the model
+      offers.
     """
     call_type = _call_type(feature, call_type)
-    model, provider = select_utility_model(
+    model, provider = fixed_model or select_utility_model(
         config, feature=feature, credentials=credentials
     )
+    if thinking is not None:
+        model = model.model_copy(update={"thinking": thinking})
     if skip_if_no_key and not holds_credential(provider, credentials):
         return None
 
@@ -206,7 +222,7 @@ async def run_utility_completion(  # noqa: PLR0913 - one concern per keyword, al
             LLMMessage(role=Role.system, content=system_prompt),
             LLMMessage(role=Role.user, content=user_content),
         ],
-        temperature=0.0,
+        temperature=None if use_model_temperature else 0.0,
         max_tokens=max_tokens,
         metadata=build_request_metadata(
             launch_context=launch_context, session_id=session_id, call_type=call_type

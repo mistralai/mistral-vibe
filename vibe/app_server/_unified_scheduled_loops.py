@@ -27,6 +27,7 @@ from vibe.core.loop import (
     parse_interval,
 )
 from vibe.utils.io import atomic_replace, file_write_lock, read_safe_async
+from vibe.utils.platform import PRIVATE_DIRECTORY_MODE
 
 
 class ScheduledLoopStoreError(RuntimeError):
@@ -311,7 +312,9 @@ class UnifiedScheduledLoops:
         if not self._persistent():
             return
         try:
-            self._path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            self._path.parent.mkdir(
+                parents=True, mode=PRIVATE_DIRECTORY_MODE, exist_ok=True
+            )
             # Scheduled loops reference session content, so the store file is
             # created owner-only; an existing file keeps its current mode.
             self._path.touch(mode=0o600, exist_ok=True)

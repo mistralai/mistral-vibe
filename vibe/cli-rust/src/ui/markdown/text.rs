@@ -31,22 +31,22 @@ pub(crate) fn wrap_chars(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
             used = 0;
             continue;
         }
-        let widths = WordWidths::new(word);
+        let total = word_width(word);
         let trailing_spaces = word.iter().rev().take_while(|sc| sc.0 == ' ').count();
-        let visible = widths.total.saturating_sub(trailing_spaces);
+        let visible = total.saturating_sub(trailing_spaces);
         if !row.is_empty() && used + visible > width {
             rows.push(trim_end(std::mem::take(&mut row)));
             used = 0;
         }
         if visible <= width {
-            used += widths.total;
+            used += total;
             row.extend_from_slice(word);
             continue;
         }
         let mut start = 0;
         let mut end = 0;
         let mut chunk_width = 0;
-        for (next_end, cell) in widths.graphemes {
+        for (next_end, cell) in graphemes(word) {
             if end > start && chunk_width + cell > width {
                 let chunk = trim_end(word[start..end].to_vec());
                 if !chunk.is_empty() {
@@ -165,27 +165,24 @@ fn split_words(chars: &[Sc]) -> Vec<&[Sc]> {
     words
 }
 
-struct WordWidths {
-    graphemes: Vec<(usize, usize)>,
-    total: usize,
+/// Cell width of `chars`; printable ASCII is one cell per char, so it skips grapheme segmentation.
+fn word_width(chars: &[Sc]) -> usize {
+    if chars.iter().all(|sc| matches!(sc.0, ' '..='~')) {
+        return chars.len();
+    }
+    graphemes(chars).iter().map(|&(_, width)| width).sum()
 }
 
-impl WordWidths {
-    fn new(chars: &[Sc]) -> Self {
-        let text = chars.iter().map(|sc| sc.0).collect::<String>();
-        let mut end = 0;
-        let mut total = 0;
-        let graphemes = text
-            .graphemes(true)
-            .map(|grapheme| {
-                end += grapheme.chars().count();
-                let width = grapheme.width();
-                total += width;
-                (end, width)
-            })
-            .collect();
-        Self { graphemes, total }
-    }
+/// Each grapheme of `chars` as its end char index and cell width.
+fn graphemes(chars: &[Sc]) -> Vec<(usize, usize)> {
+    let text = chars.iter().map(|sc| sc.0).collect::<String>();
+    let mut end = 0;
+    text.graphemes(true)
+        .map(|grapheme| {
+            end += grapheme.chars().count();
+            (end, grapheme.width())
+        })
+        .collect()
 }
 
 /// Whitespace runs collapse per text token, never across tokens.

@@ -90,7 +90,7 @@ class FakeConfigOrchestrator[C: VibeConfigSchema](ConfigOrchestrator[C]):
         builder = ConfigBuilder(type(self._base_config))
         builder.add_layer(
             OverridesLayer(
-                data=self._base_config.model_dump(mode="json"), name="fake-base"
+                data=self._base_config.model_dump(mode="json"), name="user-supplied"
             )
         )
         builder.add_layers(list(self._extra_layers))

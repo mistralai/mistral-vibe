@@ -5,6 +5,7 @@ use ratatui::layout::Rect;
 use vibe_rs::app::App;
 use vibe_rs::server::{PublicChildSession, SessionStatus};
 use vibe_rs::subagents;
+use vibe_rs::ui::theme;
 
 use crate::support::{down, drag, mouse, redraw, row, send_mouse, up};
 
@@ -21,6 +22,7 @@ fn pressing_the_hovered_row_keeps_the_bar_on_it() {
         ..Default::default()
     });
     subagents::refresh(&mut app);
+    subagents::focus_first(&mut app);
     redraw(&mut app);
     let row_of = |app: &App, index| app.subagents.list.options.rows_of(index).next().unwrap();
     let (main, child) = (row_of(&app, 0), row_of(&app, 1));
@@ -36,8 +38,14 @@ fn pressing_the_hovered_row_keeps_the_bar_on_it() {
     assert_ne!(pressed[(main.x, main.y)].bg, bar);
 
     send(&mut app, MouseEventKind::Up(MouseButton::Left), child);
+    redraw(&mut app);
+    let child = row_of(&app, 1);
     let released = redraw(&mut app);
-    assert_eq!(released[(child.x, child.y)].bg, bar);
+    assert_eq!(
+        released[(child.x, child.y)].bg,
+        bar,
+        "the viewed child keeps the bar"
+    );
     assert_eq!(app.subagents.viewed_subagent_id.as_deref(), Some("a"));
 }
 
@@ -52,11 +60,12 @@ fn an_overflowing_list_shows_a_draggable_scrollbar() {
         });
     }
     subagents::refresh(&mut app);
+    subagents::focus_first(&mut app);
     let buffer = redraw(&mut app);
     let area = app.subagents.list.area;
     let x = area.right() - 1;
     let thumb = (area.y..area.bottom())
-        .find(|&y| buffer[(x, y)].symbol() != " ")
+        .find(|&y| buffer[(x, y)].fg == theme::scrollbar())
         .expect("a scrollbar thumb in the last column");
     assert_eq!(app.subagents.list.options.scroll(), 0);
 
@@ -85,7 +94,7 @@ fn a_list_that_fits_has_no_scrollbar() {
 }
 
 #[test]
-fn the_waiting_row_offers_a_only_while_the_list_has_focus() {
+fn the_list_shows_its_waiting_child_only_while_it_has_focus() {
     let mut app = App::default();
     for status in [SessionStatus::Running, SessionStatus::Idle] {
         app.subagents.replace_child_session(PublicChildSession {
@@ -98,43 +107,52 @@ fn the_waiting_row_offers_a_only_while_the_list_has_focus() {
     let last_row = |app: &mut App| {
         let buffer = redraw(app);
         let area = app.subagents.list.area;
-        row(&buffer, area.bottom() - 1)
+        row(&buffer, area.y + 1).trim_matches(['│', ' ']).to_owned()
     };
-    assert_eq!(last_row(&mut app).trim(), "1 subagent waiting");
+    redraw(&mut app);
+    assert_eq!(vibe_rs::ui::subagent_list::height(&app), 0);
 
     assert!(subagents::focus_first(&mut app));
-    assert_eq!(last_row(&mut app).trim(), "1 subagent waiting · a to show");
+    assert!(last_row(&mut app).contains("[ready]"));
 
     subagents::leave_list(&mut app);
-    assert_eq!(last_row(&mut app).trim(), "1 subagent waiting");
+    assert_eq!(vibe_rs::ui::subagent_list::height(&app), 0);
 }
 
 #[test]
-fn an_overflowing_list_keeps_its_waiting_row_below_the_scrollbar() {
+fn a_hovered_list_keeps_its_order_until_the_mouse_leaves() {
     let mut app = App::default();
-    for id in ["a", "b", "c", "d", "e", "f", "g", "w"] {
+    let set = |app: &mut App, id: &str, status| {
         app.subagents.replace_child_session(PublicChildSession {
             id: id.into(),
-            status: SessionStatus::Running,
+            status,
             ..Default::default()
         });
-        subagents::refresh(&mut app);
+        subagents::refresh(app);
+    };
+    for id in ["a", "b", "c"] {
+        set(&mut app, id, SessionStatus::Running);
     }
-    app.subagents.replace_child_session(PublicChildSession {
-        id: "w".into(),
-        status: SessionStatus::Idle,
-        ..Default::default()
-    });
-    app.subagents.list.batch_session_ids.remove("w");
-    subagents::refresh(&mut app);
-    assert_eq!(app.subagents.list.waiting_count, 1);
+    subagents::show_subagent_chat(&mut app, "c");
+    subagents::focus_input(&mut app);
+    redraw(&mut app);
+    let a = app.subagents.list.options.rows_of(1).next().unwrap();
+    send(&mut app, MouseEventKind::Moved, a);
+    set(&mut app, "a", SessionStatus::Idle);
+    let ids = |app: &App| {
+        app.subagents
+            .list
+            .rows
+            .iter()
+            .map(|r| r.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(&app),
+        ["a", "b", "c"],
+        "rows hold still under the mouse"
+    );
 
-    let buffer = redraw(&mut app);
-    let area = app.subagents.list.area;
-    assert_eq!(area.height, 7, "6 list rows and the waiting row");
-    assert_eq!(row(&buffer, area.bottom() - 1).trim(), "1 subagent waiting");
-    let tracks = vibe_rs::mouse::scrollbar_tracks(&app, area);
-    assert_eq!(tracks.len(), 1);
-    assert_eq!(tracks[0].height, 6, "the bar spans only the list rows");
-    assert!(tracks[0].bottom() < area.bottom());
+    send_mouse(&mut app, mouse(MouseEventKind::Moved, 0, 0));
+    assert_eq!(ids(&app), ["b", "c", "a"]);
 }

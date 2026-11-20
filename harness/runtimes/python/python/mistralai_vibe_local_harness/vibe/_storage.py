@@ -31,6 +31,7 @@ from pydantic import (
     JsonValue,
     SerializerFunctionWrapHandler,
     TypeAdapter,
+    ValidationInfo,
     WrapSerializer,
     field_validator,
     model_validator,
@@ -45,6 +46,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustAudioContentBlock,
     RustBackgroundProcessNotificationSource,
     RustCapabilitiesChange,
+    RustContentBlock,
     RustDispatchActionDirective,
     RustEmbeddedResourceContentBlock,
     RustHarnessCapabilitySet,
@@ -63,6 +65,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustPluginContextDefinition,
     RustPluginsChange,
     RustPostToolCallHookAction,
+    RustPromptSettings,
     RustProvidedToolDefinition,
     RustReasoningPart,
     RustReconfigureEvent,
@@ -88,9 +91,11 @@ from mistralai_vibe_local_harness.vibe._errors import (
     HarnessSessionBusyError,
     HarnessStoreRequiresNewerReaderError,
 )
+from mistralai_vibe_local_harness.vibe._paths import PRIVATE_DIRECTORY_MODE
 from mistralai_vibe_local_harness.vibe._process_actions import (
     process_id as expected_process_id,
 )
+from mistralai_vibe_local_harness.vibe._public_content import public_content_block
 from mistralai_vibe_local_harness.vibe._subagents import (
     ActiveSessionLifecycle,
     ForkSessionIdentity,
@@ -273,7 +278,14 @@ def _fill_program_time_limits(value: dict[str, Any]) -> dict[str, Any]:
 def _fill_stored_settings(value: object) -> object:
     if not isinstance(value, dict):
         return value
-    return _fill_model_facts(_fill_program_time_limits(value))
+    return _fill_stock_prompts(_fill_model_facts(_fill_program_time_limits(value)))
+
+
+def _fill_stock_prompts(settings: dict[str, object]) -> dict[str, object]:
+    """Stored settings leave the stock guidance out; absent reads back as it."""
+    if "prompts" in settings:
+        return settings
+    return {**settings, "prompts": _STOCK_PROMPTS}
 
 
 def _fill_stored_input_settings(value: object) -> object:
@@ -356,11 +368,59 @@ def _drop_commits_without_call(value: object) -> object:
     return {**value, "observations": kept}
 
 
+def _without_stock_prompts(settings: object) -> object:
+    """Settings without their prompt choice while it is the stock guidance.
+
+    Absent reads back as the stock guidance, and a build whose settings predate
+    the prompt choice can then still load the document.
+    """
+    if not isinstance(settings, dict) or settings.get("prompts") != _STOCK_PROMPTS:
+        return settings
+    return {key: value for key, value in settings.items() if key != "prompts"}
+
+
+_STOCK_PROMPTS = RustPromptSettings(guidance="stock").model_dump(
+    mode="json", by_alias=True
+)
+
+
+def _dump_stored_settings(
+    settings: RustHarnessSettings, handler: SerializerFunctionWrapHandler
+) -> object:
+    return _without_stock_prompts(handler(settings))
+
+
+def _dump_stored_input(
+    value: RustHarnessInput, handler: SerializerFunctionWrapHandler
+) -> object:
+    """Store an input with each reconfigured setting's stock prompts left out."""
+    dumped = handler(value)
+    if not isinstance(dumped, dict):
+        return dumped
+    command = dumped.get("command")
+    if not isinstance(command, dict) or command.get("type") != "reconfigure":
+        return dumped
+    changes = command.get("changes")
+    if not isinstance(changes, list):
+        return dumped
+    stored = [
+        {**change, "value": _without_stock_prompts(change.get("value"))}
+        if isinstance(change, dict) and change.get("type") == "settings"
+        else change
+        for change in changes
+    ]
+    return {**dumped, "command": {**command, "changes": stored}}
+
+
 type StoredHarnessSettings = Annotated[
-    RustHarnessSettings, BeforeValidator(_fill_stored_settings)
+    RustHarnessSettings,
+    BeforeValidator(_fill_stored_settings),
+    WrapSerializer(_dump_stored_settings),
 ]
 type StoredHarnessInput = Annotated[
-    RustHarnessInput, BeforeValidator(_fill_stored_input)
+    RustHarnessInput,
+    BeforeValidator(_fill_stored_input),
+    WrapSerializer(_dump_stored_input),
 ]
 
 
@@ -800,6 +860,7 @@ class SessionPin(StrEnum):
 
     ACTIVE_MODEL = "active_model"
     AGENT_NAME = "agent_name"
+    APPROVAL_POLICY = "approval_policy"
     REASONING_EFFORT = "reasoning_effort"
     COMPLETION_CATALOGUE = "completion_catalogue"
 
@@ -819,9 +880,12 @@ class SessionMetadataV1(_StoredModel):
     origin_cwd: str | None = None
     # The concrete model alias pinned to the session; see ``SessionPin``.
     active_model: str | None = None
-    # The running mode (agent profile name) the session is in. Backward-compatible:
-    # older snapshots load as ``None`` and keep their configured default agent.
+    # The agent the session runs. Before agents and approval policies split it
+    # held the policy too, so a session with no ``approval_policy`` reads a
+    # policy name here as its policy, and one on the default agent still writes
+    # its policy here for builds that predate the split.
     agent_name: str | None = None
+    approval_policy: str | None = None
     reasoning_effort: str | None = None
     # What the provider's catalogue said about the active model, as JSON, so a
     # reopen reuses it instead of asking again.
@@ -1065,7 +1129,47 @@ def _load_stored_public_state(value: object) -> object:
                 items=[], paused=False, max_items=TURN_QUEUE_MAX_ITEMS
             ),
         }
+    if isinstance(value, dict):
+        value = _with_public_imported_blocks(value)
     return PublicSessionState.model_validate(value, extra="allow")
+
+
+def _with_public_imported_blocks(state: dict[str, Any]) -> dict[str, Any]:
+    """Repair the image and link blocks imports and forks stored as Core blocks.
+
+    Imports and forks once stored those message blocks in the Core's shape,
+    which public history readers reject: the session could be neither read
+    nor deleted. Every other block is kept as stored.
+    """
+    history = state.get("history")
+    if not isinstance(history, dict):
+        return state
+    entries = cast(dict[str, Any], history).get("entries")
+    if not isinstance(entries, list):
+        return state
+    repaired = [
+        {**entry, "content": [_public_imported_block(block) for block in content]}
+        if isinstance(entry, dict)
+        and entry.get("type") == "message"
+        and isinstance(content := entry.get("content"), list)
+        else entry
+        for entry in entries
+    ]
+    return {**state, "history": {**history, "entries": repaired}}
+
+
+_CORE_CONTENT_BLOCK: TypeAdapter[RustContentBlock] = TypeAdapter(RustContentBlock)
+
+
+def _public_imported_block(block: object) -> object:
+    if not isinstance(block, dict):
+        return block
+    stored_as_core = block.get("type") == "resource_link" or (
+        block.get("type") == "image" and "attachment" not in block
+    )
+    if not stored_as_core:
+        return block
+    return public_content_block(_CORE_CONTENT_BLOCK.validate_python(block))
 
 
 def _dump_stored_public_state(
@@ -1113,6 +1217,29 @@ StoredPublicSessionState = Annotated[
 ]
 
 
+class SparseHistoryPositionsV1(_StoredModel):
+    """Session API history positions saved without those history order gives.
+
+    Walking the saved history in order, an entry absent from ``positions``
+    takes the position right after the entry before it, and the first entry
+    takes 0. ``positions`` keeps the others, and those of entries the saved
+    history does not hold. ``next_index`` is the position of the next new
+    entry.
+    """
+
+    positions: dict[str, int] = Field(default_factory=dict)
+    next_index: int = Field(default=0, ge=0)
+    history_sha256: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """Digest of the saved history's entries, in order, when positions follow it.
+
+    A build that rewrites the history without knowing this form leaves it
+    stale; the positions are then dropped rather than read against another
+    history.
+    """
+
+
 class SessionApiFactsV1(_StoredModel):
     """Session API facts the public snapshot cannot rebuild.
 
@@ -1120,6 +1247,10 @@ class SessionApiFactsV1(_StoredModel):
     holds one for its call and one for its result. ``turn_outcomes`` keeps how
     each Turn ended after the snapshot's latest Turn moves on. A journal record
     carries only the facts its advance added; folding merges them.
+
+    A document saves these facts in a smaller form (``_saved_session_api``),
+    and the models that load one convert it back (``_loaded_session_api``), so
+    every instance holds every fact.
     """
 
     metadata_version: Literal[1] = 1
@@ -1171,6 +1302,222 @@ def _fold_session_api_facts(
     return current.merged(added)
 
 
+_SPARSE_HISTORY_KEY = "sparse_history"
+"""The saved form of ``history_positions`` and ``next_history_index``.
+
+Saved documents hold positions there and leave the two fields empty, unless an
+entry of the saved history has no position. A build that does not know the key
+then numbers the whole history again in order, rather than numbering entries
+it has no position for after the ones it has.
+"""
+
+
+def _saved_session_api(
+    facts: SessionApiFactsV1, snapshot: PublicSessionState | None
+) -> JsonObject:
+    """``facts`` as a document saves them, beside ``snapshot``.
+
+    Leaves out the Turn outcomes a load gives back from the saved history
+    (``_restored_turn_outcomes``) and moves the positions to the sparse form
+    (``_sparse_positions``). A journal record has no snapshot beside it and
+    keeps every outcome and every position.
+    """
+    document = cast(JsonObject, facts.model_dump(mode="json", by_alias=True))
+    document.pop(_SPARSE_HISTORY_KEY, None)
+    entries = snapshot.history.entries if snapshot is not None else None
+    if snapshot is not None:
+        restored = _restored_turn_outcomes(snapshot)
+        document["turn_outcomes"] = {
+            turn_id: outcome
+            for turn_id, outcome in facts.turn_outcomes.items()
+            if restored.get(turn_id) != outcome
+        }
+    sparse = _sparse_positions(facts, entries)
+    if sparse is not None and (sparse.positions or sparse.next_index):
+        document |= {
+            "history_positions": {},
+            "next_history_index": 0,
+            _SPARSE_HISTORY_KEY: cast(
+                JsonValue, sparse.model_dump(mode="json", by_alias=True)
+            ),
+        }
+    return document
+
+
+def _loaded_session_api(value: object, snapshot: PublicSessionState | None) -> object:
+    """The facts a document saved beside ``snapshot``, every one of them.
+
+    Undoes ``_saved_session_api``. When the history is no longer the one the
+    positions were saved against, because a build that does not know the
+    sparse form rewrote it, the positions are dropped: the Session API view
+    numbers the history again in order, as that build does. Anything but a
+    saved document passes through to validation.
+    """
+    if not isinstance(value, dict):
+        return value
+    document = dict(cast(JsonObject, value))
+    saved_sparse = document.pop(_SPARSE_HISTORY_KEY, None)
+    facts = SessionApiFactsV1.model_validate(document)
+    entries = snapshot.history.entries if snapshot is not None else None
+    if saved_sparse is not None and not facts.history_positions:
+        # Otherwise a build that does not know the sparse form numbered the
+        # history again and saved every position it gave: those are shown.
+        sparse = SparseHistoryPositionsV1.model_validate(saved_sparse)
+        positions = _dense_positions(sparse, entries)
+        if positions is not None:
+            facts = facts.model_copy(
+                update={
+                    "history_positions": positions,
+                    "next_history_index": max([
+                        sparse.next_index,
+                        *(position + 1 for position in positions.values()),
+                    ]),
+                }
+            )
+    if snapshot is not None:
+        facts = facts.model_copy(
+            update={
+                "turn_outcomes": {
+                    **_restored_turn_outcomes(snapshot),
+                    **facts.turn_outcomes,
+                }
+            }
+        )
+    return facts
+
+
+def _sparse_positions(
+    facts: SessionApiFactsV1, entries: Sequence[JsonObject] | None
+) -> SparseHistoryPositionsV1 | None:
+    """The positions of ``facts`` without those history order gives.
+
+    Keeps the positions of entries ``entries`` does not hold: one may still
+    come back, such as streamed output the saved history leaves out. None when
+    an entry of ``entries`` has no position: history order would give it one
+    the Session API never showed.
+    """
+    from mistralai_vibe_local_harness.vibe._session_api_entries import (
+        history_position_ids,
+    )
+
+    positions = facts.history_positions
+    kept: dict[str, int] = {}
+    walked: list[str] = []
+    expected = 0
+    for raw in entries or ():
+        for api_id in history_position_ids(raw):
+            position = positions.get(api_id)
+            if position is None:
+                return None
+            if position != expected:
+                kept[api_id] = position
+            expected = position + 1
+            walked.append(api_id)
+    seen = set(walked)
+    kept |= {
+        api_id: position for api_id, position in positions.items() if api_id not in seen
+    }
+    return SparseHistoryPositionsV1(
+        positions=kept,
+        next_index=facts.next_history_index,
+        history_sha256=_walk_sha256(walked) if entries is not None else None,
+    )
+
+
+def _dense_positions(
+    sparse: SparseHistoryPositionsV1, entries: Sequence[JsonObject] | None
+) -> dict[str, int] | None:
+    """Every position ``sparse`` saved beside ``entries``, or None if they are stale."""
+    from mistralai_vibe_local_harness.vibe._session_api_entries import (
+        history_position_ids,
+    )
+
+    positions = dict(sparse.positions)
+    walked: list[str] = []
+    expected = 0
+    for raw in entries or ():
+        for api_id in history_position_ids(raw):
+            position = sparse.positions.get(api_id, expected)
+            positions.setdefault(api_id, position)
+            expected = position + 1
+            walked.append(api_id)
+    if sparse.history_sha256 is not None and (
+        _walk_sha256(walked) != sparse.history_sha256
+    ):
+        return None
+    return positions
+
+
+def _restored_turn_outcomes(snapshot: PublicSessionState) -> dict[str, JsonObject]:
+    """The outcome a load gives each Turn of the saved history that has none saved.
+
+    A Turn simply completed, from its first entry's creation to its last
+    entry's update, which is also how a build that does not restore outcomes
+    reads a Turn without one. A save leaves out an outcome only when it equals
+    this one, and a load gives it back from the same history, so the outcome
+    stays fixed even if a later rewind removes some of the Turn's entries. The
+    snapshot's latest Turn is not restored: its outcome is always saved, and
+    while it runs it has none.
+    """
+    # The Session API modules load on first use, as in ``fact_recorder``: only a
+    # Session that saved facts gets here.
+    from mistralai_vibe_local_harness.session_api.app_server.session.models import (
+        CompletedTermination,
+    )
+    from mistralai_vibe_local_harness.vibe._session_api_entries import (
+        history_position_ids,
+    )
+
+    latest = snapshot.latest_turn
+    latest_id = latest.id if latest is not None else None
+    times: dict[str, tuple[int, int]] = {}
+    for raw in snapshot.history.entries:
+        turn_id = raw.get("turnId")
+        if (
+            not isinstance(turn_id, str)
+            or turn_id == latest_id
+            or not history_position_ids(raw)
+        ):
+            continue
+        created = _int_or(raw.get("createdAt"), 0)
+        updated = _int_or(raw.get("updatedAt"), created)
+        first, last = times.get(turn_id, (created, updated))
+        times[turn_id] = (min(first, created), max(last, updated))
+    completed = cast(
+        JsonValue, CompletedTermination().model_dump(mode="json", by_alias=True)
+    )
+    return {
+        turn_id: {"startedAt": first, "completedAt": last, "termination": completed}
+        for turn_id, (first, last) in times.items()
+    }
+
+
+def _int_or(value: object, default: int) -> int:
+    return value if isinstance(value, int) else default
+
+
+def _walk_sha256(api_ids: Sequence[str]) -> str:
+    return hashlib.sha256("\n".join(api_ids).encode()).hexdigest()
+
+
+def _load_journal_session_api(value: object) -> object:
+    return _loaded_session_api(value, None)
+
+
+def _dump_journal_session_api(
+    facts: SessionApiFactsV1 | None, handler: SerializerFunctionWrapHandler
+) -> object:
+    return handler(facts) if facts is None else _saved_session_api(facts, None)
+
+
+# The Session API facts a journal record carries, in the saved form on disk.
+JournalSessionApiFacts = Annotated[
+    SessionApiFactsV1 | None,
+    BeforeValidator(_load_journal_session_api),
+    WrapSerializer(_dump_journal_session_api),
+]
+
+
 class ProjectionStateV1(_StoredModel):
     projection_state_version: Literal[1] = 1
     session_id: str
@@ -1180,6 +1527,15 @@ class ProjectionStateV1(_StoredModel):
     session_api: SessionApiFactsV1 | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+    """Dumped whole; ``write_generation`` saves it with ``_saved_session_api``."""
+
+    @field_validator("session_api", mode="before")
+    @classmethod
+    def _load_session_api(cls, value: object, info: ValidationInfo) -> object:
+        snapshot = info.data.get("snapshot")
+        return _loaded_session_api(
+            value, snapshot if isinstance(snapshot, PublicSessionState) else None
+        )
 
 
 class AppendEntryOp(_StoredModel):
@@ -1641,7 +1997,7 @@ class ProjectionAdvancedPayloadV1(_StoredModel):
 class ProjectionDeltaPayloadV1(_StoredModel):
     watermark: int = Field(ge=0)
     delta: ProjectionDelta
-    session_api: SessionApiFactsV1 | None = Field(
+    session_api: JournalSessionApiFacts = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
@@ -2116,7 +2472,9 @@ class SessionLease:
         if self._file is not None:
             raise RuntimeError("session lease is already acquired")
         _reject_symlink_components(self._path.parents[1], self._path.parent)
-        self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._path.parent.mkdir(
+            mode=PRIVATE_DIRECTORY_MODE, parents=True, exist_ok=True
+        )
         with _lease_directory_lock(self._path.parent):
             _sweep_once(self._path.parent)
             self._path.touch(mode=0o600, exist_ok=True)
@@ -2296,7 +2654,8 @@ class ProjectionTail:
     """The newest public history of a stored session, read without a full load.
 
     ``projection_state`` is the published projection with its history cut to
-    at most the requested number of newest entries.
+    at most the requested number of newest entries, and without Session API
+    facts: those are read against the whole history.
     """
 
     projection_state: ProjectionStateV1
@@ -2497,18 +2856,25 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         generation = _next_generation(generation_root, sequence)
         final_dir = generation_root / generation
         self._invalidate_cache()
-        self.session_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        generation_root.mkdir(mode=0o700, exist_ok=True)
-        journal_root.mkdir(mode=0o700, exist_ok=True)
+        self.session_root.mkdir(
+            mode=PRIVATE_DIRECTORY_MODE, parents=True, exist_ok=True
+        )
+        generation_root.mkdir(mode=PRIVATE_DIRECTORY_MODE, exist_ok=True)
+        journal_root.mkdir(mode=PRIVATE_DIRECTORY_MODE, exist_ok=True)
         journal_path = journal_root / f"{sequence + 1:016d}.jsonl"
         _create_empty_file(journal_path)
 
         chunk_root = self.session_root / _CHUNKS_DIRNAME
         _reject_symlink_components(self.session_root, chunk_root)
-        chunk_root.mkdir(mode=0o700, exist_ok=True)
+        chunk_root.mkdir(mode=PRIVATE_DIRECTORY_MODE, exist_ok=True)
 
+        saved_session_api = (
+            _saved_session_api(projection_state.session_api, projection_state.snapshot)
+            if projection_state.session_api is not None
+            else None
+        )
         staging = generation_root / f".staging-{generation}-{secrets.token_hex(8)}"
-        staging.mkdir(mode=0o700)
+        staging.mkdir(mode=PRIVATE_DIRECTORY_MODE)
         try:
             checkpoint_envelope, checkpoint_transcript = _detach_transcript(
                 checkpoint, _CHECKPOINT_MESSAGES_PATH
@@ -2516,6 +2882,8 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             projection_envelope, projection_transcript = _detach_projection_history(
                 projection_state
             )
+            if saved_session_api is not None:
+                projection_envelope["session_api"] = saved_session_api
             runtime_envelope, capability_catalog = self._detach_capability_catalog(
                 runtime_state
             )
@@ -2623,7 +2991,18 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             manifest=manifest,
             checkpoint=checkpoint,
             runtime_state=runtime_state,
-            projection_state=projection_state,
+            # What a load reads back, so a warm read matches a reopen.
+            projection_state=(
+                projection_state
+                if saved_session_api is None
+                else projection_state.model_copy(
+                    update={
+                        "session_api": _loaded_session_api(
+                            saved_session_api, projection_state.snapshot
+                        )
+                    }
+                )
+            ),
             generation_dir=final_dir,
             manifest_sha256=current.manifest_sha256,
             current=current_bytes,
@@ -2817,6 +3196,10 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             )
             _attach_transcript(projection_value, _PROJECTION_HISTORY_PATH, history)
             loaded_bytes += chunk_bytes
+        if isinstance(projection_value, dict):
+            # The tail carries no Session API facts (``_projection_tail``): they
+            # are read against the whole saved history, which a tail lacks.
+            projection_value.pop("session_api", None)
         projection = ProjectionStateV1.model_validate(projection_value)
         if projection.session_id != self.session_id:
             raise ValueError("projection state belongs to another session")
@@ -3144,7 +3527,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         quarantine = self.session_root / _QUARANTINE_DIRNAME
         try:
             _reject_symlink_components(self.session_root, quarantine)
-            quarantine.mkdir(mode=0o700, exist_ok=True)
+            quarantine.mkdir(mode=PRIVATE_DIRECTORY_MODE, exist_ok=True)
             copy = quarantine / f"{generation}.jsonl"
             copy.write_bytes(segment.read_bytes())
             copy.chmod(0o600)
@@ -5831,7 +6214,8 @@ def _projection_tail(
                             update={"entries": list(kept)}
                         )
                     }
-                )
+                ),
+                "session_api": None,
             }
         ),
         session_metadata=session_metadata,
@@ -6179,6 +6563,11 @@ def _release_file_lock(file: Any) -> None:
     fcntl.flock(file.fileno(), fcntl.LOCK_UN)
 
 
+def durable_replace(source: Path, target: Path) -> None:
+    """Move ``source`` over ``target``, retrying Windows sharing violations."""
+    _durable_replace(source, target)
+
+
 def _durable_replace(source: Path, target: Path) -> None:
     if not _is_windows():
         os.replace(source, target)
@@ -6294,6 +6683,7 @@ __all__ = [
     "SessionPin",
     "SetEnvelopeOp",
     "SetHistoryEntriesOp",
+    "SparseHistoryPositionsV1",
     "StoredSession",
     "SubmittedProcessNotificationV1",
     "UnifiedInteropSourceV1",
@@ -6302,6 +6692,7 @@ __all__ = [
     "canonical_json",
     "committed_history",
     "compute_projection_delta",
+    "durable_replace",
     "empty_runtime_state",
     "parse_stored_settings",
     "sha256_json",

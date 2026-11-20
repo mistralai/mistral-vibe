@@ -1,8 +1,8 @@
 [
  {
-  "method": "session/agent/update",
+  "method": "session/approvalPolicy/update",
   "params": {
-   "agentName": "smart-approve",
+   "approvalPolicy": "smart-approve",
    "sessionId": "00000000-0000-4000-8000-000000000001"
   }
  }

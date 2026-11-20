@@ -24,11 +24,10 @@ _ELAPSED = re.compile(r"(?<=… \()(?:\d+h)?(?:\d+m)?\d+s(?=[ )])")
 # versions, IPs, and the pinned latest intact. The mask keeps the width, so a
 # digit-count change or a row wrap still needs one regen.
 _UPDATE_CURRENT = re.compile(r"\d+\.\d+\.\d+(?= → \d+\.\d+\.\d+)")
-_SCROLLBAR_THUMB = re.compile(r"[\u2581-\u2587]")
 _VIBE_DIR = str(VIBE_DIR)
 _VIBE_DIR_PLACEHOLDER = "<vibe-dir>"
 
-_AGENT_UPDATE = "session/agent/update"
+_SWITCHES = frozenset({"session/agent/update", "session/approvalPolicy/update"})
 _QUEUE_REPLACE = "session/turn/queue/replace"
 _CLIENT_MESSAGE_ID_KEYS = frozenset({
     "clientUserMessageId",
@@ -41,21 +40,21 @@ _CLIENT_MESSAGE_ID_KEYS = frozenset({
 def normalize_requests(requests: Sequence[Request]) -> list[Request]:
     """Mask transport-generated values before comparing semantic RPC requests."""
     replacement_keys: dict[str, str] = {}
-    return _coalesce_agent_switches([
+    return _coalesce_switches([
         _normalize_request(request, replacement_keys) for request in requests
     ])
 
 
-def _coalesce_agent_switches(requests: list[Request]) -> list[Request]:
-    """Keep only the agent a burst of Shift+Tab settles on, not every hop it took."""
+def _coalesce_switches(requests: list[Request]) -> list[Request]:
+    """Keep only the target a burst of Shift+Tab settles on, not every hop it took."""
     # A switch in flight is chased when it answers, so the number of hops depends
     # on whether a reply lands between two keys of the burst. The target does not.
     coalesced: list[Request] = []
     for request in requests:
         if (
-            request.method == _AGENT_UPDATE
+            request.method in _SWITCHES
             and coalesced
-            and coalesced[-1].method == _AGENT_UPDATE
+            and coalesced[-1].method == request.method
         ):
             coalesced[-1] = request
             continue
@@ -162,39 +161,13 @@ def _normalized_cells(
         _collapse_elapsed(_normalize_vibe_dir(list(snapshot_row)))
         for snapshot_row in snapshot.cells
     ]
-    scrollbar = any(
-        _SCROLLBAR_THUMB.match(row[-1].character) for row in normalized_rows
-    )
-    scrollbar_cols = {
-        x
-        for normalized_row in normalized_rows
-        for x, cell in enumerate(normalized_row)
-        if _SCROLLBAR_THUMB.match(cell.character)
-    }
     normalized: list[list[Cell]] = []
     for cell_row in normalized_rows:
         grid_row = "".join(cell.character for cell in cell_row)
         version_columns = _version_columns(grid_row)
         row: list[Cell] = []
-        # Mask whole scrollbar columns so blank thumb cells cannot vary by host.
         for x, cell in enumerate(cell_row):
-            volatile = (
-                (not keep_braille and _BRAILLE.match(cell.character))
-                or (
-                    scrollbar
-                    and x == len(cell_row) - 1
-                    and (
-                        cell.character == " " or _SCROLLBAR_THUMB.match(cell.character)
-                    )
-                )
-                or (
-                    x in scrollbar_cols
-                    and (
-                        cell.character == " " or _SCROLLBAR_THUMB.match(cell.character)
-                    )
-                )
-            )
-            if volatile:
+            if not keep_braille and _BRAILLE.match(cell.character):
                 row.append(Cell(" ", "default", "default", frozenset()))
             elif cell.character == _PULSE_HOLLOW:
                 row.append(

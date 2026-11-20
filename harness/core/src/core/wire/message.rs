@@ -140,6 +140,68 @@ pub(crate) struct StoredMessage {
     pub source: StoredMessageSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_index: Option<u64>,
+    /// Set on the note Core appends when instructions are set or removed.
+    /// Compaction keeps only the newest note of each live key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<InstructionsNote>,
+}
+
+/// What an injected instructions note does to the instructions held for its
+/// key.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum InstructionsNote {
+    /// The note carries the live text for `key`, which held none.
+    Upsert { key: String },
+    /// The note carries the live text for `key` and says it replaces the text
+    /// the key held. `carried` is the text of the plain note for the same
+    /// content: compaction carries it in place of this note, since the
+    /// replaced text is gone from the rebuilt history.
+    Overwrite { key: String, carried: String },
+    /// The note says the instructions for `key` no longer apply.
+    Delete { key: String },
+}
+
+impl InstructionsNote {
+    pub(crate) fn key(&self) -> &str {
+        match self {
+            Self::Upsert { key } | Self::Overwrite { key, .. } | Self::Delete { key } => key,
+        }
+    }
+
+    /// Whether the note sets text, so its key is live while it is the newest.
+    pub(crate) fn sets_text(&self) -> bool {
+        match self {
+            Self::Upsert { .. } | Self::Overwrite { .. } => true,
+            Self::Delete { .. } => false,
+        }
+    }
+}
+
+/// The longest instructions key, in characters.
+pub(crate) const MAX_INSTRUCTIONS_KEY_CHARS: usize = 128;
+
+/// Keys use letters, digits, `.`, `_`, `:` and `-`, so a note can show one in a
+/// tag attribute without escaping.
+pub(crate) fn validate_instructions_key(key: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("instructions key must not be empty".to_string());
+    }
+    if key.chars().count() > MAX_INSTRUCTIONS_KEY_CHARS {
+        return Err(format!(
+            "instructions key must be at most {MAX_INSTRUCTIONS_KEY_CHARS} characters"
+        ));
+    }
+    if !key
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "._:-".contains(character))
+    {
+        return Err(
+            "instructions key may contain only ASCII letters, digits, '.', '_', ':' and '-'"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 impl Message {
@@ -297,6 +359,7 @@ impl StoredMessage {
             message,
             source: StoredMessageSource::History,
             turn_index: None,
+            instructions: None,
         }
     }
 
@@ -305,6 +368,16 @@ impl StoredMessage {
             message,
             source: StoredMessageSource::Injection,
             turn_index: None,
+            instructions: None,
+        }
+    }
+
+    /// An injected context message that notes a change to the instructions
+    /// held for a key.
+    pub(crate) fn instructions(note: InstructionsNote, text: String) -> Self {
+        Self {
+            instructions: Some(note),
+            ..Self::injected(Message::context(vec![ContentBlock::text(text)]))
         }
     }
 
@@ -313,6 +386,7 @@ impl StoredMessage {
             message,
             source: StoredMessageSource::GeneratedSystem,
             turn_index: None,
+            instructions: None,
         }
     }
 

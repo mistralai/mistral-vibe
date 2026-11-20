@@ -601,7 +601,7 @@ async def test_resume_attaches_the_requested_persisted_session_and_keeps_it_usab
 
 
 @pytest.mark.asyncio
-async def test_auto_approve_starts_the_auto_approve_agent_and_stays_a_bypass_on_resume(
+async def test_auto_approve_starts_the_auto_approve_policy_and_stays_a_bypass_on_resume(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_config: None,
@@ -609,7 +609,7 @@ async def test_auto_approve_starts_the_auto_approve_agent_and_stays_a_bypass_on_
 ) -> None:
     """*Prepare*: A session saved on ``ask``.
     *Do*: Start a new session, then resume the saved one, both with auto-approve.
-    *Assert*: The new one runs the auto-approve agent; the resumed one stays on
+    *Assert*: The new one runs the auto-approve policy; the resumed one stays on
     ``ask`` with every call approved.
     """
     # Prepare
@@ -617,7 +617,7 @@ async def test_auto_approve_starts_the_auto_approve_agent_and_stays_a_bypass_on_
         side_effect=[backend_contract_mistral_response("saved")]
     )
     saving = await connect_backend_contract_host(
-        session_options=SessionOptions(agent="ask"),
+        session_options=SessionOptions(approval_policy="ask"),
         capabilities=ClientCapabilities(),
         process_services=process_services,
     )
@@ -643,7 +643,7 @@ async def test_auto_approve_starts_the_auto_approve_agent_and_stays_a_bypass_on_
                 else connection.host.resume_session(session_id)
             )
             opened = (
-                session.resources.agents.active.name,
+                session.resources.agents.active_policy.name,
                 session.resources.runtime.bypass_tool_permissions,
             )
             await session.close()
@@ -651,12 +651,12 @@ async def test_auto_approve_starts_the_auto_approve_agent_and_stays_a_bypass_on_
         finally:
             await connection.host.close()
 
-    started_agent, started_bypass = await open_with_auto_approve(None)
-    resumed_agent, resumed_bypass = await open_with_auto_approve(saved_id)
+    started_policy, started_bypass = await open_with_auto_approve(None)
+    resumed_policy, resumed_bypass = await open_with_auto_approve(saved_id)
 
     # Assert
-    assert (started_agent, started_bypass) == ("auto-approve", True)
-    assert (resumed_agent, resumed_bypass) == ("ask", True)
+    assert (started_policy, started_bypass) == ("auto-approve", True)
+    assert (resumed_policy, resumed_bypass) == ("ask", True)
 
 
 @pytest.mark.asyncio
@@ -682,14 +682,14 @@ async def test_an_auto_approve_start_grants_its_folder_trust_once(
     )
     try:
         session = await connection.host.open_session()
-        agent = session.resources.agents.active.name
+        policy = session.resources.agents.active_policy.name
         held = grants()
         await session.close()
     finally:
         await connection.host.close()
 
     # Assert
-    assert agent == "auto-approve"
+    assert policy == "auto-approve"
     assert held == 1
 
 

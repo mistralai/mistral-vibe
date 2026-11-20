@@ -246,6 +246,7 @@ class _ConnectorWebSearchCard(_SourceModel):
 class _ConnectorOpenUrlPage(_SourceModel):
     url: str
     content: str = ""
+    can_open: bool = True
 
 
 class _GrepArguments(_SourceModel):
@@ -1489,9 +1490,12 @@ def _project_connector_open_url(detail: GenericEffectDetail) -> _ProjectedCall:
         output = WebFetchEffectOutput(
             url=page.url, content=page.content, content_type="", was_truncated=False
         )
-        content_len = len(page.content)
+        message = f"{page.url} ({len(page.content):,} chars)"
         display = EffectResultDisplay(
-            success=True, verb="Fetched", message=f"{page.url} ({content_len:,} chars)"
+            success=True,
+            verb="Fetched",
+            message=message if page.can_open else page.url,
+            suffix="" if page.can_open else "(unreadable)",
         )
         return _completed_state(state, output, display)
 

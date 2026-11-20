@@ -309,8 +309,9 @@ class SkillManager:
         for entry in self._session_pins:
             info = self._load_registry_entry(entry, SkillScope.SESSION)
             if info is None:
-                logger.warning(
-                    "The session's skill %s (%s@%s) is not in the store; it is left out",
+                logger.info(
+                    "The session's skill %s (%s@%s) is not in the store yet; it loads"
+                    " once fetched",
                     entry.name,
                     entry.skill_id,
                     entry.version,
@@ -377,7 +378,7 @@ class SkillManager:
                 skill_file, source=SkillSource.LOCAL, scope=scope
             )
             if skill_info is not None:
-                skills.append(skill_info)
+                skills.append(skill_info.model_copy(update={"entry_path": skill_file}))
         return skills
 
     def _registry_sources(self) -> list[tuple[Path, SkillScope]]:
@@ -396,9 +397,21 @@ class SkillManager:
         return [
             info
             for path, scope in self._registry_sources()
-            for entry in _manifest.load_sync(path).skills
+            for entry in self._manifest_entries(path)
             if (info := self._load_registry_entry(entry, scope)) is not None
         ]
+
+    def _manifest_entries(self, path: Path) -> list[_manifest.ManifestEntry]:
+        try:
+            return _manifest.read_sync(path).skills
+        except _manifest.ManifestReadError as exc:
+            logger.warning("Ignoring unreadable skills manifest: %s", exc)
+            self._config_issues.append(
+                SkillConfigIssue(
+                    file=path, message=f"Shared skills not loaded: {exc.reason}"
+                )
+            )
+            return []
 
     def installed_skills(self) -> list[InstalledSkill]:
         """Everything installed, one entry per (name, scope, source), in the order
