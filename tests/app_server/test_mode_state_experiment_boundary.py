@@ -3,7 +3,7 @@
 resolved config through AgentManager into the ACP mode list.
 
 This locks the seam past ``resolve``/``GrowthbookLayer`` (already unit-tested):
-config field -> AgentManager.available_agents -> project_agent_summaries ->
+config field -> AgentManager.available_policies -> project_selection ->
 build_mode_state, which is what the desktop client renders.
 """
 
@@ -16,7 +16,7 @@ import pytest
 import tomli_w
 
 from vibe.acp.utils import build_mode_state
-from vibe.app_server._projection import project_agent_summaries
+from vibe.app_server._projection import project_selection
 from vibe.core.agents.manager import AgentManager
 from vibe.core.config import build_default_orchestrator
 from vibe.core.config.layers.growthbook import GrowthbookLayer
@@ -55,7 +55,8 @@ async def test_default_value_rollout_enables_smart_approve_config() -> None:
     orchestrator = await _orchestrator_with_smart_approve()
     config = orchestrator.config
     assert config.smart_approve_available is True
-    assert config.default_agent == "smart-approve"
+    assert config.default_approval_policy == "smart-approve"
+    assert config.origin_of("default_approval_policy") == GrowthbookLayer.NAME
 
 
 @pytest.mark.asyncio
@@ -63,10 +64,10 @@ async def test_default_value_rollout_surfaces_smart_approve_in_mode_list() -> No
     orchestrator = await _orchestrator_with_smart_approve()
     agents = AgentManager(orchestrator, None)
 
-    active, summaries = project_agent_summaries(
-        agents.active_profile, agents.available_agents.values()
+    selection = project_selection(agents)
+    state, option = build_mode_state(
+        selection.approval_policies, selection.active_approval_policy
     )
-    state, option = build_mode_state(summaries, active)
 
     mode_ids = [mode.id for mode in state.available_modes]
     assert "smart-approve" in mode_ids
@@ -75,16 +76,16 @@ async def test_default_value_rollout_surfaces_smart_approve_in_mode_list() -> No
 
 
 @pytest.mark.asyncio
-async def test_default_value_rollout_keeps_the_configured_default_agent(
+async def test_default_value_rollout_keeps_the_configured_default_policy(
     config_dir: Path,
 ) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
-    config["default_agent"] = "auto-approve"
+    config["default_approval_policy"] = "auto-approve"
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
     orchestrator = await _orchestrator_with_smart_approve()
 
     agents = AgentManager(orchestrator, initial_agent=None)
 
-    assert orchestrator.config.origin_of("default_agent") == "user-toml"
-    assert agents.active_profile.name == "auto-approve"
+    assert orchestrator.config.origin_of("default_approval_policy") == "user-toml"
+    assert agents.active_policy.name == "auto-approve"

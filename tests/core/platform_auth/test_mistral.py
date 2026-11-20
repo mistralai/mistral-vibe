@@ -19,6 +19,7 @@ from vibe.core.platform_auth import (
 from vibe.core.platform_auth._mistral import (
     OIDC_PRINCIPAL_PREFIX,
     credential_request,
+    credential_stream,
     fetched_for_current_account,
     may_cache_under,
     mistral_credentials,
@@ -144,6 +145,20 @@ async def test_a_401_tells_the_provider_which_credential_was_refused() -> None:
     respx.get("https://api.mistral.ai/v1/models").mock(return_value=httpx.Response(401))
     provider = _UserToken(f"{OIDC_PRINCIPAL_PREFIX}a", token="sent-token")
     await credential_request(provider, "GET", "https://api.mistral.ai/v1/models")
+    assert provider.rejected == ["sent-token"]
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_a_401_on_a_stream_tells_the_provider_which_credential_was_refused() -> (
+    None
+):
+    respx.get("https://api.mistral.ai/v1/models").mock(return_value=httpx.Response(401))
+    provider = _UserToken(f"{OIDC_PRINCIPAL_PREFIX}a", token="sent-token")
+    async with credential_stream(
+        provider, "GET", "https://api.mistral.ai/v1/models"
+    ) as response:
+        assert response.status_code == 401
     assert provider.rejected == ["sent-token"]
 
 

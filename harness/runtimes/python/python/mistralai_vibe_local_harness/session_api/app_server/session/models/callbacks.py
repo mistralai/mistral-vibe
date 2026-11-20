@@ -17,9 +17,11 @@ from pydantic import (
 from pydantic.json_schema import SkipJsonSchema
 from pydantic_core import PydanticCustomError
 
+from ....session_values import EXPERIMENTAL
 from .base import JsonSchema, SessionModel
 from .common import (
     CallbackId,
+    EncryptedValue,
     ProtocolError,
     SessionId,
     ToolCallId,
@@ -239,6 +241,31 @@ class StartSubagentCallback(BaseSessionCallback):
     agent_config: AgentConfig
 
 
+class EncryptedCallback(BaseSessionCallback):
+    """A callback of an encrypted Session, with its content sealed.
+
+    The worker writes it instead of the callback. ``encrypted`` holds the whole callback as JSON. A
+    few fields stay in plain text so that the control plane can track open callbacks and the Turns
+    they block: ``id``, ``turn_id``, the callback's kind as ``callback_kind``, and its
+    ``tool_call_id`` and tool ``name`` when it has them. Every other field, the input and the
+    injected Session inputs included, is only in ``encrypted``. The plain-text fields repeat the
+    sealed ones.
+
+    ``kind`` is ``encrypted``: a client that cannot decrypt the callback reads it as a kind it does
+    not know, and does not answer it.
+
+    This model is experimental: a minor release can change it without a compatibility path.
+    """
+
+    model_config = ConfigDict(json_schema_extra=EXPERIMENTAL)
+
+    kind: Literal["encrypted"] = "encrypted"
+    callback_kind: CallbackKind | UnknownValue
+    tool_call_id: ToolCallId | None = Field(default=None, exclude_if=lambda value: value is None)
+    name: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    encrypted: EncryptedValue
+
+
 # TODO: a new callback kind breaks an older client that cannot answer it. Gate each new kind
 # behind a flag the client sets at session creation, so an older client never gets a kind it
 # cannot handle (user, 3 Nov). Linear: https://linear.app/mistral-ai/issue/AGE-2316/session-v1-an-older-client-never-gets-a-callback-kind-it-cannot-answer
@@ -249,7 +276,8 @@ type SessionCallback = Annotated[
     | ClientToolCallback
     | ClientHookCallback
     | ExecuteCodeCallback
-    | StartSubagentCallback,
+    | StartSubagentCallback
+    | EncryptedCallback,
     Field(discriminator="kind"),
 ]
 
@@ -306,6 +334,21 @@ class CallbackResult(SessionModel):
         # Audio fails the call when the answer reaches the Turn, as it did before, so an
         # accepted answer in a Workflow history still reads on replay.
         return refuse_unsupported_blocks(content, refuse_audio=False)
+
+
+class EncryptedCallbackResult(SessionModel):
+    """The answer to a callback of an encrypted Session, with its content sealed.
+
+    The client sends it instead of a ``CallbackResult``. ``encrypted`` holds the whole
+    ``CallbackResult`` as JSON. ``callback_id`` stays in plain text and repeats the sealed one.
+
+    This model is experimental: a minor release can change it without a compatibility path.
+    """
+
+    model_config = ConfigDict(json_schema_extra=EXPERIMENTAL)
+
+    callback_id: CallbackId
+    encrypted: EncryptedValue
 
 
 type ApprovalScope = Literal["once", "session"]

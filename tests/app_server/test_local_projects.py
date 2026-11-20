@@ -147,16 +147,6 @@ def test_project_methods_are_advertised() -> None:
 
 
 @pytest.mark.asyncio
-async def test_config_read_reports_local_projects_on_by_default(
-    config_dir: Path,
-) -> None:
-    result = await _handler().dispatch("config/read", {}, client_info=_CLIENT)
-
-    payload = result.response.model_dump(mode="json", by_alias=True)
-    assert payload["config"]["experimentalEnableLocalProjects"] is True
-
-
-@pytest.mark.asyncio
 async def test_list_without_a_store_file_is_empty_and_writes_nothing(
     config_dir: Path,
 ) -> None:

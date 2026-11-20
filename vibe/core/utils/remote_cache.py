@@ -149,14 +149,36 @@ class RemoteCache[K: Hashable, V]:
         await asyncio.shield(state.loading)
         return self._servable(state)
 
-    def check(self, key: K) -> None:
-        """Start a refresh when the value is old or missing; never waits."""
+    def check(self, key: K, *, refresh_after_s: float | None = None) -> None:
+        """Start a refresh when the value is old or missing; never waits.
+
+        ``refresh_after_s``, when shorter than the policy's, is the age at
+        which this caller takes the value for old: one it knows may be out of
+        date sooner.
+        """
         state = self._state(key)
         entry = self._servable(state)
         if state.flight is not None or self._clock() < state.retry_at:
             return
-        if entry is None or state.doubted or self._stale(entry):
-            self._start(key, state, force=state.doubted)
+        if (
+            entry is None
+            or state.doubted
+            or self._stale(entry, refresh_after_s=refresh_after_s)
+        ):
+            self._start(
+                key, state, force=state.doubted, refresh_after_s=refresh_after_s
+            )
+
+    async def settled(self, key: K, *, timeout_s: float) -> None:
+        """Wait, at most ``timeout_s``, for the refresh in flight to end,
+        whatever its outcome; returns at once with none.
+        """
+        state = self._states.get(key)
+        flight = state.flight if state is not None else None
+        if flight is None:
+            return
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(flight), timeout_s)
 
     async def first(self, key: K, *, timeout_s: float) -> Cached[V] | None:
         """The cached value, or, with none, the first fetch's.
@@ -257,8 +279,11 @@ class RemoteCache[K: Hashable, V]:
             return None
         return entry
 
-    def _stale(self, entry: Cached[V]) -> bool:
-        return self._clock() - entry.stored_at >= self._policy.refresh_after_s
+    def _stale(self, entry: Cached[V], *, refresh_after_s: float | None = None) -> bool:
+        after_s = self._policy.refresh_after_s
+        if refresh_after_s is not None:
+            after_s = min(after_s, refresh_after_s)
+        return self._clock() - entry.stored_at >= after_s
 
     def _flight(self, key: K) -> asyncio.Task[Cached[V]]:
         state = self._state(key)
@@ -270,12 +295,24 @@ class RemoteCache[K: Hashable, V]:
         return self._start(key, state, force=False)
 
     def _start(
-        self, key: K, state: _KeyState[V], *, force: bool, backoff: bool = True
+        self,
+        key: K,
+        state: _KeyState[V],
+        *,
+        force: bool,
+        backoff: bool = True,
+        refresh_after_s: float | None = None,
     ) -> asyncio.Task[Cached[V]]:
         # In a context of its own: one copied from the session that happened
         # to start it would keep that session alive as long as the fetch runs.
         flight = asyncio.create_task(
-            self._run(key, state, force=force, backoff=backoff),
+            self._run(
+                key,
+                state,
+                force=force,
+                backoff=backoff,
+                refresh_after_s=refresh_after_s,
+            ),
             name=f"vibe-refresh-{self._name}",
             context=contextvars.Context(),
         )
@@ -293,12 +330,20 @@ class RemoteCache[K: Hashable, V]:
         return flight
 
     async def _run(
-        self, key: K, state: _KeyState[V], *, force: bool, backoff: bool
+        self,
+        key: K,
+        state: _KeyState[V],
+        *,
+        force: bool,
+        backoff: bool,
+        refresh_after_s: float | None = None,
     ) -> Cached[V]:
         if not force:
             # Another process may have refreshed it: its copy saves a request.
             await self._load_once(key, state)
-            if state.entry is not None and not self._stale(state.entry):
+            if state.entry is not None and not self._stale(
+                state.entry, refresh_after_s=refresh_after_s
+            ):
                 return state.entry
         failed: Exception | None = None
         value: V | None = None

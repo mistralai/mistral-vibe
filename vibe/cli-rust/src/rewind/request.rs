@@ -41,27 +41,40 @@ pub(super) fn select(
     });
 }
 
-/// Send the rewind itself.
+/// Send the rewind the panel chose.
 pub(super) fn confirm(app: &mut App, client: &Arc<Client>, inplace: bool) {
-    let (Some(session_id), Some(entry_id)) =
-        (app.session.session_id.clone(), app.rewind.entry_id.clone())
-    else {
+    let Some(entry_id) = app.rewind.entry_id.clone() else {
         return;
     };
     let restore_files = app.rewind.restore_files;
+    rewind(app, client, entry_id, restore_files, inplace);
+}
+
+/// Send a rewind to the user message `entry_id`.
+pub(super) fn rewind(
+    app: &mut App,
+    client: &Arc<Client>,
+    entry_id: String,
+    restore_files: bool,
+    inplace: bool,
+) -> bool {
+    let Some(session_id) = app.session.session_id.clone() else {
+        return false;
+    };
     let client = client.clone();
     crate::ui_event::spawn(app, async move {
         let params = serde_json::json!({
             "sessionId": session_id.clone(),
-            "entryId": entry_id,
+            "entryId": entry_id.clone(),
             "restoreFiles": restore_files,
             "inplace": inplace,
         });
         match client.request_err(method::SESSION_REWIND, params).await {
-            Ok(result) => done(result, session_id, inplace),
+            Ok(result) => done(result, entry_id, session_id, inplace),
             Err(error) => Event::Failed(error.message),
         }
     });
+    true
 }
 
 #[derive(Deserialize)]
@@ -75,7 +88,7 @@ struct RewindResponse {
 }
 
 /// Read a `session/rewind` response into the event that applies it.
-fn done(result: Value, old_session_id: String, inplace: bool) -> Event {
+fn done(result: Value, entry_id: String, old_session_id: String, inplace: bool) -> Event {
     let Ok(RewindResponse {
         message,
         restore_errors,
@@ -85,6 +98,7 @@ fn done(result: Value, old_session_id: String, inplace: bool) -> Event {
         return Event::Failed("Rewind returned no session state.".into());
     };
     Event::Done {
+        entry_id,
         message,
         restore_errors,
         old_session_id,

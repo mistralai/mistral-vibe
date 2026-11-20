@@ -68,11 +68,21 @@ pub fn shape(app: &App) -> Shape {
             Shape::Default
         };
     }
+    if target == crate::mouse::MouseTarget::Rail && crate::rail::hovered(app).is_some() {
+        return Shape::Pointer;
+    }
     if matches!(
         target,
         crate::mouse::MouseTarget::JumpToBottom | crate::mouse::MouseTarget::StickyPrompt
     ) {
         return Shape::Pointer;
+    }
+    if target == crate::mouse::MouseTarget::ReleaseNotes {
+        let state = &app.release_notes;
+        return match state.link_area.contains(at.into()) || state.link_at(at).is_some() {
+            true => Shape::Pointer,
+            false => Shape::Default,
+        };
     }
     if target == crate::mouse::MouseTarget::BottomBar {
         return if crate::ui::bottom_bar::clickable_at(app, at) {

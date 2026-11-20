@@ -37,7 +37,7 @@ pub struct Columns {
 }
 
 impl Columns {
-    /// Size every column to its widest value or heading, then drop columns from the right until a row fits `pane`: Version, Source and Scope on My Skills, Version and Sharing on Shared.
+    /// Size every column to its widest value or heading, then drop columns from the right until a row fits `pane`: Version, Source and Scope on My Skills, Version and Sharing on Shared, where Sharing also goes when every skill listed shares the same way.
     pub fn fit(state: &State, rows: &[Row], pane: usize) -> Self {
         let pins: Vec<_> = rows
             .iter()
@@ -77,12 +77,16 @@ impl Columns {
             let values = entries.iter().map(|entry| label(entry).width());
             values.chain([heading.width()]).max().unwrap_or(0)
         };
+        let mut shown = entries.iter().map(|entry| sharing(entry));
+        let first = shown.next();
+        let uniform = shown.all(|value| Some(value) == first);
         let shared = [
             column_width(sharing, SHARING_HEADING),
             column_width(latest, VERSION_HEADING),
             0,
         ];
         let [sharing, version, _] = fit(shared, MARKER_WIDTH + name + SHARING_GAP, pane);
+        let sharing = if uniform { 0 } else { sharing };
         Self {
             name,
             installed: fit(widths, MARKER_WIDTH + name + GAP + badge_width, pane),

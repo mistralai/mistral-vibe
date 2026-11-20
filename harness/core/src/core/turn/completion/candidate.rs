@@ -3,7 +3,6 @@ use std::collections::BTreeSet;
 
 use crate::core::config::OutputLimitRecovery;
 use crate::core::features::output_limit_recovery;
-use crate::core::features::programmatic_tool_calling::is_private_wrapper;
 use crate::core::hooks::{CompletionHookOutput, HookPoint, PreLlmCallOutput};
 use crate::core::step_protocol::{DeterminismContext, TurnStopReason};
 use crate::core::tools::context::ToolContext;
@@ -158,7 +157,7 @@ pub(in crate::core::turn) struct AcceptedCompletion {
     /// the session's estimate correction.
     pub(in crate::core::turn) input_tokens: Option<u64>,
     pub(in crate::core::turn) message: StoredMessage,
-    pub(in crate::core::turn) observable_candidate: Option<CompletionCandidate>,
+    pub(in crate::core::turn) candidate: CompletionCandidate,
     pub(in crate::core::turn) continuation: AcceptedCompletionContinuation,
 }
 
@@ -394,7 +393,6 @@ fn resolve_accepted(
     let message = Message::assistant(candidate.message.content.clone());
     message.validate()?;
     let tool_calls = candidate.message.tool_calls();
-    let observable_candidate = observable_candidate(&candidate);
     // The final iteration's tool call runs like any other. The turn stops after
     // the tool result lands, when the loop would otherwise start a completion it
     // has no budget for (see `apply_tool_batch_transition`), so the pending tool
@@ -418,7 +416,7 @@ fn resolve_accepted(
         context_tokens,
         input_tokens,
         message: StoredMessage::visible(message),
-        observable_candidate,
+        candidate,
         continuation,
     }))
 }
@@ -532,18 +530,6 @@ pub(in crate::core::turn) fn parse_completion_result(
         finish_reason: result.finish_reason,
         usage: Some(result.usage),
     })
-}
-
-fn observable_candidate(candidate: &CompletionCandidate) -> Option<CompletionCandidate> {
-    let mut observable = candidate.clone();
-    observable.message.content.retain(|part| {
-        !matches!(
-            part,
-            AssistantPart::Semantic(AssistantSemanticPart::ToolCall { name, .. })
-                if is_private_wrapper(name)
-        )
-    });
-    (!observable.message.content.is_empty()).then_some(observable)
 }
 
 #[cfg(test)]

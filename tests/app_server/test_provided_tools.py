@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from urllib.error import URLError
 
@@ -92,7 +93,7 @@ def _executor(
 
 
 _PARENT_SETTINGS = SessionSettings(
-    model="medium", reasoning_effort="low", approval_policy="default"
+    model="medium", reasoning_effort="low", approval_policy="accept-edits"
 )
 _MODELS = (
     SpawnModel(alias="medium", display_name=None, levels=("low", "high")),
@@ -391,6 +392,8 @@ def test_todo_is_routed_to_the_name_its_permission_is_configured_under() -> None
         f"{VIBE_TOOL_GROUP}.update_goal": "update_goal",
         f"{VIBE_TOOL_GROUP}.mark_sessions_seen": "mark_sessions_seen",
         f"{VIBE_TOOL_GROUP}.enter_worktree": "enter_worktree",
+        f"{VIBE_TOOL_GROUP}.list_projects": "list_projects",
+        f"{VIBE_TOOL_GROUP}.move_to_project": "move_to_project",
     }
     assert VIBE_PROVIDED_TOOL_MODES == {
         TODO_TOOL_NAME: "ask",
@@ -407,6 +410,8 @@ def test_todo_is_routed_to_the_name_its_permission_is_configured_under() -> None
         "create_goal": "allow",
         "update_goal": "allow",
         "enter_worktree": "allow",
+        "list_projects": "ask",
+        "move_to_project": "ask",
     }
 
 
@@ -931,6 +936,30 @@ async def test_start_session_asks_the_client_for_the_calling_session(
         reasoning_effort=_PARENT_SETTINGS.reasoning_effort,
         approval_policy=_PARENT_SETTINGS.approval_policy,
     ).model_dump(exclude={"idempotency_key"})
+
+
+@pytest.mark.asyncio
+async def test_start_session_starts_the_session_on_the_callers_agent(
+    tmp_path: Path,
+) -> None:
+    spawner = _FakeSpawner()
+
+    def origin(_session_id: str) -> SessionSpawnOrigin:
+        return SessionSpawnOrigin(
+            checkout=SessionSpawnNewWorktree(),
+            settings=replace(_PARENT_SETTINGS, agent="task-lead"),
+            models=_MODELS,
+        )
+
+    await _executor(tmp_path, session_spawner=spawner, session_origin=origin)(
+        _start_session(
+            "start", prompt="Fix it", placement="new_worktree", link="attached"
+        )
+    )
+
+    [request] = spawner.requests
+    assert request.agent == "task-lead"
+    assert request.approval_policy == "accept-edits"
 
 
 @pytest.mark.asyncio

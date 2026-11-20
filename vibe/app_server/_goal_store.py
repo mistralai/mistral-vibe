@@ -17,6 +17,7 @@ from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, JsonValue
 
 from vibe.app_server.models import PublicGoal
 from vibe.utils.io import atomic_replace, file_write_lock, read_safe, read_safe_async
+from vibe.utils.platform import PRIVATE_DIRECTORY_MODE
 
 __all__ = [
     "GOAL_FILENAME",
@@ -252,7 +253,9 @@ class UnifiedGoalStore:
             if stored.goal is None and not stored.receipts:
                 await asyncio.to_thread(self._path.unlink, missing_ok=True)
                 return
-            self._path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            self._path.parent.mkdir(
+                parents=True, mode=PRIVATE_DIRECTORY_MODE, exist_ok=True
+            )
             # The objective is session content, so the file is owner-only.
             self._path.touch(mode=0o600, exist_ok=True)
             payload = stored.model_dump_json(indent=2, exclude_none=True) + "\n"

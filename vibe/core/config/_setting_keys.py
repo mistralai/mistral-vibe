@@ -98,10 +98,12 @@ TOOL_SETTINGS_WITHOUT_EFFECT: Mapping[str, frozenset[str]] = {
 # Settings that Vibe up to July 2026 wrote into a new config.toml with their
 # defaults, and that it has dropped since, with the value it wrote. A file
 # that still holds that value asked for nothing, so it is not reported.
+# Retired opt-in flags whose feature is now always on are listed with `True`.
 _FORMER_DEFAULTS: Mapping[str, Any] = {
     "auto_approve": False,
     "experiment_overrides": {},
     "experimental_bash_tool": False,
+    "experimental_enable_local_projects": True,
     # The startup migration removes it from the files Vibe writes.
     "tool_paths": [],
     "vibe_code_api_key_env_var": "MISTRAL_API_KEY",

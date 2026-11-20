@@ -111,3 +111,43 @@ impl fmt::Display for CoreError {
         formatter.write_str(self.detail())
     }
 }
+
+/// Why a checkpoint did not restore.
+///
+/// - `Invalid` — the checkpoint, the configuration or the resume cursor is
+///   malformed, or the checkpoint breaks a Core invariant.
+/// - `InvalidConfiguration` — Core refused the configuration, which names the
+///   offending field. A move to model facts the Session's context cannot
+///   continue under is refused this way, on `settings.context.model_facts`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RestoreError {
+    Invalid(String),
+    InvalidConfiguration { field: &'static str, detail: String },
+}
+
+impl From<String> for RestoreError {
+    fn from(detail: String) -> Self {
+        Self::Invalid(detail)
+    }
+}
+
+impl From<CoreError> for RestoreError {
+    fn from(error: CoreError) -> Self {
+        match error {
+            CoreError::InvalidConfiguration { field, detail } => {
+                Self::InvalidConfiguration { field, detail }
+            }
+            error => Self::Invalid(error.detail().to_string()),
+        }
+    }
+}
+
+impl fmt::Display for RestoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(detail) | Self::InvalidConfiguration { detail, .. } => {
+                formatter.write_str(detail)
+            }
+        }
+    }
+}

@@ -65,6 +65,7 @@ pub struct RunStartParams {
     pub output_dir: Option<String>,
     pub resume_session_id: Option<String>,
     pub agent: Option<String>,
+    pub approval_policy: Option<String>,
     #[serde(default)]
     pub auto_approve: bool,
     pub enabled_tools: Option<Vec<String>>,

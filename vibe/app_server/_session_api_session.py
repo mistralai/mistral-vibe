@@ -118,6 +118,12 @@ class _OpenCallback:
     details: dict[str, JsonValue] = field(default_factory=dict)
 
 
+def _opened_at(details: Mapping[str, JsonValue], fallback: int) -> int:
+    """A callback's opening time from its details, or ``fallback`` without one."""
+    opened_at = details.get("openedAt")
+    return opened_at if isinstance(opened_at, int) else fallback
+
+
 class ApiSessionState:
     """One Session's state, from a read and then stream batches."""
 
@@ -150,19 +156,20 @@ class ApiSessionState:
         self._values = {key: values[key] for key in _STATE_ITEMS if key in values}
         self._turn_details = dict(values.get(TURN_DETAILS, {}))
         callback_details = values.get(CALLBACK_DETAILS, {})
-        # A read has no callback times; the Turn's start is the closest one.
+        # A Runtime that does not send a callback's opening time leaves the
+        # Turn's start as the closest one.
         turn = self._turn
-        opened_at = (
+        fallback_opened_at = (
             turn.started_at
             if turn is not None and turn.started_at is not None
             else state.session.updated_at
         )
-        self._callbacks = {
-            callback.id: _OpenCallback(
-                callback, opened_at, callback_details.get(callback.id, {})
+        self._callbacks = {}
+        for callback in state.active_callbacks:
+            details = callback_details.get(callback.id, {})
+            self._callbacks[callback.id] = _OpenCallback(
+                callback, _opened_at(details, fallback_opened_at), details
             )
-            for callback in state.active_callbacks
-        }
         self._tool_call_entries = {
             entry.tool_call_id: entry.id
             for entry in entries
@@ -385,6 +392,7 @@ class ApiSessionState:
             open_callback = self._callbacks.get(cast(str, item.data["callbackId"]))
             if open_callback is not None:
                 open_callback.details = item.data
+                open_callback.opened_at = _opened_at(item.data, open_callback.opened_at)
             return
         applied.signals.append(item)
 

@@ -57,11 +57,14 @@ def test_persisted_huge_tool_output_is_capped() -> None:
     )
 
 
-def test_config_view_reports_the_configured_default_agent() -> None:
-    config = project_config_view(build_test_vibe_config(default_agent="ask"))
+def test_config_view_reports_the_configured_default_agent_and_policy() -> None:
+    config = project_config_view(
+        build_test_vibe_config(default_agent="reviewer", default_approval_policy="ask")
+    )
 
-    assert config.default_agent == "ask"
-    assert config.model_dump(mode="json", by_alias=True)["defaultAgent"] == "ask"
+    wire = config.model_dump(mode="json", by_alias=True)
+    assert (config.default_agent, config.default_approval_policy) == ("reviewer", "ask")
+    assert (wire["defaultAgent"], wire["defaultApprovalPolicy"]) == ("reviewer", "ask")
 
 
 @pytest.mark.parametrize(
@@ -108,6 +111,18 @@ def test_config_view_projects_cursor_blink(enabled: bool) -> None:
     assert type(config).model_validate(legacy_payload).cursor_blink is True
 
 
+@pytest.mark.parametrize("disabled", [True, False])
+def test_config_view_projects_disable_selection_animation(disabled: bool) -> None:
+    config = project_config_view(
+        build_test_vibe_config(disable_selection_animation=disabled)
+    )
+
+    payload = config.model_dump(mode="json", by_alias=True)
+    assert payload["disableSelectionAnimation"] is disabled
+    del payload["disableSelectionAnimation"]
+    assert type(config).model_validate(payload).disable_selection_animation is False
+
+
 @pytest.mark.parametrize("enabled", [True, False])
 def test_config_view_projects_vim_keybindings(enabled: bool) -> None:
     config = project_config_view(build_test_vibe_config(vim_keybindings=enabled))
@@ -128,6 +143,16 @@ def test_config_view_projects_show_dangerous_directory_warning(enabled: bool) ->
     assert payload["showDangerousDirectoryWarning"] is enabled
     del payload["showDangerousDirectoryWarning"]
     assert type(config).model_validate(payload).show_dangerous_directory_warning
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_config_view_projects_collapse_turn_details(enabled: bool) -> None:
+    config = project_config_view(build_test_vibe_config(collapse_turn_details=enabled))
+
+    payload = config.model_dump(mode="json", by_alias=True)
+    assert payload["collapseTurnDetails"] is enabled
+    del payload["collapseTurnDetails"]
+    assert type(config).model_validate(payload).collapse_turn_details is False
 
 
 @pytest.mark.parametrize("enabled", [True, False])

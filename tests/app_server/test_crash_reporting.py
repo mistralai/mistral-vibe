@@ -13,7 +13,10 @@ from typing import Any, cast
 import pytest
 import tomli_w
 
-from vibe.app_server import server as server_module
+from vibe.app_server import (
+    _vibe_home_access as vibe_home_access_module,
+    server as server_module,
+)
 from vibe.app_server._agent_socket import session_open_error
 from vibe.app_server._completion_facts import ModelFactsError
 from vibe.app_server._host import HostRequestHandler
@@ -213,6 +216,24 @@ async def test_a_failed_resume_with_an_internal_error_is_reported(
     assert reports.captures[0]["tags"]["app_server_method"] == "session/resume"
 
 
+@pytest.mark.asyncio
+async def test_an_unhandled_failure_names_its_exception_type_to_the_client(
+    process_services: ProcessServices,
+    reports: _Reports,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(*_: Any) -> None:
+        raise PermissionError("[Errno 13] Permission denied: '/home/ana/.vibe/x'")
+
+    async with _connect("desktop", process_services) as (client, _):
+        monkeypatch.setattr(AppServer, "_dispatch_request", fail)
+        with pytest.raises(AppServerResponseError) as raised:
+            await client.request("session/list", {})
+
+    assert raised.value.error.code is ProtocolErrorCode.INTERNAL_ERROR
+    assert raised.value.error.data == {"exceptionType": "PermissionError"}
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -249,6 +270,43 @@ async def test_a_server_no_terminal_ui_launched_never_reports(
 
     await _fail_resume("acp", RuntimeError("boom"), process_services, monkeypatch)
 
+    assert reports.captures == []
+
+
+@pytest.mark.asyncio
+async def test_a_vibe_home_windows_denies_is_named_and_not_reported(
+    tmp_path: Path,
+    process_services: ProcessServices,
+    reports: _Reports,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # What an elevated mkdir(mode=0o700) leaves behind: the session store
+    # wraps the denial of a file under the Vibe home in its own error.
+    monkeypatch.setenv("VIBE_HOME", str(tmp_path))
+    monkeypatch.setattr(vibe_home_access_module, "is_windows", lambda: True)
+    registry = tmp_path / "logs" / "session" / "active" / ".registry"
+    try:
+        raise PermissionError(13, "Permission denied", str(registry))
+    except PermissionError as denied:
+        error = RuntimeError("Invalid Unified session store")
+        error.__cause__ = denied
+
+    async def fail(*_: Any) -> None:
+        raise error
+
+    async with _connect("programmatic", process_services) as (client, _):
+        monkeypatch.setattr(AppServer, "_dispatch_request", fail)
+        with pytest.raises(AppServerResponseError) as raised:
+            await client.request(
+                "session/resume", {"sessionId": "session-1", "agentConfig": {}}
+            )
+
+    assert raised.value.error.code == ProtocolErrorCode.FORBIDDEN
+    assert raised.value.error.data == {
+        "harnessCode": "vibe_home_access_denied",
+        "path": str(registry),
+        "vibeHome": str(tmp_path.resolve()),
+    }
     assert reports.captures == []
 
 

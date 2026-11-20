@@ -10,7 +10,7 @@ request_methods = REQUEST_METHODS
 
 screen_contains = (
     "Session forked",
-    "Copy and paste this command to resume it:",
+    "To continue in the forked session, run this command in another terminal:",
     "vibe --resume 22222222-0000-4000-8000-000000000002",
 )
 screen_excludes = ("Branched to a new session.",)

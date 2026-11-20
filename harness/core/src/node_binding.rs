@@ -213,7 +213,7 @@ impl Task for CreateSessionTask {
                     .map_err(|_| node_error("resumed input ID must not be negative".to_string()))?;
                 self.engine
                     .restore(config, checkpoint, resume_input_id, None)
-                    .map_err(node_error)
+                    .map_err(|error| node_error(error.to_string()))
             }
         }
     }

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncGenerator, Callable
+import os
+from typing import BinaryIO, cast
 
 import httpx
 import pytest
@@ -12,9 +14,11 @@ from tests.app_server.backend_contract.conftest import (
     connect_backend_contract_host,
 )
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._runtime import HarnessProcess, create_harness_server
 from vibe.app_server._unified_harness_backend_adapter import (
     UnifiedHarnessBackendAdapter,
 )
+from vibe.app_server.client import AppServerClient
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
@@ -39,20 +43,31 @@ from vibe.app_server.protocol import (
     AppServerResponseError,
     CallbackCallParams,
     CallbackCallResponse,
+    CallbackResult,
+    CallbackResultParams,
     ClientCapabilities,
+    ClientInfo,
     Notification,
     ProtocolErrorCode,
     ServerRequest,
     SessionOptions,
     SessionReadParams,
     SessionReadResponse,
+    SessionResumeParams,
+    SessionResumeResponse,
     SessionStartParams,
     SessionStartResponse,
+    SessionStopParams,
     TurnCompletedParams,
     TurnStartParams,
 )
 from vibe.app_server.server import AppServer
 from vibe.app_server.session import AppServerSession, AppServerTurnError
+from vibe.app_server.transport import (
+    JsonRpcTransport,
+    StdioJsonRpcTransport,
+    memory_transport_pair,
+)
 
 pytestmark = pytest.mark.both_paths
 
@@ -213,7 +228,7 @@ async def test_interrupted_user_input_callback_survives_a_new_host(
 
 
 @pytest.mark.asyncio
-async def test_agent_switches_during_a_callback_and_remains_selected(
+async def test_approval_policy_switches_during_a_callback_and_remains_selected(
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[..., httpx.Response],
     backend_contract_session: AppServerSession,
@@ -229,19 +244,25 @@ async def test_agent_switches_during_a_callback_and_remains_selected(
         if not isinstance(event, CallbackRequested):
             continue
         assert (
-            await backend_contract_session.resources.agents.switch("auto-approve")
+            await backend_contract_session.resources.agents.switch_policy(
+                "auto-approve"
+            )
         ).name == "auto-approve"
         assert (
-            await backend_contract_session.resources.agents.switch("ask")
+            await backend_contract_session.resources.agents.switch_policy("ask")
         ).name == "ask"
         assert (
-            await backend_contract_session.resources.agents.switch("auto-approve")
+            await backend_contract_session.resources.agents.switch_policy(
+                "auto-approve"
+            )
         ).name == "auto-approve"
         await backend_contract_session.respond_to_callback(
             event.callback.callback_id, _user_answer("Yes")
         )
 
-    assert backend_contract_session.resources.agents.active.name == "auto-approve"
+    assert (
+        backend_contract_session.resources.agents.active_policy.name == "auto-approve"
+    )
 
 
 @pytest.mark.asyncio
@@ -733,6 +754,159 @@ async def test_rejected_callback_delivery_fails_the_turn_and_closes_the_callback
     assert completed.turn.status is PublicTurnStatus.FAILED
     assert completed.turn.error is not None
     assert state.active_callbacks == []
+
+
+@pytest.mark.parametrize("transport", ["memory", "stdio"])
+@pytest.mark.asyncio
+async def test_a_question_open_at_session_stop_is_asked_again_after_resume(
+    transport: str,
+    backend_contract_persistent_config: None,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A session stopped with `session/stop` while its turn waits on
+        a question to the user.
+    *Do*: Resume it from a new app server, then answer the question it sends.
+    *Assert*: After the resume response, the client gets `turn/started` for the
+        same turn, then `callback/call` with the same callback ID; the answer
+        completes the turn. The stdio case runs over OS pipes, as Desktop does.
+    """
+    # Prepare
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            _user_question_response(backend_contract_mistral_response),
+            backend_contract_mistral_response("Done"),
+        ]
+    )
+    capabilities = ClientCapabilities(callback_kinds=["user_input"])
+    first = await _connect_over(transport, capabilities, process_services)
+    incoming = first.incoming()
+    try:
+        started = SessionStartResponse.model_validate(
+            await first.request("session/start", SessionStartParams())
+        )
+        session_id = started.state.session.id
+        await first.request(
+            "turn/start",
+            TurnStartParams(
+                session_id=session_id, message=[TextContentBlock(text="ask me")]
+            ),
+        )
+        asked = await _next_callback_call(incoming)
+        await first.request("session/stop", SessionStopParams(session_id=session_id))
+    finally:
+        await incoming.aclose()
+        await first.close()
+    second = await _connect_over(transport, capabilities, process_services)
+    incoming = second.incoming()
+
+    # Do
+    try:
+        resumed = SessionResumeResponse.model_validate(
+            await second.request(
+                "session/resume", SessionResumeParams(session_id=session_id)
+            )
+        )
+        before_the_question: list[str] = []
+        turn_announced: str | None = None
+        reasked: CallbackCallParams | None = None
+        while reasked is None:
+            message = await asyncio.wait_for(anext(incoming), timeout=5)
+            if isinstance(message, ServerRequest) and message.method == "callback/call":
+                reasked = CallbackCallParams.model_validate(message.params)
+                await second.respond(
+                    message.id,
+                    CallbackCallResponse(
+                        callback_id=reasked.callback.callback_id, accepted=True
+                    ),
+                )
+            elif isinstance(message, Notification):
+                before_the_question.append(message.method)
+                if message.method == "turn/started":
+                    turn_announced = cast(dict[str, dict[str, str]], message.params)[
+                        "turn"
+                    ]["id"]
+        await second.request(
+            "callback/result",
+            CallbackResultParams(
+                session_id=session_id,
+                result=CallbackResult(
+                    callback_id=reasked.callback.callback_id,
+                    output=_user_answer("Yes").model_dump(mode="json", by_alias=True),
+                ),
+            ),
+        )
+        completed: TurnCompletedParams | None = None
+        while completed is None:
+            message = await asyncio.wait_for(anext(incoming), timeout=5)
+            if isinstance(message, Notification) and message.method == "turn/completed":
+                completed = TurnCompletedParams.model_validate(message.params)
+    finally:
+        await incoming.aclose()
+        await second.close()
+
+    # Assert
+    assert resumed.state.session.status.type in {"running", "blocked"}
+    assert "turn/started" in before_the_question
+    assert turn_announced == asked.callback.turn_id
+    assert reasked.callback.callback_id == asked.callback.callback_id
+    assert reasked.callback.turn_id == asked.callback.turn_id
+    assert reasked.callback.detail.kind == "user_input"
+    assert completed.turn.id == asked.callback.turn_id
+    assert completed.turn.status is PublicTurnStatus.COMPLETED
+
+
+async def _connect_over(
+    transport: str, capabilities: ClientCapabilities, process_services: ProcessServices
+) -> AppServerClient:
+    client_transport, server_transport = (
+        memory_transport_pair() if transport == "memory" else _stdio_transport_pair()
+    )
+    harness = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(services=process_services),
+    )
+    client = AppServerClient(client_transport, run_peer=harness.serve)
+    await client.start()
+    await client.initialize(
+        ClientInfo(name="backend-contract-test", version="0"), capabilities
+    )
+    await client.notify("initialized")
+    return client
+
+
+def _stdio_transport_pair() -> tuple[JsonRpcTransport, JsonRpcTransport]:
+    """Two newline-delimited JSON-RPC ends over OS pipes."""
+    to_server_read, to_server_write = os.pipe()
+    to_client_read, to_client_write = os.pipe()
+    client = _PipeTransport(
+        os.fdopen(to_client_read, "rb"), os.fdopen(to_server_write, "wb")
+    )
+    server = _PipeTransport(
+        os.fdopen(to_server_read, "rb"), os.fdopen(to_client_write, "wb")
+    )
+    return client, server
+
+
+class _PipeTransport(StdioJsonRpcTransport):
+    """A stdio end that closes its pipe on close, so the peer reads EOF."""
+
+    def __init__(self, reader: BinaryIO, writer: BinaryIO) -> None:
+        super().__init__(reader, writer)
+        self._pipe = writer
+
+    async def close(self) -> None:
+        await super().close()
+        self._pipe.close()
+
+
+async def _next_callback_call(incoming: AsyncGenerator[object]) -> CallbackCallParams:
+    while True:
+        message = await asyncio.wait_for(anext(incoming), timeout=5)
+        if isinstance(message, ServerRequest) and message.method == "callback/call":
+            return CallbackCallParams.model_validate(message.params)
 
 
 async def _resumed_callbacks(

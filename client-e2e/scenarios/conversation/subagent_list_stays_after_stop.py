@@ -1,4 +1,4 @@
-"""Once shown, the subagent list keeps its Main row after its last child is stopped."""
+"""Once its last child is stopped, the rail drops its subagents item and the list stays closed."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from e2e.app_server.scenario import Timeline
 
 _PROMPT = "delegate then stop the investigation"
 
-screen_contains = ("Main conversation", "The investigation was stopped.")
-screen_excludes = ("Explore (Explore 1)", "waiting")
+screen_contains = ("The investigation was stopped.",)
+screen_excludes = ("Main conversation", "Explore (Explore 1)", "subagent", "waiting")
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -26,4 +26,6 @@ timeline: Timeline = [
     child_session_updated("archived"),
     assistant_msg("The investigation was stopped."),
     turn_completed(),
+    "\x18",  # Ctrl+X — no rail item to focus: the prompt keeps the keys
+    "\r",  # Enter — an empty prompt sends nothing
 ]

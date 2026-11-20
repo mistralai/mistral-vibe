@@ -70,7 +70,7 @@ class FetchWait:
             return
         if not self._failures.failed:
             logger.info(
-                "%s not applied within %ss; continuing on local config",
+                "%s not ready within %ss; continuing without it",
                 self._name,
                 self._cap_seconds,
             )

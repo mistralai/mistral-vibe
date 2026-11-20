@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import JsonValue, TypeAdapter, ValidationError
@@ -27,6 +28,7 @@ from vibe.app_server._connection_protocol import (
     ClientToolDefinitionParams,
 )
 from vibe.app_server._credential_selection import (
+    MISTRAL_API_KEY_ENV,
     ConnectionCredentialSelection,
     select_platform_credentials,
 )
@@ -35,6 +37,8 @@ from vibe.app_server._execution import cancel_tasks, raise_if_cancelled
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._imports import ImportsService
+from vibe.app_server._local_projects import LocalProjectStore
+from vibe.app_server._local_projects_controller import list_local_projects
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._platform_credentials import ConnectionPlatformCredentialProvider
 from vibe.app_server._session_backend_port import (
@@ -45,6 +49,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendEvent,
     SessionBackendEventDrain,
     SessionBackendExtension,
+    SessionBackendHeldEvents,
     SessionBackendHistoryClearHost,
     SessionBackendHost,
     SessionBackendHostArchive,
@@ -76,6 +81,36 @@ from vibe.app_server._session_peers import SessionPeerError
 from vibe.app_server._session_spawn import SessionSpawnError
 from vibe.app_server._setup_oidc import SetupOidcHandler
 from vibe.app_server._storage_usage import StorageUsageService, touch_stale_marker
+from vibe.app_server._vibe_bot import (
+    VIBE_BOT_ARCHIVE_LOCAL_METHOD,
+    VIBE_BOT_CLIENT_ID_FILE,
+    VIBE_BOT_METHODS,
+    VIBE_BOT_REPORT_METHOD,
+    VIBE_BOT_SEND_LOCAL_METHOD,
+    VIBE_BOT_START_LOCAL_METHOD,
+    VIBE_BOT_STOP_LOCAL_METHOD,
+    VibeBotArchiveLocalParams,
+    VibeBotCallHeld,
+    VibeBotCallRefused,
+    VibeBotController,
+    VibeBotEmpty,
+    VibeBotLocalSessions,
+    VibeBotReportParams,
+    VibeBotReportResponse,
+    VibeBotSendLocalParams,
+    VibeBotSendLocalResponse,
+    VibeBotStartLocalParams,
+    VibeBotStartLocalResponse,
+    VibeBotStopLocalParams,
+    bot_sender_id,
+)
+from vibe.app_server._vibe_bot_tools import (
+    VIBE_BOT_MCP_CACHE_DIR,
+    HarnessLocalMCP,
+    LocalMCP,
+    LocalTools,
+)
+from vibe.app_server._vibe_home_access import vibe_home_access_denied
 from vibe.app_server.connector_catalog import ConnectorCatalogService
 from vibe.app_server.events import (
     CallbackRequested,
@@ -94,6 +129,7 @@ from vibe.app_server.protocol import (
     SESSION_SPAWN_METHOD,
     AgentInstallParams,
     AgentSwitchParams,
+    ApprovalPolicySwitchParams,
     ArtifactsListParams,
     ArtifactsMarkViewedParams,
     ArtifactsSyncParams,
@@ -101,6 +137,7 @@ from vibe.app_server.protocol import (
     CallbackCallResponse,
     CallbackResultError,
     CallbackResultParams,
+    ClientAccount,
     ClientCapabilities,
     ClientInfo,
     ConfigChangedParams,
@@ -128,6 +165,7 @@ from vibe.app_server.protocol import (
     ModelConfigWriteParams,
     Notification,
     PageRequest,
+    PeerDelivery,
     PlatformCredentialsInvalidatedParams,
     PlatformCredentialsResolveParams,
     PlatformCredentialsResolveResponse,
@@ -174,6 +212,11 @@ from vibe.app_server.protocol import (
     SessionStartParams,
     SessionStartResponse,
     SessionTitleUpdateParams,
+    StorageLeftoversCleanParams,
+    StorageSessionKept,
+    StorageSessionKeptReason,
+    StorageSessionsDeleteParams,
+    StorageSessionsDeleteResponse,
     StorageUsageReadParams,
     StorageUsageRefreshParams,
     StorageUsageUpdatedParams,
@@ -197,6 +240,7 @@ from vibe.app_server.protocol import (
     validate_json_rpc_envelope,
 )
 from vibe.app_server.transport import ClientLossAwareTransport, JsonRpcTransport
+from vibe.core.paths import VIBE_HOME, WORKTREES_DIR
 from vibe.core.platform_auth import PlatformCredentialProvider
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.observability.logging import logger
@@ -209,8 +253,10 @@ from vibe.observability.sentry import (
 from vibe.setup.auth._oidc_tenant import OidcTenantResolver
 
 if TYPE_CHECKING:
+    from vibe.app_server._session_backend_port import ResolvedMCPCatalog
     from vibe.app_server.mcp_catalog import MCPCatalogService
     from vibe.app_server.plugin_catalog import PluginCatalogService
+    from vibe.core.config import VibeConfigSchema
 
 
 class InitializationState(StrEnum):
@@ -242,6 +288,10 @@ _SESSION_ATTACHMENT_CANDIDATES = frozenset({
 # tracks for it.
 _RUNNING_TURN_ANNOUNCEMENT_METHODS = frozenset({"session/resume", "session/continue"})
 
+# How long open callbacks wait for that announcement to reach the client before
+# they are sent anyway: a stuck event stream must not hide a question.
+_RUNNING_TURN_ANNOUNCEMENT_TIMEOUT_SECONDS = 5.0
+
 _SESSION_BACKEND_HOST_LIFECYCLE_METHODS = frozenset({
     "session/start",
     "session/resume",
@@ -263,6 +313,7 @@ _SESSION_BACKEND_METHODS = frozenset({
     "config/model/write",
     "config/write",
     "session/agent/update",
+    "session/approvalPolicy/update",
     "session/compact",
     "session/context/inject",
     "session/settings/update",
@@ -312,7 +363,10 @@ class _ErrorDispatch:
 
 
 class AppServer:
-    def __init__(  # noqa: PLR0913 - one collaborator per concern, all keyword-only
+    # Reset with ``_client_info``: the account the client reported at initialize.
+    _client_account: ClientAccount | None = None
+
+    def __init__(  # noqa: PLR0913, PLR0915 - one collaborator per concern, all keyword-only
         self,
         transport: JsonRpcTransport,
         *,
@@ -328,6 +382,7 @@ class AppServer:
         imports_service: ImportsService | None = None,
         storage_usage: StorageUsageService | None = None,
         config_changes: ConfigChanges | None = None,
+        vibe_bot_sessions: VibeBotLocalSessions | None = None,
         configure_agent_plugins: Callable[
             [list[AgentPlugin], list[ClientToolDefinitionParams], ClientToolRunner],
             None,
@@ -385,6 +440,7 @@ class AppServer:
         self._plugin_catalog_service = plugin_catalog_service
         self._imports_service = imports_service
         self._storage_usage = storage_usage
+        self._vibe_bot = self._new_vibe_bot(vibe_bot_sessions)
         # This connection's storage/usage/updated, from its first storage call.
         self._stop_storage_updates: Callable[[], None] | None = None
         self._oidc_tenants = oidc_tenants
@@ -658,6 +714,7 @@ class AppServer:
             self._transport = transport
             self._initialization = InitializationState.UNINITIALIZED
             self._client_info = None
+            self._client_account = None
             self._client_capabilities = ClientCapabilities()
             self._platform_credentials = None
             self._credential_selection = None
@@ -781,6 +838,7 @@ class AppServer:
         self._serve_task = None
         self._initialization = InitializationState.UNINITIALIZED
         self._client_info = None
+        self._client_account = None
         self._client_capabilities = ClientCapabilities()
         self._platform_credentials = None
         self._credential_selection = None
@@ -798,6 +856,7 @@ class AppServer:
     ) -> list[BaseException]:
         tasks = [task for task in self._request_tasks if task is not current]
         tasks.extend(self._leases.take())
+        tasks.extend(self._vibe_bot.close())
         self._stop_artifact_subscription()
         self._stop_storage_updates_now()
         self._stop_config_subscription()
@@ -808,6 +867,10 @@ class AppServer:
             tasks.append(backend_events)
         tasks.extend(self._crash_reporting_tasks)
         errors = await cancel_tasks(tasks, label="app-server background")
+        try:
+            await self._vibe_bot.aclose_tools()
+        except Exception as exc:
+            errors.append(exc)
         if isinstance(self._session_backend_host, SessionBackendHostBackgroundTasks):
             errors.extend(
                 await self._session_backend_host.stop_background_tasks(current)
@@ -819,6 +882,7 @@ class AppServer:
     ) -> list[BaseException]:
         tasks = [task for task in self._request_tasks if task is not current]
         tasks.extend(self._leases.take())
+        tasks.extend(self._vibe_bot.close())
         self._stop_artifact_subscription()
         self._stop_storage_updates_now()
         self._stop_config_subscription()
@@ -827,7 +891,12 @@ class AppServer:
         self._backend_event_backend = None
         if backend_events is not None and backend_events is not current:
             tasks.append(backend_events)
-        return await cancel_tasks(tasks, label="app-server request")
+        errors = await cancel_tasks(tasks, label="app-server request")
+        try:
+            await self._vibe_bot.drop_tools()
+        except Exception as exc:
+            errors.append(exc)
+        return errors
 
     def _request_finished(self, task: asyncio.Task[None]) -> None:
         self._request_tasks.discard(task)
@@ -916,7 +985,14 @@ class AppServer:
                     ProtocolErrorCode.NOT_INITIALIZED,
                     "initialize must be the first request",
                 )
-            dispatched = await self._dispatch_request(request.method, request.params)
+            try:
+                dispatched = await self._dispatch_request(
+                    request.method, request.params
+                )
+            except Exception as exc:
+                if (denied := vibe_home_access_denied(exc)) is None:
+                    raise
+                raise denied from exc
             if dispatched.session_attached:
                 await self._validate_open_callback_capabilities(request.method)
             return dispatched
@@ -958,7 +1034,13 @@ class AppServer:
             logger.exception("Unhandled error dispatching %s", request.method)
             self._report_dispatch_error(request.method, exc)
             return _ErrorDispatch(
-                ProtocolError(code=ProtocolErrorCode.INTERNAL_ERROR, message=str(exc))
+                ProtocolError(
+                    code=ProtocolErrorCode.INTERNAL_ERROR,
+                    message=str(exc),
+                    # The message names paths and values; the type lets a client
+                    # group the failures by cause.
+                    data={"exceptionType": type(exc).__name__},
+                )
             )
 
     async def _after_response(
@@ -972,6 +1054,8 @@ class AppServer:
         if dispatched.after_response is not None:
             dispatched.after_response()
         if dispatched.session_attached:
+            if request.method in _RUNNING_TURN_ANNOUNCEMENT_METHODS:
+                await self._wait_for_running_turn_announcement()
             await self._redeliver_open_callbacks(request.method)
         if dispatched.runtime_updated and self._root is not None:
             if not isinstance(self._root, SessionBackendRuntimeView):
@@ -1021,7 +1105,13 @@ class AppServer:
             return await self._require_imports().read(
                 params.after_event_id, params.wait_ms
             )
-        if method.startswith("storage/usage/"):
+        if method in VIBE_BOT_METHODS:
+            return DispatchResult(await self._vibe_bot.dispatch(method, raw_params))
+        if method.startswith((
+            "storage/usage/",
+            "storage/leftovers/",
+            "storage/sessions/",
+        )):
             return await self._dispatch_storage_usage(method, raw_params)
         if self._mcp_catalog_service is not None and self._mcp_catalog_service.handles(
             method
@@ -1618,6 +1708,15 @@ class AppServer:
                 after_response=result.after_response,
                 runtime_updated=result.response.applied,
             )
+        if method == "session/approvalPolicy/update":
+            result = await root.switch_approval_policy(
+                validate_wire(ApprovalPolicySwitchParams, raw_params)
+            )
+            return DispatchResult(
+                result.response,
+                after_response=result.after_response,
+                runtime_updated=result.response.applied,
+            )
         if method == "session/settings/update":
             result = await root.update_settings(
                 validate_wire(SessionSettingsUpdateParams, raw_params)
@@ -1837,6 +1936,7 @@ class AppServer:
                     ProtocolErrorCode.INVALID_PARAMS, str(exc)
                 ) from exc
         self._client_info = params.client_info
+        self._client_account = params.account
         self._client_capabilities = params.capabilities
         if params.capabilities.platform_credentials is not None:
             self._platform_credentials = ConnectionPlatformCredentialProvider(
@@ -1853,6 +1953,7 @@ class AppServer:
         return InitializeResponse(
             server_info=ServerInfo(name="vibe-app-server", version=__version__),
             process_id=os.getpid(),
+            platform_credentials=self._platform_credentials is not None,
         )
 
     def _initialized_client_info(self) -> ClientInfo:
@@ -2005,7 +2106,79 @@ class AppServer:
         if method == "storage/usage/refresh":
             params = validate_wire(StorageUsageRefreshParams, raw_params)
             return DispatchResult(await service.refresh(params))
+        if method == "storage/sessions/delete":
+            delete = validate_wire(StorageSessionsDeleteParams, raw_params)
+            return DispatchResult(await self._delete_stored_sessions(delete))
+        if method == "storage/leftovers/clean":
+            clean = validate_wire(StorageLeftoversCleanParams, raw_params)
+            return DispatchResult(
+                await service.clean_leftovers(
+                    clean, self._host_handler.harness_trust_store()
+                )
+            )
         raise method_not_found(method)
+
+    async def _delete_stored_sessions(
+        self, params: StorageSessionsDeleteParams
+    ) -> StorageSessionsDeleteResponse:
+        """A plain delete of the named sessions, archived or not, as
+        ``session/delete`` does: each through it, one at a time, unless a live
+        process holds its lease, read again right before that session's
+        delete. Then the worktrees they left with no session, removed the
+        same way for every client.
+        """
+        service = self._storage_usage
+        if service is None:
+            raise method_not_found("storage/sessions/delete")
+        before = await service.read()
+        histories = (
+            {}
+            if before.snapshot is None
+            else {row.session_id: row.history_bytes for row in before.snapshot.sessions}
+        )
+        removed: list[str] = []
+        kept: list[StorageSessionKept] = []
+        for session_id in dict.fromkeys(params.session_ids):
+            # Per session: one may have been opened while earlier ones went.
+            if await asyncio.to_thread(service.open_session_ids, {session_id}):
+                kept.append(StorageSessionKept(id=session_id, reason="in_use"))
+                continue
+            try:
+                await self._delete_session_now({"sessionId": session_id})
+            # The adapter refuses with SessionBackendError, the host handler
+            # with RequestFailure; both carry a protocol code.
+            except (RequestFailure, SessionBackendError) as exc:
+                reason = _kept_reason(exc.code, exc.data)
+                if reason == "error":
+                    logger.warning(
+                        "Failed to delete stored session %s", session_id, exc_info=True
+                    )
+                kept.append(StorageSessionKept(id=session_id, reason=reason))
+                continue
+            # Broad: one failed delete must not keep the others from running.
+            except Exception:
+                logger.warning(
+                    "Failed to delete stored session %s", session_id, exc_info=True
+                )
+                kept.append(StorageSessionKept(id=session_id, reason="error"))
+                continue
+            removed.append(session_id)
+        # Past this point the sessions are gone: whatever fails, the answer
+        # must still list them, or clients would keep sessions with no files.
+        if removed:
+            await asyncio.to_thread(touch_stale_marker)
+        freed = await service.finish_deletes(
+            removed, self._host_handler.harness_trust_store()
+        )
+        return StorageSessionsDeleteResponse(
+            removed=removed,
+            kept=kept,
+            removed_worktree_ids=freed.removed_worktree_ids,
+            kept_worktrees=freed.kept_worktrees,
+            freed_bytes=sum(histories.get(item, 0) for item in removed)
+            + freed.worktree_bytes,
+            freed_bytes_at_least=freed.at_least,
+        )
 
     async def _storage_telemetry(self) -> TelemetryClient:
         return await self._host_handler.setup_telemetry(self._initialized_client_info())
@@ -2109,6 +2282,26 @@ class AppServer:
         await root.announce_running_turn()
         await self._flush_backend_events(root)
 
+    async def _wait_for_running_turn_announcement(self) -> None:
+        """Let a reopened turn's `turn/started` reach the client before its callbacks.
+
+        A client reads a `callback/call` against the turn it knows is running.
+        """
+        root = self._root
+        if not isinstance(root, SessionBackendHeldEvents):
+            return
+        try:
+            await asyncio.wait_for(
+                root.wait_for_held_events(),
+                timeout=_RUNNING_TURN_ANNOUNCEMENT_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            logger.warning(
+                "The resumed turn was not announced in time; sending its open "
+                "callbacks anyway",
+                extra={"session_id": root.session_id},
+            )
+
     async def _redeliver_open_callbacks(self, attach_method: str) -> None:
         callbacks = await self._read_open_callbacks(attach_method)
         supported = set(self._client_capabilities.callback_kinds)
@@ -2188,6 +2381,18 @@ class AppServer:
     def client_capabilities(self) -> ClientCapabilities:
         return self._client_capabilities
 
+    def client_owner(self) -> JsonValue:
+        """Who the connection is: its entrypoint and the account it reported.
+        None when it reported no account: such a connection owns no turn.
+        """
+        account = self._client_account
+        if account is None:
+            return None
+        return {
+            "entrypoint": self._initialized_client_info().entrypoint,
+            "account": account.model_dump(mode="json"),
+        }
+
     def current_session_id(self) -> str:
         return self._require_root().session_id
 
@@ -2196,6 +2401,44 @@ class AppServer:
 
     def identity_gateway(self) -> IdentityGateway | None:
         return self._identity_gateway
+
+    def _new_vibe_bot(self, sessions: VibeBotLocalSessions | None) -> VibeBotController:
+        return VibeBotController(
+            local_tools=self._new_vibe_bot_tools(),
+            credentials=lambda: self.platform_credentials(MISTRAL_API_KEY_ENV),
+            client=_VibeBotClientRequests(self),
+            api_origin=self._host_handler.mistral_api_origin,
+            project_roots=_local_project_roots,
+            sessions=sessions
+            or VibeBotLocalSessions(
+                client_id_file=VIBE_HOME.path / VIBE_BOT_CLIENT_ID_FILE
+            ),
+        )
+
+    def _new_vibe_bot_tools(self) -> LocalTools | None:
+        """Read from the user's own config only: a repository's config could
+        define a server under a name the user allowlisted.
+        """
+        catalogs = self._mcp_catalog_service
+        if catalogs is None:
+            return None
+        host = self._host_handler
+
+        async def read_config() -> VibeConfigSchema:
+            return (await host.user_config_orchestrator()).config
+
+        async def catalog(owner: object) -> ResolvedMCPCatalog:
+            orchestrator = await host.user_config_orchestrator()
+            return await catalogs.resolve_catalog(orchestrator, owner=owner)
+
+        async def mcp() -> LocalMCP:
+            return HarnessLocalMCP(
+                catalog=catalog,
+                authorization=catalogs.authentication,
+                cache_root=VIBE_HOME.path / VIBE_BOT_MCP_CACHE_DIR,
+            )
+
+        return LocalTools(read_config=read_config, mcp=mcp)
 
     def platform_credentials(self, api_key_env_var: str) -> PlatformCredentialProvider:
         if self._credential_selection is not None:
@@ -2254,6 +2497,8 @@ class AppServer:
     async def send_to_peer_session(
         self, params: SessionPeerSendParams
     ) -> SessionPeerSendResponse:
+        if self._vibe_bot.sessions.handles(params.target_session_id):
+            return await self._vibe_bot.sessions.deliver_reply(params)
         return await self._request_peers(
             SESSION_PEER_SEND_METHOD,
             params,
@@ -2325,13 +2570,22 @@ class AppServer:
             raise SessionPeerError(str(exc)) from exc
 
     async def _request_client[ResponseT: ProtocolModel](
-        self, method: str, params: ProtocolModel, response_type: type[ResponseT]
+        self,
+        method: str,
+        params: ProtocolModel,
+        response_type: type[ResponseT],
+        *,
+        sessionless: bool = False,
     ) -> ResponseT:
         """A refusal or a malformed answer fails this request, not the
-        connection.
+        connection. A ``sessionless`` request only needs an initialized
+        client, not an attached session.
         """
         transport = self._transport
-        if transport is None or not self._connection_attached:
+        if transport is None or not (
+            self._connection_attached
+            or (sessionless and self._initialization is InitializationState.INITIALIZED)
+        ):
             raise _ClientRequestFailed("No client is attached")
         request_id = self._next_request_id
         self._next_request_id += 1
@@ -2471,6 +2725,25 @@ def _harness_code(exc: SessionBackendError) -> str | None:
     return code if isinstance(code, str) else None
 
 
+# Conflicts the harness raises because the session is running or held.
+_BUSY_HARNESS_CODES = frozenset({"session_busy"})
+
+
+def _kept_reason(code: ProtocolErrorCode, data: object) -> StorageSessionKeptReason:
+    """Why ``storage/sessions/delete`` kept a session its delete refused:
+    ``in_use`` only when the session is busy or a host holds it; any other
+    conflict, such as a child needing its parent, is ``error``.
+    """
+    if code is ProtocolErrorCode.NOT_FOUND:
+        return "not_found"
+    if code is not ProtocolErrorCode.CONFLICT:
+        return "error"
+    harness_code = data.get("harnessCode") if isinstance(data, dict) else None
+    if harness_code is None or harness_code in _BUSY_HARNESS_CODES:
+        return "in_use"
+    return "error"
+
+
 def _is_unexpected(exc: SessionBackendError) -> bool:
     """Only internal errors are bugs; other codes are refusals the client explains."""
     return exc.code is ProtocolErrorCode.INTERNAL_ERROR and not exc.expected
@@ -2601,3 +2874,118 @@ class _ConnectionClientToolRunner:
             if result.error is not None
             else None,
         )
+
+
+async def _local_project_roots() -> list[Path]:
+    """Where the bot may start a session: the user's local projects and Vibe's worktrees."""
+
+    def read() -> list[Path]:
+        projects = list_local_projects(LocalProjectStore())
+        roots = [root for project in projects for root in project.root_paths]
+        return [*roots, WORKTREES_DIR.path]
+
+    return await asyncio.to_thread(read)
+
+
+class _VibeBotClientRequests:
+    """``VibeBotClient`` as requests to this connection's client."""
+
+    def __init__(self, server: AppServer) -> None:
+        self._server = server
+
+    async def _ask[ResponseT: ProtocolModel](
+        self, method: str, params: ProtocolModel, response_type: type[ResponseT]
+    ) -> ResponseT:
+        try:
+            return await self._server._request_client(
+                method, params, response_type, sessionless=True
+            )
+        except _ClientRequestFailed as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    async def start_local(
+        self,
+        *,
+        bot: str,
+        idempotency_key: str,
+        thread_id: str,
+        prompt: str,
+        title: str,
+        checkout: dict[str, Any] | None,
+        model: str | None = None,
+        approval_policy: str | None = None,
+    ) -> tuple[str, str | None]:
+        response = await self._ask(
+            VIBE_BOT_START_LOCAL_METHOD,
+            VibeBotStartLocalParams(
+                bot_workflow_id=bot,
+                idempotency_key=idempotency_key,
+                thread_id=thread_id,
+                prompt=prompt,
+                title=title,
+                checkout=checkout,
+                starter_session_id=bot_sender_id(bot, thread_id),
+                model=model,
+                approval_policy=approval_policy,
+            ),
+            VibeBotStartLocalResponse,
+        )
+        return response.local_session_id, response.turn_id
+
+    async def send_local(
+        self,
+        *,
+        bot: str,
+        local_session_id: str,
+        thread_id: str,
+        text: str,
+        idempotency_key: str,
+        delivery: PeerDelivery = "start_turn",
+    ) -> str | None:
+        response = await self._ask(
+            VIBE_BOT_SEND_LOCAL_METHOD,
+            VibeBotSendLocalParams(
+                bot_workflow_id=bot,
+                local_session_id=local_session_id,
+                text=text,
+                idempotency_key=idempotency_key,
+                sender_session_id=bot_sender_id(bot, thread_id),
+                delivery=delivery,
+            ),
+            VibeBotSendLocalResponse,
+        )
+        return response.turn_id
+
+    async def stop_local(
+        self, *, bot: str, local_session_id: str, idempotency_key: str
+    ) -> None:
+        await self._ask(
+            VIBE_BOT_STOP_LOCAL_METHOD,
+            VibeBotStopLocalParams(
+                bot_workflow_id=bot,
+                local_session_id=local_session_id,
+                idempotency_key=idempotency_key,
+            ),
+            VibeBotEmpty,
+        )
+
+    async def archive_local(self, *, bot: str, local_session_id: str) -> None:
+        await self._ask(
+            VIBE_BOT_ARCHIVE_LOCAL_METHOD,
+            VibeBotArchiveLocalParams(
+                bot_workflow_id=bot, local_session_id=local_session_id
+            ),
+            VibeBotEmpty,
+        )
+
+    async def report(self, bot: str, event: dict[str, Any]) -> bool:
+        response = await self._ask(
+            VIBE_BOT_REPORT_METHOD,
+            VibeBotReportParams(bot_workflow_id=bot, event=event),
+            VibeBotReportResponse,
+        )
+        if response.refused is not None:
+            raise VibeBotCallRefused(response.refused)
+        if response.held is not None:
+            raise VibeBotCallHeld(response.held)
+        return response.duplicate

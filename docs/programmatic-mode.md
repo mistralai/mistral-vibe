@@ -6,7 +6,8 @@ You can run Vibe non-interactively by piping input or using the `--prompt` flag.
 vibe --prompt "Refactor the main function in cli/main.py to be more modular."
 ```
 
-By default, it uses your configured `default_agent` (`accept-edits` unless changed).
+By default, it uses your configured `default_agent` (`default` unless changed)
+and `default_approval_policy` (`accept-edits` unless changed).
 To approve all tool calls without prompting, pass `--auto-approve` or `--yolo`
 (also available for interactive sessions):
 
@@ -40,10 +41,11 @@ When using `--prompt`, you can specify additional options:
 - **`--max-turns N`**: Limit the maximum number of assistant turns. The session will stop after N turns.
 - **`--max-price DOLLARS`**: Set a maximum cumulative cost in dollars for this run's root session and subagents. Once measured cost reaches the limit, no further completion starts and the outcome is `price_limit`; calls already admitted may finish, retries included. A model whose prices are 0, the default, is free, so `--max-price 0` runs free models only and stops before the next call once one costs anything.
 - **`--max-tokens N`**: Set a maximum cumulative LLM token budget for this run's root session and subagents, counting both prompt and completion tokens. Once measured usage reaches the limit, no further completion starts and the outcome is `token_limit`; calls already admitted may finish, retries included. This is separate from the output cap on one completion.
-- **`--agent NAME`**: Select the agent profile for this run.
+- **`--agent NAME`**: Select the agent for this run. A policy name (`ask`, `accept-edits`, `smart-approve`, `auto-approve`) still selects that approval policy.
+- **`--approval-policy NAME`**: Select the approval policy for this run. Without it the run uses `default_approval_policy`, whatever its agent. `--smart-approve` is short for `--approval-policy smart-approve`.
 - **`--model ALIAS`**: Use this model alias for the run instead of `active_model`, without saving it as the default. Only for a new session; an unknown alias is a usage error.
 - **`--thinking LEVEL`**: Run the model (`--model` or `active_model`) at this thinking level (`off`, `low`, `medium`, `high`, `xhigh`, `max`, or a level the model lists; any other word is sent to the provider as written), without saving it. Only for a new session; a level an agent profile or the admin config fixes for the model is a usage error.
-- **`--auto-approve`, `--yolo`**: Approves all tool calls without prompting, including in interactive sessions. A new session on a built-in mode (`ask`, `accept-edits`, `smart-approve`) starts the `auto-approve` agent instead, which Shift+Tab can leave; a custom agent, or a resumed session, keeps its agent with every call approved.
+- **`--auto-approve`, `--yolo`**: Approves all tool calls without prompting, including in interactive sessions. A new session starts in the `auto-approve` policy, whatever its agent, which Shift+Tab can leave; a resumed session keeps its policy with every call approved.
 - **`--enabled-tools TOOL`**: Enable specific tools. In programmatic mode, this disables all other tools. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--disabled-tools TOOL`**: Disable specific tools after `--enabled-tools` filtering. Can be specified multiple times. Supports exact names, glob patterns (e.g., `bash*`), or regex with `re:` prefix (e.g., `re:^serena_.*$`).
 - **`--output FORMAT`**: Set the output format. Options:

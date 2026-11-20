@@ -17,5 +17,5 @@ handshake = {
 
 timeline: Timeline = [ESCAPE, "1", take_snapshot()]
 
-screen_contains = ("12.5K / 50K · 4m",)
+screen_contains = ("▶ goal 4m",)
 screen_excludes = ("paused when the session closed",)

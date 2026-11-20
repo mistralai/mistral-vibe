@@ -7,7 +7,10 @@
   ``runtime-state.json``; with that root gone, it is Other Vibe data.
 - Any other folder of ``unified/`` is a row with no title, never suggested.
 - ``worktrees/<name>-<12 hex>/<folder>`` is a worktree: its claim lists the
-  sessions using it; no claim, or no live session, makes it a leftover.
+  sessions using it; no claim, or no live session, makes it a leftover. A
+  claim no session ever joined, written less than ``RESERVATION_GRACE_S``
+  ago, is a worktree being started: listed, never offered for cleanup. A
+  folder there with neither a claim nor a ``.git`` is no worktree: Other.
 - The rest (legacy ``session_*`` folders, ``active/``, plugins, scratchpad,
   ``.templates``, ``.trash``, logs, caches) is Other Vibe data.
 
@@ -22,8 +25,15 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
-import re
+import time
 
+from vibe.app_server._storage_usage.rules import (
+    BUCKET_PATTERN,
+    META_FILENAME,
+    UNIFIED_DIR,
+    meta_cwd,
+    unattached_and_young,
+)
 from vibe.app_server.protocol import StorageOtherKind
 from vibe.core.git.worktree.record import (
     CLAIMS_DIR_NAME,
@@ -32,10 +42,14 @@ from vibe.core.git.worktree.record import (
     WorktreeClaim,
 )
 
-_UNIFIED = "unified"
+_UNIFIED = UNIFIED_DIR
 _CHILD_PREFIX = "child-"
-_BUCKET = re.compile(r"^.+-[0-9a-f]{12}$")
-_META = "meta.json"
+_BUCKET = BUCKET_PATTERN
+_META = META_FILENAME
+_GIT = ".git"
+# Vibe's own metadata, as older versions laid it out inside a bucket: counted
+# in Other Vibe data, never offered for cleanup.
+_VIBE_FOLDERS = frozenset({CLAIMS_DIR_NAME, TRASH_DIR_NAME, TEMPLATES_DIR_NAME})
 
 
 @dataclass(slots=True)
@@ -61,6 +75,8 @@ class WorktreeFolder:
     branch: str | None
     repo_name: str | None
     session_dirs: frozenset[Path]
+    # No session joined its claim yet, and the claim is new.
+    starting: bool = False
 
 
 @dataclass(slots=True)
@@ -71,6 +87,9 @@ class Layout:
     # Folders of a worktree root that hold no worktree.
     worktree_other: list[tuple[StorageOtherKind, Path]] = field(default_factory=list)
     child_roots: dict[str, str] = field(default_factory=dict)
+    # Folders of a worktree bucket with no claim and no ``.git``, by
+    # ``<bucket>/<name>``: also in ``worktree_other``, and the cleanup offers them.
+    unknown_folders: dict[str, Path] = field(default_factory=dict)
 
 
 def read_sessions(
@@ -109,9 +128,15 @@ def read_worktrees(worktrees_root: Path, layout: Layout) -> None:
             layout.worktree_other.append(("worktrees_unknown", entry))
         else:
             for folder in _subfolders(entry):
-                layout.worktrees.append(
-                    _worktree(name, folder, claims.get((name, folder.name)))
-                )
+                claim = claims.get((name, folder.name))
+                if claim is None and not (folder / _GIT).exists():
+                    # A build cache or scratch folder put there by hand: no
+                    # worktree to list under Leftover worktrees.
+                    layout.worktree_other.append(("worktrees_unknown", folder))
+                    if folder.name not in _VIBE_FOLDERS:
+                        layout.unknown_folders[f"{name}/{folder.name}"] = folder
+                    continue
+                layout.worktrees.append(_worktree(name, folder, claim))
 
 
 def _worktree(bucket: str, path: Path, claim: WorktreeClaim | None) -> WorktreeFolder:
@@ -136,6 +161,7 @@ def _worktree(bucket: str, path: Path, claim: WorktreeClaim | None) -> WorktreeF
         branch=record.branch,
         repo_name=record.repo_root.name,
         session_dirs=frozenset(item.resolve() for item in record.session_dirs),
+        starting=claim is not None and unattached_and_young(claim, record, time.time()),
     )
 
 
@@ -148,16 +174,12 @@ def _read_session(session_id: str, path: Path) -> SessionFolder:
         raw = None
     if not isinstance(raw, dict):
         return SessionFolder(session_id, path, has_meta=False)
-    environment = raw.get("environment")
-    cwd = (
-        environment.get("working_directory") if isinstance(environment, dict) else None
-    )
     title = raw.get("title")
     return SessionFolder(
         session_id,
         path,
         title=title if isinstance(title, str) and title else None,
-        cwd=cwd if isinstance(cwd, str) else None,
+        cwd=meta_cwd(raw),
         archived=raw.get("archived_at") is not None,
         last_activity_at=_last_activity(raw),
     )

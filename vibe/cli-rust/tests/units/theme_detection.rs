@@ -37,6 +37,14 @@ fn rejects_incomplete_or_unrelated_responses() {
 }
 
 #[test]
+fn rejects_more_than_four_hex_digits_per_channel() {
+    assert_eq!(
+        classify_osc11_response(b"\x1b]11;rgb:00000/00000/00000\x07"),
+        None
+    );
+}
+
+#[test]
 fn resolves_a_preference_or_falls_back_to_dark() {
     assert_eq!(theme_from_preferences(Some(false)), "ansi-light");
     assert_eq!(theme_from_preferences(Some(true)), "ansi-dark");

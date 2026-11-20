@@ -1,30 +1,31 @@
-//! Subagent status list: the bordered row list under the input box.
+//! Subagent status list inside the rail window, open while focused from the rail or viewing a child.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::Frame;
 
-use super::{hint_line, list_cursor, scrollbar, theme};
+use super::{list_cursor, scrollbar, theme};
 use crate::app::App;
-use crate::hints::action;
 use crate::mouse;
 use crate::server::PublicChildSession;
 use crate::subagents::{
-    display_name, page_rows, status_label, status_tone, StatusTone, MAIN_SESSION_ID, MAX_ROWS,
+    display_name, status_label, status_tone, StatusTone, MAIN_SESSION_ID, MAX_ROWS,
 };
 
-/// List height cap: the 7 rows count the whole widget, border row included,
-/// so the view title row costs one. The view border exists only while the
-/// viewed child resolves.
+/// List height: the Main row and the children, up to one page; the rail window frames it.
 pub fn height(app: &App) -> u16 {
-    if !app.subagents.list.shown {
+    if !open(app) {
         return 0;
     }
     let rows = app.subagents.list.rows.len();
-    let summary = usize::from(app.subagents.list.waiting_count > 0);
-    let viewing = usize::from(app.subagents.viewed_child().is_some());
-    (viewing + summary + (rows + 1).min(page_rows(app))) as u16
+    (rows + 1).min(MAX_ROWS) as u16
+}
+
+/// The list opens from the rail's agents item and stays while a child is viewed.
+fn open(app: &App) -> bool {
+    app.subagents.list.shown
+        && (app.subagents.list.focused || app.subagents.viewed_subagent_id.is_some())
 }
 
 /// Row-render inputs snapshotted before the frame mutates the hitmap.
@@ -69,53 +70,25 @@ impl Rows {
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let rows = Rows::snapshot(app);
-    let (waiting, show_waiting) = (
-        app.subagents.list.waiting_count,
-        app.subagents.list.show_waiting,
-    );
-    if !app.subagents.list.shown || area.height == 0 {
+    if !open(app) || area.height == 0 {
         app.subagents.list.options.layout(&[], Rect::default());
         return;
     }
     mouse::register_region(app, area, mouse::MouseTarget::SubagentList);
     app.subagents.list.area = area;
-    let viewing = app.subagents.viewed_subagent_id.is_some();
-    let mut top = area.y;
-    // The child view: a solid top border carrying the right-aligned
-    // title; the border and its title drop together when the child is gone.
-    if viewing {
-        if let Some(name) = app
-            .subagents
-            .viewed_child()
-            .map(|child| display_name(&child.name))
-        {
-            let title = format!(" Viewing {name} · read-only · Esc to return ");
-            let width = area.width as usize;
-            let padding = width.saturating_sub(title.chars().count());
-            let padded = format!("{}{}", " ".repeat(padding), title);
-            f.buffer_mut().set_stringn(
-                area.x,
-                top,
-                &padded,
-                width,
-                Style::default().fg(theme::foreground()),
-            );
-            top += 1;
-        }
-    }
     let marker = rows.marker_id();
     let total = rows.children.len() + 1;
-    let summary = u16::from(waiting > 0);
-    let viewport = (area.height.saturating_sub(top - area.y + summary) as usize).min(MAX_ROWS);
+    let viewport = (area.height as usize).min(MAX_ROWS);
     let list_area = Rect {
-        y: top,
         height: viewport as u16,
         ..area
     };
     let scroll = app.subagents.list.options.layout_rows(total, list_area);
-    for index in (scroll..total).take(viewport) {
+    let overflows = total > viewport;
+    for (top, index) in (area.y..).zip((scroll..total).take(viewport)) {
         let row_area = Rect {
             y: top,
+            width: area.width.saturating_sub(u16::from(overflows)),
             height: 1,
             ..area
         };
@@ -133,9 +106,8 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             ..row_area
         };
         f.render_widget(ratatui::widgets::Paragraph::new(line), padded);
-        top += 1;
     }
-    if total > viewport && area.width > 0 {
+    if overflows && area.width > 0 {
         let bar = Rect {
             x: area.right() - 1,
             width: 1,
@@ -144,39 +116,6 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         let target = mouse::MouseTarget::SubagentList;
         scrollbar::draw_large(app, f, target, bar, total, viewport, scroll);
     }
-    if waiting > 0 && top < area.bottom() {
-        let row = Rect {
-            x: area.x + 1,
-            y: top,
-            width: area.width.saturating_sub(2),
-            height: 1,
-        };
-        let line = waiting_summary(waiting, show_waiting, rows.focused);
-        f.render_widget(ratatui::widgets::Paragraph::new(line), row);
-    }
-}
-
-/// The last row: `N subagents waiting`, plus `· a to show`/`· a to hide` while the list owns the keys.
-fn waiting_summary(waiting: usize, show_waiting: bool, focused: bool) -> Line<'static> {
-    let muted = hint_line::action_style();
-    let noun = if waiting == 1 {
-        "subagent"
-    } else {
-        "subagents"
-    };
-    let mut spans = vec![
-        Span::raw(list_cursor::BLANK),
-        Span::styled(format!("{waiting} {noun} waiting"), muted),
-    ];
-    if focused {
-        let action = match show_waiting {
-            true => action::HIDE,
-            false => action::SHOW,
-        };
-        spans.push(Span::styled(" · ", muted));
-        spans.extend(hint_line::inline_spans(&[("a", action)]));
-    }
-    Line::from(spans)
 }
 
 /// The main row: bold `Main conversation`, current while in main chat.

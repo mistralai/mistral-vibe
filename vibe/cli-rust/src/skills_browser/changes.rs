@@ -10,8 +10,8 @@ use super::request::{self, Outcome};
 use super::{loading, page, Event, State};
 use crate::app::{App, Severity};
 use crate::commands::spawn_session;
-use crate::event_handler;
-use crate::server::{Client, InstalledSkill, SkillChange, SkillScope};
+use crate::server::{Client, InstalledSkill, InstalledSkills, SkillChange, SkillScope};
+use crate::{config_write, event_handler};
 
 /// Send `changes` as one change, in order; false when it was refused or could not start.
 pub(super) fn change(
@@ -51,8 +51,13 @@ pub(super) fn toggle(app: &mut App, client: &Arc<Client>, pin: &InstalledSkill) 
     );
 }
 
-/// Remove the shared skill `skill_id` under `name`: unpin it from every scope it is pinned in, never a same-named skill's pin.
-pub(super) fn remove_everywhere(app: &mut App, client: &Arc<Client>, name: &str, skill_id: &str) {
+/// Remove the shared skill `skill_id` under `name`: unpin it from every scope it is pinned in, never a same-named skill's pin; whether that started.
+pub(super) fn remove_everywhere(
+    app: &mut App,
+    client: &Arc<Client>,
+    name: &str,
+    skill_id: &str,
+) -> bool {
     let state = &app.skills_browser;
     let changes: Vec<SkillChange> = SkillScope::ALL
         .into_iter()
@@ -62,9 +67,7 @@ pub(super) fn remove_everywhere(app: &mut App, client: &Arc<Client>, name: &str,
             scope,
         })
         .collect();
-    if !changes.is_empty() {
-        change(app, client, &labels::removing(name), changes);
-    }
+    !changes.is_empty() && change(app, client, &labels::removing(name), changes)
 }
 
 /// Import into every scope chosen for the install.
@@ -98,12 +101,10 @@ pub(super) fn import(skill_id: &str, scope: SkillScope, choice: &Choice) -> Skil
 }
 
 /// A change answered: apply the last runtime it got back and report its failure, named by the label its spinner showed; an open browser also shows the re-read pins, or why they could not be read.
-pub(super) fn changed(
-    app: &mut App,
-    outcome: Outcome,
-    installed: Result<Vec<InstalledSkill>, String>,
-) {
+pub(super) fn changed(app: &mut App, outcome: Outcome, installed: Result<InstalledSkills, String>) {
     let label = app.skills_browser.busy.take().unwrap_or_default();
+    let done = app.skills_browser.done.take();
+    let parked = outcome.answer.as_ref().is_some_and(config_write::is_parked);
     if let Some(answer) = &outcome.answer {
         event_handler::apply_response_runtime(app, answer);
     }
@@ -111,7 +112,7 @@ pub(super) fn changed(
     let mut reread = None;
     if state.open {
         match installed {
-            Ok(pins) => state.installed = pins,
+            Ok(answer) => (state.installed, state.issues) = (answer.skills, answer.issues),
             Err(error) => reread = Some(error),
         }
         follow(state);
@@ -120,7 +121,26 @@ pub(super) fn changed(
         crate::notices::inline(app, Severity::Error, &labels::action_failed(&label, &error));
     } else if let Some(error) = reread {
         crate::notices::inline(app, Severity::Error, &labels::read_failed(&error));
+    } else if parked {
+        crate::notices::inline(app, Severity::Information, labels::NEXT_TURN);
+    } else if let Some(done) = done {
+        crate::notices::inline(app, Severity::Information, &done);
     }
+}
+
+/// The pins read again with no change made: an open browser shows them, and the change in flight, if any, keeps its spinner and its answer.
+pub(super) fn reread(app: &mut App, installed: Result<InstalledSkills, String>) {
+    let state = &mut app.skills_browser;
+    if !state.open {
+        return;
+    }
+    match installed {
+        Ok(answer) => (state.installed, state.issues) = (answer.skills, answer.issues),
+        Err(error) => {
+            return crate::notices::inline(app, Severity::Error, &labels::read_failed(&error))
+        }
+    }
+    follow(state);
 }
 
 /// Keep a page while its skill is installed, turning an install's page into the installed one; else back to the list.

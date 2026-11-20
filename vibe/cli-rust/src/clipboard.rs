@@ -89,7 +89,7 @@ pub fn unverified_hint() -> &'static str {
 
 /// Skip the native tool over SSH so OSC 52 carries the copy.
 fn is_ssh_session() -> bool {
-    std::env::var_os("SSH_CONNECTION").is_some() || std::env::var_os("SSH_TTY").is_some()
+    crate::terminal_detect::is_ssh(&crate::terminal_detect::Env)
 }
 
 /// Pipe `text` into the first platform clipboard tool that succeeds (pbcopy/wl-copy/xclip/xsel/clip).

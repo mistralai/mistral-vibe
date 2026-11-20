@@ -1,4 +1,4 @@
-//! The pinned goal line above the todo line, carrying the resume choice when offered.
+//! The goal line above the input, shown only while it offers the resume choice.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -15,9 +15,9 @@ use crate::server::GoalStatus;
 /// The resume choice's text after the goal, when the closed session suspended it.
 pub const RESUME_QUESTION: &str = "paused when the session closed";
 
-/// One line whenever there is a goal; the resume choice shares it.
+/// One line while the resume choice waits; otherwise the rail carries the goal.
 pub fn height(app: &App) -> u16 {
-    u16::from(app.goal.goal.is_some())
+    u16::from(app.goal.goal.is_some() && app.goal.resume_prompt)
 }
 
 /// The status glyph and its color.
@@ -32,7 +32,7 @@ pub fn icon(status: GoalStatus) -> (&'static str, Style) {
 
 /// Paint the goal line and publish it as a selectable region.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    if app.goal.goal.is_none() || area.width < 1 || area.height < 1 {
+    if height(app) == 0 || area.width < 1 || area.height < 1 {
         return;
     }
     let row = Rect { height: 1, ..area };

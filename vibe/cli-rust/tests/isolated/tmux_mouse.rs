@@ -1,4 +1,4 @@
-//! Inside a tmux session with `mouse off`, Vibe leaves the mouse to the terminal.
+//! Inside a tmux session with `mouse off`, Vibe leaves the mouse to the terminal; the same probe reads the terminal's reply.
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
@@ -32,14 +32,20 @@ fn tmux_mouse_off_overrides_the_capture_setting() {
     // macOS scans a new executable on its first run, which can exceed the probe timeout under load.
     let _ = std::process::Command::new(dir.path().join("tmux")).output();
 
-    for (answer, off) in [("off", true), ("0", true), ("on", false), ("1", false)] {
+    for (answer, off, termtype) in [
+        ("off", true, None),
+        ("0\t\n", true, Some("")),
+        ("on\trex 0.1.0\n", false, Some("rex 0.1.0")),
+        ("1\tiTerm2 3.7.7", false, Some("iTerm2 3.7.7")),
+    ] {
         std::fs::write(&answer_file, answer).expect("write tmux answer");
         tmux::refresh_mouse();
         assert_eq!(captures_mouse(true), !off, "{answer}");
         assert!(!captures_mouse(false), "{answer}");
+        assert_eq!(tmux::client_termtype().as_deref(), termtype, "{answer}");
         let calls = std::fs::read_to_string(&log).unwrap();
         assert!(
-            calls.ends_with("display-message -p -t %3 #{mouse}\n"),
+            calls.ends_with("display-message -p -t %3 #{mouse}\t#{client_termtype}\n"),
             "{calls}"
         );
     }
@@ -56,5 +62,6 @@ fn outside_tmux_the_setting_decides_without_running_tmux() {
 
     assert!(captures_mouse(true));
     assert!(!captures_mouse(false));
+    assert_eq!(tmux::client_termtype(), None);
     assert!(!log.exists());
 }

@@ -1,11 +1,12 @@
-//! `/storage` lines as styled runs: the header, the suggestion, session rows, details and the review.
+//! `/storage` lines as styled runs: the header, the suggestions, session rows, details and the review.
 
 use ratatui::style::{Modifier, Style};
 
 use super::{list_cursor, theme};
-use crate::server::{StorageSnapshot, StorageUsage};
+use crate::server::{StorageSnapshot, StorageUsage, StorageWorktree};
 use crate::storage_panel::actions::plural;
 use crate::storage_panel::model::{self, Estimate, Row};
+use crate::storage_panel::{leftovers, review, ReviewKind};
 use crate::utils::bytes::decimal;
 
 pub type Runs = Vec<(String, Style)>;
@@ -23,7 +24,6 @@ fn run(text: impl Into<String>, style: Style) -> (String, Style) {
 /// `Vibe storage  17.6 GB used  ·  99 GB free of 494 GB  ·  updated 2 minutes ago`.
 pub fn header(usage: &StorageUsage, refreshing: bool, now: u64) -> Runs {
     let (base, dim, bold) = styles(false);
-    let title = base.fg(theme::primary()).add_modifier(Modifier::BOLD);
     let disk = &usage.disk;
     let free = format!(
         "{} free of {}",
@@ -34,7 +34,7 @@ pub fn header(usage: &StorageUsage, refreshing: bool, now: u64) -> Runs {
         true => base.fg(theme::text_warning()).add_modifier(Modifier::BOLD),
         false => dim,
     };
-    let mut runs = vec![run("Vibe storage", title)];
+    let mut runs = title("Vibe storage");
     let Some(snapshot) = usage.snapshot.as_ref() else {
         runs.extend([run("  ·  ", dim), run(free, free_style)]);
         return runs;
@@ -77,6 +77,15 @@ fn status(usage: &StorageUsage, snapshot: &StorageSnapshot, refreshing: bool, no
     text
 }
 
+/// A bold title in the brand color.
+pub fn title(text: &str) -> Runs {
+    let (base, ..) = styles(false);
+    vec![run(
+        text,
+        base.fg(theme::primary()).add_modifier(Modifier::BOLD),
+    )]
+}
+
 /// The four categories.
 pub fn categories(snapshot: &StorageSnapshot) -> Runs {
     let (base, dim, _) = styles(false);
@@ -100,31 +109,47 @@ pub fn low_disk() -> Runs {
     )]
 }
 
-/// `Archive 4 sessions inactive for 30+ days  ·  frees about 1.8 GB →`.
-pub fn suggestion(snapshot: &StorageSnapshot, highlighted: bool) -> Runs {
+/// `Archive 4 active sessions inactive for 30+ days  ·  frees about 1.8 GB →`.
+pub fn suggestion(snapshot: &StorageSnapshot, kind: ReviewKind, highlighted: bool) -> Runs {
     let (base, dim, bold) = styles(highlighted);
-    let suggestion = &snapshot.archive_suggestion;
-    let suggested = suggestion.session_ids.iter().cloned().collect();
-    let at_least = model::estimate(snapshot, &suggested).at_least;
+    let suggested = review::suggestion(snapshot, kind);
+    let count = suggested.map_or(0, |s| s.session_ids.len());
+    let days = suggested.map_or(0, |s| s.inactive_days);
+    let text = match kind {
+        ReviewKind::Archive => format!(
+            "Archive {} inactive for {days}+ days",
+            plural(count, "active session", "active sessions")
+        ),
+        ReviewKind::Delete => format!(
+            "Delete {} inactive for {days}+ days",
+            plural(count, "archived session", "archived sessions")
+        ),
+        ReviewKind::Cleanup => leftovers::suggestion_text(snapshot),
+    };
+    let estimate = review::suggested_estimate(snapshot, kind);
     vec![
-        run(
-            format!(
-                "Archive {} inactive for 30+ days",
-                plural(suggestion.session_ids.len(), "session", "sessions")
-            ),
-            base,
-        ),
-        run(
-            if at_least {
-                "  ·  frees at least "
-            } else {
-                "  ·  frees about "
-            },
-            dim,
-        ),
-        run(decimal(suggestion.reclaimable_bytes), bold),
+        run(text, base),
+        run(format!("  ·  frees {} ", estimate.about()), dim),
+        run(decimal(estimate.bytes), bold),
         run(" →", base),
     ]
+}
+
+/// Why the server's old archived sessions have no delete row here: none can be deleted from this
+/// client (open elsewhere or this session); `None` otherwise, the delete row then saying it.
+pub fn old_archived(snapshot: &StorageSnapshot, current: Option<&str>) -> Option<Runs> {
+    let suggestion = &snapshot.delete_suggestion;
+    let count = suggestion.session_ids.len();
+    let deletable = review::review_order(snapshot, ReviewKind::Delete, current, false);
+    if count == 0 || !deletable.is_empty() {
+        return None;
+    }
+    let days = suggestion.inactive_days;
+    let text = match count {
+        1 => format!("1 archived session inactive for {days}+ days is open, so it can't be deleted now."),
+        n => format!("{n} archived sessions inactive for {days}+ days are open, so they can't be deleted now."),
+    };
+    Some(dim(&text))
 }
 
 /// `  2.1 GB  42d ago   Rebase PR 71711…   dashboard   open · shared by 2`.
@@ -151,21 +176,30 @@ pub fn session(row: &Row, highlighted: bool, now: u64, title_width: usize) -> Ru
     runs
 }
 
-/// `history 236 MB  ·  worktree 1.2 GB on <branch>  ·  copy-on-write`.
-pub fn details(row: &Row) -> Runs {
+/// `history 236 MB  ·  worktree 1.2 GB on <branch>  ·  copy-on-write`, then one line per other worktree.
+pub fn details(row: &Row) -> Vec<Runs> {
     let (base, dim, _) = styles(false);
-    let mut runs = vec![
+    let mut first = vec![
         run("history ", dim),
         run(decimal(row.session.history_bytes), base),
     ];
-    let Some(worktree) = row.worktree else {
-        runs.push(run("  ·  no worktree", dim));
-        return runs;
+    let Some((primary, others)) = row.worktrees.split_first() else {
+        first.push(run("  ·  no worktree", dim));
+        return vec![first];
     };
+    first.push(run("  ·  ", dim));
+    first.extend(worktree(primary));
+    let mut lines = vec![first];
+    lines.extend(others.iter().map(|w| worktree(w)));
+    lines
+}
+
+fn worktree(worktree: &StorageWorktree) -> Runs {
+    let (base, dim, _) = styles(false);
     let size = worktree
         .bytes
         .map_or_else(|| "not measured yet".to_owned(), decimal);
-    runs.extend([run("  ·  worktree ", dim), run(size, base)]);
+    let mut runs = vec![run("worktree ", dim), run(size, base)];
     if let Some(branch) = worktree.branch.as_deref() {
         runs.extend([run(" on ", dim), run(branch, base.fg(theme::text_accent()))]);
     }
@@ -190,23 +224,33 @@ pub fn review(row: &Row, selected: bool, highlighted: bool, now: u64, title_widt
     runs
 }
 
-/// `Archive 3 sessions →   frees about 1.8 GB  ·  uncommitted work is saved to a git ref`.
-pub fn estimate(count: usize, estimate: Estimate) -> Runs {
+/// `Archive 3 sessions →   frees about 1.8 GB  ·  uncommitted work is saved to a git ref`; the size
+/// is left out when unknown.
+pub fn estimate(kind: ReviewKind, count: usize, estimate: Option<Estimate>) -> Runs {
     let (_, dim, bold) = styles(false);
-    let frees = if estimate.at_least {
-        "   frees at least "
-    } else {
-        "   frees about "
-    };
-    vec![
-        run(
-            format!("Archive {} →", plural(count, "session", "sessions")),
-            bold,
+    let (verb, what, tail) = match kind {
+        ReviewKind::Archive => (
+            "Archive",
+            "session",
+            "uncommitted work is saved to a git ref",
         ),
-        run(frees, dim),
-        run(decimal(estimate.bytes), bold),
-        run("  ·  uncommitted work is saved to a git ref", dim),
-    ]
+        ReviewKind::Delete => (
+            "Delete",
+            "session",
+            "uncommitted work is saved to a git ref",
+        ),
+        ReviewKind::Cleanup => ("Clean up", "item", "removed for good"),
+    };
+    let mut runs = vec![run(
+        format!("{verb} {} →", plural(count, what, &format!("{what}s"))),
+        bold,
+    )];
+    if let Some(estimate) = estimate {
+        runs.push(run(format!("   frees {} ", estimate.about()), dim));
+        runs.push(run(decimal(estimate.bytes), bold));
+    }
+    runs.push(run(format!("  ·  {tail}"), dim));
+    runs
 }
 
 /// A line of plain dim text.

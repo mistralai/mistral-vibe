@@ -13,6 +13,8 @@ from typing import BinaryIO, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from mistralai_vibe_local_harness.vibe._paths import PRIVATE_DIRECTORY_MODE
+
 SEGMENT_BYTES = 8 * 1024 * 1024
 RETAINED_SEGMENTS = 8
 MAX_CURSOR = 9_007_199_254_740_991
@@ -114,10 +116,12 @@ class ProcessOutputStore:
     ) -> ProcessOutputStore:
         process_root = session_root / "processes" / process_id
         _require_safe_process_path(session_root, process_root, process_id)
-        process_root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        process_root.mkdir(mode=0o700)
+        process_root.parent.mkdir(
+            mode=PRIVATE_DIRECTORY_MODE, parents=True, exist_ok=True
+        )
+        process_root.mkdir(mode=PRIVATE_DIRECTORY_MODE)
         segments_root = process_root / "segments"
-        segments_root.mkdir(mode=0o700)
+        segments_root.mkdir(mode=PRIVATE_DIRECTORY_MODE)
         state = ProcessOutputStateV1(
             process_id=process_id,
             output_start_cursor=0,
@@ -164,8 +168,10 @@ class ProcessOutputStore:
     ) -> ProcessOutputStore:
         process_root = session_root / "processes" / process_id
         _require_safe_process_path(session_root, process_root, process_id)
-        process_root.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        process_root.mkdir(mode=0o700, exist_ok=True)
+        process_root.parent.mkdir(
+            mode=PRIVATE_DIRECTORY_MODE, parents=True, exist_ok=True
+        )
+        process_root.mkdir(mode=PRIVATE_DIRECTORY_MODE, exist_ok=True)
         _require_real_directory(process_root)
         try:
             end = _read_state(

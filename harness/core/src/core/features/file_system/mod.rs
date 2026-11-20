@@ -24,7 +24,9 @@ const READ_FILE_DESCRIPTION: &str = "Read a text file with optional zero-indexed
 const READ_FILE_EXTRACTED_DOCUMENTS: &str =
     "PDF, Word, PowerPoint, and email files return their extracted text.";
 const READ_FILE_IMAGE_TEXT: &str = "An image file returns only the text found in the image.";
-const READ_FILE_NATIVE_IMAGE: &str = "An image file returns the image itself.";
+const READ_FILE_IMAGE_METADATA: &str = "An image file returns its media type and size. `offset` and `limit` do not apply to an image file.";
+const READ_FILE_NATIVE_IMAGE: &str =
+    "An image file returns the image itself. `offset` and `limit` do not apply to an image file.";
 const WRITE_FILE_DESCRIPTION: &str = "Create or overwrite a UTF-8 file. Line breaks in `content` can be `\\n`, `\\r\\n` or `\\r`: the file keeps the line endings of the file it replaces, and a new file uses the repository's line endings when they can be found, or the platform default otherwise. To change a file's line endings, run a command such as `unix2dos` or `dos2unix`.";
 const EDIT_DESCRIPTION: &str = r#"Exact string replacement in a file.
 
@@ -48,8 +50,8 @@ fn read_file_description(support: ReadFileSupport, exposure: Exposure) -> String
         (ReadFileImages::Unsupported, _) => None,
         (ReadFileImages::ExtractedText, _) => Some(READ_FILE_IMAGE_TEXT),
         (ReadFileImages::Native, Exposure::Direct) => Some(READ_FILE_NATIVE_IMAGE),
-        // A program cannot look at an image, and the model may never see it.
-        (ReadFileImages::Native, Exposure::Programmatic) => None,
+        // A program cannot look at an image, so it receives only the image's metadata.
+        (ReadFileImages::Native, Exposure::Programmatic) => Some(READ_FILE_IMAGE_METADATA),
     };
     [Some(READ_FILE_DESCRIPTION), documents, images]
         .into_iter()
@@ -78,8 +80,16 @@ struct ReadFileInput {
     limit: Option<i64>,
 }
 
+/// The text a read returned, or the media type and size of an image whose bytes go only to the model.
 #[derive(JsonSchema)]
-struct ReadFileOutput {
+#[schemars(untagged, extend("x-harness-one-of" = true))]
+enum ReadFileOutput {
+    Text(ReadFileTextOutput),
+    Image(ReadFileImageOutput),
+}
+
+#[derive(JsonSchema)]
+struct ReadFileTextOutput {
     path: String,
     content: String,
     /// Size of the file in bytes; for a directory, of its whole listing.
@@ -93,6 +103,15 @@ struct ReadFileOutput {
     total_lines: Option<i64>,
     /// The `offset` to read the rest of the file from, or null when the read reached the end of the file.
     next_offset: Option<i64>,
+}
+
+#[derive(JsonSchema)]
+#[schemars(deny_unknown_fields)]
+struct ReadFileImageOutput {
+    path: String,
+    /// The image's media type, such as `image/png`.
+    mime_type: String,
+    file_size_bytes: i64,
 }
 
 #[derive(JsonSchema)]

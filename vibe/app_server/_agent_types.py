@@ -184,6 +184,18 @@ def workspace_agent_rejections(agents: AgentManager) -> tuple[AgentTypeRejection
     )
 
 
+def agent_file_issues(agents: AgentManager) -> tuple[ConfigIssue, ...]:
+    """What discovery kept only in part or ignored: an agent's settings an
+    agent may not set, a project's override of an approval policy.
+    """
+    from vibe.app_server.models import ConfigIssue
+
+    return tuple(
+        ConfigIssue(file=str(issue.path), message=issue.message, code=issue.code)
+        for issue in agents.agent_file_issues
+    )
+
+
 def resolve_agent_types(
     sources: Iterable[AgentTypeSource],
     tools: AgentToolCatalogue | None = None,
@@ -430,6 +442,7 @@ __all__ = [
     "AgentTypeRejection",
     "AgentTypeSource",
     "ResolvedAgentTypes",
+    "agent_file_issues",
     "agent_instructions",
     "resolve_agent_types",
     "workspace_agent_rejections",

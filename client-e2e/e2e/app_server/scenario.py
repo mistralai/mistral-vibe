@@ -130,6 +130,8 @@ class Scenario:
     """Terminal output queries and their input replies."""
     exit_responses: Mapping[str, str] = field(default_factory=dict)
     """Post-exit output triggers and their input replies, FIFO."""
+    typeahead: str = ""
+    """Input typed at launch, before the client takes the terminal."""
     client_args: tuple[str, ...] = ()
     """Extra CLI args appended to the client command (e.g. `--continue`)."""
     stdout_before_completion: tuple[Mapping[str, Any], ...] = ()
@@ -249,6 +251,7 @@ def _build_scenario(module: ModuleType, name: str, origin: str) -> Scenario:
         settle_per_key=getattr(module, "settle_per_key", False),
         terminal_responses=getattr(module, "terminal_responses", {}),
         exit_responses=getattr(module, "exit_responses", {}),
+        typeahead=getattr(module, "typeahead", ""),
         client_args=tuple(getattr(module, "client_args", ())),
         stdout_before_completion=tuple(getattr(module, "stdout_before_completion", ())),
         headless_returncode=getattr(module, "headless_returncode", 0),

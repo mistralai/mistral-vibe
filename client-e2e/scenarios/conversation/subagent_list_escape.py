@@ -1,4 +1,4 @@
-"""Esc on the focused subagent list returns focus to the input with Main conversation selected."""
+"""Esc on the subagent list closes it back to the rail; a second Esc returns the caret to the input."""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ from e2e.app_server.scenario import Timeline
 
 _PROMPT = "delegate the investigation"
 
-screen_contains = ("› Main conversation", "Explore (Explore 1) [running]")
-screen_cursor = (33, 2)
+screen_contains = ("◐ 1 agent",)
+screen_excludes = ("Main conversation", "s 1 agent")
+screen_cursor = (35, 2)
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -23,7 +24,9 @@ timeline: Timeline = [
     subagent("find the grouping code"),
     child_session_updated(),
     turn_completed(),
-    "\x1b[B",  # Down — focus the list on the Main row
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the list on the Main row
     "\x1b[B",  # Down — highlight the child row
-    "\x1b",  # Esc — focus returns to the input, Main selected
+    "\x1b",  # Esc — the list closes, the rail keeps focus
+    "\x1b",  # Esc — focus returns to the input
 ]

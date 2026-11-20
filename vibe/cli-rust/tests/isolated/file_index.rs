@@ -539,45 +539,51 @@ fn a_config_write_runtime_restarts_the_index_in_the_new_watch_mode() {
 }
 
 #[test]
-fn a_rapid_burst_of_creates_settles_into_few_rebuilds() {
-    use std::time::{Duration, Instant};
-    use vibe_rs::utils::file_index::FileIndexHandle;
+fn a_rapid_burst_of_creates_settles_into_one_rebuild() {
+    use std::sync::atomic::AtomicBool;
+    use vibe_rs::utils::file_index::watch_events;
     let root = temp_root();
     // A git-backed tree keeps one version bump per drained burst: the plain
     // incremental path bumps per changed event instead.
-    let git = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&root)
-        .args(["init", "--quiet"])
-        .status()
-        .unwrap();
-    assert!(git.success());
-    let mut handle = FileIndexHandle::start(root.clone(), true);
-    wait_for_version(&mut handle, 1);
+    git(&root, &["init", "--quiet"]);
+    let paths = RwLock::new(BTreeMap::new());
+    let (version_tx, version_rx) = watch::channel(0u64);
 
-    // One rapid burst: ten files, faster than any filesystem would deliver
-    // them as separate change sets.
+    // The whole burst is queued before the loop drains it, so the writer's
+    // speed cannot split it into several settled clusters.
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
     for index in 0..10 {
-        fs::write(root.join(format!("burst{index}.txt")), "b").unwrap();
-        std::thread::sleep(Duration::from_millis(5));
+        let path = root.join(format!("burst{index}.txt"));
+        fs::write(&path, "b").unwrap();
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+        ] {
+            events_tx.send(Ok(ev(kind, from_ref(&path)))).unwrap();
+        }
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while *handle.changes.borrow() < 2 && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    handle.changes.borrow_and_update();
-    std::thread::sleep(Duration::from_millis(500));
-    handle.changes.borrow_and_update();
+    // A closed source ends the loop once the queued burst is applied.
+    drop(events_tx);
+    watch_events(
+        &root,
+        &paths,
+        &version_tx,
+        &AtomicBool::new(false),
+        &events_rx,
+        true,
+    );
 
-    // Every file is indexed, and the whole burst cost few rebuilds - one
-    // per settled cluster, never one per event.
-    let rebuilt = (*handle.changes.borrow()).saturating_sub(1);
-    assert!(rebuilt <= 3, "a rapid burst rebuilt {rebuilt} times");
+    // Every file is indexed, and twenty events cost a single rebuild.
+    assert_eq!(
+        *version_rx.borrow(),
+        1,
+        "a rapid burst rebuilt more than once"
+    );
+    let current = paths.read().unwrap();
     for index in 0..10 {
-        let needle = format!("burst{index}");
-        assert_eq!(handle.index.matching(&needle, 10).len(), 1);
+        assert!(current.contains_key(&format!("burst{index}.txt")));
     }
-    handle.stop();
+    drop(current);
     cleanup(&root);
 }
 

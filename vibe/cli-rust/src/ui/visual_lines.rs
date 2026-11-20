@@ -58,7 +58,7 @@ fn wrap_line(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
 }
 
 /// Terminal columns a run occupies, so wide glyphs wrap by the cells they fill.
-fn columns(chars: &[Sc]) -> usize {
+pub(crate) fn columns(chars: &[Sc]) -> usize {
     chars
         .iter()
         .map(|(character, _)| character.width().unwrap_or(0))
@@ -84,10 +84,18 @@ pub(crate) fn wrap_indented(line: &str, style: Style, width: usize) -> Vec<Vec<S
     let depth = (line.len() - body.len()).min(width / 2);
     let indent = text(&" ".repeat(depth), style);
     let room = width.saturating_sub(depth).max(1);
-    wrap(&text(body, style), room)
+    wrap_folded(&text(body, style), room)
+        .into_iter()
+        .map(|row| [indent.clone(), row].concat())
+        .collect()
+}
+
+/// Word-wrap `chars` to `width`, folding a word longer than a line, such as a path, instead of letting it run past the edge.
+pub(crate) fn wrap_folded(chars: &[Sc], width: usize) -> Vec<Vec<Sc>> {
+    let room = width.max(1);
+    wrap(chars, room)
         .into_iter()
         .flat_map(|row| fold(row, room))
-        .map(|row| [indent.clone(), row].concat())
         .collect()
 }
 

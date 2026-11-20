@@ -1,6 +1,6 @@
 [project]
 name = "mistral-vibe"
-version = "3.1.3"
+version = "3.1.4"
 description = "Minimal CLI coding agent by Mistral"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -146,6 +146,12 @@ default = true
 name = "pypi"
 url = "https://pypi.org/simple"
 
+# CI puts the private Gemfury index first, and Gemfury has Harness builds that
+# are not on PyPI. Pinning the index keeps every lock on PyPI releases, which
+# the public release needs. The release sync renames this index to `pypi`.
+[tool.uv.sources]
+mistralai-vibe-harness = { index = "pypi" }
+
 [tool.maturin]
 manifest-path = ".native-build/harness-core/Cargo.toml"
 module-name = "mistralai_vibe_local_harness._native"
@@ -203,7 +209,7 @@ required-version = ">=0.8.0"
 # Wheels go through Maturin and ignore this table.
 module-name = "vibe"
 module-root = ""
-source-include = ["build_backend/**", "LICENSE"]
+source-include = ["build_backend/**", "LICENSE", "rust-toolchain.toml"]
 source-exclude = ["vibe/_bin", "vibe/cli-rust/target"]
 
 [dependency-groups]
@@ -320,7 +326,7 @@ markers = [
     "unified_supported: backend contract behavior implemented by the Unified Harness",
     "unified_default: e2e test spawning the unflagged unified-default binary",
     "both_paths: backend contract test run with the Session API switch off and on",
-    "one_path: backend contract test run with the Session API switch off only",
+    "one_path: backend contract test run with the Session API switch on only",
 ]
 filterwarnings = [
     # (e2e) streaming mock server is started in a thread; and the cli is spawn in a fork

@@ -1,8 +1,8 @@
 """Tests of the app server talking to the local runtime directly.
 
-The Session API switch is off by default, so the app server takes this path
-unless ``vibe_cli_local_runtime_session_api_migration`` or
-``VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API`` turns the Session API on.
+The Session API switch is on by default; the app server takes this path when
+``experimental_local_runtime_session_api`` or
+``VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API`` turns it off.
 """
 
 from __future__ import annotations
@@ -2302,6 +2302,59 @@ async def test_unified_adapter_does_not_seed_deleted_or_failed_children(
         SessionReadParams(session_id="session-1", history=PageRequest(limit=20))
     )
     assert read.state.child_sessions == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state_type", ["tombstone", "deleting_idle", "creation_failed"]
+)
+async def test_unified_adapter_stops_listing_a_live_child_the_harness_deleted(
+    tmp_path: Path, state_type: str
+) -> None:
+    """*Prepare*: A root adapter listing one live child.
+    *Do*: The Harness closes the child, as when its spawn fails while offline,
+    then the root is read.
+    *Assert*: The child is listed as stopped, so clients drop it.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    child = _RecordingSession()
+    child.session_id = "session-child"
+    child.sent.append(SimpleNamespace(message=[TextContentBlock(text="child")]))
+    states = _persisted_child_states()
+
+    class FakeHost:
+        state = states["idle"]
+
+        def child_session_records(self, root_session_id: str) -> tuple[Any, ...]:
+            assert root_session_id == "session-1"
+            return (
+                _persisted_child_record("revue-front", "session-child", self.state),
+            )
+
+        def references_child(self, root_session_id: str, child_session_id: str) -> bool:
+            return child_session_id == "session-child"
+
+        async def read(self, params: Any) -> object:
+            result = await child.read(params)
+            return SimpleNamespace(snapshot=result.snapshot, cwd=str(tmp_path))
+
+    host = FakeHost()
+    adapter = _inert_adapter(
+        _RecordingSession(), str(tmp_path), str(tmp_path), host=host
+    )
+    await adapter.seed_persisted_child_states()
+
+    # Do
+    host.state = states[state_type]
+    read = await adapter.read(
+        SessionReadParams(session_id="session-1", history=PageRequest(limit=20))
+    )
+
+    # Assert
+    assert [(c.id, c.status.type) for c in read.state.child_sessions] == [
+        ("session-child", "archived")
+    ]
 
 
 @pytest.mark.asyncio

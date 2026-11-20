@@ -18,17 +18,23 @@ const QUEUE_HEADER_LABEL: &str = "» Queued";
 const QUEUE_PAUSED_PREFIX: &str = "» Queued — press ";
 const QUEUE_PAUSED_SEND: &str = " to send, ";
 const QUEUE_PAUSED_SUFFIX: &str = " to edit, type to add";
+const QUEUE_HINTS_GAP: &str = "   ";
 const ATTACHED_IMAGE: &str = "  ┝ attached image: ";
 const LAST_ATTACHED_IMAGE: &str = "  └ attached image: ";
 /// The alias the harness gives a resumed image, which forgets its placeholder.
 const GENERIC_IMAGE_ALIAS: &str = "image";
 
-/// The queue header: one gap row, the bold-italic label, then the
+/// The queue header: one gap row, the bold-italic label and the queue's keys, then the
 /// same expanding separator a user message paints.
-pub(super) fn push_queue_header(lines: &mut LinkedLines, width: u16, paused: bool) {
+pub(super) fn push_queue_header(
+    lines: &mut LinkedLines,
+    width: u16,
+    paused: bool,
+    hints: &[crate::hints::Hint],
+) {
     let label = theme::text(theme::ORANGE).add_modifier(Modifier::BOLD | Modifier::ITALIC);
     lines.push_gap();
-    lines.push(match paused {
+    let mut line = match paused {
         false => Line::from(Span::styled(QUEUE_HEADER_LABEL, label)),
         // The shortcuts only recolor the label they sit in.
         true => Line::from(vec![
@@ -38,7 +44,16 @@ pub(super) fn push_queue_header(lines: &mut LinkedLines, width: u16, paused: boo
             Span::styled(crate::hints::key::UP, label.fg(theme::primary())),
             Span::styled(QUEUE_PAUSED_SUFFIX, label),
         ]),
-    });
+    };
+    // Keys only join a label they fit beside: the cached layout measured one row.
+    let keys = crate::ui::hint_line::spans(hints);
+    let keys_width: usize = keys.iter().map(Span::width).sum();
+    if !hints.is_empty() && line.width() + QUEUE_HINTS_GAP.len() + keys_width <= usize::from(width)
+    {
+        line.spans.push(Span::raw(QUEUE_HINTS_GAP));
+        line.spans.extend(keys);
+    }
+    lines.push(line);
     push_separator(lines, width);
 }
 

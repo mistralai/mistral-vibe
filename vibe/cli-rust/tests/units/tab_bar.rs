@@ -2,14 +2,18 @@
 
 use crossterm::event::{MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
-use vibe_rs::tab_bar::{label, pressed};
+use vibe_rs::tab_bar::{pressed, Label};
 
 use crate::support::mouse;
 
 #[test]
-fn a_label_counts_its_matches_only_while_searching() {
-    assert_eq!(label("Shared", None), "Shared");
-    assert_eq!(label("Shared", Some(3)), "Shared 3");
+fn a_label_reads_as_its_name_then_its_count() {
+    let label = |count| Label {
+        name: "Shared",
+        count,
+    };
+    assert_eq!(label(None).text(), "Shared");
+    assert_eq!(label(Some(3)).text(), "Shared 3");
 }
 
 #[test]

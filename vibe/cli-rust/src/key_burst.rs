@@ -46,6 +46,13 @@ impl KeyBurst {
         out
     }
 
+    /// Deliver the held keys now, without waiting for their deadline.
+    pub fn finish(&mut self) -> Vec<Event> {
+        let mut out = Vec::new();
+        self.flush(&mut out);
+        out
+    }
+
     fn hold(&mut self, key: KeyEvent, character: char, now: Instant) {
         self.held.push(key);
         self.text.push(character);

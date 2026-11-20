@@ -1,23 +1,31 @@
-"""Deleting the only session of a worktree asks to remove it; a worktree the server keeps is reported as kept."""
+"""A row's delete asks first with its `deleteBytes`, then sends one `storage/sessions/delete`; a worktree the server keeps is reported."""
 
 from __future__ import annotations
 
 from e2e.app_server.scenario import Timeline, take_snapshot
 from scenarios.storage._fixtures import (
     DOWN,
-    NO_SESSIONS_LEFT,
+    REBASE,
     REQUEST_METHODS,
+    SCOPES,
     flagged,
+    sessions_deleted,
     usage,
 )
 
 handshake = flagged({
     "storage/usage/read": usage(),
     "storage/usage/refresh": {"started": False, "reason": "fresh"},
-    "session/list": NO_SESSIONS_LEFT,
-    "workspace/git/worktrees/remove": [
-        {"outcome": "removed", "branchDeleted": True, "reasons": []},
-        {"outcome": "kept_in_use", "branchDeleted": False, "reasons": []},
+    "storage/sessions/delete": [
+        sessions_deleted(
+            [REBASE], worktrees=["dashboard-aaaaaaaaaaaa/rebase"], freed=2_100_000_000
+        ),
+        {
+            **sessions_deleted([SCOPES], freed=236_000_000),
+            "keptWorktrees": [
+                {"id": "dashboard-aaaaaaaaaaaa/scopes", "reason": "in_use"}
+            ],
+        },
     ],
 })
 request_methods = REQUEST_METHODS
@@ -28,6 +36,7 @@ timeline: Timeline = [
     "\r",
     DOWN,
     "d",
+    take_snapshot(),
     "y",
     take_snapshot(),
     "d",
@@ -35,4 +44,8 @@ timeline: Timeline = [
     take_snapshot(),
 ]
 
-screen_contains = ("Its worktree was removed.", "Its worktree was kept: kept in use.")
+screen_contains = (
+    'Deleted "Rebase PR 71711 on the OIDC session work". Freed about 2.1 GB.',
+    'Deleted "Add Vibe scopes to the ALBE OIDC config". Freed about 236 MB.',
+    "Kept 1 worktree: in use (scopes).",
+)

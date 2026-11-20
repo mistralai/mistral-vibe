@@ -24,6 +24,7 @@ Randomness is seeded, so any failure reprints the seed for a deterministic repro
 
 from __future__ import annotations
 
+import os
 import random
 
 import pytest
@@ -575,3 +576,20 @@ def test_crlf_revert_restores_exact_bytes() -> None:
     cp = build(chain)
     cp.decide_file(P, Decision.REVERT)
     assert cp.view({P: current}).content(P) == st(original)
+
+
+@pytest.mark.parametrize("linesep", ["\n", "\r\n"])
+@pytest.mark.parametrize("decision", [Decision.KEEP, Decision.REVERT])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_newline_less_original_keeps_the_edit_newline_style(
+    monkeypatch: pytest.MonkeyPatch, linesep: str, decision: Decision, newline: str
+) -> None:
+    monkeypatch.setattr(os, "linesep", linesep)
+    edited = st(f"a{newline}b{newline}c")
+    later = st(f"a{newline}B{newline}c")
+    chain: Chain = [(1, st("solo"), edited), (2, edited, later)]
+    cp = build(chain)
+    second = region_ids(cp, later)[-1]
+    cp.decide_region(P, second, decision)
+    expected = later if decision is Decision.KEEP else edited
+    assert cp.view({P: later}).content(P) == expected

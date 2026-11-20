@@ -20,6 +20,7 @@ from vibe.app_server.config import ConfigView, ProxySettingsView
 from vibe.app_server.models import (
     AgentSummary,
     AgentType,
+    ApprovalPolicySummary,
     PathGrantScope,
     RequiredPermission,
 )
@@ -125,24 +126,24 @@ def is_jetbrains_client(client_info: Implementation | None) -> bool:
 
 
 def build_mode_state(
-    agents: list[AgentSummary], active: AgentSummary
+    policies: list[ApprovalPolicySummary], active: ApprovalPolicySummary
 ) -> tuple[SessionModeState, SessionConfigOptionSelect]:
-    primary = [agent for agent in agents if agent.agent_type is AgentType.AGENT]
-    # The current mode must stay in the advertised list even when the rollout
+    """The approval policies as ACP session modes."""
+    # The current policy must stay in the advertised list even when the rollout
     # gate hides it, so the client can label it and switch away.
-    if all(agent.name != active.name for agent in primary):
-        primary = [*primary, active]
+    if all(policy.name != active.name for policy in policies):
+        policies = [*policies, active]
     modes = [
         SessionMode(
-            id=agent.name, name=agent.display_name, description=agent.description
+            id=policy.name, name=policy.display_name, description=policy.description
         )
-        for agent in primary
+        for policy in policies
     ]
     options = [
         SessionConfigSelectOption(
-            value=agent.name, name=agent.display_name, description=agent.description
+            value=policy.name, name=policy.display_name, description=policy.description
         )
-        for agent in primary
+        for policy in policies
     ]
     return (
         SessionModeState(current_mode_id=active.name, available_modes=modes),
@@ -154,6 +155,29 @@ def build_mode_state(
             type="select",
             options=options,
         ),
+    )
+
+
+def build_agent_config(
+    agents: list[AgentSummary], active: AgentSummary
+) -> SessionConfigOptionSelect | None:
+    """The agent picker, left out while the default agent is the only one."""
+    primary = [agent for agent in agents if agent.agent_type is AgentType.AGENT]
+    if all(agent.name != active.name for agent in primary):
+        primary = [*primary, active]
+    if len(primary) <= 1:
+        return None
+    return SessionConfigOptionSelect(
+        id="agent",
+        name="Agent",
+        current_value=active.name,
+        type="select",
+        options=[
+            SessionConfigSelectOption(
+                value=agent.name, name=agent.display_name, description=agent.description
+            )
+            for agent in primary
+        ],
     )
 
 

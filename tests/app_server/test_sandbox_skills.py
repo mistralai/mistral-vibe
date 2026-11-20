@@ -42,7 +42,7 @@ from vibe.app_server.protocol import (
     SessionOptions,
     SkillsSetEnabledParams,
 )
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 from vibe.core.skills.models import RegistryRef, SkillInfo
 
 pytestmark = [
@@ -92,7 +92,7 @@ def _options(sandbox: RecordingSandbox) -> LocalHarnessOptions:
             capabilities=ClientCapabilities(callback_kinds=["approval", "user_input"]),
         ),
         session_options=SessionOptions(
-            agent=BuiltinAgentName.AUTO_APPROVE, headless=True
+            approval_policy=ApprovalPolicyName.AUTO_APPROVE, headless=True
         ),
         sandbox=sandbox,
     )
@@ -502,5 +502,6 @@ async def test_skills_lists_the_sandboxs_project_skills_and_turns_them_off(
         return row.scope, row.enabled, row.locked
 
     assert release(listed) == ("project", True, False)
+    assert {row.path for row in listed} == {None}, "the host cannot reach the files"
     assert summary.skills_count == 1
     assert release(relisted) == ("project", False, False)

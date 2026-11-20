@@ -1,4 +1,4 @@
-//! The animated braille cat: one transition round per start, replayed on click.
+//! The animated braille cat: one round per start or click, or looped as a spinner.
 
 mod frames;
 
@@ -122,6 +122,12 @@ impl PetitChat {
         self.transition_index = (self.transition_index + 1) % transitions.len();
         self.animating = self.transition_index != 0;
         changed
+    }
+
+    /// Advance one frame, looping rounds endlessly.
+    pub fn spin(&mut self) -> bool {
+        self.restart();
+        self.tick()
     }
 
     /// The current frame as a braille grid (`\n`-joined rows).

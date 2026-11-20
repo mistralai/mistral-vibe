@@ -133,8 +133,7 @@ async fn an_installed_scope_writes_its_choice_at_once_and_returns_to_its_row() {
     );
     assert_eq!(page_row(&app), Some(Property::Scope(SkillScope::Project)));
     assert_eq!(app.skills_browser.busy.as_deref(), Some("Tracking stable"));
-    highlight_row(&mut app, Property::Enabled);
-    press(&mut app, &client, KeyCode::Enter);
+    press(&mut app, &client, KeyCode::Char(' '));
     assert_eq!(
         notice(&app),
         Some(labels::BUSY),
@@ -185,9 +184,7 @@ async fn unpin_removes_one_scope_and_remove_takes_every_scope() {
     assert_eq!(seen.last(), Some(&("skills/remove".to_owned(), unpin)));
     assert_eq!(next(&mut frames).await.0, "skills/installed");
     app.skills_browser.busy = None;
-    highlight_row(&mut app, Property::Remove);
-    press(&mut app, &client, KeyCode::Enter);
-    press(&mut app, &client, KeyCode::Enter);
+    press(&mut app, &client, KeyCode::Char('r'));
     let seen = through(&mut frames, "skills/installed").await;
     let scopes: Vec<&str> = seen
         .iter()

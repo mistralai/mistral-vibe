@@ -169,6 +169,7 @@ async def send_reply(route: ReplyRoute, owed: OwedReply, text: str) -> bool:
                     delivery="start_turn",
                     hops=min(owed.hops + 1, MAX_SESSION_HOPS),
                     reply=True,
+                    reply_turn_id=owed.turn_id,
                     idempotency_key=str(
                         uuid.uuid5(
                             _IDEMPOTENCY_NAMESPACE,

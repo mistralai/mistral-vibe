@@ -28,8 +28,24 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     };
     form.width = width;
     let rows = (form.layout().height() as usize).clamp(1, OBJECTIVE_ROWS) as u16;
+    let nested = matches!(app.goal.panel, Some(Panel::Edit { nested: true, .. }));
+    let extra = hint_line::extra(&footer(nested), area.width);
     let kind = super::bottom_app::Kind::Goal;
-    super::bottom_app::draw(app, f, area, rows + 9, kind, draw_box);
+    super::bottom_app::draw(app, f, area, rows + 9 + extra, kind, draw_box);
+}
+
+fn footer(nested: bool) -> [Hint; 4] {
+    let back = if nested {
+        crate::hints::BACK
+    } else {
+        crate::hints::CANCEL
+    };
+    [
+        (key::TAB, action::SWITCH_FIELD),
+        (key::ENTER, action::SAVE),
+        (key::CTRL_J, action::NEWLINE),
+        back,
+    ]
 }
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
@@ -43,7 +59,8 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     };
     let label = theme::muted_style();
     let x = content.x + 2;
-    let body = body(content);
+    let hints = footer(nested);
+    let body = body(content, &hints);
     put_line(f, body, content.y + 1, Line::styled("Objective", label));
     let rows = (form.layout().height() as usize).clamp(1, OBJECTIVE_ROWS);
     let objective = Rect::new(x, content.y + 2, form.width, rows as u16).intersection(body);
@@ -63,18 +80,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
             Line::styled(error, theme::text(theme::error())),
         );
     }
-    let back = if nested {
-        crate::hints::BACK
-    } else {
-        crate::hints::CANCEL
-    };
-    let hints: [Hint; 4] = [
-        (key::TAB, action::SWITCH_FIELD),
-        (key::ENTER, action::SAVE),
-        (key::CTRL_J, action::NEWLINE),
-        back,
-    ];
-    hint_line::draw_clipped(f, content.x, body.bottom(), content.width, &hints);
+    super::goal_panel::draw_hints(f, content, &hints);
 }
 
 fn draw_budget(f: &mut Frame, field: Rect, form: &mut EditForm, cursor_on: bool) {

@@ -87,6 +87,7 @@ async def connect_backend_contract_host(
     identity_gateway: IdentityGateway | None = None,
     process_services: ProcessServices,
     process: HarnessProcess | None = None,
+    client_info: ClientInfo | None = None,
 ) -> BackendContractConnection:
     client_transport, server_transport = memory_transport_pair()
     harness = await create_harness_server(
@@ -99,7 +100,8 @@ async def connect_backend_contract_host(
     client = AppServerClient(client_transport, run_peer=harness.serve)
     host = await AppServerHost.connect(
         client,
-        client_info=ClientInfo(name="backend-contract-test", version="0"),
+        client_info=client_info
+        or ClientInfo(name="backend-contract-test", version="0"),
         capabilities=capabilities,
         session_options=session_options,
         client_factory=harness.connect_client,
@@ -137,7 +139,7 @@ _opened_backends: list[Any] = []
 SESSION_API_SWITCH = "VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API"
 
 # The adapter takes a different path to the runtime for these commands when the
-# Session API switch is on. A test that drives one of them must say on which
+# Session API switch is off. A test that drives one of them must say on which
 # positions it runs: ``both_paths`` when what it asserts comes from the command
 # (turn events, callback state, compaction, ...), ``one_path`` when the command
 # is only setup for a behavior both paths share. Reads, subscriptions and host
@@ -163,7 +165,7 @@ def _path_marker(item: pytest.Item) -> str | None:
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
-    """Run ``both_paths`` tests with the switch off and on, the others with it off."""
+    """Run ``both_paths`` tests with the switch off and on, the others with it on."""
     if "session_api_path" not in metafunc.fixturenames:
         return
     if _path_marker(metafunc.definition) == "both_paths":
@@ -171,7 +173,7 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
             "session_api_path", [False, True], ids=["direct", "session_api"]
         )
         return
-    metafunc.parametrize("session_api_path", [False], ids=["direct"])
+    metafunc.parametrize("session_api_path", [True], ids=["session_api"])
 
 
 @pytest.fixture(autouse=True)

@@ -2,7 +2,7 @@ use super::*;
 use crate::core::prompt::PromptSettings;
 use crate::core::wire::content::ResourceContents;
 use crate::core::wire::message::{
-    AssistantPart, AssistantSemanticPart, ToolArguments, ToolOutcome,
+    AssistantPart, AssistantSemanticPart, InstructionsNote, ToolArguments, ToolOutcome,
 };
 
 const TRUNCATION_MARKER_END: &str = " tokens truncated here for size</system>";
@@ -169,6 +169,7 @@ fn cut_share(canonical: &[StoredMessage], token_threshold: u64) -> u64 {
         carry_tokens(
             &system("agent system prompt"),
             &[],
+            &[],
             budget(Some(token_threshold)),
         )
         .expect("the carry is estimated"),
@@ -176,7 +177,7 @@ fn cut_share(canonical: &[StoredMessage], token_threshold: u64) -> u64 {
         budget(None).image_cost,
     )
     .expect("the carry is collected");
-    let mut minimal = rebuilt_history_head(system("agent system prompt"), &carried, &note);
+    let mut minimal = rebuilt_history_head(system("agent system prompt"), &[], &carried, &note);
     minimal.push(view_message(&prompts().reduced_view_omitted));
     (token_threshold - size(&minimal) - 1) * TRUNCATED_SUMMARY_SHARE / 100
 }
@@ -234,7 +235,7 @@ fn the_carry_is_at_most_a_quarter_of_the_room_and_at_most_20k_tokens() {
     assert!(carried.contains(TRUNCATION_MARKER_END));
     assert!(text_tokens(&carried) <= USER_CARRY_TOKENS as u64 + 20);
 
-    let preamble = size(&rebuilt_history_head(system("agent system prompt"), &[], "")[..2]);
+    let preamble = size(&rebuilt_history_head(system("agent system prompt"), &[], &[], "")[..2]);
     let rebuilt = rebuild(&canonical, "summary", Some(40_000)).expect("the rebuild fits");
     let carried = text(&rebuilt.messages[2]);
     assert!(carried.starts_with("Fix the parser"));
@@ -315,6 +316,7 @@ fn an_image_over_the_carry_budget_is_carried_whole_when_the_rebuild_fits() {
     let token_threshold = 20_000;
     let carry = carry_tokens(
         &system("agent system prompt"),
+        &[],
         &[],
         budget(Some(token_threshold)),
     )
@@ -527,7 +529,7 @@ fn a_huge_task_message_keeps_its_carry_and_the_new_tool_results_give_way() {
         result("call-2", "grep", "d".repeat(100_000)),
         user("also check the tests"),
     ];
-    let preamble = size(&rebuilt_history_head(system("agent system prompt"), &[], "")[..2]);
+    let preamble = size(&rebuilt_history_head(system("agent system prompt"), &[], &[], "")[..2]);
     let quarter = (60_000 - preamble) / 4;
 
     let rebuilt = rebuild(&canonical, "summary", Some(60_000)).expect("the rebuild fits");
@@ -576,6 +578,7 @@ fn a_compaction_that_may_start_fits_any_summary() {
     let start = size(&rebuilt_history_head(
         system("agent system prompt"),
         &[],
+        &[],
         "",
     ));
     // The tightest thresholds that let a compaction start.
@@ -614,4 +617,163 @@ fn a_compaction_that_may_start_fits_any_summary() {
         }
     }
     assert_eq!(started, 50, "the tightest thresholds are checked");
+}
+
+fn upserted(text: &str, key: &str) -> StoredMessage {
+    StoredMessage::instructions(
+        InstructionsNote::Upsert {
+            key: key.to_string(),
+        },
+        text.to_string(),
+    )
+}
+
+fn removed(key: &str) -> StoredMessage {
+    StoredMessage::instructions(
+        InstructionsNote::Delete {
+            key: key.to_string(),
+        },
+        format!("{key} no longer applies"),
+    )
+}
+
+#[test]
+fn only_the_newest_note_of_each_live_key_follows_the_system_prompt() {
+    let mut canonical = history("Fix the parser", "also check the tests");
+    canonical.push(upserted("branch: main", "repository"));
+    canonical.push(upserted("plan: draft", "plan"));
+    canonical.push(upserted("branch: release", "repository"));
+
+    let rebuilt = rebuild(&canonical, "summary", None).expect("fits");
+
+    assert_eq!(
+        &rebuilt.messages[1..3],
+        &canonical[canonical.len() - 2..],
+        "the live notes follow the system prompt in the order of their last update"
+    );
+    assert!(
+        rebuilt.messages[3..]
+            .iter()
+            .all(|stored| stored.instructions.is_none())
+    );
+    assert_eq!(rebuilt.messages.last(), canonical.get(canonical.len() - 4));
+}
+
+#[test]
+fn a_removed_key_leaves_nothing_after_the_last_reply() {
+    let mut canonical = history("Fix the parser", "also check the tests");
+    canonical.insert(1, upserted("plan: draft", "plan"));
+    canonical.push(upserted("plan: final", "plan"));
+    canonical.push(removed("plan"));
+
+    let rebuilt = rebuild(&canonical, "summary", None).expect("fits");
+
+    assert!(
+        rebuilt
+            .messages
+            .iter()
+            .all(|stored| stored.instructions.is_none())
+    );
+    assert_eq!(rebuilt.messages.last(), canonical.get(canonical.len() - 3));
+}
+
+#[test]
+fn instructions_after_the_last_reply_are_not_reduced() {
+    let mut canonical = history("Fix the parser", "also check the tests");
+    canonical.insert(1, upserted("branch: main", "repository"));
+    canonical.push(upserted("branch: release", "repository"));
+    let whole = rebuild(&canonical, "summary", None).expect("fits").messages;
+
+    let rebuilt =
+        rebuild(&canonical, "summary", Some(size(&whole) - 12_000)).expect("the rebuild fits");
+
+    assert_eq!(reduction(&rebuilt).reduced_messages, 3);
+    assert_eq!(
+        &rebuilt.messages[1],
+        canonical.last().expect("instructions")
+    );
+    let [.., view, steer] = rebuilt.messages.as_slice() else {
+        panic!("the rebuild ends with the view and the steer");
+    };
+    assert!(text(view).starts_with(&prompts().reduced_view_header));
+    assert_eq!(steer, &canonical[canonical.len() - 2]);
+    assert_eq!(
+        rebuilt
+            .messages
+            .iter()
+            .filter(|stored| stored.instructions.is_some())
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn instructions_are_a_fixed_part_when_the_summary_is_cut() {
+    let mut canonical = history("Fix the parser", "also check the tests");
+    canonical.insert(1, upserted("branch: main", "repository"));
+    canonical.push(upserted("plan: draft", "plan"));
+
+    let rebuilt =
+        rebuild(&canonical, &summary_lines(20_000), Some(2_000)).expect("the cut summary fits");
+
+    assert_eq!(
+        reduction(&rebuilt),
+        &Reduction {
+            reduced_messages: 4,
+            view: OMITTED_LEVEL,
+            turn_message_reduced: true,
+        }
+    );
+    assert_eq!(
+        &rebuilt.messages[1..3],
+        &[
+            canonical[1].clone(),
+            canonical.last().expect("instructions").clone()
+        ]
+    );
+    let [.., summary, omitted] = rebuilt.messages.as_slice() else {
+        panic!("the rebuild ends with the summary and the omitted line");
+    };
+    assert!(text(summary).contains(COMPACTION_SUMMARY_OPEN));
+    assert_eq!(text(omitted), prompts().reduced_view_omitted);
+}
+
+#[test]
+fn instructions_count_toward_the_fixed_parts() {
+    let mut canonical = history("Fix the parser", "also check the tests");
+    canonical.insert(1, upserted(&"k".repeat(80_000), "repository"));
+    let prompts = prompts();
+
+    assert!(rebuild(&canonical, "summary", Some(15_000)).is_none());
+    assert!(
+        !minimum_replacement_fits(
+            &canonical,
+            system("agent system prompt"),
+            &[],
+            budget(Some(15_000)),
+            &prompts,
+        )
+        .expect("the rebuild is estimated")
+    );
+}
+
+#[test]
+fn instructions_shrink_the_user_carry() {
+    let request = format!("Fix the parser {}", "a".repeat(400_000));
+    let plain = history(&request, "also check the tests");
+    let mut with_instructions = plain.clone();
+    let context = upserted(&"k".repeat(16_000), "repository");
+    with_instructions.insert(1, context.clone());
+
+    let without = rebuild(&plain, "summary", Some(40_000)).expect("the rebuild fits");
+    let with = rebuild(&with_instructions, "summary", Some(40_000)).expect("the rebuild fits");
+
+    let carried_without = text_tokens(&text(&without.messages[2]));
+    assert_eq!(with.messages[1], context);
+    let carried_with = text_tokens(&text(&with.messages[3]));
+    let instructions_share = size(std::slice::from_ref(&context)) / USER_CARRY_ROOM_SHARE;
+    assert!(
+        carried_without - carried_with >= instructions_share - 20,
+        "{carried_without} {carried_with} {instructions_share}"
+    );
 }

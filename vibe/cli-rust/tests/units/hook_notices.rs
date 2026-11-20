@@ -176,3 +176,27 @@ fn a_model_call_hook_line_mounts_in_its_own_container() {
         assert_eq!(transcript.lines().count(), 1, "{scope}");
     }
 }
+
+fn add_hook_notice(transcript: &mut Transcript, id: &str, kind: &str, call: &str) {
+    transcript.add(
+        &json!({"entry": {"id": id, "type": "notice", "message": "hook",
+                          "detail": {"kind": kind, "scope": "pre_tool", "toolCallId": call,
+                                     "content": "checked", "hookName": "guard"}}}),
+    );
+}
+
+#[test]
+fn a_hook_line_mounts_only_while_its_latest_run_is_open() {
+    let mut transcript = Transcript::default();
+    add_hook_notice(&mut transcript, "s1", "hook_run_started", "c1");
+    add_hook_notice(&mut transcript, "s2", "hook_run_started", "c2");
+    add_hook_notice(&mut transcript, "d2", "hook_run_completed", "c2");
+    add_hook_notice(&mut transcript, "k1", "hook_completed", "c1");
+    add_hook_notice(&mut transcript, "d1", "hook_run_completed", "c1");
+    add_hook_notice(&mut transcript, "k2", "hook_completed", "c1");
+    add_hook_notice(&mut transcript, "s3", "hook_run_started", "c1");
+    add_hook_notice(&mut transcript, "k3", "hook_completed", "c1");
+    let shown: Vec<_> = transcript.lines().map(|line| line.id.to_owned()).collect();
+    // Another call's closed run leaves c1 open; c1's own completion closes it until it reopens.
+    assert_eq!(shown, ["k1", "k3"]);
+}

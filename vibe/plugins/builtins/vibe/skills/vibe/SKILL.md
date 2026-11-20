@@ -84,6 +84,15 @@ is present. Set `ask_confirmation_on_exit = false` to make `Ctrl+D` quit on the
 first press (also toggleable in `/config`); `Ctrl+C` always requires a second
 press. `Ctrl+Z` suspends on POSIX (resume with `fg`).
 
+### Interrupting a Turn
+
+`Esc` or `Ctrl+C` interrupts the running turn. If the model has not answered yet
+(no reply text and no tool call, thinking aside), the prompt is taken back: the
+turn is rewound in the current session, without restoring files, and the prompt
+returns to the input to edit and resend. This needs an empty input and no other
+queued prompt; otherwise, or once an answer has started, the turn stays in the
+conversation with an `Interrupted` row and `/retry` can re-run it.
+
 ### Prompt History
 
 `Up`/`Down` recall previous prompts (stored in `~/.vibe/vibehistory`, newest 100
@@ -96,6 +105,53 @@ in the input without sending it (`Ctrl+Z` undoes), `Esc`/`Ctrl+C` restore the dr
 bottom border shows `Ctrl+S restore stash` while one is held. The next message
 you send brings the stash back, and `Ctrl+S` swaps the input with the stash
 at any time. The stash lives in memory only and holds one draft.
+
+### Prompt Input Keybindings
+
+The prompt input follows emacs/readline conventions. With `vim_keybindings`,
+these keys work in Insert mode, and the `Ctrl` ones in Normal mode too, except
+`Ctrl+R` (redo) and `Ctrl+H` (left) there. `Ctrl+P` / `Ctrl+N` act as `Up` /
+`Down` wherever the prompt owns the keys: they also step through the completion
+popup, reverse-search matches and the queued prompts.
+
+| Keys | Action |
+| --- | --- |
+| `Ctrl+B` / `Left`, `Ctrl+F` / `Right` | Caret one character left / right |
+| `Alt+B`, `Ctrl+Left`, `Alt+Left` / `Alt+F`, `Ctrl+Right`, `Alt+Right` | Caret one word left / right |
+| `Ctrl+A` / `Home` / `Cmd+Left`, `Ctrl+E` / `End` / `Cmd+Right` | Caret to line start / end |
+| `Ctrl+P` / `Up`, `Ctrl+N` / `Down` | Previous / next line; on the first or last line, recall prompt history (see Prompt History) |
+| `PgUp` / `PgDn` | Caret one page up / down |
+| `Backspace`, `Ctrl+H` / `Delete`, `Ctrl+D` | Delete one character left / right (`Ctrl+D` on an empty prompt quits) |
+| `Ctrl+W`, `Ctrl+Backspace`, `Alt+Backspace`, `Ctrl+Alt+H` | Delete the word left |
+| `Alt+D`, `Ctrl+Delete`, `Alt+Delete` | Delete the word right |
+| `Ctrl+U` / `Ctrl+K` | Delete to line start / end |
+| `Ctrl+Shift+K` | Delete the whole line |
+| `Ctrl+Y` | Copy the selection, else yank the last deleted text (macOS and Linux) |
+| `Shift+Left/Right`, with `Ctrl`/`Alt` | Extend the selection by character, or by word |
+| `Shift+Home/End`, `Cmd+Shift+Left/Right` | Extend the selection to line start / end |
+| `F7` / `F6` | Select all / select the line |
+| `Ctrl+Shift+C`, `Cmd+C`, `Ctrl+C` | Copy the selection (`Ctrl+C` without a selection interrupts or quits) |
+| `Cmd+Z` / `Cmd+Y` | Undo / redo (`Ctrl+Z` / `Ctrl+Y` on Windows) |
+| `Enter` | Send |
+| `Ctrl+J`, `Shift+Enter`, `Alt+Enter`, `Ctrl+M` | Insert a newline (`Shift+Enter` and `Ctrl+M` only where the terminal reports them) |
+| `Tab` | Complete `/` commands and `@` file mentions |
+| `Ctrl+R` / `Ctrl+S` | Search prompt history / stash the draft |
+| `Ctrl+G` | Edit the draft in `$VISUAL`, `$EDITOR` or `nano` |
+| `Ctrl+V` | Paste a clipboard image (macOS) |
+
+Other keys in the main view:
+
+| Keys | Action |
+| --- | --- |
+| `Esc` | Interrupt the turn; twice on an empty prompt opens rewind, twice on a draft clears it |
+| `Ctrl+C` / `Ctrl+D` / `Ctrl+Z` | Interrupt or quit / quit on an empty prompt / suspend (see Exit) |
+| `Shift+Tab` | Cycle the approval policy |
+| `Shift+Up/Down` | Scroll the transcript |
+| `Ctrl+O` | Expand or collapse every tool group and result |
+| `Ctrl+X` | Focus the status rail (see the rail under Built-in Slash Commands) |
+| `Ctrl+T` | Start or stop voice recording (with voice mode on) |
+| `Cmd+\`, `Alt+\` | Dock the todo list on the right |
+| `Ctrl+\` | Toggle the debug console |
 
 ### Update
 
@@ -174,11 +230,13 @@ changes only that layer. `/clear` starts an unpinned conversation that follows
 the current config again. If a selected model is no longer configured, Vibe
 falls back to the current default model.
 
-Each user message also pins the running agent, including one chosen with
-`--agent`. Resuming or continuing keeps that agent, even if the configured
-default agent changes or `--agent` names another one; switch agents in the
-session to change it. If the pinned agent no longer exists, Vibe falls back to
-`--agent` or the default agent, and keeps that one from then on.
+Each user message also pins the running agent and approval policy, including
+ones chosen with `--agent` or `--approval-policy`. Resuming or continuing keeps
+them, even if the configured defaults change or the flags name others; switch
+them in the session to change them. If a pinned agent or policy no longer
+exists, Vibe falls back to the flag or the default, and keeps that from then on.
+A session saved before agents and approval policies were split restores its
+mode as its approval policy.
 
 ## Configuration (config.toml)
 
@@ -215,11 +273,13 @@ active_model = "mistral-medium-3.5"  # Model alias to pin; omit or set "" to fol
 # UI preferences
 theme = "auto"  # Follow terminal background, then OS light/dark preference
 disable_welcome_banner_animation = false
+disable_selection_animation = false  # Skip the light that sweeps across a copied selection
 cursor_blink = true  # Blink the input cursor; false keeps it steady
 vim_keybindings = false  # Vim Normal and Insert modes in the prompt input
 autocopy_to_clipboard = true  # Enable automatic copying of selected text to clipboard
 enable_mouse_capture = true  # Capture the mouse for scrolling, clicks and selection; false keeps the terminal's native selection
 enable_sticky_prompt = true  # Pin the prompt of the section at the top of the transcript while scrolling
+collapse_turn_details = false  # Collapse each settled turn's steps into a "Worked for" group above its final answer
 enable_file_autocomplete = true  # Offer @ file completion; off skips the file index entirely
 file_watcher_for_autocomplete = true  # Refresh @ suggestions and pick up skill changes after workspace changes
 ask_confirmation_on_exit = true  # Require a second Ctrl+D to quit (Ctrl+C always confirms)
@@ -238,6 +298,20 @@ transcript rows. A prompt a scheduled loop sent pins as its folded title
 scrolls the transcript back to that prompt. Set it to `false` through `/config`,
 or edit `config.toml` and run `/reload`; no restart is needed.
 
+`collapse_turn_details = true` collapses a turn once its final answer arrives:
+the intermediate assistant messages, reasoning and tool calls move into one
+group above the answer, headed `⏵ Worked for 1m 12s · 2 messages · 3 tool calls`.
+While the turn runs, its steps show as usual. A click on the header, or
+`Ctrl+O` with the tool groups, expands the group: the steps show indented by two
+columns behind a rail like a tool group's border, the header and rail turn to
+the primary color, and a blank row sets the steps apart from the answer. The
+user's own messages, such as a message steered into the running turn, stay
+outside the group. A turn collapses only when an assistant message ends it after
+at least one step, and the turn was not interrupted. A subagent's view keeps
+every step shown. Changing the setting regroups every turn of the session.
+Change it through `/config`, or edit `config.toml` and run `/reload`; no restart
+is needed.
+
 `vim_keybindings` adds a subset of vim to the prompt input. It starts in Insert
 mode, labelled `INSERT` on its bottom border with a bar caret; `Esc` enters Normal
 mode, unlabelled with a block caret.
@@ -251,9 +325,10 @@ mode, yank/paste, count or `:` command.
 
 ### Copy and Text Selection
 
-- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. On macOS and Linux, with nothing selected, `Ctrl+Y` yanks (pastes back) the text the last `Ctrl+K`, `Ctrl+Shift+K`, `Ctrl+U`, `Ctrl+W`, `Alt+D` or word delete removed from the input box. Each kill replaces the previous one. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically, as does a drag that ends without a release (the terminal losing focus, or a key other than `Esc`, which aborts the drag without copying). Each successful copy flashes a brief inline "Copied to clipboard" notice.
+- **Copy shortcuts**: `Ctrl+Y` and `Ctrl+Shift+C` both copy the current selection to the clipboard. On macOS and Linux, with nothing selected, `Ctrl+Y` yanks (pastes back) the text the last `Ctrl+K`, `Ctrl+Shift+K`, `Ctrl+U`, `Ctrl+W`, `Alt+D` or word delete removed from the input box. Each kill replaces the previous one. When autocopy is enabled (default), releasing the mouse over a selection also copies automatically, as does a drag that ends without a release (the terminal losing focus, or a key other than `Esc`, which aborts the drag without copying). Each successful copy flashes a brief inline "Copied to clipboard" notice, on the row above the status rail while the rail shows.
 - **Multi-click selection**: Double-click selects a word, triple-click selects the current paragraph; dragging extends the selection at the same granularity. Clicking a collapsible transcript entry (tool group, tool call, reasoning) toggles it on every click; drag to select its text.
-- **Terminal-native selection**: `enable_mouse_capture = false` (or `VIBE_ENABLE_MOUSE_CAPTURE=false`) turns mouse capture off, so the terminal's own selection and copy work instead of in-app selection; depending on the terminal, some other mouse interactions such as clicks are disabled too. It applies live from `/config` or `/reload`. Inside a tmux session whose `mouse` option is off (the default before tmux 3.8), Vibe behaves as if this setting were `false`, re-reading the option at startup and when resuming from suspend or an external editor. At startup it also shows a warning explaining that the wheel then scrolls the terminal instead of the conversation (fix with `set -g mouse on` in `~/.tmux.conf`, or scroll with `Shift+Up/Down`); `Ctrl+N` removes it and stores the dismissal in `cache.toml` (`[tmux_mouse_hint]`), so it never shows again. The warning also goes away when tmux's `mouse` is found on after a suspend or the external editor, or when `enable_mouse_capture` is turned off. Native selection only covers the visible screen; `Shift+Up/Down` always scrolls the transcript. In some terminals the mouse wheel then sends Up/Down keys, which recall prompt history in the input box.
+- **Code link preview**: Resting the pointer on a transcript link to a local file (a path, `file://` or editor link such as `vscode://file/...:12`) for 300 ms opens a popup with the file's code around the linked lines, as it is on disk. The wheel and scrollbar scroll it, its code can be selected and copied without line numbers, and moving off the link, `Esc`, any other key or a click outside it closes it.
+- **Terminal-native selection**: `enable_mouse_capture = false` (or `VIBE_ENABLE_MOUSE_CAPTURE=false`) turns mouse capture off, so the terminal's own selection and copy work instead of in-app selection; depending on the terminal, some other mouse interactions such as clicks are disabled too. It applies live from `/config` or `/reload`. Inside a tmux session whose `mouse` option is off (the default before tmux 3.8), Vibe behaves as if this setting were `false`, re-reading the option at startup and when resuming from suspend or an external editor. At startup it also shows a warning explaining that the wheel then scrolls the terminal instead of the conversation (fix with `set -g mouse on` in `~/.tmux.conf`, or scroll with `Shift+Up/Down`); `Ctrl+X` then `h` removes it and stores the dismissal in `cache.toml` (`[tmux_mouse_hint]`), so it never shows again. The warning also goes away when tmux's `mouse` is found on after a suspend or the external editor, or when `enable_mouse_capture` is turned off. Native selection only covers the visible screen; `Shift+Up/Down` always scrolls the transcript. In some terminals the mouse wheel then sends Up/Down keys, which recall prompt history in the input box.
 - **Warnings**: Config issues, config validation warnings, and the warnings the
   app server reports before the first turn (an MCP server or connector that
   failed to load, a model whose context window is unknown) are listed together in one
@@ -269,11 +344,11 @@ outside_workdir = "ask"            # Outside-workdir file/shell access: "ask" pr
 worktree_copy_on_write = true      # macOS: clone new worktrees of a trusted repo from a template checkout; sets extensions.worktreeConfig in the repo
 enable_pr_monitoring = true        # Track the session's PRs/MRs (gh/glab): detect created ones, find existing ones for the branch, keep their status fresh
 system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
-compaction_prompt_id = "compact"  # Compaction prompt: built-in "compact" or custom .md filename
 enable_telemetry = true
 enable_update_checks = true       # Daily update check (uv or PyPI); prompts on next launch when a newer release exists
 enable_notifications = true
-enable_system_trust_store = false  # Use OS trust store for outbound HTTPS and update-time uv
+keep_awake = false                # Prevent idle sleep while a turn runs or waits for an approval/question (caffeinate, systemd-inhibit idle lock, SetThreadExecutionState); display sleep and lid close still apply; applies at once, mid-turn too; Vibe Desktop sessions follow Desktop's own setting
+enable_system_trust_store = true   # Trust OS and bundled certificates for outbound HTTPS and update-time uv; false uses bundled only
 api_timeout = 720.0               # API request timeout in seconds
 api_retry_max_elapsed_time = 300.0  # Retry budget for retryable API failures in seconds
 api_stream_idle_timeout = 300.0   # Silence after the model starts answering that counts as a stall, in seconds; 0 allows api_timeout
@@ -353,7 +428,7 @@ allowed_models = ["mistral-vibe-cli-*"]
 name = "mistral-vibe-cli-latest"
 provider = "mistral"
 alias = "mistral-medium-3.5"
-temperature = 1.0
+temperature = 1.0                 # sampling temperature; omit for 1.0
 input_price = 1.5
 output_price = 7.5
 cached_input_price = 0.15         # per million cached input tokens; omit to bill at input_price
@@ -539,12 +614,14 @@ disabled_skills = ["experimental-*"]
 # Additional agent search paths
 agent_paths = ["/path/to/custom/agents"]
 
-# Enable/disable agents
+# Enable/disable agents and approval policies by name. An enabled_agents list
+# that names no agent keeps the "default" agent; one that names agents allows
+# only those. A list that names agents but no policy allows only "ask".
 enabled_agents = ["ask", "accept-edits"]
 disabled_agents = ["auto-approve"]
 
-# Forbid the auto-approve (YOLO) mode entirely: hides the "auto-approve" agent
-# (and any custom agent with safety = "yolo") and ignores --auto-approve/--yolo.
+# Forbid the auto-approve (YOLO) mode entirely: hides the "auto-approve" policy
+# (and any custom policy with safety = "yolo") and ignores --auto-approve/--yolo.
 # Per-tool permissions still apply.
 # Intended for admin-managed (enterprise) config.
 enable_auto_approve = false
@@ -552,13 +629,18 @@ enable_auto_approve = false
 # Opt-in builtin agents (only affects agents with install_required=True, e.g. lean)
 installed_agents = ["lean"]
 
-# Agent profile to use when --agent is not passed
-# (default: "accept-edits"). Valid values: "ask", "accept-edits",
-# "auto-approve", "lean" (only when listed in installed_agents), or any
-# custom agent name from ~/.vibe/agents/ or .vibe/agents/. Subagents
-# (e.g. "explore") are rejected. Applies in both interactive and programmatic
+# Agent to use when --agent is not passed (default: "default", Vibe's own
+# instructions and tools). Valid values: "default", "lean" (only when listed in
+# installed_agents), or any custom agent name from ~/.vibe/agents/ or
+# .vibe/agents/. Subagents (e.g. "explore") are rejected. A policy name here
+# ("ask", "auto-approve", ...) still works and sets default_approval_policy.
+default_agent = "default"
+
+# Approval policy to use when --approval-policy is not passed, whatever the
+# agent (default: "accept-edits"). Valid values: "ask", "accept-edits",
+# "smart-approve", "auto-approve". Applies in both interactive and programmatic
 # (-p/--prompt) mode.
-default_agent = "ask"
+default_approval_policy = "ask"
 ```
 
 ### MCP Servers
@@ -864,12 +946,12 @@ pattern starts with `re:` (`"re:(read_file|write_file)"`).
 **Agent matching on `post_agent`.** `post_agent` fires after the main agent's
 turns and after every subagent's turns. Its `match` selects the agent that
 finished its turn, by agent configuration name: the main session's current
-agent (`accept-edits`, `ask`, a custom agent file name), a subagent's
+agent (`default`, `lean`, a custom agent file name; never an approval policy), a subagent's
 `config_name` (e.g. `reviewer`, or `<plugin-name>:<name>` for a plugin agent), or,
 for a subagent spawned without one, its parent's agent. The reserved alias `main`
 matches the main session (root or fork) whatever its agent, and never a
-subagent; no agent may be named `main`. A mode name also matches the subagents
-that inherit it, so use `match = "main"` to run only after the main agent.
+subagent; no agent may be named `main`. An agent name also matches the
+subagents that inherit it, so use `match = "main"` to run only after the main agent.
 Without `match` (or with `"*"`), a `post_agent` hook runs for every agent. A
 hook that does not match is skipped silently. `pre_agent`, `pre_llm` and
 `post_llm` match agents the same way, for the agent whose turn it is.
@@ -906,19 +988,19 @@ discriminated by `hook_event_name`:
 // pre_agent
 {"hook_event_name": "pre_agent", "session_id": "...",
  "parent_session_id": null, "transcript_path": "...", "cwd": "...",
- "agent_name": "accept-edits", "turn_id": "turn-...",
+ "agent_name": "default", "turn_id": "turn-...",
  "prompt": "fix the bug"}          // the text the user typed; attachments are not included
 
 // pre_llm
 {"hook_event_name": "pre_llm", "session_id": "...",
  "parent_session_id": null, "transcript_path": "...", "cwd": "...",
- "agent_name": "accept-edits", "turn_id": "turn-...",
+ "agent_name": "default", "turn_id": "turn-...",
  "model": "mistral-medium-3-5"}    // active model alias, or the model name when it has none
 
 // post_llm
 {"hook_event_name": "post_llm", "session_id": "...",
  "parent_session_id": null, "transcript_path": "...", "cwd": "...",
- "agent_name": "accept-edits", "turn_id": "turn-...",
+ "agent_name": "default", "turn_id": "turn-...",
  "response_text": "Let me check.",
  "tool_calls": [{"tool_name": "file_system.read_file", "tool_call_id": "call_1",
                  "tool_input": {"file_path": "a.txt"}}],
@@ -933,7 +1015,7 @@ discriminated by `hook_event_name`:
 // post_agent
 {"hook_event_name": "post_agent", "session_id": "...",
  "parent_session_id": null, "transcript_path": "...", "cwd": "...",
- "agent_name": "accept-edits",    // agent configuration name; null when unknown
+ "agent_name": "default",         // agent configuration name; null when unknown
  "turn_id": "turn-...",
  "response_text": "Done."}        // the final answer; transcript_path records it only once every post_agent hook accepts it
 
@@ -942,14 +1024,14 @@ discriminated by `hook_event_name`:
  "parent_session_id": null, "transcript_path": "...", "cwd": "...",
  "notification_type": "approval_requested",  // | question_asked | turn_completed | turn_failed
  "message": "Vibe needs your approval to run file_system.bash",
- "agent_name": "accept-edits",
+ "agent_name": "default",
  "tool_name": "file_system.bash"}  // approval_requested only
 
 // session_start
 {"hook_event_name": "session_start", "session_id": "...",
  "parent_session_id": null, "transcript_path": "...", "cwd": "...",
  "source": "startup",              // | resume | clear | fork
- "agent_name": "accept-edits", "model": "mistral-medium-3-5"}  // active model alias
+ "agent_name": "default", "model": "mistral-medium-3-5"}  // active model alias
 
 // session_end
 {"hook_event_name": "session_end", "session_id": "...",
@@ -1115,11 +1197,13 @@ Tool, skill, and agent names support three matching modes:
 
 ```
 vibe [PROMPT]                       # Start interactive session with optional prompt
-vibe -p TEXT / --prompt TEXT         # Programmatic mode using `default_agent`, one-shot, exit. Calls needing approval are denied, so an agent's `[tools.bash] allowlist` limits the shell to those commands
+vibe -p TEXT / --prompt TEXT         # Programmatic mode using `default_agent` and `default_approval_policy`, one-shot, exit. Calls needing approval are denied, so an agent's `[tools.bash] allowlist` limits the shell to those commands
 vibe -p TEXT --auto-approve          # Programmatic mode with all tool calls approved
-vibe -p TEXT --agent lean --yolo      # Lean mode with all tool calls approved
-vibe --agent NAME                   # Select agent profile (falls back to `default_agent` config)
-vibe --auto-approve / --yolo         # Approve all tool calls. New session on ask/accept-edits/smart-approve: starts the auto-approve agent. Custom agent or resumed session: keeps its agent, every call approved
+vibe -p TEXT --agent lean --yolo      # Lean agent with all tool calls approved
+vibe --agent NAME                   # Select the agent (falls back to `default_agent` config). A policy name still selects that approval policy
+vibe --approval-policy NAME         # Select the approval policy: ask, accept-edits, smart-approve, auto-approve (falls back to `default_approval_policy`, whatever the agent)
+vibe --smart-approve                # Same as --approval-policy smart-approve
+vibe --auto-approve / --yolo         # Approve all tool calls: a new session starts in the auto-approve policy, whatever its agent; a resumed session keeps its policy, every call approved
 vibe --workdir DIR                  # Change working directory
 vibe --worktree NAME                # Create/reuse a git worktree under $VIBE_HOME/worktrees on branch NAME and run inside it. Auto-cleanup only for worktrees Vibe created this run and only after a session started; reused worktrees and attached (pre-existing) branches are kept unless confirmed. -p sessions keep worktrees. Ignored with --setup/--check-upgrade.
 vibe --worktree                     # Same, but Vibe picks an unused name from the prompt (a random slug when there is no prompt) on a vibe/<name> branch, and never reuses an existing worktree. The prompt must precede the flag or follow a `--`, since --worktree otherwise reads it as NAME.
@@ -1143,27 +1227,56 @@ vibe --output text|json|streaming   # Output format (programmatic mode)
 
 Programmatic mode never prompts for approval: a tool call that needs it is
 denied unless the run approves calls without a prompt. `--auto-approve` (or
-`--agent auto-approve`) approves them, and `--smart-approve` lets a classifier
+`--approval-policy auto-approve`) approves them, and `--smart-approve` lets a classifier
 approve the ones it judges safe. Each denied call is printed on stderr as
 `Tool call denied: <tool> (<reason>)` and listed in the export's `warnings`.
 A text run whose agent finishes without an answer says so on stderr.
 
-## Built-in Agents
+## Approval Policies and Built-in Agents
 
-There are two kinds of agents:
-- **Agents** are user-facing profiles selectable via `--agent` or `Shift+Tab`.
-  They configure the model's behavior, tools, and system prompt.
+Every session runs one agent and one approval policy, chosen independently:
+- The **approval policy** decides which tool calls run without asking. Select it
+  with `--approval-policy`, `default_approval_policy`, or `Shift+Tab` (which
+  cycles policies only).
+- The **agent** decides what the session is: instructions, model, tools and
+  system prompt. Select it with `--agent`, `default_agent`, or `/agent`.
 - **Subagents** are model-facing: the model can spawn them autonomously to delegate
   subtasks (e.g. exploring the codebase). Users cannot select subagents directly.
 
-### Agents
+### Approval policies
 
 - **ask**: Requests approval for tool executions
-- **accept-edits**: Default agent; auto-approves file edits but asks for other tools
+- **accept-edits**: Default policy; auto-approves file edits but asks for other tools
+- **smart-approve**: A classifier auto-runs the calls it judges safe and asks for
+  the risky ones (shown once your account has it, or when chosen explicitly)
 - **auto-approve**: Auto-approves all tool calls
+
+A file in `~/.vibe/agents/` (or an org-managed agents directory) named after a
+policy (`accept-edits.toml`, ...) overrides that policy. A project's
+`.vibe/agents/` cannot: such a file is ignored and reported as a config issue.
+
+### Agents
+
+- **default**: Vibe's own instructions, model and tools
 - **lean**: Specialized Lean 4 proof assistant. Not available by default — must be
   installed with `/leanstall` (removed with `/unleanstall`). Use `--agent lean
-  --auto-approve` or `--agent lean --yolo` to run Lean mode without tool prompts.
+  --auto-approve` or `--agent lean --yolo` to run Lean without tool prompts.
+
+An agent never picks or implies an approval policy: a session runs the policy
+you choose, else `default_approval_policy`. An agent file may set only what the
+agent is: `instructions`, `display_name`, `description`, its model
+(`active_model`, `models`, `providers`, `allowed_models`, `compaction_model`,
+`vision_model`, `auto_compact_threshold`), `enabled_tools`/`disabled_tools`,
+skills (`enabled_skills`, `disabled_skills`, `skill_paths`), `system_prompt_id`
+and `system_prompt_behavior`, and per tool the shell timeouts
+(`default_timeout`, `max_timeout_seconds`) and a `permission` of `ask` or
+`never`. Any other setting (`safety`, `approval_policy`,
+`bypass_tool_permissions`, `permission = "always"`, `allowlist`, `denylist`,
+`sensitive_patterns`, `enabled_agents`, `enable_auto_approve`, ...) is ignored
+and reported as a config issue naming the agent and the key. A policy never
+loosens a tool the agent sets to `ask` or `never`. Subagents
+(`agent_type = "subagent"`) keep their per-tool rules, which only narrow the
+session's.
 
 ### Subagents
 
@@ -1212,7 +1325,7 @@ session's model.
 - `/help` - Show help message
 - `/config` - Full-screen settings browser. Fields show their value and origin layer (default / TOML / env / override). Type to filter, arrows to move, Enter to edit; booleans toggle, closed-set fields (theme, models) pick from a list, scalars edit inline, complex fields open a JSON editor. The edit modal shows an inspector of the layers setting the field; edits persist to the user config (`~/.vibe/config.toml`) by default, `Tab` cycles the save target through the project config (`.vibe/config.toml`, when the project layer is active) and the ephemeral session override (until restart), and `Ctrl+R` clears the field one writable layer at a time toward the default. The `tools` field opens a grouped tool list with a per-tool config editor (permission, allow/deny lists, `Ctrl+E` for raw JSON). Enabling/disabling whole MCP servers or connectors stays in `/mcp`.
 - `/model` - Select active model. The picker's `/` focuses a fuzzy search that filters the list live; arrows move, Enter saves to config, `s` keeps the pick for this session only, Esc leaves search, clears the filter, then closes. The footer shows the active model and its thinking level (`Name[level]`) before the context gauge; clicking it opens `/model` and keeps the prompt being typed (only while idle, like the typed command).
-- `/thinking` - Select thinking level
+- `/thinking` - Select thinking level; `/thinking <level>` (e.g. `/thinking high`) saves a level the model offers without opening the picker
 - `/theme` - Select UI theme; `auto` follows terminal/OS appearance, `mistral-dark` and `mistral-light` use the Mistral brand palette (persisted in config)
 - `/reload` - Reload configuration, agent instructions, and skills from disk (skills added or edited on disk are also picked up on their own while `file_watcher_for_autocomplete` is on, except in sandboxed sessions)
 - `/clear`, `/new` - Start a new conversation. Optionally pass a prompt to seed it
@@ -1235,7 +1348,8 @@ session's model.
   passed to the model for the retry. Relevant error messages also hint at this
   command; with nothing to retry, it says so.
 - `/pr` - List the session's pull requests and merge requests (needs
-  `enable_pr_monitoring`, on by default). Opening it refreshes their status.
+  `enable_pr_monitoring`, on by default) in the rail's PR window, like
+  `Ctrl+X` then `p`. Opening it refreshes their status.
   Enter opens the highlighted one, `c` its first failing CI check, `f` drafts a
   prompt asking the agent to fix what blocks it (shown only when it needs action).
 - `/status` - Display agent statistics
@@ -1342,8 +1456,30 @@ session's model.
     empty for no budget). `/goal pause`, `/goal resume` and `/goal clear` do
     what they say. Replacing or clearing an unfinished goal asks for
     confirmation. All of them work while a turn runs.
-  - A goal row above the input shows the objective, its status, tokens used
-    against the budget, and time spent, updated while a goal turn runs. The
+  - The status rail on the loading line shows one chip per item, each a count
+    then a muted noun, separated by `·`: `◐ 1 agent · ▪ 2 tasks · ● 2 PRs ·
+    ▶ goal 4m · ≡ 2/5`. The goal chip shows the time spent while it runs,
+    `✓ goal` once complete, else its status (tokens used against the budget
+    are in its window); the todo chip shows done over total. On a narrow
+    terminal the leftmost chips shrink first (`◐ 1`, `▪ 2`, `▶ 4m`), and only
+    then drop; the rail never squeezes the loading line's own text. A dimmed
+    `Ctrl+X to navigate` leads the rail until it takes focus, and is the first
+    thing to go on a narrow row.
+    `Ctrl+X` focuses the rail and letters its items (`s` subagents, `b`
+    background tasks, `p` PRs/MRs, `g` goal, `t` todo): a letter opens that item's window
+    in place of the input box, `←→` (or `Tab`/`Shift+Tab`) and `Enter` do the same step by step, `Esc` goes
+    back. The letters show only until the next key: any key, even an arrow or
+    `Ctrl+X` again, hides them; `Ctrl+X` once they are gone shows them again. With a window open its button stays lit, `←→` (or `Tab`/`Shift+Tab`) move to
+    the previous or next item's window, and `Ctrl+X` with a letter jumps to one.
+    Clicking an item opens its window; clicking it again closes it. A click,
+    like `Ctrl+X`, works even while a picker such as `/model` or `/context`
+    fills the box, which it closes first; a form or flow in progress (a goal
+    edit, a tool approval, a question, a sign-in) keeps the box.
+    The windows list the subagents (`Enter` views one), the running
+    background commands (a click highlights one, `s` stops it), the PRs/MRs (as in `/pr`), the goal (`p` pause/resume, `e`
+    edit, `c` clear) and the todo list; `↑↓`/`jk` or the wheel scroll the goal
+    and todo windows, and `Esc` closes them. `Cmd/Alt+\` in the prompt docks
+    the whole todo list on the right instead. The
     transcript marks each step: the goal set or changed, each goal turn, and
     why it stopped.
   - While the goal is active and the session is idle, Vibe starts the next
@@ -1369,10 +1505,13 @@ session's model.
   - `max_goal_token_budget` in `config.toml` caps the budget a goal may set,
     and a goal set without a budget gets that one.
 - `/proxy-setup` - Configure proxy and SSL certificate settings
+- `/agent` - List the agents; `/agent <name>` switches the session to one
 - `/leanstall` - Install the Lean 4 agent (leanstral)
 - `/unleanstall` - Uninstall the Lean 4 agent
 - `/plugins` - Display the plugins this session is running (Unified Harness only). Shows each plugin's name, scope, source format, content digest, and
   components (skills, MCP servers, agents, hooks, knowledge, connectors, tools).
+  `Enter` opens a plugin's page: its description, then Author, Version, Scope,
+  Location, Format and Pinned in a label column, then its components by kind.
   Press `r` inside the view to reload.
 - `/reload-plugins` - Re-pin this session's plugins and report what changed
   (Unified Harness only). Re-discovers plugins from disk, re-pins the
@@ -1389,31 +1528,47 @@ session's model.
   except those explicitly untrusted, which the view lists. Changes apply the
   next time Vibe starts; running sessions keep the project config they loaded.
 - `/skills` - Browse and manage skills. My Skills shows one row per installed
-  skill, the one its name resolves to: enabled (`●`) or disabled (`○`), Scope,
+  skill, sorted by name, the one its name resolves to: enabled (`●`) or disabled (`○`), Scope,
   Source (Local, Shared or Plugin) and, for shared skills, the pinned version,
   with `● New vN` when a number-pinned shared skill has a newer version. A
   locked skill (from a plugin, or fixed by `enabled_skills` or a
   `disabled_skills` pattern) shows its marker in the warning color and cannot be
   toggled. Narrow terminals drop the Version, Source and Scope columns, in that
-  order, and on Shared the Version and Sharing columns. `/` searches names and
-  descriptions; `Space` turns the highlighted skill on or off for every scope
-  (written to `disabled_skills`) when its name loads that skill; the highlighted
-  skill's body shows under the list, or beside it from 140 columns, and `Enter`
-  opens its page with its description and the body of the highlighted scope's
-  pin under or beside the rows, which PageUp and PageDown scroll. With
-  `experimental_enable_registry_skills`, My Skills and Shared are tabs switched
-  with `Tab`, Shared listing the shared skills you can still add, `d` then `d`
-  again on the My Skills row of a shared skill removes it from every scope, and
-  a shared skill's page has a row per scope (Global, and Project inside a
+  order. Skills that failed to load (a bad frontmatter, a description over 1024
+  characters, an unreadable `skills.toml`) are listed under a `Failed to load`
+  heading with their file and the reason. `/` searches names and descriptions;
+  the highlighted skill's description shows above the rows, cut to two lines.
+  `Enter` opens the skill's page: its description, then Status, Source, Scope
+  and File in a label column, then its `SKILL.md` rendered as markdown under a
+  rule. The arrows scroll that body on a page with no row to move to, and
+  PageUp/PageDown scroll it on every page; `Shift+↑↓` keeps scrolling the
+  conversation. The same keys act on the
+  highlighted row and on the page, and the footer lists them in this order:
+  `Space` turns the skill on or off for every scope (written to
+  `disabled_skills`) when its name loads that skill; on a local skill `e` opens
+  its `SKILL.md` in `$VISUAL`/`$EDITOR` (the session picks up the saved file)
+  and `x` deletes its folder after a confirmation that names the folder, with
+  Cancel focused first (a linked folder loses only its link); a sandboxed
+  session offers neither `e` nor `x`. `n` closes the browser and puts the
+  `vibe:skill-creator` skill, with "Create a new skill: ", in the input; with a
+  draft already in the input it keeps the draft and asks you to send or clear it. `/skills` also opens while
+  a turn runs: a change made then is saved at once and applies when the turn
+  ends (`Saved; it applies when the current turn ends.`); the running turn keeps
+  the skills it started with. With `experimental_enable_registry_skills`, My
+  Skills and Shared are tabs, each labelled with its count and switched with
+  `Tab`, `Shift+Tab`, `←` or `→`. Shared lists the shared skills you can still
+  add, without the Sharing column when they all share the same way: `a` adds the
+  highlighted one, tracking latest, and `Enter` opens its page to choose where
+  and at which version first. `r` removes a shared skill from every scope at
+  once, with no confirmation since adding it back from Shared restores it. A
+  shared skill's page has a row per scope (Global, and Project inside a
   project): `vN pinned`, `alias → vN tracking`, or `not pinned`, marked
   `(shadowed)` when the name loads another pin. Enter on a scope opens its
   picker of aliases and versions on the choice in effect, else on the other
   scope's, previewing the highlighted version's body: picking one pins that
   scope at once, and `Unpin from <scope>` drops just that pin (not the last one,
-  which is what Remove is for). Enabled, on the page of the skill its name
-  loads, switches the skill in every scope, and Remove, pressed twice, unpins it
-  from every scope. A shared skill not added yet starts out tracking latest in
-  Global, or in Project when another shared skill of its name holds Global,
+  which is what `r` is for). A shared skill not added yet starts out tracking
+  latest in Global, or in Project when another shared skill of its name holds Global,
   since a scope pins one skill per name and pinning over another is refused;
   each scope takes its own choice, `Don't pin here` drops one, and nothing is
   written until Add to My Skills. Each new version of a pinned skill is
@@ -1523,11 +1678,12 @@ Image attachments:
 The bottom row of the CLI reads, left to right:
 
 - The working directory, elided from the start (`…/vibe/cli-rust`) so the project name stays visible. Once shortened, it is followed by `⧉`: clicking it copies the whole path.
-- The session's PR/MR, with `enable_pr_monitoring` (on by default): `● PR #123 mergeable`. The dot's color gives its state (green mergeable, red action needed or closed, purple merged, grey draft or waiting); the status names the cause when known (`CI failing`, `changes requested`, `conflicts`, `CI running`, `review required`). Merged and closed PRs/MRs give way to the open one; several open ones show `PRs (2)`. A bold label means a new PR/MR or a status change not seen in `/pr` yet. Clicking the link opens the `/pr` list and refreshes the statuses; clicking it again closes the list. PRs/MRs are found when the session starts, after turns (at most once a minute), and when a `gh pr create`/`glab mr create` runs; statuses refresh about every minute.
 - On the right, with a Vibe key (chat plan) and a Mistral model, the monthly Vibe Code usage gauge `usage ██▍    40%`: the organization's spend against its allowance, re-read after each turn (at most once a minute), right after a rate limit and when the model changes. Without pay-as-you-go its fill turns yellow from 75% and red from 90% (Vibe Code stops at 100%); with pay-as-you-go it keeps its color and reads `· PAYG`, since usage past the allowance is billed. It is absent for API and Codestral keys, non-Mistral models, members without permission to see the organization's usage, and platforms without the billing API.
 - Then the context gauge `ctx ▍      23k/600k`.
 
-On narrow terminals the footer first turns the context then usage gauges into one-cell levels (`ctx ▁ 4%`), then drops the PR status, then shortens the working directory to its last folder (`…/cli-rust ⧉`), then drops the gauges' numbers and shortens the PR link (`● #123`), and finally hides the link. The working directory, its copy icon and the gauges stay.
+The session's PRs/MRs live on the status rail above the input box, with `enable_pr_monitoring` (on by default): `● PR #123`. The dot's color gives its state (green mergeable, red action needed or closed, purple merged, grey draft or waiting). Several PRs/MRs show their count, `● 2 PRs`, whatever their state, like the list it opens. A bold label means a new PR/MR or a status change not seen yet. Clicking it, or `Ctrl+X` then `p`, opens the `/pr` list and refreshes the statuses, which name the cause when known (`CI failing`, `changes requested`, `conflicts`). PRs/MRs are found when the session starts, after turns (at most once a minute), and when a `gh pr create`/`glab mr create` runs; statuses refresh about every minute.
+
+On narrow terminals the footer first turns the context then usage gauges into one-cell levels (`ctx ▁ 4%`), then shortens the working directory to its last folder (`…/cli-rust ⧉`), then drops the gauges' numbers. The working directory, its copy icon and the gauges stay.
 
 The input box's top border names the active model with its thinking level (`mistral-medium-3.5[medium]`, the level muted) before the mode label, which is colored by the agent's safety; the borders themselves are neutral. Clicking the model opens `/model` while the session is idle. On narrow terminals the border drops the thinking level, then elides and hides the model; the mode stays whole.
 
@@ -1542,7 +1698,9 @@ prompts, and prompts with `@` mentions. `!bash` and non-side-channel slash
 commands require an idle session and are rejected while busy
 with a notice above the input that stays until the next key. **Ctrl+C** removes the newest queued prompt (LIFO); **Esc**
 interrupts the active turn and pauses the remaining queue; pressing Enter
-(empty or not) on a paused queue resumes it.
+(empty or not) on a paused queue resumes it. The queue's keys (`Enter steer`,
+`Ctrl+C cancel last queued message`) show on its `» Queued` header, which
+leaves the loading line to the interrupt hint and the status rail.
 
 Allowlisted slash commands (`side_channel=True`) run immediately via a
 side channel while the agent or bash is busy, or while prompts are queued.

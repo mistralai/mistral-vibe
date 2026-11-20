@@ -25,7 +25,7 @@ pub(super) fn draw_validation_feedback(f: &mut Frame, area: Rect, validation: &V
     match validation {
         ValidationState::Valid if area.height > 0 => {
             let submit = [(crate::hints::key::ENTER, crate::hints::action::SUBMIT)];
-            crate::ui::hint_line::draw(f, area.x, area.y, &submit);
+            crate::ui::hint_line::draw(f, area, &submit);
         }
         ValidationState::Invalid(msg) => draw_wrapped(f, area, msg, theme::error()),
         ValidationState::Warning(msg) => draw_wrapped(f, area, msg, theme::warning()),

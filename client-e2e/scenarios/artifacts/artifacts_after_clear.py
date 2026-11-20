@@ -1,8 +1,7 @@
-"""`/clear` drops the old session's PRs from the bar and reads the new session's."""
+"""`/clear` drops the old session's PRs from the rail and reads the new session's."""
 
 from __future__ import annotations
 
-from e2e.app_server.config import COLUMNS, ROWS
 from e2e.app_server.events import CLEARED_SESSION_ID, artifact, cleared_state
 from e2e.app_server.scenario import Timeline
 
@@ -32,12 +31,7 @@ handshake = {
 }
 request_methods = {"artifacts/list", "session/history/clear"}
 
-screen_contains = ("New conversation started.", "PR #200")
+screen_contains = ("New conversation started.", "● PR #200")
 screen_excludes = ("PRs (2)", "PR #123", "PR #124")
-
-_LEFT = "/test/workdir  "
-_LINK = "● PR #200"
-_RIGHT = "ctx        0/600k"
-screen_rows = {ROWS - 1: (_LEFT + _LINK).ljust(COLUMNS - len(_RIGHT)) + _RIGHT}
 
 timeline: Timeline = ["/clear\r"]

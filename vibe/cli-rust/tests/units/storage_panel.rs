@@ -1,4 +1,4 @@
-//! `/storage` pure logic: decimal sizes, the archive estimate, row badges, the bulk scan match, the header and the wire shapes.
+//! `/storage` pure logic: sizes, the archive estimate, rows, suggestions, the bulk scan match, the header and the wire shapes.
 
 use std::collections::HashSet;
 
@@ -8,10 +8,10 @@ use vibe_rs::server::{
     StorageUsage, StorageUsageUpdated,
 };
 use vibe_rs::storage_panel::bulk::{freed_estimate, matches, Match};
-use vibe_rs::storage_panel::model::{
-    age, estimate, measured_freed, review_order, rows, updated, Estimate,
-};
-use vibe_rs::storage_panel::still_running;
+use vibe_rs::storage_panel::model::{age, estimate, measured_freed, rows, updated, Estimate};
+use vibe_rs::storage_panel::review::review_order;
+use vibe_rs::storage_panel::{still_running, ReviewKind};
+use vibe_rs::ui::storage_rows;
 use vibe_rs::utils::bytes::{bucket, count_bucket, decimal};
 
 const GB: u64 = 1_000_000_000;
@@ -153,8 +153,9 @@ fn rows_sort_by_size_with_badges() {
 #[test]
 fn the_review_sorts_by_size_or_oldest_first() {
     let snapshot = snapshot();
-    assert_eq!(review_order(&snapshot, false), ["a", "c", "e"]);
-    assert_eq!(review_order(&snapshot, true), ["e", "c", "a"]);
+    let order = |by_date| review_order(&snapshot, ReviewKind::Archive, None, by_date);
+    assert_eq!(order(false), ["a", "c", "e"]);
+    assert_eq!(order(true), ["e", "c", "a"]);
 }
 
 #[test]
@@ -357,4 +358,138 @@ fn the_header_says_refreshing_beside_the_update_time() {
     };
     assert!(text(true).ends_with("updated 3 hours ago · refreshing…"));
     assert!(text(false).ends_with("updated 3 hours ago"));
+}
+
+fn text(runs: Vec<(String, ratatui::style::Style)>) -> String {
+    runs.into_iter().map(|(text, _)| text).collect()
+}
+
+/// `a` claims two worktrees, one shared with `b`; `old` and `older` are archived and idle 30+ days.
+fn claims() -> StorageSnapshot {
+    let usage: StorageUsage = serde_json::from_value(json!({
+        "snapshot": {
+            "sessions": [
+                {"sessionId": "a", "historyBytes": 10, "worktreeId": "w1", "worktreeIds": ["w1", "w2"]},
+                {"sessionId": "b", "historyBytes": 20, "worktreeId": "w2"},
+                {"sessionId": "old", "archived": true, "historyBytes": 100, "worktreeId": "w3", "lastActivityAt": DAY},
+                {"sessionId": "older", "archived": true, "historyBytes": 200, "worktreeId": "w3", "lastActivityAt": DAY},
+                {"sessionId": "busy", "archived": true, "open": true, "historyBytes": 400, "lastActivityAt": DAY}
+            ],
+            "worktrees": [
+                {"id": "w1", "path": "/p/1", "bytes": 1_000, "sessionIds": ["a"], "branch": "one"},
+                {"id": "w2", "path": "/p/2", "bytes": 500, "sessionIds": ["a", "b"], "branch": "two"},
+                {"id": "w3", "path": "/p/3", "bytes": 3_000, "sessionIds": ["old", "older"]}
+            ],
+            "archiveSuggestion": {"inactiveDays": 30, "sessionIds": ["a"], "reclaimableBytes": 1_000},
+            "deleteSuggestion": {"inactiveDays": 30, "sessionIds": ["old", "older", "busy"], "reclaimableBytes": 37_000}
+        }
+    }))
+    .unwrap();
+    usage.snapshot.unwrap()
+}
+
+#[test]
+fn a_row_counts_every_worktree_its_session_claims() {
+    let snapshot = claims();
+    let rows = rows(&snapshot, None);
+    let a = rows.iter().find(|r| r.session.session_id == "a").unwrap();
+    assert_eq!(a.bytes(), 1_510);
+    assert_eq!(a.badges(), "2 worktrees · shared by 2");
+    let details: Vec<String> = storage_rows::details(a).into_iter().map(text).collect();
+    assert_eq!(
+        details,
+        [
+            "history 10 B  ·  worktree 1 KB on one",
+            "worktree 500 B on two  ·  shared by 2"
+        ]
+    );
+}
+
+#[test]
+fn an_older_server_without_worktree_ids_falls_back_to_the_worktree_id() {
+    let snapshot = claims();
+    let rows = rows(&snapshot, None);
+    let b = rows.iter().find(|r| r.session.session_id == "b").unwrap();
+    assert_eq!(b.bytes(), 520);
+    assert_eq!(b.worktrees.len(), 1);
+}
+
+#[test]
+fn the_delete_review_leaves_out_open_sessions() {
+    let snapshot = claims();
+    let order = review_order(&snapshot, ReviewKind::Delete, None, false);
+    assert_eq!(order, ["older", "old"]);
+}
+
+#[test]
+fn the_suggestions_say_active_and_archived_sessions() {
+    let snapshot = claims();
+    let archive = text(storage_rows::suggestion(
+        &snapshot,
+        ReviewKind::Archive,
+        false,
+    ));
+    assert_eq!(
+        archive,
+        "Archive 1 active session inactive for 30+ days  ·  frees about 1 KB →"
+    );
+    let delete = text(storage_rows::suggestion(
+        &snapshot,
+        ReviewKind::Delete,
+        false,
+    ));
+    assert_eq!(
+        delete,
+        "Delete 3 archived sessions inactive for 30+ days  ·  frees about 37 KB →"
+    );
+}
+
+#[test]
+fn the_old_archived_hint_shows_only_when_no_suggested_session_can_be_deleted_here() {
+    let mut snapshot = claims();
+    assert!(storage_rows::old_archived(&snapshot, None).is_none());
+    snapshot.delete_suggestion.session_ids = vec!["busy".into(), "older".into()];
+    snapshot.delete_suggestion.inactive_days = 45;
+    assert!(storage_rows::old_archived(&snapshot, None).is_none());
+    let hint = storage_rows::old_archived(&snapshot, Some("older")).map(text);
+    assert!(!vibe_rs::storage_panel::review::offered(
+        &snapshot,
+        ReviewKind::Delete,
+        Some("older")
+    ));
+    assert_eq!(
+        hint.as_deref(),
+        Some("2 archived sessions inactive for 45+ days are open, so they can't be deleted now.")
+    );
+    snapshot.delete_suggestion.session_ids = vec!["busy".into()];
+    assert_eq!(
+        storage_rows::old_archived(&snapshot, None)
+            .map(text)
+            .as_deref(),
+        Some("1 archived session inactive for 45+ days is open, so it can't be deleted now.")
+    );
+    snapshot.delete_suggestion.session_ids.clear();
+    assert!(storage_rows::old_archived(&snapshot, Some("older")).is_none());
+}
+
+#[test]
+fn the_suggestion_rows_honor_the_servers_lower_bound_and_days() {
+    let mut snapshot = claims();
+    snapshot.delete_suggestion.reclaimable_at_least = true;
+    snapshot.archive_suggestion.inactive_days = 14;
+    let delete = text(storage_rows::suggestion(
+        &snapshot,
+        ReviewKind::Delete,
+        false,
+    ));
+    assert!(delete.ends_with("frees at least 37 KB →"), "{delete}");
+    let archive = text(storage_rows::suggestion(
+        &snapshot,
+        ReviewKind::Archive,
+        false,
+    ));
+    assert!(
+        archive.starts_with("Archive 1 active session inactive for 14+ days"),
+        "{archive}"
+    );
 }

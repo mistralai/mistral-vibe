@@ -12,6 +12,8 @@ use crate::mouse::{pixels, MouseTarget};
 use crate::server::Client;
 use crate::ui::notice::Notice;
 
+mod rail;
+
 fn mouse(kind: MouseEventKind, row: u16) -> Event {
     Event::Mouse(MouseEvent {
         kind,
@@ -325,4 +327,62 @@ fn a_paste_also_answers_a_painted_refusal() {
 
     assert!(app.config_screen.status.is_none());
     assert!(app.overlays.notice.is_none());
+}
+
+#[test]
+fn ctrl_c_after_ctrl_x_hides_the_jump_letters_too() {
+    let client = Arc::new(Client::stub());
+    let (config_tx, _config_rx) = mpsc::channel(1);
+    let mut app = App::default();
+    app.todo_tracker.record(vec![crate::todo_tracker::TodoItem {
+        id: "1".into(),
+        content: "Ship".into(),
+        status: crate::todo_tracker::TodoStatus::Pending,
+    }]);
+    app.chat_input.input = "draft".into();
+    let ctrl = |c| {
+        Some(Event::Key(KeyEvent::new(
+            KeyCode::Char(c),
+            KeyModifiers::CONTROL,
+        )))
+    };
+    handle_input_event(&mut app, &client, &config_tx, ctrl('x'));
+    assert!(app.rail.letters);
+
+    handle_input_event(&mut app, &client, &config_tx, ctrl('c'));
+    assert!(!app.rail.letters);
+    handle_input_event(&mut app, &client, &config_tx, Some(key('t')));
+    assert_eq!(
+        app.chat_input.full_text(),
+        "t",
+        "the letter reaches the prompt"
+    );
+}
+
+#[test]
+fn losing_focus_drops_the_subagent_hover_and_sorts_the_rows_again() {
+    let client = Arc::new(Client::stub());
+    let (config_tx, _config_rx) = mpsc::channel(1);
+    let mut app = App::default();
+    for id in ["a", "b"] {
+        app.subagents
+            .replace_child_session(crate::server::PublicChildSession {
+                id: id.into(),
+                status: crate::server::SessionStatus::Running,
+                ..Default::default()
+            });
+    }
+    crate::subagents::refresh(&mut app);
+    crate::subagents::list::set_hover(&mut app, Some("a".into()));
+    app.subagents.sessions[0].status = crate::server::SessionStatus::Idle;
+    crate::subagents::refresh(&mut app);
+    handle_input_event(&mut app, &client, &config_tx, Some(Event::FocusLost));
+    let ids: Vec<&str> = app
+        .subagents
+        .list
+        .rows
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(ids, ["b", "a"]);
 }

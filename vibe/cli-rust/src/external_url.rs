@@ -5,14 +5,9 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 const ACTION_LOG_ENV: &str = "VIBE_E2E_ACTION_LOG";
-const SAFE_SCHEMES: [&str; 6] = [
-    "http",
-    "https",
-    "vscode",
-    "vscode-insiders",
-    "cursor",
-    "windsurf",
-];
+/// Editor URL schemes that open a local file, such as `vscode://file/...:12`.
+pub const EDITOR_SCHEMES: [&str; 5] = ["vscode", "vscode-insiders", "cursor", "windsurf", "zed"];
+const WEB_SCHEMES: [&str; 2] = ["http", "https"];
 
 pub fn open(url: &str) {
     if !is_safe(url) {
@@ -47,7 +42,7 @@ fn open_checked(url: &str) {
 
 pub fn is_safe(url: &str) -> bool {
     let scheme = url.split_once(':').map(|(scheme, _)| scheme);
-    matches!(scheme, Some(scheme) if SAFE_SCHEMES.iter().any(|safe| scheme.eq_ignore_ascii_case(safe)))
+    matches!(scheme, Some(scheme) if WEB_SCHEMES.iter().chain(&EDITOR_SCHEMES).any(|safe| scheme.eq_ignore_ascii_case(safe)))
         && !url.chars().any(char::is_control)
 }
 

@@ -34,6 +34,23 @@ fn every_row_spans_the_width_at_any_size() {
 }
 
 #[test]
+fn a_second_list_stands_one_blank_row_below_the_first() {
+    let border = vibe_rs::ui::theme::md_fence_border();
+    let rows: Vec<String> =
+        markdown::framed("- a\n- b\n\n* c\n", 20, "Release notes", border, |_| false)
+            .lines()
+            .iter()
+            .map(|line| {
+                let row = line.to_string();
+                row.trim_matches(|c| c == '│' || c == ' ').to_owned()
+            })
+            .collect();
+    let b = rows.iter().position(|row| row.ends_with('b')).unwrap();
+    assert_eq!(rows[b + 1], "", "{rows:?}");
+    assert!(rows[b + 2].ends_with('c'), "{rows:?}");
+}
+
+#[test]
 fn the_title_sits_in_the_top_rule() {
     assert!(rows(40)[0].starts_with("┌─ Release notes ─"));
 }

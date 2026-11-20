@@ -3,6 +3,7 @@
 from typing import Annotated, Literal
 
 from pydantic import (
+    ConfigDict,
     Discriminator,
     Field,
     JsonValue,
@@ -17,12 +18,22 @@ from pydantic import (
 )
 from pydantic_core import ErrorDetails
 
+from ....session_values import EXPERIMENTAL
 from .base import SessionModel
 from .callbacks import CallbackOutcome, SessionCallback
-from .common import CallbackId, EventId, HistoryEntryId, ProtocolError, SessionId, TurnId, UnixMs
+from .common import (
+    CallbackId,
+    EncryptedValue,
+    EventId,
+    HistoryEntryId,
+    ProtocolError,
+    SessionId,
+    TurnId,
+    UnixMs,
+)
 from .content import UNSUPPORTED_CONTENT_ERROR
 from .history import HistoryEntry
-from .state import Session, TurnState
+from .state import BackgroundProcess, Session, TurnState
 
 type JsonPointer = str
 
@@ -107,9 +118,47 @@ class HistoryEntryPatchedEvent(SessionModel):
     patches: list[JsonPatchOperation] = Field(default_factory=list)
 
 
+class HistoryEntryPatchedEncryptedEvent(SessionModel):
+    """The ``history_entry_patched`` event of an entry of an encrypted Session.
+
+    The worker writes it while the entry streams. ``patches`` holds, sealed, the patch list that a
+    ``history_entry_patched`` event would carry, computed on the entry before it was sealed. A
+    client decrypts the list and applies it to the entry it decrypted from the
+    ``EncryptedHistoryEntry``.
+
+    This model is experimental: a minor release can change it without a compatibility path.
+    """
+
+    model_config = ConfigDict(json_schema_extra=EXPERIMENTAL)
+
+    type: Literal["history_entry_patched_encrypted"] = "history_entry_patched_encrypted"
+    entry_id: HistoryEntryId
+    entry_index: Annotated[int, Field(ge=0)]
+    patches: EncryptedValue
+
+
 class HistoryEntryCompletedEvent(SessionModel):
     type: Literal["history_entry_completed"] = "history_entry_completed"
     entry: HistoryEntry
+
+
+class ToolCallArgumentsAppendedEvent(SessionModel):
+    """Arguments the model just wrote for a tool call whose entry is still generating.
+
+    Live only: it is never stored, so a reader that joins or reads again later can miss some or
+    all of a call's fragments. The completed `tool_call` entry carries the final arguments.
+    """
+
+    type: Literal["tool_call_arguments_appended"] = "tool_call_arguments_appended"
+    entry_id: HistoryEntryId
+    entry_index: Annotated[int, Field(ge=0)]
+    json_fragment: str = Field(
+        alias="json",
+        description=(
+            "The raw JSON text the model just wrote, appended to the call's arguments so far. "
+            "Joined in order, a call's fragments may not parse until its entry completes."
+        ),
+    )
 
 
 class TurnStartedEvent(SessionModel):
@@ -135,6 +184,19 @@ class SessionUpdatedEvent(SessionModel):
 class SessionTerminatedEvent(SessionModel):
     type: Literal["session_terminated"] = "session_terminated"
     session: Session
+
+
+class BackgroundProcessesUpdatedEvent(SessionModel):
+    """The Session's background processes changed: one started, changed status, or left the list.
+
+    `processes` is the full list, as `SessionState.backgroundProcesses` holds it, and replaces
+    the reader's copy. The Runtime emits it after it saves the change, so a read never returns
+    an older list than the last event. Only a Host that reports background processes to
+    clients emits it.
+    """
+
+    type: Literal["background_processes_updated"] = "background_processes_updated"
+    processes: list[BackgroundProcess]
 
 
 class CallbackOpenedEvent(SessionModel):
@@ -220,10 +282,13 @@ type SessionClientEvent = (
     | SessionTerminatedEvent
     | HistoryEntryAddedEvent
     | HistoryEntryPatchedEvent
+    | HistoryEntryPatchedEncryptedEvent
     | HistoryEntryCompletedEvent
+    | ToolCallArgumentsAppendedEvent
     | TurnStartedEvent
     | TurnUpdatedEvent
     | TurnTerminatedEvent
+    | BackgroundProcessesUpdatedEvent
     | PromptSuggestedEvent
     | ArtifactCreatedEvent
     | NoticeEvent
@@ -237,10 +302,13 @@ type SessionEvent = Annotated[
     | SessionTerminatedEvent
     | HistoryEntryAddedEvent
     | HistoryEntryPatchedEvent
+    | HistoryEntryPatchedEncryptedEvent
     | HistoryEntryCompletedEvent
+    | ToolCallArgumentsAppendedEvent
     | TurnStartedEvent
     | TurnUpdatedEvent
     | TurnTerminatedEvent
+    | BackgroundProcessesUpdatedEvent
     | PromptSuggestedEvent
     | ArtifactCreatedEvent
     | NoticeEvent
@@ -259,10 +327,13 @@ _KNOWN_EVENT_PAYLOAD_TYPES = frozenset(
     {
         "history_entry_added",
         "history_entry_patched",
+        "history_entry_patched_encrypted",
         "history_entry_completed",
+        "tool_call_arguments_appended",
         "turn_started",
         "turn_updated",
         "turn_terminated",
+        "background_processes_updated",
         "session_updated",
         "session_terminated",
         "callback_opened",

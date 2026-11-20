@@ -187,6 +187,7 @@ fn moved_to(session: &HarnessSession, config: HarnessConfig) -> Result<HarnessSe
         0,
         Some(&automatic_compaction_config()),
     )
+    .map_err(|error| error.to_string())
 }
 
 ///
@@ -447,7 +448,8 @@ fn session_reported_large_on_the_old_model() -> HarnessSession {
 ///
 /// *Prepare*: A Session without compaction whose request is larger than a 32,000-token window.
 /// *Do*: Restore it on that model, also without compaction, and move it there.
-/// *Assert*: The move refuses, naming the new window, because nothing can shrink the context.
+/// *Assert*: The move refuses the model facts, naming the new window, because nothing can
+/// shrink the context.
 ///
 #[test]
 fn context_larger_than_a_smaller_window_without_compaction_is_refused() {
@@ -474,13 +476,47 @@ fn context_larger_than_a_smaller_window_without_compaction_is_refused() {
     .map(drop);
 
     // Assert
-    let error = result.expect_err("context over the new window is refused");
+    let Err(RestoreError::InvalidConfiguration { field, detail }) = result else {
+        panic!("expected the model facts to be refused, got {result:?}")
+    };
+    assert_eq!(field, "settings.context.model_facts");
     assert!(
-        error.starts_with(
+        detail.starts_with(
             "the Session's context cannot move to a model with a 32000-token context window \
              and compaction disabled: "
         ),
-        "{error}"
+        "{detail}"
+    );
+}
+
+///
+/// *Prepare*: A Core invariant error and a Core configuration error.
+/// *Do*: Convert each to a restore error.
+/// *Assert*: The invariant error becomes `Invalid` with the same detail; the configuration
+/// error keeps its field and detail.
+///
+#[test]
+fn core_errors_convert_to_restore_errors_keeping_a_configuration_field() {
+    // Prepare
+    let invariant = CoreError::invariant("checkpoint breaks an invariant");
+    let configuration =
+        CoreError::invalid_configuration("settings.context.model_facts", "context does not fit");
+
+    // Do
+    let invalid = RestoreError::from(invariant);
+    let refused = RestoreError::from(configuration);
+
+    // Assert
+    assert_eq!(
+        invalid,
+        RestoreError::Invalid("checkpoint breaks an invariant".to_string())
+    );
+    assert_eq!(
+        refused,
+        RestoreError::InvalidConfiguration {
+            field: "settings.context.model_facts",
+            detail: "context does not fit".to_string(),
+        }
     );
 }
 
@@ -803,4 +839,78 @@ fn a_session_resumed_at_the_json_safe_limit_reports_an_exhausted_sequence() {
         panic!("expected an invalid-command rejection, got {result:?}")
     };
     assert_eq!(error.message, "input ID sequence is exhausted");
+}
+
+///
+/// *Prepare*: A Session on a large model with about 10,000 tokens of instructions, under its limit.
+/// *Do*: Restore it on a 32,000-token model, whose instructions limit is 10% of a 16,000-token threshold, and move it there.
+/// *Assert*: The move succeeds: the limit only bounds instructions that grow, and the instructions still leave room for a summary, so the Session opens and its instructions can be removed.
+///
+#[test]
+fn a_move_over_the_instructions_limit_with_room_for_a_summary_succeeds() {
+    // Prepare
+    let mut session = HarnessSession::create(automatic_compaction_config()).unwrap();
+    let admitted = session.apply(input(
+        1,
+        HarnessCommand::InstructionsUpsert {
+            key: "repository".to_string(),
+            content: "k".repeat(40_000),
+        },
+    ));
+    assert!(matches!(admitted, HarnessApplyResult::Accepted { .. }));
+
+    // Do
+    let mut moved = moved_to(&session, small_model_config()).expect("the move succeeds");
+
+    // Assert
+    let deleted = moved.apply(input(
+        1,
+        HarnessCommand::InstructionsDelete {
+            key: "repository".to_string(),
+        },
+    ));
+    assert!(matches!(deleted, HarnessApplyResult::Accepted { .. }));
+}
+
+///
+/// *Prepare*: A Session on a large model with a Turn running and about 15,500 tokens of instructions waiting for it.
+/// *Do*: Restore it on a 32,000-token model, with a 16,000-token compaction threshold, and move it there.
+/// *Assert*: The move refuses: the instructions waiting for the Turn leave no room for a summary under the new threshold, so every compaction would fail.
+///
+#[test]
+fn a_move_whose_instructions_leave_no_room_for_a_summary_is_refused() {
+    // Prepare
+    let mut session = HarnessSession::create(automatic_compaction_config()).unwrap();
+    let started = session.apply(input(
+        1,
+        HarnessCommand::UserMessage {
+            turn_id: "turn-1".to_string(),
+            content: vec![ContentBlock::text("hello")],
+            mode: UserMessageMode::Queue,
+            output_type: None,
+        },
+    ));
+    assert!(matches!(started, HarnessApplyResult::Accepted { .. }));
+    let deferred = session.apply(input(
+        2,
+        HarnessCommand::InstructionsUpsert {
+            key: "repository".to_string(),
+            content: "k".repeat(62_000),
+        },
+    ));
+    assert!(matches!(deferred, HarnessApplyResult::Accepted { .. }));
+    assert!(session.state.active().is_some());
+
+    // Do
+    let result = moved_to(&session, small_model_config()).map(drop);
+
+    // Assert
+    let error = result.expect_err("instructions with no room for a summary are refused");
+    assert!(
+        error.contains(
+            "the Session's instructions do not fit the new settings: the instructions would \
+             take about 15532 tokens and leave no room for a compaction summary"
+        ),
+        "{error}"
+    );
 }

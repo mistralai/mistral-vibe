@@ -1833,7 +1833,7 @@ def _project_catalog_entry(connector: ResolvedConnector) -> ConnectorCatalogEntr
     return ConnectorCatalogEntryView(
         alias=connector.alias,
         display_name=connector.display_name,
-        readiness=_connector_readiness(connector),
+        readiness=connector_readiness(connector),
         auth_action=connector.auth_action,
         tools=[
             ConnectorCatalogToolView(name=tool.raw_name, description=tool.description)
@@ -1843,9 +1843,10 @@ def _project_catalog_entry(connector: ResolvedConnector) -> ConnectorCatalogEntr
     )
 
 
-def _connector_readiness(
+def connector_readiness(
     connector: ResolvedConnector,
 ) -> Literal["ready", "needs_auth", "needs_setup", "needs_connect", "unavailable"]:
+    """What the user must do before the connector's tools load, if anything."""
     if connector.ready:
         return "ready"
     if connector.auth_action == "oauth":

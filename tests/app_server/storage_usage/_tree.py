@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 import json
 import os
 from pathlib import Path
+import time
 
 from vibe.core.git.worktree.record import WorktreeClaim, WorktreeRecord
 
@@ -87,6 +88,7 @@ class Tree:
         claim: bool = True,
         admin_name: str | None = None,
         copy_on_write: bool = False,
+        claimed_at: datetime = NOW,
     ) -> Path:
         folder = self.worktrees_root / bucket / name
         write(folder / "src" / "main.py", size)
@@ -106,7 +108,7 @@ class Tree:
                     repo_root=self.home / "repo",
                     base_commit="0" * 40,
                     branch_created=True,
-                    claimed_at=NOW,
+                    claimed_at=claimed_at,
                     session_dirs={
                         self.sessions_root / "unified" / item for item in sessions
                     },
@@ -131,9 +133,20 @@ def write(path: Path, size: int) -> None:
     path.write_bytes(os.urandom(size))
 
 
+def age(root: Path, seconds: float) -> None:
+    """Every folder and file under ``root``, and ``root``, last changed
+    ``seconds`` ago.
+    """
+    when = time.time() - seconds
+    for folder, dirs, names in os.walk(root, topdown=False):
+        for name in [*dirs, *names]:
+            os.utime(os.path.join(folder, name), (when, when), follow_symlinks=False)
+    os.utime(root, (when, when))
+
+
 def bump_mtime(path: Path, seconds: float = 5) -> None:
     stat = path.stat()
     os.utime(path, (stat.st_atime + seconds, stat.st_mtime + seconds))
 
 
-__all__ = ["NOW", "NOW_MS", "Tree", "bump_mtime", "write"]
+__all__ = ["NOW", "NOW_MS", "Tree", "age", "bump_mtime", "write"]

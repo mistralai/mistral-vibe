@@ -15,7 +15,8 @@ use crate::utils::text::capitalize;
 /// Draw the whole screen with the picker replacing the input box.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let kind = super::bottom_app::Kind::Thinking;
-    super::bottom_app::draw(app, f, area, box_height(app), kind, draw_box);
+    let height = box_height(app) + hint_line::extra(hints(app), area.width);
+    super::bottom_app::draw(app, f, area, height, kind, draw_box);
 }
 
 fn box_height(app: &App) -> u16 {
@@ -49,7 +50,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     );
     let top = by + 2;
     let rows = app.thinking_picker.levels.len();
-    let visible = (rows as u16).min(h - 5);
+    let visible = (rows as u16).min(h.saturating_sub(5 + hint_line::extra(hints(app), w)));
     let options = Rect::new(bx + 3, top, w.saturating_sub(6), visible);
     app.thinking_picker.list.layout_rows(rows, options);
     let list_area = Rect::new(bx + 1, top, w.saturating_sub(2), visible);
@@ -57,7 +58,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     for (row, i) in (0..rows).enumerate() {
         draw_option(app, f, bx, top + row as u16, w, i);
     }
-    hint_line::draw(f, bx + 2, by + h - 2, hints(app));
+    hint_line::draw_footer(f, area, hints(app));
 }
 
 /// After a session-only model pick, Enter keeps the level for the session too.

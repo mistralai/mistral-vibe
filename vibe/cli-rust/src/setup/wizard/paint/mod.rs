@@ -4,6 +4,7 @@
 mod api_key;
 mod browser_sign_in;
 mod custom_domain;
+mod hint_row;
 mod input;
 mod options;
 mod panel;

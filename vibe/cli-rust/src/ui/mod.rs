@@ -11,6 +11,7 @@ pub mod braille_renderer;
 pub mod branch_app;
 pub(crate) mod browser_box;
 pub mod chat_input;
+pub mod code_preview;
 pub mod completion_popup;
 pub(crate) mod composer_layout;
 pub mod composer_title;
@@ -20,6 +21,7 @@ mod config_options;
 pub mod connector_auth;
 pub mod context_app;
 pub mod context_bar;
+pub mod copy_light;
 pub mod debug_console;
 pub mod feedback_bar;
 pub mod footer_fit;
@@ -34,6 +36,8 @@ pub(crate) mod list_cursor;
 mod list_hover;
 pub mod list_scroll;
 pub mod loading;
+mod loading_area;
+pub(crate) use loading_area::{draw_loading_area, loading_height};
 pub mod log_level_picker;
 pub mod loops;
 pub mod markdown;
@@ -50,6 +54,8 @@ pub mod question_app;
 mod question_layout;
 pub(crate) mod question_other;
 mod question_rows;
+pub mod rail;
+pub mod rail_window;
 pub mod recording_indicator;
 pub mod release_notes;
 pub mod resume_picker;
@@ -61,6 +67,7 @@ pub(crate) mod search_field;
 pub mod selection;
 pub mod skills_browser;
 pub mod storage_panel;
+mod storage_review;
 pub mod storage_rows;
 mod styled_text;
 pub mod subagent_list;
@@ -89,6 +96,7 @@ use crate::focus::Focus;
 /// Lay out the screen and draw every component.
 pub fn draw(app: &mut App, f: &mut Frame) {
     app.chat_input.sync_mentions();
+    code_preview::reset(app);
     let area = f.area();
     draw_active_screen(app, f, area);
     list_hover::paint(app, f);
@@ -139,7 +147,6 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::ModelPicker => model_picker::draw(app, f, area),
         Focus::LogLevelPicker => log_level_picker::draw(app, f, area),
         Focus::ThinkingPicker => thinking_picker::draw(app, f, area),
-        Focus::ArtifactsModal => artifacts_modal::draw(app, f, area),
         Focus::Loops => loops::draw(app, f, area),
         Focus::Goal => goal_panel::draw(app, f, area),
         Focus::Config => {
@@ -150,7 +157,8 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
             draw_base(app, f, area);
             release_notes::draw(app, f, area);
         }
-        Focus::Trust | Focus::SubagentList | Focus::Composer => draw_base(app, f, area),
+        // The composer, the rail and the windows it opens in the composer's place.
+        _ => draw_base(app, f, area),
     }
 }
 
@@ -175,27 +183,23 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
     // The shared slash-command/file popup sits above the input box.
     completion_popup::reconcile_scroll(app, area.width);
     let popup_height = completion_popup::popup_height(app, area.width);
-    // The input box is hidden while a child is viewed.
-    let input_height = if app.subagents.viewed_subagent_id.is_some() {
-        0
-    } else {
-        input_box_height(app, area.width, area.height)
+    // A rail item's window takes the input box's place; the box is also hidden while a child is viewed.
+    let box_height = input_box_height(app, area.width, area.height);
+    let window_height = rail_window::slot_height(app, area, box_height);
+    let input_height = match app.subagents.viewed_subagent_id.is_some() || window_height > 0 {
+        true => 0,
+        false => box_height,
     };
-    let rows = Layout::vertical([
-        Constraint::Min(1),                             // #chat — height: 1fr
-        Constraint::Length(loading_height),             // #loading-area — height: auto
-        Constraint::Length(popup_height),               // #completion-popup — height: auto, max 12
-        Constraint::Length(goal_row::height(app)),      // pinned goal line
-        Constraint::Length(todo::row_height(app)),      // pinned todo line — height: 1
-        Constraint::Length(input_height),               // #input-box (grows with rendered rows)
-        Constraint::Length(subagent_list::height(app)), // #subagent-list — under the input
-        Constraint::Length(1),                          // #bottom-bar — height: auto
+    let chunks = Layout::vertical([
+        Constraint::Min(1),                                          // #chat — height: 1fr
+        Constraint::Length(loading_height),                          // #loading-area — height: auto
+        Constraint::Length(popup_height), // #completion-popup — height: auto, max 12
+        Constraint::Length(goal_row::height(app)), // the goal's resume choice
+        Constraint::Length(input_height), // #input-box (grows with rendered rows)
+        Constraint::Length(window_height), // the rail item's window, in the box's place
+        Constraint::Length(reverse_search::height(app, area.width)), // #bottom-bar — height: auto
     ])
     .split(area);
-    // The goal line is last here so the shared indices hold.
-    let chunks = [
-        rows[0], rows[1], rows[2], rows[4], rows[5], rows[6], rows[7], rows[3],
-    ];
 
     app.view.input_area = chunks[4];
     // A child view swaps the rendered transcript in the same scroll region.
@@ -246,58 +250,15 @@ fn draw_base(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
         crate::mouse::register_region(app, chunks[2], crate::mouse::MouseTarget::Completion);
         completion_popup::draw(app, f, chunks[2]);
     }
-    todo::draw_row(app, f, chunks[3]);
-    goal_row::draw(app, f, chunks[7]);
+    goal_row::draw(app, f, chunks[3]);
     if input_height > 0 {
         crate::mouse::register_region(app, chunks[4], crate::mouse::MouseTarget::Composer);
         app.view.cursor_position = chat_input::draw(app, f, chunks[4]);
     }
-    subagent_list::draw(app, f, chunks[5]);
+    rail_window::draw(app, f, chunks[5]);
     bottom_bar::draw(app, f, chunks[6]);
     selection::overlay(app, f);
+    code_preview::draw(app, f, chunks[0]);
     draw_loading_area(app, f, chunks[1]);
     selection::loading_region(app, f, chunks[1]);
-}
-
-/// The loading-area row, mounted on every screen that keeps it: the
-/// narrator status, the loading spinner, the inline notice and the feedback
-/// bar, laid out left to right.
-pub(crate) fn draw_loading_area(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
-    // A squeezed area keeps the loading row: the block only gets the rows beyond it.
-    let block = notice_block(app, area.width).min(area.height.saturating_sub(2));
-    let [area, block_area] =
-        Layout::vertical([Constraint::Fill(1), Constraint::Length(block)]).areas(area);
-    let notice_width = if block > 0 { 0 } else { notice::width(app) };
-    let feedback_width = feedback_bar::width(app);
-    // The narrator row is laid out before the loading spinner; zero width
-    // while idle keeps the split identical to before.
-    let loading_chunks = Layout::horizontal([
-        Constraint::Length(narrator::width(app)),
-        Constraint::Fill(1),
-        Constraint::Length(notice_width),
-        Constraint::Length(u16::from(feedback_width > 0)),
-        Constraint::Length(feedback_width),
-    ])
-    .split(area);
-
-    narrator::draw(app, f, loading_chunks[0]);
-    loading::draw(app, f, loading_chunks[1]);
-    feedback_bar::draw(app, f, loading_chunks[4]);
-    match block > 0 {
-        true => notice::draw(app, f, block_area, true),
-        false => notice::draw(app, f, loading_chunks[2], false),
-    }
-}
-
-/// Rows of the wrapped-failure block under the loading row: 0 when the notice fits beside the narrator and feedback.
-fn notice_block(app: &App, width: u16) -> u16 {
-    let feedback = feedback_bar::width(app);
-    let others = narrator::width(app) + feedback + u16::from(feedback > 0);
-    notice::block_rows(app, width.saturating_sub(others), width)
-}
-
-/// A failed startup grows the area so its error wraps under the padding row; a wrapped failure adds its block below.
-pub(crate) fn loading_height(app: &App, width: u16) -> u16 {
-    let base = if app.view.transcript.is_empty() { 3 } else { 2 };
-    base.max(loading::failure::rows(app, width).saturating_add(1)) + notice_block(app, width)
 }

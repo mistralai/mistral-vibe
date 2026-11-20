@@ -10,5 +10,5 @@ mouse_tracking = False
 request_methods = {"telemetry/record"}
 # The snapshot pins the code-span styling of the command, file and keys.
 timeline: Timeline = [take_snapshot()]
-screen_contains = ("Warnings", "tmux has mouse off", "~/.tmux.conf", "Ctrl+N")
+screen_contains = ("Warnings", "tmux has mouse off", "~/.tmux.conf", "Ctrl+X")
 screen_excludes = ("`",)

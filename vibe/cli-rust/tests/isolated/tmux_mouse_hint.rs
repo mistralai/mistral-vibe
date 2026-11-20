@@ -1,4 +1,4 @@
-//! Inside tmux with `mouse off`, a startup warning explains scrolling until Ctrl+N dismisses it for good.
+//! Inside tmux with `mouse off`, a startup warning explains scrolling until Ctrl+X then `h` dismisses it for good.
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
@@ -11,7 +11,17 @@ use vibe_rs::server::{HistoryEntry, MessageContent};
 use vibe_rs::telemetry::{self, event, TelemetryEvent};
 use vibe_rs::{notices, tmux, tmux_hint};
 
-const CTRL_N: KeyEvent = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+const CTRL_X: KeyEvent = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+const H: KeyEvent = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE);
+
+/// Press Ctrl+X then `h`; true when `h` hid the warning.
+fn ctrl_x_h(app: &mut App) -> bool {
+    assert!(
+        !tmux_hint::handle_key(app, &CTRL_X),
+        "Ctrl+X still reaches the rail"
+    );
+    tmux_hint::handle_key(app, &H)
+}
 
 /// Point the fake tmux at `answer` for its `mouse` option and re-read it.
 fn set_tmux_mouse(dir: &Path, answer: &str) {
@@ -68,16 +78,16 @@ fn recorded(rx: &mut mpsc::Receiver<TelemetryEvent>) -> Vec<TelemetryEvent> {
 }
 
 #[test]
-fn ctrl_n_dismisses_the_warning_for_later_sessions() {
+fn ctrl_x_then_h_dismisses_the_warning_for_later_sessions() {
     let _home = mouse_off_session();
     let mut app = App::default();
 
     tmux_hint::show(&mut app);
     assert!(shown(&app));
 
-    assert!(tmux_hint::handle_key(&mut app, &CTRL_N));
+    assert!(ctrl_x_h(&mut app));
     assert!(!shown(&app));
-    assert!(!tmux_hint::handle_key(&mut app, &CTRL_N));
+    assert!(!ctrl_x_h(&mut app));
 
     let mut next = App::default();
     tmux_hint::show(&mut next);
@@ -93,7 +103,32 @@ fn mouse_capture_turned_off_needs_no_warning() {
     tmux_hint::show(&mut app);
 
     assert!(!shown(&app));
-    assert!(!tmux_hint::handle_key(&mut app, &CTRL_N));
+    assert!(!ctrl_x_h(&mut app));
+}
+
+#[test]
+fn only_h_right_after_ctrl_x_dismisses_the_warning() {
+    let _home = mouse_off_session();
+    let mut app = App::default();
+    tmux_hint::show(&mut app);
+
+    assert!(
+        !tmux_hint::handle_key(&mut app, &H),
+        "h alone types into the prompt"
+    );
+    tmux_hint::handle_key(&mut app, &CTRL_X);
+    assert!(!tmux_hint::handle_key(
+        &mut app,
+        &KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)
+    ));
+    assert!(
+        !tmux_hint::handle_key(&mut app, &H),
+        "another key in between disarms h"
+    );
+    assert!(shown(&app));
+
+    assert!(ctrl_x_h(&mut app));
+    assert!(!shown(&app));
 }
 
 #[test]
@@ -148,11 +183,11 @@ fn the_warning_records_its_impression_and_its_dismissal() {
     let shown: Vec<_> = recorded(&mut rx).iter().map(|e| e.name).collect();
     assert_eq!(shown, [event::TMUX_MOUSE_HINT_RENDERED]);
 
-    assert!(tmux_hint::handle_key(&mut app, &CTRL_N));
+    assert!(ctrl_x_h(&mut app));
     let dismissed = recorded(&mut rx);
     assert_eq!(dismissed.len(), 1);
     assert_eq!(dismissed[0].name, event::TMUX_MOUSE_HINT_DISABLED);
-    assert_eq!(dismissed[0].properties["entry_point"], "ctrl_n");
+    assert_eq!(dismissed[0].properties["entry_point"], "rail_h");
 }
 
 #[test]
@@ -162,7 +197,7 @@ fn a_warning_that_never_shows_or_is_withdrawn_records_nothing_more() {
     let mut rx = record_telemetry(&mut app);
     notices::close_startup(&mut app);
     tmux_hint::show(&mut app);
-    assert!(!tmux_hint::handle_key(&mut app, &CTRL_N));
+    assert!(!ctrl_x_h(&mut app));
     assert!(recorded(&mut rx).is_empty());
 
     let mut next = App::default();

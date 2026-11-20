@@ -21,24 +21,20 @@ class _ProjectLinkInspector(Protocol):
     async def inspect_root(self, root_path: str) -> dict[str, Any]: ...
 
 
-type LocalProjectStoreFactory = Callable[[], Awaitable[LocalProjectStore | None]]
-
-
-async def _no_local_projects() -> LocalProjectStore | None:
-    return None
+type LocalProjectStoreFactory = Callable[[], Awaitable[LocalProjectStore]]
 
 
 class VibeProjectService:
-    """Reuses a directory's saved project link, or its local project when enabled.
+    """Reuses a directory's saved project link, or its local project.
 
-    Never creates a cloud project: an unlinked directory stays unlinked and its
-    sessions fall back to folder matching.
+    Never creates a cloud project: an unlinked directory gets a local project.
     """
 
     def __init__(
         self,
         project_links: _ProjectLinkInspector | None = None,
-        local_projects: LocalProjectStoreFactory = _no_local_projects,
+        *,
+        local_projects: LocalProjectStoreFactory,
     ) -> None:
         self._project_links = project_links or ProjectLinksController()
         self._local_projects = local_projects
@@ -64,7 +60,7 @@ class VibeProjectService:
         return resolved
 
     async def _resolve(
-        self, project: ImportProject, store: LocalProjectStore | None
+        self, project: ImportProject, store: LocalProjectStore
     ) -> ImportProject:
         inspection = await self._project_links.inspect_root(str(project.cwd))
         root = inspection.get("root")
@@ -75,7 +71,7 @@ class VibeProjectService:
         project_id = (
             saved_link.get("projectId") if isinstance(saved_link, dict) else None
         )
-        if not isinstance(project_id, str) and store is not None:
+        if not isinstance(project_id, str):
             project_id = await asyncio.to_thread(
                 _local_project_id, store, Path(directory_path), project.name
             )

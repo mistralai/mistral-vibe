@@ -751,6 +751,153 @@ async def test_unified_fetch_returning_the_same_catalog_announces_nothing(
     announced.assert_awaited_once()
 
 
+async def _hold_upgraded_catalog(
+    adapter: Any, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """Have the process hold a newer catalog, as a refresh after a plan upgrade
+    leaves it, without the session loading it.
+    """
+    _serve_catalog(
+        monkeypatch,
+        process_services,
+        AsyncMock(return_value=_runnable_catalog("unlocked-model")),
+    )
+    key = adapter._model_catalog_key
+    assert key is not None
+    await process_services.model_catalog.refresh(key)
+
+
+@pytest.mark.asyncio
+async def test_unified_config_read_loads_a_refreshed_catalog_into_an_idle_session(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, announced = await _adapter_fetching(
+        tmp_path, config_dir, session, monkeypatch, process_services=process_services
+    )
+    await _open_catalog(adapter)
+    adapter.mark_announced()
+    await _hold_upgraded_catalog(adapter, monkeypatch, process_services)
+
+    response = await adapter._dispatch_config_read("config/read", {})
+
+    assert "unlocked-model" in [model.alias for model in response.config.models]
+    assert len(session.applied) == 2
+    assert announced.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unified_config_read_before_the_announce_keeps_the_running_catalog(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    # The session/start answer carries the runtime: a read before it must
+    # not announce one the client has not seen the first of.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, announced = await _adapter_fetching(
+        tmp_path, config_dir, session, monkeypatch, process_services=process_services
+    )
+    await _open_catalog(adapter)
+    await _hold_upgraded_catalog(adapter, monkeypatch, process_services)
+
+    response = await adapter._dispatch_config_read("config/read", {})
+
+    assert "unlocked-model" not in [model.alias for model in response.config.models]
+    assert len(session.applied) == 1
+    announced.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unified_config_read_answers_when_loading_the_catalog_fails(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, _announced = await _adapter_fetching(
+        tmp_path, config_dir, session, monkeypatch, process_services=process_services
+    )
+    await _open_catalog(adapter)
+    adapter.mark_announced()
+    await _hold_upgraded_catalog(adapter, monkeypatch, process_services)
+    monkeypatch.setattr(
+        adapter, "_load_model_catalog", AsyncMock(side_effect=RuntimeError("boom"))
+    )
+
+    response = await adapter._dispatch_config_read("config/read", {})
+
+    assert "fetched-model" in [model.alias for model in response.config.models]
+    assert len(session.applied) == 1
+
+
+@pytest.mark.asyncio
+async def test_unified_config_read_mid_turn_keeps_the_running_catalog(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, _announced = await _adapter_fetching(
+        tmp_path, config_dir, session, monkeypatch, process_services=process_services
+    )
+    await _open_catalog(adapter)
+    adapter.mark_announced()
+    await _hold_upgraded_catalog(adapter, monkeypatch, process_services)
+    session.active_turn_id = "turn-1"
+    fetch = AsyncMock(return_value=_runnable_catalog("another-model"))
+    _serve_catalog(monkeypatch, process_services, fetch)
+    lock = adapter._context.admin_config_lock
+
+    # Under the catalog lock: a read that took it would never answer.
+    async with lock:
+        response = await asyncio.wait_for(
+            adapter._dispatch_config_read("config/read", {}), timeout=5
+        )
+    await asyncio.sleep(0.05)
+
+    assert "unlocked-model" not in [model.alias for model in response.config.models]
+    assert len(session.applied) == 1
+    fetch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unified_catalog_loaded_after_a_turn_tells_subscribed_clients(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, _announced = await _adapter_fetching(
+        tmp_path, config_dir, session, monkeypatch, process_services=process_services
+    )
+    await _open_catalog(adapter)
+    adapter.mark_announced()
+    await _hold_upgraded_catalog(adapter, monkeypatch, process_services)
+    session.active_turn_id = "turn-1"
+    await adapter._dispatch_config_read("config/read", {})
+    published: list[None] = []
+    process_services.config_changes.subscribe(lambda: published.append(None))
+    session.active_turn_id = None
+
+    loaded = await adapter._load_model_catalog(reserved_turn=False, strict=False)
+
+    assert loaded
+    assert published == [None]
+
+
 @pytest.mark.asyncio
 async def test_unified_pin_on_a_catalog_alias_selects_the_fetched_model(
     tmp_path: Path,

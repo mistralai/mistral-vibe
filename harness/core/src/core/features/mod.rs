@@ -1,6 +1,7 @@
 pub(super) mod background_processes;
 pub(super) mod compaction;
 pub(super) mod file_system;
+pub(super) mod instructions;
 pub(super) mod large_output;
 pub(super) mod model_wait;
 pub(super) mod notifications;

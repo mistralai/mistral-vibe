@@ -76,10 +76,11 @@ fn narrower_panes_drop_the_shared_version_then_sharing() {
         "latestVersion": 12,
         "sharingScope": "workspace",
     });
+    let mine = json!({"name": "lint", "skillId": "id-lint", "latestVersion": 1, "sharingScope": "private"});
     let client = stub();
     let mut app = opened(
         Vec::new(),
-        Some(catalog(json!({"skills": [long], "loaded": true}))),
+        Some(catalog(json!({"skills": [long, mine], "loaded": true}))),
     );
     press(&mut app, &client, KeyCode::Tab);
     let state = &app.skills_browser;
@@ -96,6 +97,19 @@ fn narrower_panes_drop_the_shared_version_then_sharing() {
 }
 
 #[test]
+fn sharing_is_left_out_when_every_shared_skill_shares_the_same_way() {
+    let entry = |name: &str| json!({"name": name, "skillId": format!("id-{name}"), "latestVersion": 1, "sharingScope": "workspace"});
+    let client = stub();
+    let skills = json!({"skills": [entry("lint"), entry("deploy")], "loaded": true});
+    let mut app = opened(Vec::new(), Some(catalog(skills)));
+    press(&mut app, &client, KeyCode::Tab);
+    let state = &app.skills_browser;
+    assert_eq!(Columns::fit(state, state.rows(), 120).sharing, 0);
+    let screen = rows(&render(120, 40, |frame| app.draw(frame)));
+    assert!(screen.iter().all(|row| !row.contains("Sharing")));
+}
+
+#[test]
 fn a_box_too_narrow_for_its_scrollbar_still_draws() {
     let many = (0..30)
         .map(|n| pin(&format!("skill-{n}"), "local", "global"))
@@ -104,4 +118,31 @@ fn a_box_too_narrow_for_its_scrollbar_still_draws() {
     for width in 1..=6 {
         render(width, 40, |frame| app.draw(frame));
     }
+}
+
+#[test]
+fn the_state_dot_keeps_its_color_on_the_highlighted_row() {
+    let mut locked = pin("pdf", "plugin", "global");
+    locked["locked"] = json!(true);
+    let app = &mut opened(vec![pin("lint", "local", "global"), locked], None);
+    let dot = |app: &mut vibe_rs::app::App, name: &str| {
+        let buffer = render(100, 40, |frame| app.draw(frame));
+        let screen = rows(&buffer);
+        let y = screen
+            .iter()
+            .position(|row| row.contains(&format!("● {name}")));
+        let y = y.expect("the row is drawn");
+        let x = screen[y]
+            .chars()
+            .position(|c| c == '●')
+            .expect("the dot is drawn");
+        buffer[(x as u16, y as u16)].fg
+    };
+    let highlighted = dot(app, "lint");
+    press(app, &stub(), KeyCode::Down);
+    assert_eq!(dot(app, "lint"), highlighted, "on the bar as off it");
+    let locked = dot(app, "pdf");
+    press(app, &stub(), KeyCode::Up);
+    assert_eq!(dot(app, "pdf"), locked);
+    assert_ne!(locked, highlighted, "a locked skill keeps its own color");
 }

@@ -16,8 +16,10 @@ pub enum Row {
     Blank,
     /// The bold `Not loaded` heading above the dropped files.
     Heading(&'static str),
-    /// A disabled dim line: a dropped file or a detail fact.
+    /// A disabled dim line: a dropped file.
     Dim(String),
+    /// A line of a plugin's detail, styled by its role.
+    Detail(text::DetailLine),
 }
 
 impl Row {
@@ -30,7 +32,7 @@ pub fn rows(state: &State) -> Vec<Row> {
     if let Some(entry) = viewing_entry(state) {
         return text::detail_lines(entry)
             .into_iter()
-            .map(Row::Dim)
+            .map(Row::Detail)
             .collect();
     }
     let query = state.query();

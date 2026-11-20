@@ -56,10 +56,10 @@ from mistralai_vibe_local_harness.session_protocol import (
     TokenUsage,
 )
 from mistralai_vibe_local_harness.vibe._fact_recorder import FactRecorder
-from mistralai_vibe_local_harness.vibe._file_images import is_file_image
 from mistralai_vibe_local_harness.vibe._observability import (
     add_uncorrelated_tool_result,
 )
+from mistralai_vibe_local_harness.vibe._public_content import public_content_block
 from mistralai_vibe_local_harness.vibe._runtime_config import CompletionDelta
 from mistralai_vibe_local_harness.vibe._storage import (
     ProjectionDelta,
@@ -658,6 +658,23 @@ class SessionProjector:
         )
         return self._advance(public)
 
+    def apply_resumed(self, turn_id: str, *, observed_at: int) -> ProjectionUpdate:
+        """Record that a restart cut this turn and it carried on."""
+        state = self._projection.snapshot
+        entries = list(state.history.entries)
+        entries.append(
+            _resumed_entry(
+                state.session.id, turn_id, _resumed_count(entries) + 1, observed_at
+            )
+        )
+        public = state.model_copy(
+            update={
+                "session": state.session.model_copy(update={"updated_at": observed_at}),
+                "history": state.history.model_copy(update={"entries": entries}),
+            }
+        )
+        return self._advance(public)
+
     def apply_agent_change(
         self, agent: str, *, observed_at: int, turn_id: str | None = None
     ) -> ProjectionUpdate:
@@ -984,7 +1001,7 @@ def _message_entry(
             "relatedEntryId": None,
             "inputEntryId": input_entry_id,
             "role": role,
-            "content": [_public_content_block(part) for part in content],
+            "content": [public_content_block(part) for part in content],
             "source": source,
             **(
                 {"userDisplayContent": user_display_content}
@@ -1394,83 +1411,6 @@ def _text_preview(parts: Sequence[str]) -> str:
     return text
 
 
-def _public_content_block(part: Any) -> JsonValue:
-    serialized = part.model_dump(mode="json", by_alias=True, exclude_none=True)
-    # An image kept with its file shows as the image it was sent as.
-    if isinstance(part, RustImageContentBlock) or is_file_image(part):
-        data, mime_type = (
-            (part.data, part.mime_type)
-            if isinstance(part, RustImageContentBlock)
-            else (part.resource.blob, part.resource.mime_type)
-        )
-        return cast(
-            JsonValue,
-            {
-                "type": "image",
-                "attachment": {
-                    "source": {"kind": "inline", "data": data},
-                    "alias": "image",
-                    "mimeType": mime_type,
-                },
-            },
-        )
-    if isinstance(serialized, dict) and serialized.get("type") == "resource_link":
-        return cast(
-            JsonValue,
-            {
-                "type": "resource",
-                "resource": {
-                    "kind": "link",
-                    "uri": serialized["uri"],
-                    **({"name": serialized["name"]} if serialized.get("name") else {}),
-                    **(
-                        {"title": serialized["title"]}
-                        if serialized.get("title")
-                        else {}
-                    ),
-                    **(
-                        {"description": serialized["description"]}
-                        if serialized.get("description")
-                        else {}
-                    ),
-                    **(
-                        {"mediaType": serialized["mimeType"]}
-                        if serialized.get("mimeType")
-                        else {}
-                    ),
-                    **(
-                        {"size": serialized["size"]}
-                        if serialized.get("size") is not None
-                        else {}
-                    ),
-                },
-            },
-        )
-    if isinstance(serialized, dict) and serialized.get("type") == "resource":
-        resource = serialized.get("resource")
-        if isinstance(resource, dict):
-            return cast(
-                JsonValue,
-                {
-                    "type": "resource",
-                    "resource": {
-                        "kind": "text" if "text" in resource else "blob",
-                        "uri": resource["uri"],
-                        **(
-                            {"mediaType": resource["mimeType"]}
-                            if resource.get("mimeType")
-                            else {}
-                        ),
-                        **({"text": resource["text"]} if "text" in resource else {}),
-                        **({"blob": resource["blob"]} if "blob" in resource else {}),
-                    },
-                },
-            )
-    if isinstance(serialized, dict):
-        serialized.pop("_meta", None)
-    return cast(JsonValue, serialized)
-
-
 def _running_effect_entry(
     session_id: str,
     entries: Sequence[JsonObject],
@@ -1562,6 +1502,36 @@ def _model_change_entry(
             "kind": "model_change",
             "message": f"Model changed to {model}",
             "details": {"model": model},
+        },
+    )
+
+
+def _resumed_count(entries: Sequence[JsonObject]) -> int:
+    return sum(
+        1
+        for entry in entries
+        if entry.get("type") == "checkpoint" and entry.get("kind") == "resumed"
+    )
+
+
+def _resumed_entry(
+    session_id: str, turn_id: str, sequence: int, observed_at: int
+) -> JsonObject:
+    return cast(
+        JsonObject,
+        {
+            "type": "checkpoint",
+            "id": f"checkpoint-resumed-{sequence}",
+            "sessionId": session_id,
+            "turnId": turn_id,
+            "createdAt": observed_at,
+            "updatedAt": observed_at,
+            "generationStatus": "completed",
+            "relatedEntryId": None,
+            "inputEntryId": None,
+            "kind": "resumed",
+            "message": "Resumed after a restart",
+            "details": {},
         },
     )
 

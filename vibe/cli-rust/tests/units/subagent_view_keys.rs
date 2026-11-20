@@ -45,18 +45,21 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn moving_focus_to_the_subagent_list_and_back_keeps_the_draft() {
+async fn opening_the_subagent_list_from_the_rail_and_back_keeps_the_draft() {
     let mut harness = Harness::new();
     for character in "Draft prompt".chars() {
         harness.press(KeyCode::Char(character), KeyModifiers::NONE);
     }
-    assert!(!harness.press(KeyCode::Down, KeyModifiers::NONE));
+    assert!(!harness.press(KeyCode::Char('x'), KeyModifiers::CONTROL));
+    assert!(harness.app.rail.focused, "Ctrl+X reaches the rail");
+    assert!(!harness.press(KeyCode::Enter, KeyModifiers::NONE));
     assert!(harness.app.subagents.list.focused);
     assert_eq!(harness.app.subagents.list.options.selected(), 0);
     assert_eq!(harness.app.chat_input.input, "Draft prompt");
 
     assert!(!harness.press(KeyCode::Up, KeyModifiers::NONE));
     assert!(!harness.app.subagents.list.focused);
+    assert_eq!(harness.app.focus(), vibe_rs::focus::Focus::Rail);
     assert_eq!(harness.app.chat_input.input, "Draft prompt");
 }
 

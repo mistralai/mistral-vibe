@@ -11,5 +11,5 @@ from scenarios.goal._resumed import (
 
 timeline: Timeline = ["1", take_snapshot()]
 
-screen_contains = ("12.5K / 50K · 4m",)
+screen_contains = ("▶ goal 4m",)
 screen_excludes = ("paused when the session closed",)

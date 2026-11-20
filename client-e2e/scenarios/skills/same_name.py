@@ -1,4 +1,4 @@
-"""Two shared skills under one name: the shadowed one's page shows only its own pins and the scope the other holds, and its Remove leaves the other's under My Skills."""
+"""Two shared skills under one name: the shadowed one's page shows only its own pins and the scope the other holds, and its r leaves the other's under My Skills."""
 
 from __future__ import annotations
 
@@ -34,9 +34,7 @@ handshake = {
 }
 request_methods = METHODS
 
-_END = "\x1b[F"
-
-timeline: Timeline = ["/skills\r", "\t", "\r", _END, "\r", "\r", "\t"]
+timeline: Timeline = ["/skills\r", "\t", "\r", "r", "\t"]
 
 screen_contains = ("review", "Project  Shared  v3")
 screen_excludes = ("Their review",)

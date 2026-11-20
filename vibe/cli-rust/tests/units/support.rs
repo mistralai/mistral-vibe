@@ -30,13 +30,9 @@ pub fn ctrl(character: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(character), KeyModifiers::CONTROL)
 }
 
-/// Route one key through vim mode and the app's top-level input handler; true means exit.
+/// Route one key through the event loop's real key dispatch; true means exit.
 pub fn send_key(app: &mut App, key: KeyEvent) -> bool {
-    let (config_tx, _config_rx) = mpsc::channel(1);
-    let pending = app.vim.pending.take();
-    vibe_rs::vim::route(app, key, pending, |app, key| {
-        vibe_rs::input::handle_key(app, &stub(), &config_tx, key)
-    })
+    vibe_rs::event_loop::route_key(app, &stub(), key)
 }
 
 pub fn press(app: &mut App, code: KeyCode) -> bool {
@@ -194,6 +190,13 @@ pub fn bottom_bar(app: &mut App, width: u16) -> Buffer {
 
 pub fn bottom_bar_row(app: &mut App, width: u16) -> String {
     row(&bottom_bar(app, width), 0)
+}
+
+/// Paint the status rail alone on a `width`-cell row.
+pub fn rail(app: &mut App, width: u16) -> Buffer {
+    render(width, 1, |frame| {
+        vibe_rs::ui::rail::draw(app, frame, frame.area())
+    })
 }
 
 /// The cell where `text` starts in a row of one-cell glyphs, some multi-byte (`⧉`, `·`).

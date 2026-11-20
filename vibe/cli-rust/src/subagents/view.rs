@@ -223,9 +223,8 @@ pub fn reset_views(app: &mut App) {
     // Leave `refresh_in_flight` set so the outstanding answer, not a new read, releases the drain.
     app.subagents.viewed_subagent_id = None;
     app.subagents.transcripts.clear();
-    // Another session: its list shows again only once it has a child, with waiting ones hidden.
+    // Another session: its list shows again only once it has a child.
     app.subagents.list.shown = false;
-    app.subagents.list.show_waiting = false;
     if app.subagents.list.focused {
         super::list::leave_list(app);
     }

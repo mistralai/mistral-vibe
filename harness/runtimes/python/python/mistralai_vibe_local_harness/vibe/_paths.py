@@ -11,6 +11,14 @@ def is_windows() -> bool:
     return sys.platform == "win32"
 
 
+# The mode for directories only their user may open. On Windows, CPython turns
+# mkdir(mode=0o700) into an ACL for the token's default owner, which is
+# Administrators in an elevated process: the same user, unelevated, then cannot
+# open the directory. Any other mode inherits the user profile's ACL, which is
+# already private.
+PRIVATE_DIRECTORY_MODE = 0o777 if sys.platform == "win32" else 0o700
+
+
 def file_uri_to_path(uri: str) -> str:
     """Convert a file URI into a path using the current platform's rules."""
     parsed = urlparse(uri)

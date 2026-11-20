@@ -10,7 +10,7 @@ from pathlib import Path
 import tomllib
 from types import MappingProxyType
 import typing
-from typing import Annotated, Any, ClassVar, Self
+from typing import Annotated, Any, ClassVar, Final, Self
 
 from dotenv import dotenv_values
 from jsonpatch import JsonPatchException, apply_patch as apply_json_patch
@@ -25,7 +25,12 @@ from pydantic import (
     model_validator,
 )
 
-from vibe.core.agents.models import REMOVED_BUILTIN_AGENTS, BuiltinAgentName
+from vibe.core.agents.models import (
+    BUILTIN_APPROVAL_POLICIES,
+    REMOVED_BUILTIN_AGENTS,
+    ApprovalPolicyName,
+    BuiltinAgentName,
+)
 from vibe.core.config._catalog_filter import with_remote_models
 from vibe.core.config._defaults import (
     DEFAULT_API_RETRY_MAX_ELAPSED_TIME,
@@ -82,6 +87,7 @@ from vibe.core.config.models import (
     TTSProviderConfig,
     UtilityFeature,
     UtilityModelsConfig,
+    VibeBotLocalToolsEntry,
     normalize_model_configs,
     refuse_zero_auto_compact_threshold,
     serialize_model_configs,
@@ -577,6 +583,88 @@ def _mistral_thinking_levels() -> list[str]:
 _REQUIREMENT_LAYERS: frozenset[str] = frozenset({CATALOG_LAYER, GrowthbookLayer.NAME})
 
 
+VIBE_BOT_CEILING_KEY: Final = "vibe_bot_max_approval_policy"
+VIBE_BOT_LOCAL_TOOLS_KEY: Final = "vibe_bot_local_tools"
+VIBE_BOT_LOCAL_TOOL_MAX_BYTES_KEY: Final = "vibe_bot_local_tool_max_bytes"
+# Vibebot is behind its flag: these settings stay out of the settings screens,
+# the published schema and exported configs.
+VIBE_BOT_KEYS: frozenset[str] = frozenset({
+    VIBE_BOT_CEILING_KEY,
+    VIBE_BOT_LOCAL_TOOLS_KEY,
+    VIBE_BOT_LOCAL_TOOL_MAX_BYTES_KEY,
+})
+# What the bot may call on this machine: only the user's own files set it,
+# never a repository, a session's overrides, a remote layer or an admin.
+_VIBE_BOT_LOCAL_TOOL_KEYS: frozenset[str] = frozenset({
+    VIBE_BOT_LOCAL_TOOLS_KEY,
+    VIBE_BOT_LOCAL_TOOL_MAX_BYTES_KEY,
+})
+_VIBE_BOT_LOCAL_TOOL_LAYERS: frozenset[str] = frozenset({
+    "default",
+    "user-toml",
+    "user-supplied",
+})
+# Only the user's own config sets how much a Vibebot-started session may do on
+# this machine: never a repository, a session's overrides, or a remote layer.
+_VIBE_BOT_CEILING_LAYERS: frozenset[str] = frozenset({
+    "default",
+    "user-toml",
+    "user-supplied",
+    "admin",
+})
+
+
+_POLICY_STRICTNESS: Mapping[str, int] = {
+    ApprovalPolicyName.ASK: 0,
+    ApprovalPolicyName.ACCEPT_EDITS: 1,
+    ApprovalPolicyName.SMART_APPROVE: 2,
+    ApprovalPolicyName.AUTO_APPROVE: 3,
+}
+
+
+def _without_vibe_bot_ceiling(
+    layers: list[tuple[str, dict[str, Any]]],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Only the user's own config sets the ceiling; an admin's applies only
+    where it is stricter than what the layers below it set.
+    """
+    prepared: list[tuple[str, dict[str, Any]]] = []
+    below = ApprovalPolicyName.ASK.value
+    for name, data in layers:
+        value = data.get(VIBE_BOT_CEILING_KEY)
+        if value is None:
+            prepared.append((name, data))
+            continue
+        allowed = name in _VIBE_BOT_CEILING_LAYERS and (
+            name != "admin"
+            or _POLICY_STRICTNESS.get(str(value), -1) < _POLICY_STRICTNESS.get(below, 0)
+        )
+        if allowed:
+            below = str(value)
+            prepared.append((name, data))
+        else:
+            prepared.append((
+                name,
+                {k: v for k, v in data.items() if k != VIBE_BOT_CEILING_KEY},
+            ))
+    return prepared
+
+
+def _without_vibe_bot_local_tools(
+    layers: list[tuple[str, dict[str, Any]]],
+) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            name,
+            data
+            if name in _VIBE_BOT_LOCAL_TOOL_LAYERS
+            or _VIBE_BOT_LOCAL_TOOL_KEYS.isdisjoint(data)
+            else {k: v for k, v in data.items() if k not in _VIBE_BOT_LOCAL_TOOL_KEYS},
+        )
+        for name, data in layers
+    ]
+
+
 def _without_requirements(data: dict[str, Any]) -> dict[str, Any]:
     models = normalize_model_configs(data.get("models"))
     if not isinstance(models, Mapping) or not any(
@@ -638,7 +726,12 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
     def prepare_layers(
         cls, layers: list[tuple[str, dict[str, Any]]]
     ) -> list[tuple[str, dict[str, Any]]]:
-        layers = with_remote_models(without_telemetry_opt_ins(layers))
+        layers = [(name, _with_policy_default(data)) for name, data in layers]
+        layers = _without_vibe_bot_local_tools(
+            _without_vibe_bot_ceiling(
+                with_remote_models(without_telemetry_opt_ins(layers))
+            )
+        )
         layers = [
             (name, data if name in _REQUIREMENT_LAYERS else _without_requirements(data))
             for name, data in layers
@@ -1039,28 +1132,69 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         ),
     )
     default_agent: Annotated[str, WithReplaceMerge()] = Field(
-        default=BuiltinAgentName.ACCEPT_EDITS,
+        default=BuiltinAgentName.DEFAULT,
         description=(
-            "Agent profile to use when no --agent flag is passed. "
-            "Builtin: ask, accept-edits, smart-approve, auto-approve. "
-            "Applies in both interactive and programmatic (-p/--prompt) mode."
+            "Agent to use when no --agent flag is passed: 'default' (Vibe's own "
+            "instructions and tools), 'lean', or a custom agent. An approval policy "
+            "name here (ask, accept-edits, smart-approve, auto-approve) still sets "
+            "default_approval_policy, as before agents and policies were split."
+        ),
+    )
+    default_approval_policy: Annotated[str, WithReplaceMerge()] = Field(
+        default=ApprovalPolicyName.ACCEPT_EDITS,
+        description=(
+            "Approval policy to use when no --approval-policy flag is passed and "
+            "the agent names none. Builtin: ask, accept-edits, smart-approve, "
+            "auto-approve. Applies in both interactive and programmatic "
+            "(-p/--prompt) mode."
+        ),
+    )
+    vibe_bot_max_approval_policy: Annotated[str, WithReplaceMerge()] = Field(
+        default=ApprovalPolicyName.ASK,
+        description=(
+            "The most a Vibebot thread may let a session it starts on this machine "
+            "do: ask, accept-edits, smart-approve, or auto-approve. Such a session "
+            "runs the strictest of this, default_approval_policy, and the policy "
+            "the bot asks for."
+        ),
+    )
+    vibe_bot_local_tools: Annotated[
+        list[VibeBotLocalToolsEntry], WithReplaceMerge()
+    ] = Field(
+        default_factory=list,
+        description=(
+            "The local MCP tools a Vibebot thread may call on this machine, by "
+            "server and tool name or glob. None by default. A call runs the "
+            "strictest of the entry's approval and vibe_bot_max_approval_policy. "
+            "Under smart-approve, a tool runs without asking when it is read-only "
+            "as the server declares it (MCP readOnlyHint, the server's own claim): "
+            "list only servers you trust to say so."
+        ),
+    )
+    vibe_bot_local_tool_max_bytes: Annotated[int, WithReplaceMerge()] = Field(
+        default=8 * 1024,
+        gt=0,
+        le=64 * 1024,
+        description=(
+            "The most text a local tool call returns to Vibebot, in bytes; the "
+            "rest is cut and the answer says so."
         ),
     )
     # Kept off by default so smart approve ships dark until a cohort is opted in.
-    # The vibe_cli_default_agent experiment makes a mode the default by setting
-    # default_agent itself.
+    # The vibe_cli_default_agent experiment makes a policy the default through
+    # default_agent, which names a policy there.
     smart_approve_available: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
         description=(
-            "Expose the smart-approve mode in the mode picker/cycle. "
+            "Expose the smart-approve policy in the picker/cycle. "
             "Set by the vibe_cli_smart_approve experiment; does not change the default."
         ),
     )
     enable_auto_approve: Annotated[bool, WithReplaceMerge()] = Field(
         default=True,
         description=(
-            "Allow the auto-approve (YOLO) mode: the 'auto-approve' agent and the "
-            "--auto-approve/--yolo flag. When false, no agent with the 'yolo' safety "
+            "Allow the auto-approve (YOLO) mode: the 'auto-approve' policy and the "
+            "--auto-approve/--yolo flag. When false, no policy with the 'yolo' safety "
             "level is available and the flag and bypass_tool_permissions are ignored "
             "(per-tool permissions still apply). Intended for admin-managed "
             "(enterprise) config to forbid auto-approving tool calls."
@@ -1134,14 +1268,6 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
             " almost full."
         ),
     )
-    experimental_enable_local_projects: Annotated[bool, WithReplaceMerge()] = Field(
-        default=True,
-        description=(
-            "Experimental: switch Vibe Desktop to local projects"
-            " (local_projects.toml) instead of project links."
-            " Read once when Vibe Desktop starts its app server."
-        ),
-    )
     enable_pr_monitoring: Annotated[bool, WithReplaceMerge()] = Field(
         default=True,
         description=(
@@ -1155,13 +1281,19 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         ),
     )
     experimental_local_runtime_session_api: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "The app server drives local Sessions through the Session API."
+            " Set to false, or set VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API"
+            " to false, to call the local runtime directly instead. Read when a"
+            " Session opens."
+        ),
+    )
+    experimental_target_runtime: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
         description=(
-            "Experimental: the app server drives local Sessions through the"
-            " Session API instead of calling the local runtime directly. Set by"
-            " the vibe_cli_local_runtime_session_api_migration experiment; the"
-            " VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API environment variable"
-            " takes precedence. Read when a Session opens."
+            "Create new Sessions on the target runtime. Not supported yet: while"
+            " this is on, a new Session refuses its first message."
         ),
     )
 
@@ -1196,6 +1328,10 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         default_factory=list
     )
     disable_welcome_banner_animation: Annotated[bool, WithReplaceMerge()] = False
+    disable_selection_animation: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description="Skip the light that sweeps across a selection when it is copied.",
+    )
     cursor_blink: Annotated[bool, WithReplaceMerge()] = Field(
         default=True, description="Blink the input cursor. Disable for a steady cursor."
     )
@@ -1223,6 +1359,14 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         description=(
             "Pin the prompt of the conversation section at the top of the "
             "transcript while scrolling; a click scrolls back to it."
+        ),
+    )
+    collapse_turn_details: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Once a turn's final answer arrives, collapse its intermediate "
+            "messages, reasoning and tool calls into one 'Worked for' group "
+            "above the answer; a click on the group shows them."
         ),
     )
     enable_file_autocomplete: Annotated[bool, WithReplaceMerge()] = Field(
@@ -1326,7 +1470,11 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
             "finishes its turn."
         ),
     )
-    compaction_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.COMPACT
+    compaction_prompt_id: Annotated[str, WithReplaceMerge()] = Field(
+        default="compact",
+        deprecated="No longer used; remove this setting from your config.",
+        description="Retired: accepted for older configs, with no effect.",
+    )
     title_prompt_id: Annotated[str, WithReplaceMerge()] = UtilityPrompt.SESSION_TITLE
     include_commit_signature: Annotated[bool, WithReplaceMerge()] = True
     include_model_info: Annotated[bool, WithReplaceMerge()] = Field(
@@ -1351,8 +1499,18 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
     enable_update_checks: Annotated[bool, WithReplaceMerge()] = True
     enable_auto_update: Annotated[bool, WithReplaceMerge()] = True
     enable_notifications: Annotated[bool, WithReplaceMerge()] = True
+    keep_awake: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Keep the machine from idle-sleeping while a turn runs or waits for"
+            " an approval or a question. The display can still sleep, and closing"
+            " the lid still puts the machine to sleep. macOS (caffeinate), Linux"
+            " (a systemd-inhibit idle lock) and Windows (SetThreadExecutionState)."
+            " Vibe Desktop sessions follow Desktop's own setting instead."
+        ),
+    )
     experimental_enable_tab_status: Annotated[bool, WithReplaceMerge()] = True
-    enable_system_trust_store: Annotated[bool, WithReplaceMerge()] = False
+    enable_system_trust_store: Annotated[bool, WithReplaceMerge()] = True
     api_timeout: Annotated[float, WithReplaceMerge()] = DEFAULT_API_TIMEOUT
     api_retry_max_elapsed_time: Annotated[float, WithReplaceMerge()] = (
         DEFAULT_API_RETRY_MAX_ELAPSED_TIME
@@ -1702,14 +1860,6 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         return load_system_prompt(self.system_prompt_id)
 
     @property
-    def compaction_prompt(self) -> str:
-        return load_prompt(
-            self.compaction_prompt_id,
-            setting_name="compaction_prompt_id",
-            builtins={"compact": UtilityPrompt.COMPACT.path},
-        )
-
-    @property
     def title_prompt(self) -> str:
         return load_prompt(
             self.title_prompt_id,
@@ -1916,14 +2066,19 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         )
         return self
 
+    @model_validator(mode="before")
+    @classmethod
+    def _read_policy_default_agent(cls, data: Any) -> Any:
+        return _with_policy_default(data) if isinstance(data, dict) else data
+
     @model_validator(mode="after")
     def _warn_removed_default_agent(self) -> VibeConfigSchema:
         if (replacement := REMOVED_BUILTIN_AGENTS.get(self.default_agent)) is None:
             return self
         self._validation_warnings.append(
             f"Default agent '{self.default_agent}' is no longer built in — sessions "
-            f"start on '{replacement}' unless a custom agent is named "
-            f"'{self.default_agent}'. Set default_agent to another agent."
+            f"start on the '{replacement}' policy unless a custom agent is named "
+            f"'{self.default_agent}'. Set default_approval_policy instead."
         )
         return self
 
@@ -2001,11 +2156,6 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         return self
 
     @model_validator(mode="after")
-    def _check_compaction_prompt(self) -> VibeConfigSchema:
-        _ = self.compaction_prompt
-        return self
-
-    @model_validator(mode="after")
     def _check_title_prompt(self) -> VibeConfigSchema:
         _ = self.title_prompt
         return self
@@ -2030,3 +2180,21 @@ def create_default_config() -> dict[str, Any]:
     if tool_defaults := discover_tool_defaults():
         config_dict["tools"] = tool_defaults
     return config_dict
+
+
+def _with_policy_default(data: dict[str, Any]) -> dict[str, Any]:
+    """Read a ``default_agent`` naming an approval policy as that layer's
+    ``default_approval_policy``, as it meant before agents and policies split.
+
+    Done per layer, before the merge, so the policy keeps the precedence and
+    the origin of the layer that set it: an experiment's default stays below
+    the user's own.
+    """
+    name = data.get("default_agent")
+    if not isinstance(name, str):
+        return data
+    if name not in BUILTIN_APPROVAL_POLICIES:
+        return data
+    moved = {key: value for key, value in data.items() if key != "default_agent"}
+    moved.setdefault("default_approval_policy", name)
+    return moved

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 import os
@@ -14,7 +14,11 @@ import pytest
 import respx
 
 from tests.conftest import build_test_vibe_config
-from vibe.app_server._registry_skill_sync import RegistrySkillSync, RegistryStep
+from vibe.app_server._registry_skill_sync import (
+    PickRestore,
+    RegistrySkillSync,
+    RegistryStep,
+)
 from vibe.app_server._skills import registry_versions_of
 from vibe.core.config import VibeConfigSchema
 from vibe.core.platform_auth import (
@@ -44,6 +48,8 @@ class _Session:
         stale: bool = False,
         refresh: RegistryStep[RegistrySyncResult] | None = None,
         cleanup: RegistryStep[object] | None = None,
+        restore: Callable[[], Awaitable[Sequence[str]]] | None = None,
+        retry_delays: Sequence[float] = (),
     ) -> None:
         self.roots = [_REPO]
         self.config = build_test_vibe_config(
@@ -54,6 +60,8 @@ class _Session:
         self.checks = 0
         self.apply = AsyncMock(return_value=True)
         self.credentials: PlatformCredentialFactory | None = None
+        self.reported: list[tuple[list[str], bool]] = []
+        self.back: list[list[str]] = []
         self.sync = RegistrySkillSync(
             config=lambda: self.config,
             credentials=lambda: self.credentials,
@@ -63,6 +71,14 @@ class _Session:
             running=lambda: _RUNNING,
             resolve=self._resolve,
             apply=self.apply,
+            restore=None
+            if restore is None
+            else PickRestore(
+                fetch=restore,
+                missing=lambda names, final: self.reported.append((list(names), final)),
+                restored=lambda names: self.back.append(list(names)),
+                retry_delays=retry_delays,
+            ),
         )
 
     def _resolve(self) -> dict[str, tuple[str, int]]:
@@ -83,6 +99,9 @@ def _fetches(*results: RegistrySyncResult) -> AsyncMock:
 async def _settled(sync: RegistrySkillSync) -> None:
     while sync._tasks or sync._lease_tasks:
         await asyncio.gather(*sync._tasks, *sync._lease_tasks)
+        # A gather of done tasks does not yield, and the done callbacks that
+        # drop them from the sets only run once the loop turns.
+        await asyncio.sleep(0)
 
 
 def _synced_roots(refresh: AsyncMock) -> list[tuple[Path, ...]]:
@@ -613,3 +632,179 @@ async def test_with_registry_skills_off_a_session_still_clears_unused_versions_o
         (session.config, (_REPO,))
     ]
     assert held_at_cleanup == [{("id-deploy", 1)}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("behind", "applied"), [(True, 1), (False, 0)])
+async def test_a_restore_applies_only_when_the_session_is_behind_its_picks(
+    behind: bool, applied: int
+) -> None:
+    release = asyncio.Event()
+
+    async def restore() -> list[str]:
+        await release.wait()
+        return []
+
+    session = _Session(registry=False, stale=behind, restore=restore)
+
+    session.sync.start()
+    await asyncio.sleep(0)
+    applied_before = session.apply.await_count
+    release.set()
+    await _settled(session.sync)
+
+    assert applied_before == 0
+    assert session.apply.await_count == applied
+
+
+@pytest.mark.asyncio
+async def test_a_restore_that_raises_is_logged_and_applies_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nothing arrived, so the session runs what it resolves: nothing to apply."""
+    session = _Session(registry=False, restore=AsyncMock(side_effect=OSError("down")))
+
+    session.sync.start()
+    await _settled(session.sync)
+
+    assert "Failed to restore the session's picked skills" in caplog.text
+    session.apply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_session_abandons_its_restore() -> None:
+    async def hangs() -> list[str]:
+        await asyncio.Event().wait()
+        return []
+
+    session = _Session(registry=False, restore=hangs)
+
+    session.sync.start()
+    await asyncio.sleep(0)
+    await session.sync.stop()
+
+    assert not session.sync._tasks
+    session.apply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_restore_applies_a_pick_another_session_fetched_first() -> None:
+    """The session opened without the pick; another session put it back before this
+    restore ran, so the restore writes nothing yet the session still runs without it.
+    """
+    session = _Session(registry=False, stale=True, restore=AsyncMock(return_value=[]))
+
+    session.sync.start()
+    await _settled(session.sync)
+
+    session.apply.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_session_with_no_picks_runs_no_restore() -> None:
+    restore = AsyncMock()
+    session = _Session(registry=False, stale=True, restore=restore)
+
+    restoring = session.sync.start(restore=False)
+    await _settled(session.sync)
+
+    assert restoring is None
+    restore.assert_not_awaited()
+    session.apply.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_picks_a_restore_could_not_fetch_are_reported_then_tried_again() -> None:
+    restore = AsyncMock(side_effect=[["ask-data"], []])
+    session = _Session(registry=False, restore=restore, retry_delays=(0, 0))
+
+    session.sync.start()
+    await _settled(session.sync)
+
+    assert restore.await_count == 2
+    assert session.reported == [(["ask-data"], False)]
+    assert session.back == [["ask-data"]]
+
+
+@pytest.mark.asyncio
+async def test_a_restore_that_keeps_failing_is_reported_again_once_retries_run_out() -> (
+    None
+):
+    restore = AsyncMock(return_value=["ask-data"])
+    session = _Session(registry=False, restore=restore, retry_delays=(0, 0))
+
+    session.sync.start()
+    await _settled(session.sync)
+
+    assert restore.await_count == 3
+    assert session.reported == [(["ask-data"], False), (["ask-data"], True)]
+
+
+@pytest.mark.asyncio
+async def test_a_last_retry_that_raises_still_names_the_missing_picks() -> None:
+    restore = AsyncMock(side_effect=[["ask-data"], OSError("down")])
+    session = _Session(registry=False, restore=restore, retry_delays=(0,))
+
+    session.sync.start()
+    await _settled(session.sync)
+
+    assert session.reported[-1] == (["ask-data"], True)
+
+
+@pytest.mark.asyncio
+async def test_a_restore_that_raises_is_tried_again() -> None:
+    restore = AsyncMock(side_effect=[OSError("down"), []])
+    session = _Session(registry=False, restore=restore, retry_delays=(0,))
+
+    session.sync.start()
+    await _settled(session.sync)
+
+    assert restore.await_count == 2
+    assert session.reported == []
+    assert session.back == []
+
+
+@pytest.mark.asyncio
+async def test_the_first_turn_waits_only_for_the_first_restore_and_a_stop_ends_the_retries() -> (
+    None
+):
+    restore = AsyncMock(return_value=["ask-data"])
+    session = _Session(registry=False, restore=restore, retry_delays=(3600,))
+
+    restoring = session.sync.start()
+    assert restoring is not None
+    async with asyncio.timeout(5):
+        await restoring
+    assert restore.await_count == 1
+    (retrying,) = session.sync._tasks
+
+    await session.sync.stop()
+
+    assert retrying.cancelled()
+    assert session.reported == [(["ask-data"], False)]
+
+
+@pytest.mark.asyncio
+async def test_a_retry_that_brings_back_some_picks_announces_those() -> None:
+    restore = AsyncMock(side_effect=[["ask-data", "intake"], ["intake"], []])
+    session = _Session(registry=False, restore=restore, retry_delays=(0, 0))
+
+    session.sync.start()
+    await _settled(session.sync)
+
+    assert session.reported == [(["ask-data", "intake"], False)]
+    assert session.back == [["ask-data"], ["intake"]]
+
+
+@pytest.mark.asyncio
+async def test_retries_that_run_out_after_some_picks_came_back_report_only_the_rest() -> (
+    None
+):
+    restore = AsyncMock(side_effect=[["ask-data", "intake"], ["intake"], ["intake"]])
+    session = _Session(registry=False, restore=restore, retry_delays=(0, 0))
+
+    session.sync.start()
+    await _settled(session.sync)
+
+    assert session.back == [["ask-data"]]
+    assert session.reported[-1] == (["intake"], True)

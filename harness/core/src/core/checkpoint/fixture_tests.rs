@@ -224,6 +224,7 @@ fn assert_checkpoint_boundary(file_name: &str, value: &Value) {
         "last_reported_context_tokens",
         "estimate_correction",
         "rebuilt_since_reply",
+        "pending_input",
     ] {
         if root.contains_key(optional) {
             expected_root_keys.insert(optional.to_string());

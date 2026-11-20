@@ -26,6 +26,12 @@ class OpenSessionHost(Protocol):
         """Have every open session re-read the config files."""
         ...
 
+    def open_selection(self, session_id: str) -> tuple[str, str] | None:
+        """The agent and policy the session runs now; None when this Host does
+        not hold it open.
+        """
+        ...
+
 
 class OpenSessions:
     def __init__(self) -> None:
@@ -57,6 +63,16 @@ class OpenSessions:
         """
         for host in tuple(self._hosts):
             await host.reload_config_files()
+
+    def selection(self, session_id: str) -> tuple[str, str] | None:
+        """The agent and policy an open session runs now, whichever channel
+        holds it.
+        """
+        for host in tuple(self._hosts):
+            selection = host.open_selection(session_id)
+            if selection is not None:
+                return selection
+        return None
 
 
 __all__ = ["OpenSessionHost", "OpenSessions"]

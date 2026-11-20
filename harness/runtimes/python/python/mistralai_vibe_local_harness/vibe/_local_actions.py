@@ -77,7 +77,7 @@ from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._completion import execute_completion
 from mistralai_vibe_local_harness.vibe._file_tools import execute_file_tool
 from mistralai_vibe_local_harness.vibe._hook_matcher import qualified_tool_name
-from mistralai_vibe_local_harness.vibe._paths import is_windows
+from mistralai_vibe_local_harness.vibe._paths import PRIVATE_DIRECTORY_MODE, is_windows
 from mistralai_vibe_local_harness.vibe._permissions import ALWAYS_ASK, PermissionOutcome
 from mistralai_vibe_local_harness.vibe._projection import (
     APPROVAL_META_KEY,
@@ -2130,7 +2130,7 @@ def _content_addressed(path: Path, content: str) -> Path:
 def _replace_text_file(path: Path, content: str) -> None:
     # Offloaded tool results hold raw model output, so the directory and the
     # file are created owner-only; existing paths keep their current mode.
-    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    path.parent.mkdir(parents=True, mode=PRIVATE_DIRECTORY_MODE, exist_ok=True)
     path.touch(mode=0o600, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 

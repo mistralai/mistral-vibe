@@ -1,8 +1,8 @@
-//! Agent wire types (app-server `AgentSummary`, `AgentSafety`, `AgentType`).
+//! Agent and approval policy wire types (app-server `AgentSummary`, `ApprovalPolicySummary`, `AgentSafety`, `AgentType`).
 
 use serde::{Deserialize, Serialize};
 
-/// How much a profile is allowed to do without asking (app-server `AgentSafety`).
+/// How much an approval policy lets run without asking (app-server `AgentSafety`).
 /// Unknown wire values read as `Neutral`, so a newer server never breaks the UI.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(from = "String", rename_all = "lowercase")]
@@ -27,8 +27,8 @@ impl From<String> for AgentSafety {
     }
 }
 
-/// Primary agents cycle with Shift+Tab; subagents never do (app-server `AgentType`).
-/// Unknown wire values read as `Other` and stay out of the cycle.
+/// Primary agents are listed by `/agent`; subagents never are (app-server `AgentType`).
+/// Unknown wire values read as `Other` and stay out of the list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(from = "String", rename_all = "lowercase")]
 pub enum AgentType {
@@ -59,9 +59,21 @@ pub struct AgentSummary {
     #[serde(default)]
     pub description: String,
     #[serde(default)]
-    pub safety: AgentSafety,
-    #[serde(default)]
     pub agent_type: AgentType,
+}
+
+/// One approval policy from the runtime snapshot (app-server `ApprovalPolicySummary`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalPolicySummary {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub safety: AgentSafety,
 }
 
 #[derive(Debug, Serialize)]
@@ -69,6 +81,13 @@ pub struct AgentSummary {
 pub struct AgentSwitchParams {
     pub session_id: String,
     pub agent_name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApprovalPolicySwitchParams {
+    pub session_id: String,
+    pub approval_policy: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -84,4 +103,8 @@ pub struct AgentInstallParams {
 pub struct AgentsListResponse {
     pub active: AgentSummary,
     pub agents: Vec<AgentSummary>,
+    #[serde(default)]
+    pub active_approval_policy: Option<ApprovalPolicySummary>,
+    #[serde(default)]
+    pub approval_policies: Option<Vec<ApprovalPolicySummary>>,
 }

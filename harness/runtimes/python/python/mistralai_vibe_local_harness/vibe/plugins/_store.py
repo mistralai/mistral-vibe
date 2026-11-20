@@ -29,6 +29,7 @@ from pydantic import (
     model_validator,
 )
 
+from mistralai_vibe_local_harness.vibe._paths import PRIVATE_DIRECTORY_MODE
 from mistralai_vibe_local_harness.vibe._storage import Sha256, canonical_json
 
 MANIFEST_VERSION = 1
@@ -42,7 +43,7 @@ TEMPORARY_TTL_SECONDS = 24 * 60 * 60
 
 _READ_CHUNK_BYTES = 1 << 20
 _BLOB_MODE = 0o400
-_WRITABLE_DIRECTORY_MODE = 0o700
+_WRITABLE_DIRECTORY_MODE = PRIVATE_DIRECTORY_MODE
 _CHECKOUT_DIRECTORY_MODE = 0o500
 _EXECUTABLE_BLOB_MODE = 0o500
 

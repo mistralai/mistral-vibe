@@ -1,0 +1,101 @@
+[
+ {
+  "method": "session/turn/enqueue",
+  "params": {
+   "entries": [
+    {
+     "annotations": {},
+     "content": [
+      {
+       "text": "hi",
+       "type": "text"
+      }
+     ],
+     "entryId": "<client-message-id>",
+     "role": "user"
+    }
+   ],
+   "idempotencyKey": "<client-message-id>",
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "feedback/shouldShow",
+  "params": {
+   "pendingUserMessages": 1,
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.code_preview.opened",
+   "properties": {
+    "has_linked_line": true,
+    "link_kind": "path"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.user_copied_text",
+   "properties": {
+    "source": "code_preview",
+    "text_length": 62
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.code_preview.done",
+   "properties": {
+    "close_reason": "key",
+    "duration_ms": 0,
+    "has_copied": true,
+    "has_linked_line": true,
+    "has_scrolled": false,
+    "is_scrollable": true,
+    "link_kind": "path",
+    "status": "success"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.code_preview.opened",
+   "properties": {
+    "has_linked_line": true,
+    "link_kind": "path"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.code_preview.done",
+   "properties": {
+    "close_reason": "key",
+    "duration_ms": 500,
+    "has_copied": false,
+    "has_linked_line": true,
+    "has_scrolled": false,
+    "is_scrollable": true,
+    "link_kind": "path",
+    "status": "success"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

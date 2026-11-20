@@ -36,11 +36,14 @@ fn a_pending_install_without_a_project_lists_global_and_install() {
 }
 
 #[test]
-fn a_locked_registry_pin_has_no_enabled_row() {
+fn a_locked_registry_pin_offers_remove_but_no_switch() {
     let mut locked = registry("deploy", "global", 2, None);
     locked["locked"] = json!(true);
     let mut app = opened(vec![locked], Some(shared()));
     open_page(&mut app, installed_row("deploy"));
-    assert!(!page(&app).rows.contains(&Property::Enabled));
-    assert!(page(&app).rows.contains(&Property::Remove));
+    let footer = vibe_rs::skills_browser::help(&app.skills_browser);
+    assert!(!footer
+        .iter()
+        .any(|(key, _)| *key == vibe_rs::hints::key::SPACE));
+    assert!(footer.contains(&("r", vibe_rs::hints::action::REMOVE)));
 }

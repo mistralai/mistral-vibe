@@ -3,7 +3,7 @@
 use serde_json::json;
 use vibe_rs::app::{App, Status};
 use vibe_rs::commands::{event, CommandEvent};
-use vibe_rs::server::{AgentSafety, AgentSummary};
+use vibe_rs::server::{AgentSummary, ApprovalPolicySummary};
 use vibe_rs::utils::startup_cache::StartupConfig;
 use vibe_rs::{agents, event_handler};
 
@@ -11,7 +11,14 @@ fn agent(name: &str) -> AgentSummary {
     AgentSummary {
         name: name.to_owned(),
         display_name: name.to_owned(),
-        safety: AgentSafety::Neutral,
+        ..Default::default()
+    }
+}
+
+fn policy(name: &str) -> ApprovalPolicySummary {
+    ApprovalPolicySummary {
+        name: name.to_owned(),
+        display_name: name.to_owned(),
         ..Default::default()
     }
 }
@@ -43,19 +50,23 @@ fn reload_keeps_the_runtime_wrapper_when_refreshing_skills() {
 }
 
 #[test]
-fn runtime_refresh_does_not_reset_the_painted_agent_to_the_default() {
+fn runtime_refresh_does_not_reset_the_painted_agent_or_policy_to_the_default() {
     let mut app = App::default();
     app.set_status(Status::Ready);
-    app.agents.active = agent("ask");
+    app.agents.active = agent("lean");
+    app.agents.active_policy = policy("ask");
     let config = StartupConfig {
-        default_agent: "auto-approve".into(),
-        agents: vec![agent("ask"), agent("auto-approve")],
+        default_agent: "default".into(),
+        agents: vec![agent("default"), agent("lean")],
+        default_approval_policy: "auto-approve".into(),
+        approval_policies: vec![policy("ask"), policy("auto-approve")],
         ..Default::default()
     };
 
     agents::show_startup_agents(&mut app, &config);
 
-    assert_eq!(app.agents.active.name, "ask");
+    assert_eq!(app.agents.active.name, "lean");
+    assert_eq!(app.agents.active_policy.name, "ask");
 }
 
 #[test]

@@ -1,4 +1,4 @@
-"""`/goal <objective>` pins a goal row above the todo row; each status renders its own right part."""
+"""`/goal <objective>` puts a goal item on the rail; each status renders its own stats."""
 
 from __future__ import annotations
 
@@ -45,4 +45,4 @@ timeline: Timeline = [
     take_snapshot(),
 ]
 
-screen_contains = ("complete · 40K · 1h12m", "Run the parity suite")
+screen_contains = ("✓ goal · ≡ 0/1",)

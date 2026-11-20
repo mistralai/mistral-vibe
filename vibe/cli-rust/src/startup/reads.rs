@@ -111,6 +111,11 @@ pub fn read_enable_sticky_prompt(result: &Value) -> bool {
     config(result).enable_sticky_prompt
 }
 
+/// Whether a turn's details collapse into a `Worked for` group (config `collapse_turn_details`).
+pub fn read_collapse_turn_details(result: &Value) -> bool {
+    config(result).collapse_turn_details
+}
+
 /// Whether Ctrl+D asks for a second press (config `ask_confirmation_on_exit`).
 pub fn read_ask_confirmation_on_exit(result: &Value) -> bool {
     config(result).ask_confirmation_on_exit

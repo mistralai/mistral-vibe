@@ -1,4 +1,4 @@
-"""Long tool descriptions wrap inside the box and scroll line by line."""
+"""Long tool descriptions stay on the tool's row, cut with an ellipsis instead of wrapping."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ _TOOLS = [
     tool(
         f"tool_{index:02d}",
         "Add review comment to the requester's latest pending pull request review, "
-        "with a very long description that must wrap at the box edge",
+        "with a very long description that must not wrap at the box edge",
         enabled=index % 3 != 0,
     )
     for index in range(30)
@@ -22,11 +22,6 @@ handshake = mcp_handshake([
 
 _DOWN = "\x1b[B"
 
-timeline: Timeline = [
-    "/mcp github_app\r",
-    _DOWN * 5,
-    _DOWN * 8,
-    "d",
-    "\x1b",
-    take_snapshot(),
-]
+timeline: Timeline = ["/mcp github_app\r", _DOWN * 13, "d", take_snapshot()]
+
+screen_excludes = ("must not wrap",)

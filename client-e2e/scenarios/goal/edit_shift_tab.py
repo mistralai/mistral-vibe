@@ -1,4 +1,4 @@
-"""Shift+Tab in `/goal edit` moves to the budget field and leaves the agent unchanged."""
+"""Shift+Tab in `/goal edit` moves to the budget field and leaves the approval policy unchanged."""
 
 from __future__ import annotations
 

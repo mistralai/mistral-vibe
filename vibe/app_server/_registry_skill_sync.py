@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from vibe.core.skills.registry import RegistrySyncResult, RegistrySyncStatus, StoreLease
 from vibe.core.utils.concurrency import cancel_pending
@@ -25,10 +26,25 @@ class RegistryStep[T](Protocol):
     ) -> Awaitable[T]: ...
 
 
+@dataclass(frozen=True)
+class PickRestore:
+    """``fetch`` downloads again the session's picks a cleanup took and returns the
+    names it could not. Those go to ``missing`` and are tried again after each of
+    ``retry_delays``: once they arrive they go to ``restored``, and if they never do
+    they go to ``missing`` again with ``final``.
+    """
+
+    fetch: Callable[[], Awaitable[Sequence[str]]]
+    missing: Callable[[Sequence[str], bool], None]
+    restored: Callable[[Sequence[str]], None]
+    retry_delays: Sequence[float] = ()
+
+
 class RegistrySkillSync:
     """A sync that did not succeed, or whose derivation failed, is tried again on the
     next derivation. While it follows the session it holds the versions the session
-    loads, so a cleanup never evicts them.
+    loads, so a cleanup never evicts them. It also fetches again the session's picks
+    a cleanup took, and applies them once they arrive.
     """
 
     def __init__(
@@ -42,6 +58,7 @@ class RegistrySkillSync:
         running: Callable[[], RegistryVersions],
         resolve: Callable[[], RegistryVersions],
         apply: Callable[[], Awaitable[bool]],
+        restore: PickRestore | None = None,
     ) -> None:
         """``apply`` logs its own failure and never raises. Without ``cleanup`` this
         process never cleans the store.
@@ -54,6 +71,7 @@ class RegistrySkillSync:
         self._running = running
         self._resolve = resolve
         self._apply = apply
+        self._restore = restore
         self._following = False
         self._synced_roots: tuple[Path, ...] | None = None
         self._cleaned_roots: tuple[Path, ...] | None = None
@@ -62,9 +80,15 @@ class RegistrySkillSync:
         self._lease_order = asyncio.Lock()
         self._lease_tasks: set[asyncio.Task[None]] = set()
 
-    def start(self) -> None:
+    def start(self, *, restore: bool = True) -> asyncio.Task[None] | None:
+        """Called once the open has answered, so nothing here holds the open. The
+        first restore of picks a cleanup took, when the session has picks to restore;
+        its retries are not part of it.
+        """
         self._following = True
+        restoring = self._start_restore() if restore else None
         self.follow()
+        return restoring
 
     def follow(self) -> None:
         """A no-op before ``start`` and after ``stop``; a sync still running for earlier
@@ -81,9 +105,7 @@ class RegistrySkillSync:
         if roots == self._synced_roots:
             return
         self._synced_roots = roots
-        task = asyncio.create_task(self._sync(roots), name="vibe-unified-registry-sync")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._track(self._sync(roots), name="vibe-unified-registry-sync")
 
     def stop(self) -> asyncio.Future[list[BaseException | None]]:
         """The cancelled syncs and the lease's release come back to await; the release
@@ -110,6 +132,70 @@ class RegistrySkillSync:
             if not done and self._synced_roots == roots:
                 self._synced_roots = None
 
+    def _start_restore(self) -> asyncio.Task[None] | None:
+        if self._restore is None:
+            return None
+        return self._track(
+            self._restored(self._restore), name="vibe-unified-registry-restore"
+        )
+
+    async def _restored(self, restore: PickRestore) -> None:
+        """An attempt that raised says nothing of what is missing, so only names the
+        restore returned are reported.
+        """
+        missing = await self._restore_once(restore.fetch)
+        if missing is not None and not missing:
+            return
+        if not restore.retry_delays:
+            restore.missing(missing or (), True)
+            return
+        if missing:
+            restore.missing(missing, False)
+        self._track(
+            self._retried(restore, missing or ()), name="vibe-unified-registry-restore"
+        )
+
+    async def _retried(self, restore: PickRestore, reported: Sequence[str]) -> None:
+        """Picks the client was told are missing are announced as they arrive."""
+        pending = list(reported)
+        last: Sequence[str] = reported
+        for delay in restore.retry_delays:
+            await asyncio.sleep(delay)
+            missing = await self._restore_once(restore.fetch)
+            if missing is None:
+                continue
+            arrived = [name for name in pending if name not in missing]
+            if arrived:
+                restore.restored(arrived)
+                pending = [name for name in pending if name in missing]
+            if not missing:
+                return
+            last = missing
+        restore.missing(last, True)
+
+    async def _restore_once(
+        self, restore: Callable[[], Awaitable[Sequence[str]]]
+    ) -> Sequence[str] | None:
+        """The picks still missing, or ``None`` when the restore raised. Checks the
+        session against its picks whatever the restore wrote: another session can
+        have put a missing pick back after this one opened without it.
+        """
+        try:
+            missing: Sequence[str] | None = await restore()
+        except Exception:
+            logger.exception("Failed to restore the session's picked skills")
+            missing = None
+        await self._caught_up()
+        return missing
+
+    def _track(
+        self, work: Coroutine[Any, Any, None], *, name: str
+    ) -> asyncio.Task[None]:
+        task = asyncio.create_task(work, name=name)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+        return task
+
     def _clean_without_sync(
         self, roots: tuple[Path, ...], *, after: asyncio.Task[None]
     ) -> None:
@@ -125,9 +211,7 @@ class RegistrySkillSync:
             await after
             await self._evict_unused(roots)
 
-        task = asyncio.create_task(clean(), name="vibe-unified-registry-cleanup")
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._track(clean(), name="vibe-unified-registry-cleanup")
 
     def _hold_running(self) -> asyncio.Task[None]:
         versions = tuple(self._running().values())

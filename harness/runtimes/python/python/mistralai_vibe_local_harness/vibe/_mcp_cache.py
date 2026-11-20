@@ -29,6 +29,7 @@ from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPDescriptorCacheRecordV1,
     MCPRemoteToolDescriptor,
 )
+from mistralai_vibe_local_harness.vibe._paths import PRIVATE_DIRECTORY_MODE
 
 _JSON_SCHEMA = TypeAdapter(JsonSchema)
 
@@ -281,7 +282,7 @@ class MCPDescriptorCache:
         return self._root / f"{hashlib.sha256(raw.encode()).hexdigest()}.json"
 
     def _ensure_root(self) -> None:
-        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._root.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
         with _suppress_os_error():
             self._root.chmod(0o700)
 

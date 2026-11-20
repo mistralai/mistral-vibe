@@ -212,7 +212,13 @@ class SubagentController:
         policy_ceiling: ResolvedSubagentPolicyCeiling,
         limits: SubagentLimits | None = None,
         rejected_agent_types: Mapping[str, str] | None = None,
+        end_left_turns: str | None = None,
     ) -> SubagentController:
+        """``end_left_turns``: end the turns a stopped process left the
+        children running, as interrupted with that reason, instead of carrying
+        them on.
+        """
+
         def initialize_subagents(state: RuntimeStateV3) -> RuntimeStateV3:
             if isinstance(state.identity, SubagentSessionIdentity):
                 raise ValueError(
@@ -250,6 +256,8 @@ class SubagentController:
         runtime.configure_subagent_controller(controller)
         await controller._adopt_current_bindings()
         await controller._preflight_children()
+        if end_left_turns is not None:
+            await controller._end_left_child_turns(end_left_turns)
         await controller.deliver_pending_notifications()
         controller.start_watchers()
         return controller
@@ -515,7 +523,7 @@ class SubagentController:
             await self._graph_changed.wait_for(self._settled)
 
     async def interrupt_running_children(
-        self, reason: str
+        self, reason: str, *, turn_ids: frozenset[str] | None = None
     ) -> tuple[ChildInterruptResult, ...]:
         """Interrupt each child's running Turn on the host's behalf, and
         return one result per child that was running, in name order.
@@ -526,11 +534,14 @@ class SubagentController:
         as it ended, and reported as not running. A child whose interrupt
         raises is reported failed with the error and left running, with its
         receipt, and the others are still interrupted. Does not wait for the
-        children to settle.
+        children to settle. With ``turn_ids``, only the children running those
+        Turns are interrupted.
         """
         results: list[ChildInterruptResult] = []
         for agent_name, child in sorted(self._subagents().children.items()):
             if not isinstance(child.state, RunningChild):
+                continue
+            if turn_ids is not None and child.state.active.turn_id not in turn_ids:
                 continue
             operation_key = (
                 f"host-interrupt:{child.child_session_id}:"
@@ -564,6 +575,23 @@ class SubagentController:
                 )
             )
         return tuple(results)
+
+    async def _end_left_child_turns(self, reason: str) -> None:
+        # Preflight opened each running child without starting its execution.
+        for agent_name, child in sorted(self._subagents().children.items()):
+            if not isinstance(child.state, RunningChild):
+                continue
+            try:
+                await self._interrupt_on_host_behalf(
+                    agent_name,
+                    f"host-interrupt:{child.child_session_id}:"
+                    f"{child.state.active.generation}",
+                    reason,
+                )
+            except Exception:
+                logger.warning(
+                    "Could not end subagent %s's left turn", agent_name, exc_info=True
+                )
 
     async def _interrupt_on_host_behalf(
         self, agent_name: str, operation_key: str, reason: str
@@ -1453,7 +1481,8 @@ class SubagentController:
                 raise UnsafeSubagentRecovery(
                     "subagent_recovery_unsafe", "Interrupt target changed"
                 )
-            handle = await self._open_current_child(agent_name)
+            # A restored child's turn is ended, not carried on first.
+            handle = await self._open_current_child(agent_name, start_new_actions=False)
             if isinstance(receipt_state, PreparedReceipt):
                 admission = await self._child_host.interrupt_child(
                     handle, target=target, operation_key=operation_key, reason=reason
@@ -1893,14 +1922,21 @@ class SubagentController:
                 # integrations of, each subagent the Session ever had.
                 if not isinstance(child.state, RunningChild | DeletingRunningChild):
                     continue
-                opened.append(
-                    await self._open_child(
+                try:
+                    handle = await self._open_child(
                         child,
                         self._binding(child),
                         start_new_actions=False,
                         require_existing=True,
                     )
-                )
+                except Exception as exc:
+                    if isinstance(child.state, RunningChild):
+                        await self._skip_unrestorable_child(child, child.state, exc)
+                    else:
+                        # Its close, part of the parent's turn, settles it.
+                        _log_unrestorable_child(child, exc)
+                    continue
+                opened.append(handle)
         except BaseException as exc:
             if not isinstance(exc, asyncio.CancelledError):
                 add_subagent_recovery_failure(
@@ -1910,6 +1946,32 @@ class SubagentController:
             for handle in reversed(opened):
                 await self._child_host.unload_child(handle)
             raise
+
+    async def _skip_unrestorable_child(
+        self, child: ChildSessionRecord, running: RunningChild, error: Exception
+    ) -> None:
+        """Let the root resume without a child whose store cannot be reopened.
+
+        The store is left as it is. The parent model learns the Turn is lost
+        and can spawn a replacement.
+        """
+        _log_unrestorable_child(child, error)
+        await self._record_outcome(
+            child.agent_name,
+            FailedChildTurnOutcome(
+                generation=running.active.generation,
+                turn_id=running.active.turn_id,
+                completed_at_unix_ms=_now_milliseconds(),
+                failure=failure(
+                    CHILD_WATCH_FAILED,
+                    f"Subagent {child.agent_name} could not be restored after the"
+                    " restart, so its unfinished work is lost and it can no longer"
+                    " take messages. Spawn a new subagent to redo the work."
+                    f" Cause: {error}",
+                    retryable=False,
+                ),
+            ),
+        )
 
     @asynccontextmanager
     async def _send_locks(self, agent_name: str) -> AsyncIterator[None]:
@@ -1942,14 +2004,21 @@ class SubagentController:
             return None
 
     async def _open_current_child(
-        self, agent_name: str, *, require_existing: bool | None = None
+        self,
+        agent_name: str,
+        *,
+        require_existing: bool | None = None,
+        start_new_actions: bool = True,
     ) -> ChildSessionHandle:
         # Reconfiguration changes Host metadata as well as the parent record.
         # Keep both stable through opening, then release before waiting on a Turn.
         async with self._graph_lock:
             child = self._require_child(agent_name)
             return await self._open_child(
-                child, self._binding(child), require_existing=require_existing
+                child,
+                self._binding(child),
+                start_new_actions=start_new_actions,
+                require_existing=require_existing,
             )
 
     async def _open_child(
@@ -2175,6 +2244,14 @@ def _settle_children_for_restore(
     return state.model_copy(
         update={"children": children, "operation_receipts": receipts}, deep=True
     )
+
+
+def _log_unrestorable_child(child: ChildSessionRecord, error: Exception) -> None:
+    add_subagent_recovery_failure(
+        failure_code=getattr(error, "code", type(error).__name__),
+        phase="child_preflight_skipped",
+    )
+    logger.warning("Could not restore subagent %s", child.agent_name, exc_info=error)
 
 
 def _settle_child_for_restore(

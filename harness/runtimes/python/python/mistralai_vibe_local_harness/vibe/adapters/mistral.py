@@ -82,6 +82,14 @@ from mistralai_vibe_local_harness.vibe.completion_profile import (
     takes_reasoning_input,
 )
 
+# The Mistral API rejects a request whose messages hold more images than the
+# model allows. Its model cards do not give that limit, which is 8 on some
+# models, so every request keeps at most 8 images.
+_MAX_REQUEST_IMAGES = 8
+_DROPPED_IMAGE_TEXT = (
+    f"[Image removed: only the {_MAX_REQUEST_IMAGES} most recent images are sent]"
+)
+
 # Mistral's in-band signal that it aborted a generation part way.
 _ABORTED_FINISH_REASON = "error"
 # Retries run in call_with_retries, which announces each backoff before sleeping
@@ -141,10 +149,10 @@ async def execute_mistral_completion(
         )
         kwargs: dict[str, Any] = {
             "model": route.model,
-            "messages": [
+            "messages": _keep_recent_images([
                 _message_payload(message, replay_reasoning=replay_reasoning)
                 for message in messages
-            ],
+            ]),
             "temperature": route.temperature,
         }
         if (thinking := route.reasoning_setting(WireFormat.MISTRAL)) is not None:
@@ -565,6 +573,27 @@ def _message_payload(
             },
         )
     raise TypeError(f"Unsupported message type: {type(message).__name__}")
+
+
+def _keep_recent_images(
+    payloads: list[ChatCompletionStreamRequestMessageTypedDict],
+) -> list[ChatCompletionStreamRequestMessageTypedDict]:
+    """Replace every image before the `_MAX_REQUEST_IMAGES` most recent ones
+    with a text chunk, in place, so the request stays within the API's limit.
+    """
+    kept = 0
+    for payload in reversed(payloads):
+        content = payload.get("content")
+        if not isinstance(content, list):
+            continue
+        for index in range(len(content) - 1, -1, -1):
+            if cast(dict[str, Any], content[index]).get("type") != "image_url":
+                continue
+            if kept < _MAX_REQUEST_IMAGES:
+                kept += 1
+                continue
+            content[index] = cast(Any, {"type": "text", "text": _DROPPED_IMAGE_TEXT})
+    return payloads
 
 
 def _content(content: Sequence[Any]) -> str | list[dict[str, Any]]:

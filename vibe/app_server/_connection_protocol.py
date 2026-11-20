@@ -113,6 +113,8 @@ class ClientCapabilities(ProtocolModel):
     session_peer_restore: bool = False
     session_peer_mark_seen: bool = False
     agent_worktrees: bool = False
+    # The client follows a session's `/project` patch, so the agent may move it.
+    agent_projects: bool = False
     # Stream each child session's own events, so the client can keep a replica
     # of it as it does of the root.
     child_session_events: bool = False
@@ -124,9 +126,20 @@ class ClientCapabilities(ProtocolModel):
     )
 
 
+class ClientAccount(ProtocolModel):
+    """The account the client is signed in to, as opaque strings it reports."""
+
+    organization_id: str
+    workspace_id: str
+    user_id: str
+
+
 class InitializeParams(ProtocolModel):
     client_info: ClientInfo
     capabilities: ClientCapabilities = Field(default_factory=ClientCapabilities)
+    # With ``client_info.entrypoint``, the connection's owner: only the owner
+    # that last opened a session is offered a turn a stop left running in it.
+    account: ClientAccount | None = None
 
 
 class ServerInfo(ProtocolModel):
@@ -183,6 +196,10 @@ class ClientToolTerminalOutputResponse(ProtocolModel):
 class InitializeResponse(ProtocolModel):
     server_info: ServerInfo
     process_id: int | None = None
+    # Whether this connection uses the client's platform credentials. A client
+    # sends `platformCredentials/invalidated` only when this is true, or once
+    # the server asked it for a credential; older servers omit it.
+    platform_credentials: bool = False
 
 
 class PlatformCredentialsResolveParams(ProtocolModel):

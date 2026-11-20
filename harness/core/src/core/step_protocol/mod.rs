@@ -154,7 +154,7 @@ pub(crate) enum HarnessConfigurationChange {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum HarnessCommand {
     ApprovalCompleted {
         action_id: String,
@@ -178,6 +178,13 @@ pub(crate) enum HarnessCommand {
     },
     ContextMessage {
         content: Vec<ContentBlock>,
+    },
+    InstructionsUpsert {
+        key: String,
+        content: String,
+    },
+    InstructionsDelete {
+        key: String,
     },
     Notification {
         notification: Notification,
@@ -245,6 +252,8 @@ impl HarnessCommand {
             Self::UserMessage { .. } => "user_message",
             Self::AgentMessage { .. } => "agent_message",
             Self::ContextMessage { .. } => "context_message",
+            Self::InstructionsUpsert { .. } => "instructions_upsert",
+            Self::InstructionsDelete { .. } => "instructions_delete",
             Self::Notification { .. } => "notification",
             Self::Compact { .. } => "compact",
             Self::Reconfigure { .. } => "reconfigure",
@@ -281,6 +290,8 @@ impl HarnessCommand {
             Self::UserMessage { .. }
             | Self::AgentMessage { .. }
             | Self::ContextMessage { .. }
+            | Self::InstructionsUpsert { .. }
+            | Self::InstructionsDelete { .. }
             | Self::Notification { .. }
             | Self::Compact { .. }
             | Self::Reconfigure { .. }

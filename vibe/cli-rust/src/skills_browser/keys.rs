@@ -5,9 +5,9 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use super::list::Row;
-use super::page::{self, Property};
+use super::page;
 use super::picker::PickerRow;
-use super::{bodies, close, list, picker, Screen, State};
+use super::{bodies, close, files, list, picker, Screen, State};
 use crate::app::App;
 use crate::mouse::option_gesture;
 use crate::option_list::{Click, ClickRule, OptionList, SingleAction};
@@ -16,8 +16,11 @@ use crate::selection::{self, RegionId};
 use crate::server::Client;
 use crate::tab_bar;
 
-/// The open browser owns keys; a page and a picker ignore chords.
+/// The open browser owns keys: a pending deletion takes them first; a page and a picker ignore chords.
 pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+    if app.skills_browser.confirm.is_some() {
+        return confirm_key(app, client, key);
+    }
     match app.skills_browser.screen() {
         Screen::List => list_key(app, client, key),
         _ if chorded(&key) => {}
@@ -27,29 +30,54 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     bodies::sync(app, client);
 }
 
-/// The list: Esc first disarms a removal, then the search field; `d` arms a removal, Enter waits while it is armed, and any other key disarms it.
-fn list_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
-    let armed = app.skills_browser.removing.take();
-    if key.code == KeyCode::Esc && armed.is_some() {
+/// The deletion confirmation: ←→ or Tab move between Delete and Cancel, Enter does the focused one, Esc cancels.
+fn confirm_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+    let Some(confirm) = app.skills_browser.confirm.as_mut() else {
         return;
+    };
+    match key.code {
+        KeyCode::Esc => app.skills_browser.confirm = None,
+        KeyCode::Enter => files::confirm(app, client),
+        KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
+            confirm.delete_focused = !confirm.delete_focused;
+        }
+        _ => {}
     }
+}
+
+/// The keys every screen with a skill on it takes: switch, add, edit, remove, delete.
+fn skill_key(app: &mut App, client: &Arc<Client>, code: KeyCode) -> bool {
+    match code {
+        KeyCode::Char(' ') => files::toggle(app, client),
+        KeyCode::Char('a') => files::add(app, client),
+        KeyCode::Char('e') => files::edit(app),
+        KeyCode::Char('r') => files::remove(app, client),
+        KeyCode::Char('x') => files::ask_delete(app),
+        _ => return false,
+    }
+    true
+}
+
+/// The list: Esc leaves the search field first, then closes; the skill keys act on the highlighted row.
+fn list_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match search_field::handle_key(&mut app.skills_browser.search, &key) {
         Outcome::Consumed => return,
         Outcome::Filtered => return list::reset(&mut app.skills_browser),
         Outcome::Pass if chorded(&key) => return,
         Outcome::Pass => {}
     }
+    if skill_key(app, client, key.code) {
+        return;
+    }
     let state = &mut app.skills_browser;
     match key.code {
         KeyCode::Esc => close(app),
-        KeyCode::Enter if armed.is_some() => state.removing = armed,
         KeyCode::Enter => {
             state.search.focused = false;
             list::activate(app, client);
         }
-        KeyCode::Char(' ') => list::toggle(app, client),
-        KeyCode::Char('d') => list::remove(app, client, armed),
-        KeyCode::Tab | KeyCode::BackTab => {
+        KeyCode::Char('n') => files::create(app),
+        KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right => {
             let other = state.tab.other();
             list::open_tab(state, other);
         }
@@ -57,22 +85,35 @@ fn list_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     }
 }
 
-/// A page has no search: Esc disarms Remove or steps back, Space only switches from Enabled, pages scroll the body.
+/// A page has no search: Esc steps back, Enter acts on the highlighted scope, the skill keys on the page's skill, pages scroll the body; a page with at most one row scrolls the body with the arrows too.
 fn page_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
+    if skill_key(app, client, key.code) {
+        return;
+    }
     let state = &mut app.skills_browser;
-    let armed = state.removing.take();
     let Some(page) = state.page.as_ref() else {
         return;
     };
     let selected = page.list.selected();
-    let on_enabled = page.rows.get(selected) == Some(&Property::Enabled);
+    let movable = page::movable(state, page);
     match key.code {
-        KeyCode::Esc if armed.is_some() => {}
         KeyCode::Esc => page::back(app),
-        KeyCode::Enter => page::activate(app, client, selected, armed),
-        KeyCode::Char(' ') if on_enabled => page::activate(app, client, selected, None),
+        KeyCode::Enter => page::activate(app, client, selected),
         KeyCode::PageUp | KeyCode::PageDown => state.pane.page(key.code == KeyCode::PageDown),
+        code if !movable => scroll_body(state, code),
         code => navigate(state, code),
+    }
+}
+
+/// The arrows and j/k scroll the body a line, Home and End to its ends.
+fn scroll_body(state: &mut State, code: KeyCode) {
+    let pane = &mut state.pane;
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => pane.scroll_by(false, 1),
+        KeyCode::Down | KeyCode::Char('j') => pane.scroll_by(true, 1),
+        KeyCode::Home => pane.scroll_to(0),
+        KeyCode::End => pane.scroll_to(usize::MAX),
+        _ => {}
     }
 }
 
@@ -140,9 +181,9 @@ fn step<R: ClickRule>(
     }
 }
 
-/// The list follows its click rule; a click on a page or picker row acts at once, but only Enter confirms a removal, and the second press of a double-click that opened a screen lands nowhere.
+/// The list follows its click rule; a click on a page or picker row acts at once, a pending deletion ignores the mouse, and the second press of a double-click that opened a screen lands nowhere.
 pub fn mouse(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
-    if dropped(&mut app.skills_browser, &event) {
+    if app.skills_browser.confirm.is_some() || dropped(&mut app.skills_browser, &event) {
         return;
     }
     let place = |state: &State| (state.screen().kind(), state.opening.is_some());
@@ -151,8 +192,7 @@ pub fn mouse(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
         Screen::List => list_mouse(app, client, event),
         Screen::Page(_) => {
             if let Some(index) = option_gesture(app, event, RegionId::BottomApp, detail_list) {
-                app.skills_browser.removing = None;
-                page::activate(app, client, index, None);
+                page::activate(app, client, index);
             }
         }
         Screen::Picker(..) => {
@@ -185,12 +225,11 @@ fn dropped(state: &mut State, event: &MouseEvent) -> bool {
     }
 }
 
-/// A press on a tab opens it, one on the search field focuses it; any press on the field or a row disarms a removal.
+/// A press on a tab opens it, one on the search field focuses it.
 fn list_mouse(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
     let at = (event.column, event.row);
     if let Some(tab) = tab_bar::pressed(&app.skills_browser.tab_areas, &event) {
         let state = &mut app.skills_browser;
-        state.removing = None;
         if tab != state.tab {
             list::open_tab(state, tab);
         }
@@ -202,9 +241,6 @@ fn list_mouse(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
     let state = &mut app.skills_browser;
     let on_option = state.list.index_at(at).is_some();
     let press = search_field::press(&mut state.search, &event, true, on_option);
-    if press != Press::Other {
-        state.removing = None;
-    }
     if press == Press::Field {
         return;
     }

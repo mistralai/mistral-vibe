@@ -1,10 +1,10 @@
 //! The onboarding welcome screen: typewriter banner with a gradient
-//! highlight, in a rounded box. No petit chat.
+//! highlight, in a square box. No petit chat.
 
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Text;
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use crate::hints;
@@ -14,7 +14,7 @@ use crate::ui::{hint_line, theme};
 const HIGHLIGHT_START: usize = 11;
 const HIGHLIGHT_END: usize = 23;
 
-/// Round border, padding 1 3, centered text, `Enter continue` hint.
+/// Square border, padding 1 3, centered text, `Enter continue` hint.
 pub(super) fn draw(wizard: &mut OnboardingState, f: &mut Frame, area: Rect) {
     let text = &WELCOME_TEXT[..wizard.welcome_char_index.min(WELCOME_TEXT.len())];
     // The box is text plus border and padding; narrow terminals clip it.
@@ -38,7 +38,6 @@ pub(super) fn draw(wizard: &mut OnboardingState, f: &mut Frame, area: Rect) {
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme::muted())),
         box_area,
     );
@@ -65,7 +64,7 @@ pub(super) fn draw(wizard: &mut OnboardingState, f: &mut Frame, area: Rect) {
     }
     let keys = [(hints::key::ENTER, hints::action::CONTINUE)];
     let hx = box_x + box_w.saturating_sub(hints::width(&keys)) / 2;
-    hint_line::draw_clipped(f, hx, box_y + 7, box_x + box_w - hx, &keys);
+    hint_line::draw(f, Rect::new(hx, box_y + 7, box_x + box_w - hx, 1), &keys);
 }
 
 fn render_welcome_text<'a>(text: &'a str, char_index: usize) -> Text<'a> {

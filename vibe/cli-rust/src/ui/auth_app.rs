@@ -64,7 +64,8 @@ pub fn draw(
     target: crate::mouse::MouseTarget,
 ) -> Rect {
     let detail = detail_lines(&view.detail, area.width);
-    let height = box_height(view.rows.len(), detail.len());
+    let help = help_lines(&view.help, area.width.saturating_sub(4) as usize);
+    let height = box_height(view.rows.len(), detail.len()) + help.len().saturating_sub(1) as u16;
     let mut options = Rect::default();
     let kind = if target == crate::mouse::MouseTarget::McpOAuth {
         super::bottom_app::Kind::McpOAuth
@@ -73,7 +74,7 @@ pub fn draw(
     };
     super::bottom_app::draw(app, f, area, height, kind, |app, f, area| {
         let list_area;
-        (list_area, options) = draw_box(f, area, view, &detail);
+        (list_area, options) = draw_box(f, area, view, &detail, &help);
         crate::mouse::register_region(app, list_area, target);
     });
     options
@@ -105,6 +106,43 @@ fn detail_lines(detail: &[Span], width: u16) -> Vec<Vec<Span>> {
         .collect()
 }
 
+/// The help line wrapped to `width`: breaks fall only after the status or between `key action` pairs, two spaces apart.
+fn help_lines(help: &[Span], width: usize) -> Vec<Vec<Span>> {
+    let mut units: Vec<Vec<Span>> = vec![Vec::new()];
+    for span in help {
+        match span {
+            (_, true) => units.push(vec![span.clone()]),
+            (text, false) if text == "  " => {}
+            _ => units
+                .last_mut()
+                .into_iter()
+                .for_each(|unit| unit.push(span.clone())),
+        }
+    }
+    let wide = |unit: &[Span]| -> usize { unit.iter().map(|(text, _)| text.chars().count()).sum() };
+    let mut lines: Vec<Vec<Span>> = Vec::new();
+    let (mut used, mut after_pair) = (0, false);
+    for unit in units.into_iter().filter(|unit| !unit.is_empty()) {
+        let paired = unit.first().is_some_and(|(_, key)| *key);
+        let gap = if used > 0 && after_pair { 2 } else { 0 };
+        after_pair = paired;
+        match lines.last_mut() {
+            Some(line) if used + gap + wide(&unit) <= width || used == 0 => {
+                if gap > 0 {
+                    line.push(("  ".to_owned(), false));
+                }
+                used += gap + wide(&unit);
+                line.extend(unit);
+            }
+            _ => {
+                used = wide(&unit);
+                lines.push(unit);
+            }
+        }
+    }
+    lines
+}
+
 /// Wrap one logical line, keeping the span a fragment came from.
 fn fold(line: Vec<Span>, width: usize) -> Vec<Vec<Span>> {
     let text: String = line.iter().map(|(text, _)| text.as_str()).collect();
@@ -132,7 +170,13 @@ pub fn option_lines(rows: &[Row]) -> Vec<Option<usize>> {
 }
 
 /// Returns the mouse capture rect (inside the border) and the option-bar rect.
-fn draw_box(f: &mut Frame, area: Rect, view: &View, detail: &[Vec<Span>]) -> (Rect, Rect) {
+fn draw_box(
+    f: &mut Frame,
+    area: Rect,
+    view: &View,
+    detail: &[Vec<Span>],
+    help: &[Vec<Span>],
+) -> (Rect, Rect) {
     if area.height < 5 {
         return (Rect::default(), Rect::default());
     }
@@ -173,13 +217,10 @@ fn draw_box(f: &mut Frame, area: Rect, view: &View, detail: &[Vec<Span>]) -> (Re
         draw_spans(f, area.x + 2, y, line, base_style());
         y += 1;
     }
-    draw_spans(
-        f,
-        area.x + 2,
-        y + 1,
-        &view.help,
-        theme::muted_style().bg(theme::background()),
-    );
+    let muted = theme::muted_style().bg(theme::background());
+    for (row, line) in (y + 1..).zip(help) {
+        draw_spans(f, area.x + 2, row, line, muted);
+    }
     let rows = view.rows.len() as u16;
     (
         Rect::new(area.x + 1, top, area.width.saturating_sub(2), rows),

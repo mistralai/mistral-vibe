@@ -22,6 +22,7 @@ permission rule reads.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
@@ -37,6 +38,11 @@ from mistralai_vibe_local_harness.protocol import RustRuntimeBuiltinToolName
 from mistralai_vibe_local_harness.vibe import PathSpace, sandbox_path
 from mistralai_vibe_local_harness.vibe._permissions import PermissionOutcome
 from vibe.app_server._cron import CRON_TOOL_NAME
+from vibe.app_server._project_moves import (
+    LIST_PROJECTS_TOOL_NAME,
+    MOVE_TO_PROJECT_TOOL_NAME,
+    move_skips_approval,
+)
 from vibe.app_server._session_peers import (
     LIST_SESSIONS_TOOL_NAME,
     MARK_SESSIONS_SEEN_TOOL_NAME,
@@ -73,11 +79,12 @@ from vibe.permissions import OutsideWorkdirPolicy, RequiredPermission
 _SHELL_TOOL_SOURCES = frozenset({"bash", "powershell", "git_bash"})
 """The shell tools: everything a foreground shell call and a background start do."""
 
-# Cron only schedules this session's own prompts, listing or reading sessions
-# changes nothing, and marking sessions seen only clears their unread mark, so
-# none of them asks by default.
+# Cron only schedules this session's own prompts, listing sessions or projects
+# or reading sessions changes nothing, and marking sessions seen only clears
+# their unread mark, so none of them asks by default.
 _ALLOWED_BY_DEFAULT = frozenset({
     CRON_TOOL_NAME,
+    LIST_PROJECTS_TOOL_NAME,
     LIST_SESSIONS_TOOL_NAME,
     MARK_SESSIONS_SEEN_TOOL_NAME,
     READ_SESSION_TOOL_NAME,
@@ -504,7 +511,19 @@ class UnifiedPermissionResolver:
         if builtin not in RUST_BUILTIN_TOOL_SOURCES:
             # The Runtime reserves the builtin namespaces for itself, so a name that is
             # not a builtin is a provided tool's ``group.tool`` route and nothing else.
-            return self._resolve_provided_tool(builtin)
+            outcome = self._resolve_provided_tool(builtin)
+            name = self._provided_names.resolve(builtin)
+            if (
+                outcome.decision == "ask"
+                and name == MOVE_TO_PROJECT_TOOL_NAME
+                # A configured `ask` asks even for a trusted folder.
+                and "permission" not in self._config.config.tools.get(name, {})
+                and await asyncio.to_thread(
+                    move_skips_approval, arguments.get("project_id")
+                )
+            ):
+                return PermissionOutcome(decision="allow")
+            return outcome
         if builtin in _PROCESS_UNGATED_BUILTINS:
             # Reads observe and a stop revokes a process this session started
             # under the start gate; see _PROCESS_UNGATED_BUILTINS.
@@ -817,6 +836,10 @@ class UnifiedPermissionResolver:
         """Record what the user approved, scoped the way legacy scopes it."""
         if builtin not in RUST_BUILTIN_TOOL_SOURCES:
             name = self._provided_names.resolve(builtin)
+            if name == MOVE_TO_PROJECT_TOOL_NAME and not required_permissions:
+                # Approving one untrusted folder must not approve them all: the
+                # answer releases this move only.
+                return
             if required_permissions:
                 for rp in required_permissions:
                     self._store.add_rule(

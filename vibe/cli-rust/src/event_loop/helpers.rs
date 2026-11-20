@@ -119,6 +119,7 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             app.set_status(Status::Ready);
             // The interrupted retry never started, so no later turn inherits its interrupt.
             app.queue.interrupt_on_start = None;
+            crate::rewind::give_up_take_back(app);
             local::add_command_error(&mut app.view.transcript, &id, &error);
             // The rows the failed attempt left survive; re-offer /retry.
             crate::commands::retry::offer(app, None, Some(id));
@@ -191,6 +192,7 @@ pub(super) fn redraw_frame(
         crate::usage_gauge::follow_model(app, client);
     }
     completion_manager::sync_files(app);
+    crate::rail::prune(app);
     let mounting = app
         .view
         .transcript_cache

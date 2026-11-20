@@ -3,11 +3,12 @@
 use serde_json::{json, Value};
 use vibe_rs::server::{
     method, notification, AgentSafety, AgentSummary, AgentSwitchParams, AgentType,
-    ApprovalCallback, ContentBlock, FeedbackAction, FeedbackRecordParams, FeedbackShouldShowParams,
-    FeedbackShouldShowResponse, HistoryEntry, Incoming, InitializeParams, MCPSourceKind,
-    MCPSourceStatus, MCPState, Request, SessionStartParams, SessionStartResponse,
-    TelemetryRecordParams, TurnEnqueueParams, TurnInputEntry, UserAnswer, UserQuestionRequest,
-    UserQuestionResult, WorkspaceTrustDetails, WorkspaceTrustStatusResponse, HISTORY_LIMIT,
+    ApprovalCallback, ApprovalPolicySummary, ApprovalPolicySwitchParams, ContentBlock,
+    FeedbackAction, FeedbackRecordParams, FeedbackShouldShowParams, FeedbackShouldShowResponse,
+    HistoryEntry, Incoming, InitializeParams, MCPSourceKind, MCPSourceStatus, MCPState, Request,
+    SessionStartParams, SessionStartResponse, TelemetryRecordParams, TurnEnqueueParams,
+    TurnInputEntry, UserAnswer, UserQuestionRequest, UserQuestionResult, WorkspaceTrustDetails,
+    WorkspaceTrustStatusResponse, HISTORY_LIMIT,
 };
 
 #[test]
@@ -18,6 +19,10 @@ fn method_names_pin_the_wire_contract() {
     assert_eq!(method::TURN_INTERRUPT, "turn/interrupt");
     assert_eq!(method::CALLBACK_RESULT, "callback/result");
     assert_eq!(method::SESSION_AGENT_UPDATE, "session/agent/update");
+    assert_eq!(
+        method::SESSION_APPROVAL_POLICY_UPDATE,
+        "session/approvalPolicy/update"
+    );
     assert_eq!(method::MCP_READ, "mcp_catalog/read");
     assert_eq!(notification::HISTORY_ENTRY_ADDED, "history/entryAdded");
     assert_eq!(notification::HISTORY_ENTRY_UPDATED, "history/entryUpdated");
@@ -158,6 +163,16 @@ fn agent_switch_params_serialize_camel_case() {
 }
 
 #[test]
+fn approval_policy_switch_params_serialize_camel_case() {
+    let params = ApprovalPolicySwitchParams {
+        session_id: "s".into(),
+        approval_policy: "ask".into(),
+    };
+    let value: Value = serde_json::to_value(&params).unwrap();
+    assert_eq!(value, json!({"sessionId": "s", "approvalPolicy": "ask"}));
+}
+
+#[test]
 fn session_state_parses_with_missing_optional_fields_and_extras() {
     let response: SessionStartResponse = serde_json::from_value(json!({
         "state": {
@@ -231,28 +246,37 @@ fn agent_summaries_default_and_tolerate_unknown_enums() {
         serde_json::from_value(json!({"name": "code", "displayName": "Code"})).unwrap();
     assert_eq!(summary.name, "code");
     assert_eq!(summary.display_name, "Code");
-    assert_eq!(summary.safety, AgentSafety::Neutral);
     assert_eq!(summary.agent_type, AgentType::Agent);
 
     let future: AgentSummary = serde_json::from_value(json!({
         "name": "x", "safety": "galactic", "agentType": "holo", "extra": true
     }))
     .unwrap();
-    assert_eq!(future.safety, AgentSafety::Neutral);
     assert_eq!(future.agent_type, AgentType::Other);
 
     let known: AgentSummary = serde_json::from_value(json!({
         "name": "x", "safety": "yolo", "agentType": "subagent"
     }))
     .unwrap();
-    assert_eq!(known.safety, AgentSafety::Yolo);
     assert_eq!(known.agent_type, AgentType::Subagent);
+}
 
-    let smart: AgentSummary = serde_json::from_value(json!({
-        "name": "smart-approve", "safety": "smart"
-    }))
-    .unwrap();
-    assert_eq!(smart.safety, AgentSafety::Smart);
+#[test]
+fn approval_policy_summaries_default_and_tolerate_unknown_safety() {
+    let policy: ApprovalPolicySummary =
+        serde_json::from_value(json!({"name": "ask", "displayName": "Ask"})).unwrap();
+    assert_eq!(policy.display_name, "Ask");
+    assert_eq!(policy.safety, AgentSafety::Neutral);
+
+    let future: ApprovalPolicySummary =
+        serde_json::from_value(json!({"name": "x", "safety": "galactic", "extra": true})).unwrap();
+    assert_eq!(future.safety, AgentSafety::Neutral);
+
+    for (wire, safety) in [("yolo", AgentSafety::Yolo), ("smart", AgentSafety::Smart)] {
+        let known: ApprovalPolicySummary =
+            serde_json::from_value(json!({"name": "x", "safety": wire})).unwrap();
+        assert_eq!(known.safety, safety);
+    }
 }
 
 #[test]

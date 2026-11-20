@@ -45,8 +45,8 @@ pub fn style(base: Style, found: bool) -> Style {
     }
 }
 
-/// The line that replaces the working directory while searching.
-pub fn line(app: &App) -> Option<Line<'static>> {
+/// The line that replaces the working directory while searching; its hints stay on it while they fit the `width`.
+pub fn line(app: &App, width: u16) -> Option<Line<'static>> {
     let status = app.reverse_search.as_ref()?.status;
     let mut spans = vec![
         Span::styled(PROMPT, theme::muted_style()),
@@ -54,6 +54,7 @@ pub fn line(app: &App) -> Option<Line<'static>> {
     ];
     match status {
         Status::Idle => {}
+        Status::Match if hints_below(app, width) => {}
         Status::Match => {
             spans.push(Span::raw("  "));
             spans.extend(hint_line::spans(HINTS));
@@ -64,6 +65,33 @@ pub fn line(app: &App) -> Option<Line<'static>> {
         }
     }
     Some(Line::from(spans))
+}
+
+/// Whether the match hints wrap under the search line instead of following the query.
+fn hints_below(app: &App, width: u16) -> bool {
+    let searching = app.quit.active().is_none()
+        && app
+            .reverse_search
+            .as_ref()
+            .is_some_and(|search| search.status == Status::Match);
+    let query = shown_query(app).unwrap_or_default();
+    let line = Line::from(format!("{PROMPT}{query}  ")).width() as u16;
+    searching && line + crate::hints::width(HINTS) > width
+}
+
+/// The rows the bottom bar takes: its line, plus the match hints wrapped under it when they do not fit beside the query.
+pub fn height(app: &App, width: u16) -> u16 {
+    match hints_below(app, width) {
+        true => 1 + hint_line::height(HINTS, width),
+        false => 1,
+    }
+}
+
+/// The match hints under the search line, when they do not fit beside the query.
+pub fn draw_hints(app: &App, f: &mut Frame, area: Rect) {
+    if hints_below(app, area.width) {
+        hint_line::draw(f, area, HINTS);
+    }
 }
 
 /// Draw the caret right after the query and park the terminal cursor on it.

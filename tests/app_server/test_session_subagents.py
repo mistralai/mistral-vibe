@@ -62,7 +62,7 @@ from vibe.app_server.transport import (
     StdioJsonRpcTransport,
     memory_transport_pair,
 )
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 from vibe.core.config.models import ModelConfig
 from vibe.utils.pricing import session_token_cost
 
@@ -204,7 +204,7 @@ async def _start(client: _Client, project: Path, *, headless: bool = True) -> _S
         {
             "agentConfig": {
                 "cwd": str(project),
-                "agent": BuiltinAgentName.AUTO_APPROVE.value,
+                "approvalPolicy": ApprovalPolicyName.AUTO_APPROVE.value,
                 "trustWorkspace": True,
                 "headless": headless,
             }
@@ -453,7 +453,9 @@ async def test_cached_tokens_reach_the_stats_and_the_subagent_and_are_priced(
     assert stats.session_cached_tokens > 0
     assert stats.session_cached_tokens == token_usage["cachedInputTokens"]
     assert stats.session_prompt_tokens == token_usage["inputTokens"]
-    assert stats.last_turn_cached_tokens == stats.session_cached_tokens
+    # Each model call commits its own snapshot, so the last-turn figures are the last call's.
+    assert stats.session_cached_tokens == 2 * usage.cached_input_tokens
+    assert stats.last_turn_cached_tokens == usage.cached_input_tokens
     [subagent] = read["subagents"]
     assert subagent["usage"] == {
         "inputTokens": 1_000,
@@ -626,7 +628,7 @@ async def test_a_client_tool_a_subagent_calls_names_the_subagent(
     options = LocalHarnessOptions(
         session_options=SessionOptions(
             cwd=str(project),
-            agent=BuiltinAgentName.AUTO_APPROVE,
+            approval_policy=ApprovalPolicyName.AUTO_APPROVE,
             trust_workspace=True,
             headless=True,
         ),

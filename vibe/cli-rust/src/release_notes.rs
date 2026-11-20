@@ -6,6 +6,7 @@ use ratatui::text::Line;
 
 use crate::app::App;
 use crate::search_field::{self, Outcome, Search};
+use crate::ui::markdown::{self, Link, LinkKind, LinkedLines};
 use crate::whats_new::{self, Entry};
 
 /// The full changelog in the public repository, every entry beyond the in-app highlights.
@@ -25,24 +26,45 @@ pub struct State {
     pub total: usize,
     /// The full-changelog link from the last render, for clicks.
     pub link_area: Rect,
+    /// The notes' own links on screen from the last render, for clicks.
+    pub links: Vec<Link>,
     entries: Vec<Entry>,
     /// The body rendered for `(query, width)`, reused until either changes.
-    rendered: Option<(String, u16, Vec<Line<'static>>)>,
+    rendered: Option<(String, u16, LinkedLines)>,
 }
 
 impl State {
     /// The body lines for the current query at `width`, rendered once per change.
     pub fn lines(&mut self, width: u16) -> &[Line<'static>] {
+        self.linked(width).lines()
+    }
+
+    /// [`Self::lines`] with the links painted on them.
+    pub fn linked(&mut self, width: u16) -> &LinkedLines {
         let query = self.search.query.trim().to_owned();
-        let stale = !matches!(&self.rendered, Some((q, w, _)) if *q == query && *w == width);
-        if stale {
-            let text = whats_new::release_notes(&self.entries, &query);
-            let mut lines = crate::ui::markdown::command_result(&text, width);
-            let leading = lines.iter().take_while(|line| line.width() == 0).count();
-            lines.drain(..leading);
-            self.rendered = Some((query, width, lines));
-        }
-        self.rendered.as_ref().map_or(&[], |(_, _, lines)| lines)
+        let rendered = match self.rendered.take() {
+            Some(rendered) if rendered.0 == query && rendered.1 == width => rendered,
+            _ => {
+                let text = whats_new::release_notes(&self.entries, &query);
+                let mut linked = markdown::command_result_linked(&text, width);
+                let leading = linked
+                    .lines()
+                    .iter()
+                    .take_while(|line| line.width() == 0)
+                    .count();
+                linked.retain(|index, _| index >= leading);
+                (query, width, linked)
+            }
+        };
+        &self.rendered.insert(rendered).2
+    }
+
+    /// The external link of the notes painted at `at`, if any.
+    pub fn link_at(&self, at: (u16, u16)) -> Option<&str> {
+        self.links
+            .iter()
+            .find(|link| link.kind() == LinkKind::External && link.contains(at))
+            .map(Link::target)
     }
 
     fn max_scroll(&self) -> usize {
@@ -111,15 +133,17 @@ pub fn wheel(app: &mut App, down: bool) {
     app.release_notes.scroll_by(if down { step } else { -step });
 }
 
-/// A press on the search field focuses it, one on the full-changelog link opens it.
+/// A press on the search field focuses it, one on the full-changelog link or a link in the notes opens it.
 pub fn mouse(app: &mut App, event: MouseEvent) {
     if event.kind != MouseEventKind::Down(MouseButton::Left) {
         return;
     }
-    let at = (event.column, event.row).into();
+    let at = (event.column, event.row);
     let state = &mut app.release_notes;
-    state.search.focused = state.search.area.contains(at);
-    if state.link_area.contains(at) {
+    state.search.focused = state.search.area.contains(at.into());
+    if state.link_area.contains(at.into()) {
         crate::external_url::open(FULL_CHANGELOG_URL);
+    } else if let Some(url) = state.link_at(at) {
+        crate::external_url::open(url);
     }
 }

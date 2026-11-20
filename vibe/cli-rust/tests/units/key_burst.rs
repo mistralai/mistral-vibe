@@ -166,3 +166,18 @@ fn shortcuts_are_never_absorbed() {
     assert_eq!(out, vec![ctrl_c]);
     assert_eq!(bursts.deadline(), None);
 }
+
+#[test]
+fn finish_flushes_held_keys_without_waiting_for_the_deadline() {
+    let now = Instant::now();
+    let mut bursts = KeyBurst::default();
+
+    let mut out = bursts.push(windows_paste("abc"), now);
+    out.extend(bursts.finish());
+    assert_eq!(out, vec![Event::Paste("abc".into())]);
+
+    let mut out = bursts.push(vec![press(code('a'))], now);
+    out.extend(bursts.finish());
+    assert_eq!(out, vec![press(code('a'))]);
+    assert_eq!(bursts.deadline(), None);
+}

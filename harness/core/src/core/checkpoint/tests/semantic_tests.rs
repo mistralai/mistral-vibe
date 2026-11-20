@@ -1,7 +1,8 @@
-use serde_json::json;
+use serde_json::{Value, json};
 
 use super::cases::*;
 use crate::core::checkpoint::{Checkpoint, decode_checkpoint};
+use crate::core::pending_input::PendingEntry;
 use crate::core::testing::config;
 use crate::core::{Message, StoredMessage, TurnState};
 
@@ -27,11 +28,11 @@ fn checkpoint_serializes_as_a_flat_v1_document() {
     assert_eq!(decode_checkpoint(&encoded.to_string()).unwrap(), checkpoint);
 }
 
-/// *Prepare*: Encode pending user steering and a model-ready notification while a pre-LLM hook is active.
+/// *Prepare*: Encode an earlier capture that keeps steering on the Turn and a model-ready notification that recorded no steering before it.
 /// *Do*: Decode and restore the checkpoint through the V1 conversion model, then capture it again.
-/// *Assert*: Steering order, delivery readiness, notification identity, and wire data are unchanged.
+/// *Assert*: The notification comes before the steering in one queue, readiness and identities are kept, and capture writes the queue.
 #[test]
-fn pending_steering_and_ready_notifications_restore_without_semantic_loss() {
+fn earlier_pending_steering_and_ready_notifications_restore_into_one_queue() {
     // Prepare
     let mut checkpoint = checkpoint_with_turn(json!({
         "type": "active",
@@ -66,6 +67,7 @@ fn pending_steering_and_ready_notifications_restore_without_semantic_loss() {
     checkpoint["notifications"] = json!([
         {
             "type": "ready",
+            "preceding_steers": 0,
             "notification": {
                 "id": "notification-ready",
                 "source": {
@@ -91,19 +93,77 @@ fn pending_steering_and_ready_notifications_restore_without_semantic_loss() {
     let TurnState::Active(active) = &restored.turn else {
         panic!("expected active checkpoint");
     };
-    assert_eq!(
-        active.pending_steer,
-        vec![StoredMessage::visible(Message::user_text(
-            "steer after the hook"
-        ))]
-    );
     assert!(active.model_input_ready);
-    assert!(restored.notifications.ready_for_model());
-    let notifications = restored.notifications.pending().collect::<Vec<_>>();
-    assert_eq!(notifications.len(), 1);
-    assert_eq!(notifications[0].id, "notification-ready");
-    checkpoint["notifications"][0]["preceding_steers"] = json!(1);
+    let PendingEntry::Notification(notification) = &restored.pending_input.entries()[0] else {
+        panic!("expected notification before steering");
+    };
+    assert_eq!(notification.id, "notification-ready");
+    assert_eq!(
+        restored.pending_input.entries()[1],
+        PendingEntry::Steering(StoredMessage::visible(Message::user_text(
+            "steer after the hook"
+        )))
+    );
+    assert_eq!(restored.pending_input.entries().len(), 2);
+    let steering = checkpoint["turn"]["pending_steer"].take();
+    checkpoint["turn"]["pending_steer"] = json!([]);
+    let notifications = checkpoint["notifications"].as_array_mut().unwrap();
+    let ready = notifications.remove(0);
+    checkpoint["pending_input"] = json!([
+        { "type": "notification", "notification": ready["notification"] },
+        { "type": "steering", "message": steering[0] }
+    ]);
     assert_eq!(recaptured, checkpoint);
+}
+
+/// *Prepare*: Start a Turn, so Core waits for the model and holds no pending input.
+/// *Do*: Capture a checkpoint and decode it with the field set of a Core that requires `pending_steer`.
+/// *Assert*: Capture writes an empty `pending_steer` and no `pending_input`, so that Core can read it.
+#[test]
+fn active_turn_without_pending_input_stays_readable_by_cores_that_require_pending_steer() {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct RequiredPendingSteerCheckpoint {
+        checkpoint_version: u8,
+        context: Value,
+        compaction_count: u64,
+        last_reported_context_tokens: Option<u64>,
+        estimate_correction: Option<f64>,
+        rebuilt_since_reply: Option<bool>,
+        turn: RequiredPendingSteerActiveTurn,
+        last_finished_turn_id: Option<String>,
+        notifications: Value,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+    #[allow(dead_code)]
+    enum RequiredPendingSteerActiveTurn {
+        Active {
+            turn_id: String,
+            iterations: u32,
+            phase: Value,
+            queued: Value,
+            pending_steer: Vec<Value>,
+            model_input_ready: bool,
+            output_limit_retries: Option<u32>,
+        },
+    }
+
+    // Prepare
+    let state = crate::core::testing::started();
+    assert!(state.active().is_some());
+
+    // Do
+    let encoded = serde_json::to_value(Checkpoint::capture(&state).unwrap()).unwrap();
+    let decoded = serde_json::from_value::<RequiredPendingSteerCheckpoint>(encoded.clone());
+
+    // Assert
+    assert_eq!(encoded["turn"]["pending_steer"], json!([]));
+    assert!(encoded.get("pending_input").is_none());
+    let RequiredPendingSteerActiveTurn::Active { pending_steer, .. } = decoded.unwrap().turn;
+    assert!(pending_steer.is_empty());
 }
 
 /// *Prepare*: An older checkpoint whose context messages carry no Turn index.

@@ -6,13 +6,11 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_millis(500);
-const MAX_RESPONSE_BYTES: usize = 256;
+const MAX_RESPONSE_BYTES: usize = 512;
 
 /// Multiplexers may not forward terminal queries or their replies.
 pub fn in_multiplexer() -> bool {
-    ["TMUX", "STY", "ZELLIJ"]
-        .iter()
-        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()))
+    crate::terminal_detect::multiplexer(&crate::terminal_detect::Env).is_some()
 }
 
 pub fn open() -> Option<File> {

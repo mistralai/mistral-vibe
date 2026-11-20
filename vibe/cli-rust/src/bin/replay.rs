@@ -17,6 +17,7 @@ const TURN_ENQUEUE: &str = "session/turn/enqueue";
 const TURN_START: &str = "turn/start";
 const TURN_QUEUE_REPLACE: &str = "session/turn/queue/replace";
 const AGENT_UPDATE: &str = "session/agent/update";
+const APPROVAL_POLICY_UPDATE: &str = "session/approvalPolicy/update";
 const SHELL_COMMAND: &str = "session/shellCommand";
 const SESSION_RESUME: &str = "session/resume";
 const SESSION_START: &str = "session/start";
@@ -170,19 +171,24 @@ fn resume_response(handshake: &Map<String, Value>, params: Option<&Value>) -> Op
     }
 }
 
-/// Answer an agent switch from the stored runtime: the requested agent becomes
-/// the active one, and `adopt_runtime` keeps it for later reads, so a scenario
-/// can cycle through every agent like the real server.
-fn agent_update_response(handshake: &Map<String, Value>, params: Option<&Value>) -> Option<Value> {
-    let name = params?.get("agentName")?.as_str()?;
+/// Answer an agent or approval policy switch from the stored runtime: the
+/// requested entry of `list` becomes `active`, and `adopt_runtime` keeps it for
+/// later reads, so a scenario can cycle through every entry like the real server.
+fn switch_response(
+    handshake: &Map<String, Value>,
+    name: Option<&Value>,
+    list: &str,
+    active: &str,
+) -> Option<Value> {
+    let name = name?.as_str()?;
     let mut runtime = handshake.get("runtime/read")?.get("runtime")?.clone();
-    let agent = runtime
-        .get("agents")?
+    let entry = runtime
+        .get(list)?
         .as_array()?
         .iter()
-        .find(|agent| agent.get("name").and_then(Value::as_str) == Some(name))?
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some(name))?
         .clone();
-    runtime["activeAgent"] = agent;
+    runtime[active] = entry;
     Some(json!({ "runtime": runtime }))
 }
 
@@ -571,7 +577,18 @@ fn main() {
             }
         }
         let response = match method {
-            AGENT_UPDATE => agent_update_response(&handshake, msg.get("params")),
+            AGENT_UPDATE => switch_response(
+                &handshake,
+                msg.pointer("/params/agentName"),
+                "agents",
+                "activeAgent",
+            ),
+            APPROVAL_POLICY_UPDATE => switch_response(
+                &handshake,
+                msg.pointer("/params/approvalPolicy"),
+                "approvalPolicies",
+                "activeApprovalPolicy",
+            ),
             SESSION_RESUME => resume_response(&handshake, msg.get("params")),
             // Session-scoped pins win, then the shared (list-consuming) canned answers.
             _ => {

@@ -12,7 +12,7 @@ from tests.stubs.local_sandbox import build_trusted_project
 from vibe.app_server._skill_shadows import ShadowWarnings
 from vibe.app_server.local import LocalHarnessHost, LocalHarnessOptions
 from vibe.app_server.protocol import SessionOptions
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 from vibe.core.config.harness_files._paths import GLOBAL_SKILLS_DIR
 from vibe.core.skills.manager import SkillManager
 from vibe.core.trusted_folders import trusted_folders_manager
@@ -48,7 +48,7 @@ async def test_two_sessions_of_one_process_warn_once_about_a_shadowed_skill(
     options = LocalHarnessOptions(
         session_options=SessionOptions(
             cwd=str(project),
-            agent=BuiltinAgentName.AUTO_APPROVE,
+            approval_policy=ApprovalPolicyName.AUTO_APPROVE,
             trust_workspace=True,
             headless=True,
         )

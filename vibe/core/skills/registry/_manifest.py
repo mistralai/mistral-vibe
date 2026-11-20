@@ -6,6 +6,7 @@ from pathlib import Path
 import tomllib
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic_core import ErrorDetails
 import tomli_w
 
 from vibe.core.config.harness_files import get_harness_files_manager
@@ -65,20 +66,51 @@ def _project_manifest_paths(roots: Sequence[Path] | None = None) -> list[Path]:
     return out
 
 
+class ManifestReadError(Exception):
+    def __init__(self, path: Path, reason: str) -> None:
+        super().__init__(f"Cannot read {path}: {reason}")
+        self.path = path
+        self.reason = reason
+
+
+def read_sync(path: Path) -> SkillManifest:
+    """Raises ``ManifestReadError`` for a manifest that exists but cannot be read,
+    so a writer never replaces the pins it could not see.
+    """
+    try:
+        with path.open("rb") as f:
+            data = tomllib.load(f)
+    except FileNotFoundError:
+        return SkillManifest()
+    except OSError as exc:
+        raise ManifestReadError(path, exc.strerror or str(exc)) from exc
+    except tomllib.TOMLDecodeError as exc:
+        raise ManifestReadError(path, f"invalid TOML: {exc}") from exc
+    try:
+        return SkillManifest.model_validate(data)
+    except ValidationError as exc:
+        reason = "; ".join(_describe(error) for error in exc.errors())
+        raise ManifestReadError(path, reason) from exc
+
+
+def _describe(error: ErrorDetails) -> str:
+    where = ".".join(str(part) for part in error["loc"])
+    return f"{where}: {error['msg']}" if where else error["msg"]
+
+
+async def read(path: Path) -> SkillManifest:
+    return await asyncio.to_thread(read_sync, path)
+
+
 async def load(path: Path) -> SkillManifest:
     return await asyncio.to_thread(_load, path)
 
 
 def _load(path: Path) -> SkillManifest:
     try:
-        with path.open("rb") as f:
-            data = tomllib.load(f)
-    except (FileNotFoundError, OSError, tomllib.TOMLDecodeError):
-        return SkillManifest()
-    try:
-        return SkillManifest.model_validate(data)
-    except ValidationError as exc:
-        logger.warning("Ignoring malformed skills manifest at %s: %s", path, exc)
+        return read_sync(path)
+    except ManifestReadError as exc:
+        logger.warning("Ignoring unreadable skills manifest: %s", exc)
         return SkillManifest()
 
 

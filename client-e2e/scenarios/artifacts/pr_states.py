@@ -1,10 +1,10 @@
-"""Clicking the footer link opens `/pr`: one row per PR with its number, title and state colored by lifecycle, nothing else."""
+"""Ctrl+X then `p` opens the PR window: one row per PR with its number, title and state colored by lifecycle, nothing else."""
 
 from __future__ import annotations
 
-from e2e.app_server.config import ROWS
 from e2e.app_server.events import artifact
 from e2e.app_server.scenario import Timeline, take_snapshot
+from scenarios.artifacts._rail import OPEN_PRS
 
 
 def _pr(number: int, hour: int, title: str, state: str) -> dict:
@@ -33,7 +33,8 @@ handshake = {
 }
 request_methods = {"artifacts/list", "artifacts/sync", "artifacts/markViewed"}
 screen_contains = (
-    "Pull Requests",
+    "Pull Requests 4",
+    "● 4 PRs",
     "● #125  Draft the docs     draft",
     "● #124  Rework the footer  open",
     "● #123  Fix the footer     merged",
@@ -41,9 +42,5 @@ screen_contains = (
 )
 screen_excludes = ("https://github.com/mistral-ai/vibe/pull/",)
 
-# The bar counts the open and draft PRs; merged and closed ones only show in the list.
-_LABEL = "PRs (2)"
-_CLICK_COL = len("/test/workdir  ") + len(_LABEL) // 2 + 1
-_BAR_CLICK = f"\x1b[<0;{_CLICK_COL};{ROWS}M\x1b[<0;{_CLICK_COL};{ROWS}m"
-
-timeline: Timeline = [_BAR_CLICK, take_snapshot()]
+# The rail counts every PR its window lists, merged and closed ones included.
+timeline: Timeline = [*OPEN_PRS, take_snapshot()]

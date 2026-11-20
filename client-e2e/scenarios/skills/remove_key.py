@@ -1,4 +1,4 @@
-"""d on a shared skill's row asks again in the row, and a second d removes it from every scope."""
+"""r on a shared skill's row removes it from every scope at once: it is easy to add back."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ handshake = {
 }
 request_methods = METHODS
 
-timeline: Timeline = ["/skills\r", "d", "d"]
+timeline: Timeline = ["/skills\r", "r"]
 
 screen_contains = ("lint",)
-screen_excludes = ("deploy",)
+screen_excludes = ("● deploy",)

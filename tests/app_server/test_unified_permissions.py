@@ -24,6 +24,7 @@ from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.tools.manager import ToolManager
 from vibe.core.tools.models import PermissionScope, ToolPermission
 from vibe.core.tools.permissions import PermissionStore
+from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.permissions import RequiredPermission
 
 pytest.importorskip("mistralai_vibe_local_harness.vibe")
@@ -32,6 +33,11 @@ pytest.importorskip("mistralai_vibe_local_harness.vibe")
 # at module scope -- it builds `PermissionOutcome`, so importing the resolver is
 # importing it. `mistralai-vibe-local-harness` is an optional extra, and an environment
 # without it must skip this module rather than fail to collect it.
+from vibe.app_server._local_projects import LocalProjectStore
+from vibe.app_server._project_moves import (
+    LIST_PROJECTS_TOOL_NAME,
+    MOVE_TO_PROJECT_TOOL_NAME,
+)
 from vibe.app_server._provided_tools import (
     TODO_TOOL_NAME,
     VIBE_PROVIDED_TOOL_NAMES,
@@ -1061,6 +1067,92 @@ async def test_the_unified_todo_tool_obeys_the_permission_configured_for_todo(
     # Do / Assert
     assert (await denied.resolve(route, {"action": "read"})).decision == "deny"
     assert (await allowed.resolve(route, {"action": "read"})).decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_moving_to_a_project_asks_only_when_its_folder_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: Two projects, one in a folder the user trusts for good.
+    *Do*: Resolve a ``move_to_project`` call to each, a cancel, and a project listing.
+    *Assert*: Only the move into the untrusted folder asks.
+    """
+    # Prepare
+    trusted_folder = tmp_path / "trusted"
+    untrusted_folder = tmp_path / "untrusted"
+    trusted_folder.mkdir()
+    untrusted_folder.mkdir()
+    store = LocalProjectStore()
+    trusted = store.create(name="trusted", root_path=trusted_folder)
+    untrusted = store.create(name="untrusted", root_path=untrusted_folder)
+    TrustedFoldersManager.read_file().add_trusted(trusted_folder)
+    resolver, _ = _resolver(tmp_path)
+    resolver.provided_names.register(VIBE_TOOL_GROUP, VIBE_PROVIDED_TOOL_NAMES)
+    move = f"{VIBE_TOOL_GROUP}.{MOVE_TO_PROJECT_TOOL_NAME}"
+
+    # Do
+    into_trusted = await resolver.resolve(move, {"project_id": trusted.id})
+    into_untrusted = await resolver.resolve(move, {"project_id": untrusted.id})
+    cancel = await resolver.resolve(move, {})
+    listing = await resolver.resolve(f"{VIBE_TOOL_GROUP}.{LIST_PROJECTS_TOOL_NAME}", {})
+
+    # Assert
+    assert into_trusted.decision == "allow"
+    assert into_untrusted.decision == "ask"
+    assert cancel.decision == "allow"
+    assert listing.decision == "allow"
+
+
+@pytest.mark.asyncio
+async def test_approving_one_move_does_not_approve_the_next(tmp_path: Path) -> None:
+    """*Prepare*: Two projects in folders the user has not trusted.
+    *Do*: Approve a move to one for good, then resolve a move to the other.
+    *Assert*: The second move still asks, and nothing reaches the config.
+    """
+    # Prepare
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    store = LocalProjectStore()
+    store.create(name="first", root_path=first)
+    target = store.create(name="second", root_path=second)
+    resolver, orchestrator = _resolver(tmp_path)
+    resolver.provided_names.register(VIBE_TOOL_GROUP, VIBE_PROVIDED_TOOL_NAMES)
+    move = f"{VIBE_TOOL_GROUP}.{MOVE_TO_PROJECT_TOOL_NAME}"
+
+    # Do
+    await resolver.grant(move, [], permanent=True)
+    outcome = await resolver.resolve(move, {"project_id": target.id})
+
+    # Assert
+    assert outcome.decision == "ask"
+    assert MOVE_TO_PROJECT_TOOL_NAME not in orchestrator.config.tools
+
+
+@pytest.mark.asyncio
+async def test_a_configured_ask_asks_even_for_a_trusted_folder(tmp_path: Path) -> None:
+    """*Prepare*: A project in a trusted folder, with ``move_to_project`` set to ask.
+    *Do*: Resolve a move to it.
+    *Assert*: It asks: the user's setting beats the trust shortcut.
+    """
+    # Prepare
+    folder = tmp_path / "trusted"
+    folder.mkdir()
+    project = LocalProjectStore().create(name="trusted", root_path=folder)
+    TrustedFoldersManager.read_file().add_trusted(folder)
+    resolver, _ = _resolver(
+        tmp_path, **{MOVE_TO_PROJECT_TOOL_NAME: {"permission": "ask"}}
+    )
+    resolver.provided_names.register(VIBE_TOOL_GROUP, VIBE_PROVIDED_TOOL_NAMES)
+
+    # Do
+    outcome = await resolver.resolve(
+        f"{VIBE_TOOL_GROUP}.{MOVE_TO_PROJECT_TOOL_NAME}", {"project_id": project.id}
+    )
+
+    # Assert
+    assert outcome.decision == "ask"
 
 
 @pytest.mark.asyncio

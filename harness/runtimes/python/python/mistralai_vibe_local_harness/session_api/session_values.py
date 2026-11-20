@@ -3,7 +3,7 @@
 import builtins
 import re
 from dataclasses import dataclass
-from typing import Annotated, Literal, Self, get_args
+from typing import Annotated, Final, Literal, Self, get_args
 
 from pydantic import (
     BaseModel,
@@ -27,6 +27,16 @@ EMBEDDED_RESOURCE_URI_PREFIX = "vibe-agents://embedded-resources/"
 
 REQUEST_CONTEXT = {"request": True}
 """Validation context of a request a server reads: an `UnknownValue` is refused there."""
+
+INSTRUCTIONS_KEY_MAX_LENGTH = 128
+"""The longest key instructions may be held under, matching Core's limit."""
+
+INSTRUCTIONS_KEY_PATTERN = r"^[A-Za-z0-9._:-]+$"
+"""The characters an instructions key may use, matching Core: letters, digits, `.`, `_`, `:`
+and `-`."""
+
+INSTRUCTIONS_CONTENT_PATTERN = r"\S"
+"""Instructions content must hold a character that is not whitespace, as Core requires."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +116,53 @@ class SessionModel(ForwardCompatibleModel):
     )
 
 
+EXPERIMENTAL: Final[dict[str, JsonValue]] = {"x-experimental": True}
+"""Marks a model or field as experimental, as its ``json_schema_extra``.
+
+A minor release can change or remove a model or field that carries the mark, without a
+compatibility path. The Session API schema shows the mark as ``x-experimental``, and the public
+contract snapshot (``scripts/public_contract.py``) does not record what carries it.
+"""
+
+
+class EncryptedValue(ForwardCompatibleModel):
+    """A value encrypted with the key of an encrypted Session. This documentation calls it sealed.
+
+    The worker that runs the Session and the clients of the Session hold the key. The control plane,
+    the server that stores and relays the Session, does not: it stores and relays the value without
+    reading it. ``data`` holds the value as encrypted JSON.
+
+    The keys stay snake_case because this is the form that the Workflows payload codec encrypts in
+    partial mode. When the worker seals a value, its code holds plain JSON in ``data``, and the
+    codec encrypts ``data`` when the worker publishes it. When a client seals a value, the worker
+    receives encrypted ``data``. The codec decrypts it if the payload is marked partially encrypted;
+    otherwise the worker decrypts it with the key. A client decrypts every sealed value it reads.
+
+    This model is defined here, not imported from the Workflows client, so that only this package
+    changes the Session API.
+
+    This model is experimental: a minor release can change it without a compatibility path.
+    """
+
+    model_config = ConfigDict(json_schema_extra=EXPERIMENTAL)
+
+    field_type: Literal["__encrypted_str__"] = "__encrypted_str__"
+    data: str
+
+
+def sealed_variant(value: object) -> str:
+    """Tag a value of a union of a model and its encrypted form.
+
+    The encrypted form has no tag field, so its ``encrypted`` member tells the two apart: a value
+    with an ``encrypted`` member is tagged ``encrypted``, any other ``plain``. A member set to null
+    still tags the value ``encrypted``, so the value fails validation instead of reading as an empty
+    plain value.
+    """
+    if isinstance(value, dict):
+        return "encrypted" if "encrypted" in value else "plain"
+    return "encrypted" if hasattr(value, "encrypted") else "plain"
+
+
 class ProtocolError(SessionModel):
     """Serializable error exposed through the Session boundary."""
 
@@ -126,6 +183,13 @@ class CompletedTermination(SessionModel):
     outcome: Literal["completed"] = "completed"
     output: JsonValue = None
     stop_reason: CompletedStopReason | UnknownValue | None = None
+    encrypted_output: EncryptedValue | None = Field(
+        default=None, exclude_if=lambda value: value is None, json_schema_extra=EXPERIMENTAL
+    )
+    """In an encrypted Session, the output as a sealed value; ``output`` stays empty.
+
+    The worker writes it, and the clients of the Session decrypt it. This field is experimental: a
+    minor release can change it without a compatibility path."""
 
 
 # Open: a newer server may name a cause this client does not know yet.
@@ -140,6 +204,13 @@ class CancelledTermination(SessionModel):
     # idle too long.
     cause: CancelledCause | None = None
     output: JsonValue = Field(default=None, exclude_if=lambda value: value is None)
+    encrypted_output: EncryptedValue | None = Field(
+        default=None, exclude_if=lambda value: value is None, json_schema_extra=EXPERIMENTAL
+    )
+    """In an encrypted Session, the output as a sealed value; ``output`` stays empty.
+
+    The worker writes it, and the clients of the Session decrypt it. This field is experimental: a
+    minor release can change it without a compatibility path."""
 
 
 class FailedTermination(SessionModel):

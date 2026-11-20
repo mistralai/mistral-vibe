@@ -7,10 +7,11 @@ use crate::core::error::CoreError;
 use crate::core::features::compaction::{
     EstimateCorrection, ExactRequestTokens, PendingCompaction,
 };
-use crate::core::features::notifications::{Acceptance, Delivery, Notification, NotificationState};
+use crate::core::features::notifications::Notification;
 use crate::core::hooks::HookPoint;
 use crate::core::hooks::HookToolKey;
 use crate::core::model_context::ModelContext;
+use crate::core::pending_input::{Acceptance, PendingInput};
 use crate::core::prompt::build_system_prompt;
 use crate::core::step_protocol::{
     Action, CompletionActionKind, FilesystemOperation, ModelInputUpdate, ModelMessageUpdate,
@@ -73,7 +74,9 @@ pub(crate) struct HarnessState {
     /// and a context injection resetting the session to idle, which is why it
     /// does not live inside [`TurnState`].
     pub last_finished_turn_id: Option<String>,
-    pub notifications: NotificationState,
+    /// Steering, notifications, and context that arrived after either, admitted
+    /// but not yet in model context, in admission order.
+    pub pending_input: PendingInput,
     pub(crate) tool_catalog: ToolCatalogLedger,
 }
 
@@ -135,16 +138,9 @@ impl HarnessState {
         notification: Notification,
     ) -> Result<Outcome, CoreError> {
         let turn_id = self.active_turn_id().map(str::to_string);
-        let delivery = match &self.turn {
-            TurnState::Active(active) if active.model_input_ready => Delivery::Immediate,
-            TurnState::Active(_) | TurnState::Compacting { .. } => Delivery::Deferred,
-            TurnState::Idle | TurnState::Terminal { .. } => Delivery::Immediate,
-        };
-        let acceptance = self.notifications.accept(
+        let acceptance = self.pending_input.accept_notification(
             notification.clone(),
-            delivery,
             &self.compiled.config().settings.context.notifications,
-            self.active().map_or(0, |active| active.pending_steer.len()),
         )?;
         if matches!(acceptance, Acceptance::Duplicate) {
             return Ok(Outcome::quiet());
@@ -159,15 +155,12 @@ impl HarnessState {
 
     pub(crate) fn mark_model_input_ready(&mut self) -> Result<(), CoreError> {
         self.require_active_mut()?.mark_model_input_ready();
-        self.notifications.mark_ready();
         Ok(())
     }
 
     /// Steering and notifications, the input that keeps a finishing turn running.
     pub(crate) fn has_pending_turn_input(&self) -> bool {
-        self.active()
-            .is_some_and(|active| !active.pending_steer.is_empty())
-            || self.notifications.has_pending()
+        !self.pending_input.is_empty()
     }
 
     /// Everything admitted but not yet in the model context. Unlike turn input, it includes
@@ -179,23 +172,41 @@ impl HarnessState {
                 .is_some_and(|active| !active.pending_context.is_empty())
     }
 
+    pub(crate) fn defer_steer(&mut self, message: StoredMessage) -> Result<(), CoreError> {
+        self.require_active()?.require_steerable()?;
+        self.pending_input.push_steering(message);
+        Ok(())
+    }
+
     /// Context waits alone for the next model-safe boundary and never extends the turn. Once the
-    /// turn's user message is committed, context after pending steering or a notification waits
-    /// with the steering instead, so it stays after them. Alone, it comes before any later steer
-    /// or notification, since Core commits it first. Context sent while the pre-agent hook runs
-    /// always waits alone: it follows the notifications held for the turn and precedes the turn's
-    /// user message.
+    /// turn's user message is committed, context after pending steering or a notification joins
+    /// the pending input queue as steering does, so it stays after them. Alone, it comes before
+    /// any later steer or notification, since Core commits it first. Context sent while the
+    /// pre-agent hook runs always waits alone: it follows the notifications held for the turn and
+    /// precedes the turn's user message.
     pub(crate) fn defer_context(&mut self, message: StoredMessage) -> Result<(), CoreError> {
-        let follows_notification = self.notifications.has_pending();
+        let queue_is_empty = self.pending_input.is_empty();
         let active = self.require_active_mut()?;
-        if active.is_awaiting_pre_agent_hook()
-            || (active.pending_steer.is_empty() && !follows_notification)
-        {
+        if active.is_awaiting_pre_agent_hook() || queue_is_empty {
             active.pending_context.push(message);
         } else {
-            active.pending_steer.push(message);
+            self.pending_input.push_steering(message);
         }
         Ok(())
+    }
+
+    /// Pending context for a request that commits no steering. While steering waits, the context
+    /// stays held: a Runtime sends the context attached to a steer just before it, so it joins
+    /// the request that commits that steer, ahead of it.
+    pub(crate) fn take_context_unless_steering_waits(
+        &mut self,
+    ) -> Result<Vec<StoredMessage>, CoreError> {
+        if self.pending_input.has_steering() {
+            return Ok(Vec::new());
+        }
+        Ok(std::mem::take(
+            &mut self.require_active_mut()?.pending_context,
+        ))
     }
 
     /// Seeds the system prompt when a session takes its first message.
@@ -524,7 +535,7 @@ impl HarnessState {
                     }
                 }
                 self.context
-                    .extend_current_turn(active.take_pending_steer());
+                    .extend_current_turn(self.pending_input.take_steering());
                 active.turn_id
             }
             restored => {
@@ -606,15 +617,13 @@ pub(crate) struct ActiveTurn {
     pub turn_id: String,
     pub iterations: u32,
     pub phase: ActivePhase,
-    /// Steering accepted for this turn but not yet included in a model Action.
-    pub pending_steer: Vec<StoredMessage>,
     /// Model-only context received during this turn, held until the next
-    /// model-safe boundary, or with the steering received after it. Unlike
-    /// steering, it never extends the turn.
+    /// model-safe boundary. Context received after pending steering or a
+    /// notification waits in the Session's pending input queue instead, so it
+    /// stays after them. Unlike steering, it never extends the turn on its own.
     pub pending_context: Vec<StoredMessage>,
     /// A model-valid assistant or tool-result boundary has been committed, so
-    /// pending steering and notifications may be included in the next agent
-    /// completion Action.
+    /// pending input may be included in the next agent completion Action.
     pub model_input_ready: bool,
     /// Agent completions this turn discarded because they reached the output
     /// token limit; bounded by `settings.turn.output_limit_recovery`.
@@ -655,6 +664,15 @@ pub(crate) enum InterruptionResolution {
 }
 
 impl ActiveTurn {
+    pub(crate) fn require_steerable(&self) -> Result<(), CoreError> {
+        if self.is_awaiting_pre_agent_hook() {
+            return Err(CoreError::invalid_command(
+                "cannot steer a turn before its pre-agent hook completes",
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn is_awaiting_pre_agent_hook(&self) -> bool {
         matches!(
             &self.phase,
@@ -664,36 +682,12 @@ impl ActiveTurn {
         )
     }
 
-    pub(crate) fn defer_steer(&mut self, message: StoredMessage) -> Result<(), CoreError> {
-        if self.is_awaiting_pre_agent_hook() {
-            return Err(CoreError::invalid_command(
-                "cannot steer a turn before its pre-agent hook completes",
-            ));
-        }
-        self.pending_steer.push(message);
-        Ok(())
-    }
-
     pub(crate) fn mark_model_input_ready(&mut self) {
         self.model_input_ready = true;
     }
 
     pub(crate) fn take_model_input_ready(&mut self) -> bool {
         std::mem::replace(&mut self.model_input_ready, false)
-    }
-
-    /// Pending context for a request that commits no steering. While steering waits, the context
-    /// stays held: a Runtime sends the context attached to a steer just before it, so it joins
-    /// the request that commits that steer, ahead of it.
-    pub(crate) fn take_context_unless_steering_waits(&mut self) -> Vec<StoredMessage> {
-        if !self.pending_steer.is_empty() {
-            return Vec::new();
-        }
-        std::mem::take(&mut self.pending_context)
-    }
-
-    pub(crate) fn take_pending_steer(&mut self) -> Vec<StoredMessage> {
-        std::mem::take(&mut self.pending_steer)
     }
 }
 

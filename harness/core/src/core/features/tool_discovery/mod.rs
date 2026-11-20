@@ -184,8 +184,13 @@ pub(crate) fn direct_tool(description: &str) -> ToolDefinition {
     }
 }
 
+/// The model-facing names of the tools this feature runs.
+pub(crate) fn direct_names() -> impl Iterator<Item = &'static str> {
+    [SEARCH_TOOL_FUNCTIONS_NAME].into_iter()
+}
+
 pub(crate) fn is_direct_name(name: &str) -> bool {
-    name == SEARCH_TOOL_FUNCTIONS_NAME
+    direct_names().any(|direct| direct == name)
 }
 
 pub(crate) fn dispatch(

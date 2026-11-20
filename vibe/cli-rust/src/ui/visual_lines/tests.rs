@@ -1,6 +1,6 @@
 use ratatui::style::Style;
 
-use super::{fold, text, wrap_indented, Sc};
+use super::{fold, text, wrap_folded, wrap_indented, Sc};
 
 fn rows(chunks: &[Vec<Sc>]) -> Vec<String> {
     chunks
@@ -37,4 +37,13 @@ fn an_indent_deeper_than_half_the_line_is_cut_to_half() {
     let line = format!("{}deep text", " ".repeat(20));
     let wrapped = wrap_indented(&line, Style::default(), 12);
     assert_eq!(rows(&wrapped), ["      deep", "      text"]);
+}
+
+#[test]
+fn a_path_longer_than_the_line_folds_instead_of_running_past_it() {
+    let path = text("~/code/a/very/long/path", Style::default());
+    assert_eq!(
+        rows(&wrap_folded(&path, 10)),
+        ["~/code/a/v", "ery/long/p", "ath"]
+    );
 }

@@ -12,9 +12,9 @@ from e2e.app_server.events import (
 from e2e.app_server.scenario import Timeline, take_snapshot
 
 _PROMPT = "delegate the investigation"
-_HOVER_CHILD = "\x1b[<35;10;39M"
-_PRESS_CHILD = "\x1b[<0;10;39M"
-_RELEASE_CHILD = "\x1b[<0;10;39m"
+_HOVER_CHILD = "\x1b[<35;10;37M"
+_PRESS_CHILD = "\x1b[<0;10;37M"
+_RELEASE_CHILD = "\x1b[<0;10;37m"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -23,6 +23,8 @@ timeline: Timeline = [
     subagent("find the grouping code"),
     child_session_updated(context_tokens=2_500),
     turn_completed(),
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the subagent list
     _HOVER_CHILD,
     _PRESS_CHILD,
     _RELEASE_CHILD,

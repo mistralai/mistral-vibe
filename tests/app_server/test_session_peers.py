@@ -461,6 +461,40 @@ async def test_send_to_session_keys_the_message_by_the_tool_call(
 
 
 @pytest.mark.asyncio
+async def test_send_to_session_takes_a_long_brief_but_not_an_unbounded_one(
+    tmp_path: Path,
+) -> None:
+    peers = _FakePeers()
+    execute = _executor(tmp_path, peers)
+
+    sent = await execute(
+        _call(
+            "long",
+            SEND_TO_SESSION_TOOL_NAME,
+            session_id="other",
+            message="x" * (_session_peers.MAX_SEND_MESSAGE_BYTES - 2),
+            delivery="start_turn",
+        )
+    )
+    # Fewer characters than the limit, but two UTF-8 bytes each.
+    refused = await execute(
+        _call(
+            "huge",
+            SEND_TO_SESSION_TOOL_NAME,
+            session_id="other",
+            message="é" * (_session_peers.MAX_SEND_MESSAGE_BYTES // 2),
+            delivery="start_turn",
+        )
+    )
+
+    assert isinstance(sent, RustToolSucceededEvent)
+    assert "bytes as UTF-8 JSON" in _failure(refused)
+    assert [len(send.text) for send in peers.sends] == [
+        _session_peers.MAX_SEND_MESSAGE_BYTES - 2
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_message_names_the_session_that_sends_it(tmp_path: Path) -> None:
     """The client only passes the sender on; it never works it out."""
     peers = _FakePeers()
@@ -951,3 +985,55 @@ async def test_only_what_acts_on_sessions_asks_by_default(
     store.set_tool_permission(tool_name, ToolPermission.NEVER)
     outcome = await resolver.resolve(f"{VIBE_TOOL_GROUP}.{tool_name}", {})
     assert outcome.decision == "deny"
+
+
+@pytest.mark.asyncio
+async def test_a_vibebot_session_names_the_bots_threads_by_handle(
+    tmp_path: Path,
+) -> None:
+    """VIB2-163: a session Vibebot started reaches the bot's threads, not this
+    project's sessions: its bot resolves the name, as `send_message.to`.
+    """
+    starter = "vibebot:vibe-bot--u1--default:local_cb-1"
+    peers = _FakePeers()
+    execute = _executor(tmp_path, peers, started_by=starter)
+
+    sent = await execute(
+        _call(
+            "send",
+            SEND_TO_SESSION_TOOL_NAME,
+            session_id="fix-login",
+            message="Is the fix pushed?",
+            delivery="queue",
+        )
+    )
+
+    assert isinstance(sent, RustToolSucceededEvent)
+    [send] = peers.sends
+    assert send.target_session_id == starter and send.bot_to == "fix-login"
+    assert send.delivery == "queue" and peers.resolves == 0
+
+
+@pytest.mark.asyncio
+async def test_a_vibebot_session_answering_the_starter_id_asks_the_thread_it_works_for(
+    tmp_path: Path,
+) -> None:
+    """Benjamin's review: the bot's messages arrive under the starter's id, so
+    replying to it is natural; it reaches the thread it works for.
+    """
+    starter = "vibebot:vibe-bot--u1--default:local_cb-1"
+    peers = _FakePeers()
+    execute = _executor(tmp_path, peers, started_by=starter)
+
+    await execute(
+        _call(
+            "send",
+            SEND_TO_SESSION_TOOL_NAME,
+            session_id=starter,
+            message="Which policies?",
+            delivery="start_turn",
+        )
+    )
+
+    [send] = peers.sends
+    assert send.target_session_id == starter and send.bot_to is None

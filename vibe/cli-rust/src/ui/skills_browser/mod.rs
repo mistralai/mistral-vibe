@@ -1,118 +1,133 @@
-//! `/skills` bottom-app: the list, a skill's page or its version picker, and the body under them.
+//! `/skills` bottom-app: the list under the highlighted skill's description, or a skill's page or version picker over its body.
 
 mod body_lines;
 pub(crate) use body_lines::wrap as wrap_body;
 pub mod columns;
+mod confirm_lines;
+mod intro_lines;
 mod list_lines;
 mod page_lines;
 
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
-use super::browser_box::{self, draw_frame, GUTTER, SCROLLBAR_GUTTER, SIDE_BY_SIDE};
+use super::browser_box::{self, draw_frame, GUTTER, SCROLLBAR_GUTTER};
 use super::visual_lines::VisualLine;
 use crate::app::App;
-use crate::hints::{self, action, Hint};
+
 use crate::mouse::MouseTarget;
 use crate::search_field::Search;
 use crate::skills_browser::labels::{self, PLACEHOLDER, TITLE};
-use crate::skills_browser::{self, bodies, list, Screen, State};
+use crate::skills_browser::{self, list, Screen, State};
 
-/// Where the body sits: under the rows, beside them on a wide box, or nowhere.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Layout {
-    Under,
-    Beside,
-    Alone,
-}
+/// The lines between a page's rows and its body: a blank one and the rule.
+const BODY_HEAD: usize = 2;
+/// The fewest lines the box keeps under its title, so a page has room for its facts and some body.
+const MIN_LINES: usize = 14;
+/// The fewest lines a page keeps for its body, its rows taking the rest first.
+const MIN_BODY: usize = 3;
 
-/// The rows' lines, and how many of them and of the body's the box shows.
+/// The rows' lines, how many of them the box shows, and the lines above and under them.
 struct Panes {
-    layout: Layout,
+    intro: Vec<VisualLine>,
     rows: Vec<VisualLine>,
     shown_rows: usize,
+    /// A page's or a picker's body, under a blank line and a rule; none on the list.
     shown_body: usize,
 }
 
 impl Panes {
-    /// Fit both panes in `budget` lines (`50vh`); a screen that keeps a body pane sizes it whatever the body and the highlight, so the rows never move as one loads or changes.
-    fn fit(state: &State, width: u16, budget: usize) -> Self {
-        match bodies::reserved(state) {
-            true if width >= SIDE_BY_SIDE => Self::beside(state, width, budget),
-            true => Self::stacked(state, width, budget, Layout::Under),
-            false => Self::stacked(state, width, budget, Layout::Alone),
+    /// Fit the panes in `lines`, the box's pinned height: the list under its description, or a page or a picker over its body, which also gets the search row's line and grows up to `budget` (`50vh`) when its rows need it, so a long description never hides its facts.
+    fn fit(state: &State, width: u16, lines: usize, budget: usize) -> Self {
+        if state.page.is_some() && state.confirm.is_none() {
+            let needed = Self::detail_rows(state, width, budget) + BODY_HEAD + MIN_BODY;
+            return Self::detail(state, width, needed.clamp(lines + 1, budget.max(lines + 1)));
         }
-    }
-
-    /// The body a fixed half of `budget` under a blank line, or no body.
-    fn stacked(state: &State, width: u16, budget: usize, layout: Layout) -> Self {
-        let shown_body = match layout {
-            Layout::Under => budget.saturating_sub(1) / 2,
-            _ => 0,
-        };
-        let room = match shown_body {
-            0 => budget,
-            pane => budget.saturating_sub(1 + pane),
-        };
+        let intro = intro(state, width);
+        let room = lines.saturating_sub(intro.len());
         let rows = browser_box::fit(width, room, |width| lay_out(state, width));
-        let shown_rows = rows.len().max(tallest_tab(state, width)).min(room);
+        let shown_rows = room;
         Self {
-            layout,
+            intro,
             rows,
             shown_rows,
-            shown_body,
+            shown_body: 0,
         }
     }
 
-    /// The rows on the left half and the body on the right, as tall as the rows but never under half of `budget`, so the body always has room.
-    fn beside(state: &State, width: u16, budget: usize) -> Self {
-        let left = width / 2;
-        let rows = browser_box::fit(left, budget, |width| lay_out(state, width));
-        let tallest = rows.len().max(tallest_tab(state, left));
-        let shown = tallest.max(budget.saturating_sub(1) / 2).min(budget);
+    /// The rows, a blank line and a rule, then the body in what is left, never under `MIN_BODY` lines.
+    fn detail(state: &State, width: u16, budget: usize) -> Self {
+        let room = budget.saturating_sub(BODY_HEAD + MIN_BODY);
+        let rows = browser_box::fit(width, room, |width| lay_out(state, width));
+        let shown_rows = rows.len().min(room);
         Self {
-            layout: Layout::Beside,
+            intro: Vec::new(),
             rows,
-            shown_rows: shown,
-            shown_body: shown,
+            shown_rows,
+            shown_body: budget.saturating_sub(BODY_HEAD + shown_rows),
         }
     }
 
-    /// The rows, with the body under a blank line or beside them.
+    /// The lines a page's or a picker's rows take within `budget`.
+    fn detail_rows(state: &State, width: u16, budget: usize) -> usize {
+        browser_box::fit(width, budget, |width| lay_out(state, width)).len()
+    }
+
+    /// The list's own height within `budget` (`50vh`): its description and rows, never under `MIN_LINES`.
+    fn wanted(state: &State, width: u16, budget: usize) -> usize {
+        let intro = intro(state, width).len();
+        let rows = browser_box::fit(width, budget, |width| lay_out(state, width)).len();
+        (intro + rows).max(MIN_LINES).min(budget)
+    }
+
     fn height(&self) -> usize {
-        match self.layout {
-            Layout::Under => self.shown_rows + 1 + self.shown_body,
-            Layout::Beside | Layout::Alone => self.shown_rows,
+        let body = match self.shown_body {
+            0 => 0,
+            lines => BODY_HEAD + lines,
+        };
+        self.intro.len() + self.shown_rows + body
+    }
+}
+
+/// The highlighted skill's description over the list, unless a deletion waits or there is no skill to describe.
+fn intro(state: &State, width: u16) -> Vec<VisualLine> {
+    match state.confirm.is_none() && list::any_skill(state) {
+        true => intro_lines::lay_out(state, usize::from(width.saturating_sub(GUTTER))),
+        false => Vec::new(),
+    }
+}
+
+/// The box's lines under its title on the list, pinned at the first draw on this screen height.
+fn pinned(state: &mut State, width: u16, height: u16) -> usize {
+    match state.pinned {
+        Some((at, lines)) if at == height => lines,
+        _ => {
+            let lines = Panes::wanted(state, width, usize::from(height) / 2);
+            state.pinned = Some((height, lines));
+            lines
         }
     }
 }
 
 /// Draw the whole screen with the browser replacing the input box.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    let budget = area.height as usize / 2;
-    let panes = Panes::fit(&app.skills_browser, area.width, budget);
-    let height = panes.height() as u16 + browser_box::chrome(search_shown(app));
+    let lines = pinned(&mut app.skills_browser, area.width, area.height);
+    let budget = usize::from(area.height) / 2;
+    let panes = Panes::fit(&app.skills_browser, area.width, lines, budget);
+    let help = skills_browser::help(&app.skills_browser);
+    let height = panes.height() as u16 + browser_box::chrome(search_shown(app), area.width, &help);
     let kind = super::bottom_app::Kind::Skills;
     super::bottom_app::draw(app, f, area, height, kind, |app, f, area| {
         draw_box(app, f, area, &panes)
     });
 }
 
-/// The list's lines on its tallest tab, so Tab never resizes the box; none off the list.
-fn tallest_tab(state: &State, width: u16) -> usize {
-    if state.page.is_some() {
-        return 0;
-    }
-    let width = usize::from(width.saturating_sub(GUTTER));
-    let tabs = state.tab_rows.iter();
-    let heights = tabs.map(|(_, rows)| list_lines::height(rows, width));
-    heights.max().unwrap_or(0)
-}
-
+/// The rows of the screen up, or the deletion's confirmation in their place while it waits.
 fn lay_out(state: &State, width: usize) -> Vec<VisualLine> {
-    match &state.page {
-        Some(page) => page_lines::rows(state, page, width),
-        None => list_lines::lay_out(state, width),
+    match (&state.confirm, &state.page) {
+        (Some(confirm), _) => confirm_lines::lay_out(confirm, width),
+        (None, Some(page)) => page_lines::rows(state, page, width),
+        (None, None) => list_lines::lay_out(state, width),
     }
 }
 
@@ -123,7 +138,9 @@ fn search_shown(app: &App) -> bool {
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect, panes: &Panes) {
     let search = search_shown(app);
-    if area.height < browser_box::chrome(search) {
+    let help = skills_browser::help(&app.skills_browser);
+    let chrome = browser_box::chrome(search, area.width, &help);
+    if area.height < chrome {
         return;
     }
     let title = title(&app.skills_browser);
@@ -147,46 +164,31 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, panes: &Panes) {
             MouseTarget::Skills,
         );
     }
-    let room = usize::from(area.height.saturating_sub(browser_box::chrome(search)));
-    let shown_rows = panes.shown_rows.min(room) as u16;
-    let (list_box, body_box) = match panes.layout {
-        Layout::Beside => browser_box::halves(area),
-        Layout::Under | Layout::Alone => (area, area),
-    };
-    let rows = browser_box::pane(list_box, search, 0, shown_rows);
-    if panes.layout == Layout::Beside {
-        browser_box::split_selection(app, (list_box, body_box));
+    let room = usize::from(area.height.saturating_sub(chrome));
+    let intro = panes.intro.len().min(room) as u16;
+    if intro > 0 {
+        let pane = browser_box::pane(area, search, 0, intro);
+        browser_box::draw_lines(app, f, area, pane, &panes.intro, 0, MouseTarget::Skills);
     }
+    let shown_rows = panes
+        .shown_rows
+        .min(room.saturating_sub(usize::from(intro))) as u16;
+    let rows = browser_box::pane(area, search, intro, shown_rows);
     app.skills_browser.list_area = rows;
-    browser_box::draw_list(app, f, list_box, rows, &panes.rows, MouseTarget::Skills);
-    let body = match panes.layout {
-        Layout::Beside => Some(browser_box::pane(body_box, search, 0, shown_rows)),
-        Layout::Under => {
-            let below = room.saturating_sub(usize::from(shown_rows) + 1);
-            let height = panes.shown_body.min(below) as u16;
-            (height > 0).then(|| browser_box::pane(area, search, shown_rows + 1, height))
-        }
-        Layout::Alone => None,
-    };
-    if let Some(body) = body {
-        draw_body(app, f, body_box, body);
+    browser_box::draw_list(app, f, area, rows, &panes.rows, MouseTarget::Skills);
+    let below = room.saturating_sub(usize::from(intro + shown_rows) + BODY_HEAD);
+    let height = panes.shown_body.min(below) as u16;
+    if height > 0 {
+        let rule = browser_box::pane(area, search, intro + shown_rows + 1, 1);
+        let line = [intro_lines::rule(
+            labels::BODY_RULE,
+            usize::from(area.width.saturating_sub(GUTTER)),
+        )];
+        browser_box::draw_lines(app, f, area, rule, &line, 0, MouseTarget::Skills);
+        let body = browser_box::pane(area, search, intro + shown_rows + 2, height);
+        draw_body(app, f, area, body);
     }
-    let help = fitted(
-        skills_browser::help(&app.skills_browser),
-        area.width.saturating_sub(4),
-    );
     browser_box::draw_help(f, area, &help);
-}
-
-/// A footer too wide for the box drops its navigation hint, then its Tab hint, so it still ends with Esc.
-fn fitted(mut help: Vec<Hint>, width: u16) -> Vec<Hint> {
-    for dropped in [action::NAVIGATE, action::SWITCH_TAB] {
-        if hints::width(&help) <= width {
-            break;
-        }
-        help.retain(|(_, action)| *action != dropped);
-    }
-    help
 }
 
 /// The body pane keeps its own scroll, wheel and scrollbar, and wraps short of the scrollbar.

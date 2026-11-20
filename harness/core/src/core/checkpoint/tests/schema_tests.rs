@@ -656,7 +656,7 @@ fn restore_reads_queued_agent_tasks_from_older_checkpoints_as_messages() {
 
         // Assert
         assert_eq!(
-            recaptured["notifications"][0]["notification"]["source"],
+            recaptured["pending_input"][0]["notification"]["source"],
             json!({"type": "agent_message", "sender_agent_path": "/root/child"}),
             "{saved_kind:?}"
         );

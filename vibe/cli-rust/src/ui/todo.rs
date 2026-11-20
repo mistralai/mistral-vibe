@@ -1,9 +1,9 @@
-//! The pinned todo line above the input and the docked right plan panel.
+//! The docked right plan panel Cmd/Alt+\ toggles from the prompt.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Padding, Paragraph};
 use ratatui::Frame;
 
 use super::super::mouse::{self, MouseTarget};
@@ -11,11 +11,6 @@ use super::theme;
 use crate::app::App;
 use crate::hints;
 use crate::todo_tracker::{self, TodoItem, TodoStatus};
-
-/// Exactly one line: it sits above the input box, which any growth would shove down.
-pub fn row_height(app: &App) -> u16 {
-    u16::from(!app.todo_tracker.todos().is_empty())
-}
 
 /// Below this the docked column would leave the chat too narrow to read.
 const MIN_DOCK_WIDTH: u16 = 60;
@@ -38,40 +33,6 @@ pub fn split(app: &App, area: Rect) -> (Rect, Option<Rect>) {
     (main, Some(sidebar))
 }
 
-/// Both modifiers, because `is_todo_key` takes either and only macOS has a Cmd byte to send.
-const TOGGLE_HINT: &str = "Cmd/Alt+\\";
-
-/// The todo status row: one muted summary line, ellipsized, clickable.
-pub fn draw_row(app: &mut App, f: &mut Frame, area: Rect) {
-    if area.width < 1 || area.height < 1 {
-        return;
-    }
-    mouse::register_region(app, area, MouseTarget::TodoRow);
-    let Some(summary) = app.todo_tracker.summary() else {
-        return;
-    };
-    let hint = [
-        Span::styled(TOGGLE_HINT, Style::default().fg(theme::primary())),
-        Span::styled(" plan", theme::muted_style()),
-    ];
-    let hint_width: u16 = hint.iter().map(|span| span.width() as u16).sum();
-    let text =
-        crate::utils::text::ellipsize(&summary, area.width.saturating_sub(hint_width + 1) as usize);
-    let hint_x = area.right().saturating_sub(hint_width);
-    f.render_widget(
-        Paragraph::new(Line::from(Span::styled(text, theme::muted_style()))),
-        area,
-    );
-    f.render_widget(
-        Paragraph::new(Line::from(Vec::from(hint))),
-        Rect {
-            x: hint_x,
-            width: hint_width,
-            ..area
-        },
-    );
-}
-
 /// The todo sidebar: progress title, items by status, closing hint.
 pub fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     if area.width < 6 || area.height < 5 {
@@ -82,7 +43,6 @@ pub fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     let title = format!(" Todos · {} done ", todo_tracker::progress_label(&todos));
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
         .border_style(theme::text(theme::primary()))
         .style(Style::default().bg(theme::surface()))
         .title(Span::styled(
@@ -95,13 +55,14 @@ pub fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
     if inner.width < 1 || inner.height < 2 {
         return;
     }
+    let help = super::hint_line::lines(&[hints::CLOSE], inner.width);
     let list_area = Rect {
-        height: inner.height - 1,
+        height: inner.height.saturating_sub(help.len() as u16),
         ..inner
     };
     let hint_area = Rect {
         y: list_area.bottom(),
-        height: 1,
+        height: inner.bottom() - list_area.bottom(),
         ..inner
     };
     let rows = sidebar_rows(&todos, list_area.width as usize);
@@ -114,8 +75,7 @@ pub fn draw_sidebar(app: &mut App, f: &mut Frame, area: Rect) {
         .collect();
     f.render_widget(Paragraph::new(visible), list_area);
     f.render_widget(
-        Paragraph::new(super::hint_line::line(&[hints::CLOSE]))
-            .alignment(ratatui::layout::Alignment::Right),
+        Paragraph::new(help).alignment(ratatui::layout::Alignment::Right),
         hint_area,
     );
 }
@@ -136,25 +96,33 @@ fn sidebar_rows(todos: &[TodoItem], width: usize) -> Vec<Line<'static>> {
     }
     let mut rows = Vec::new();
     for (index, todo) in ordered.iter().enumerate() {
-        let icon = todo_tracker::status_icon(todo.status);
-        let style = status_style(todo.status);
-        let wrapped = crate::utils::text::wrap_hard(&todo.content, width.saturating_sub(2));
-        if wrapped.is_empty() {
-            rows.push(Line::from(Span::styled(format!("{icon} "), style)));
-        }
-        for (line_index, line) in wrapped.into_iter().enumerate() {
-            let text = if line_index == 0 {
-                format!("{icon} {line}")
-            } else {
-                format!("  {line}")
-            };
-            rows.push(Line::from(Span::styled(text, style)));
-        }
+        rows.extend(item_rows(todo, width));
         if index + 1 < ordered.len() {
             rows.push(Line::default());
         }
     }
     rows
+}
+
+/// `icon text` wrapped to `width`, continuation rows indented under the text.
+pub(super) fn item_rows(todo: &TodoItem, width: usize) -> Vec<Line<'static>> {
+    let icon = todo_tracker::status_icon(todo.status);
+    let style = status_style(todo.status);
+    let wrapped = crate::utils::text::wrap_hard(&todo.content, width.saturating_sub(2));
+    if wrapped.is_empty() {
+        return vec![Line::from(Span::styled(format!("{icon} "), style))];
+    }
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(line_index, line)| {
+            let text = match line_index {
+                0 => format!("{icon} {line}"),
+                _ => format!("  {line}"),
+            };
+            Line::from(Span::styled(text, style))
+        })
+        .collect()
 }
 
 /// Active warns, done succeeds, cancelled mutes.

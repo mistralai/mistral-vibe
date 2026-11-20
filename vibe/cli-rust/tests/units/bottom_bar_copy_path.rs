@@ -48,6 +48,29 @@ fn a_click_on_the_icon_copies_the_whole_cwd() {
 }
 
 #[test]
+fn a_press_and_release_across_the_icon_halves_copies_the_whole_cwd() {
+    let (mut app, icon) = footer();
+    let (tx, mut rx) = mpsc::channel(telemetry::TELEMETRY_CHANNEL_CAP);
+    app.telemetry_tx = Some(tx);
+
+    send_mouse(
+        &mut app,
+        mouse(MouseEventKind::Down(MouseButton::Left), icon, 0),
+    );
+    send_mouse(
+        &mut app,
+        mouse(MouseEventKind::Drag(MouseButton::Left), icon + 1, 0),
+    );
+    send_mouse(
+        &mut app,
+        mouse(MouseEventKind::Up(MouseButton::Left), icon + 1, 0),
+    );
+
+    assert_eq!(copied_lengths(&mut rx), [CWD.chars().count() as u64]);
+    assert!(app.selection.bottom_bar.is_none(), "no selection is armed");
+}
+
+#[test]
 fn a_double_click_on_the_icon_copies_the_path_twice_and_selects_nothing() {
     let (mut app, icon) = footer();
     let (tx, mut rx) = mpsc::channel(telemetry::TELEMETRY_CHANNEL_CAP);
@@ -66,17 +89,33 @@ fn a_double_click_on_the_icon_copies_the_path_twice_and_selects_nothing() {
 }
 
 #[test]
-fn the_icon_is_the_only_hit_area_and_carries_the_whole_path() {
+fn the_icon_and_the_cell_its_glyph_overflows_are_the_hit_area_and_carry_the_whole_path() {
     let (app, icon) = footer();
 
     let link = bottom_bar::link_at(&app, (icon, 0)).expect("icon link");
     assert!(matches!(&link.action, BarLinkAction::CopyPath(path) if path == CWD));
-    assert_eq!(link.area.width, 1);
+    assert_eq!(link.area.width, 2);
     assert!(
         bottom_bar::link_at(&app, (icon - 2, 0)).is_none(),
         "the cwd"
     );
-    assert!(bottom_bar::link_at(&app, (icon + 1, 0)).is_none());
+    assert!(
+        bottom_bar::link_at(&app, (icon + 1, 0)).is_some(),
+        "the icon's right half"
+    );
+    assert!(bottom_bar::link_at(&app, (icon + 2, 0)).is_none());
+}
+
+#[test]
+fn a_click_on_the_right_half_of_the_icon_copies_the_whole_cwd() {
+    let (mut app, icon) = footer();
+    let (tx, mut rx) = mpsc::channel(telemetry::TELEMETRY_CHANNEL_CAP);
+    app.telemetry_tx = Some(tx);
+
+    click(&mut app, icon + 1, 0);
+
+    assert_eq!(copied_lengths(&mut rx), [CWD.chars().count() as u64]);
+    assert!(app.selection.bottom_bar.is_none(), "no selection is armed");
 }
 
 #[test]

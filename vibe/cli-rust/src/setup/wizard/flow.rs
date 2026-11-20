@@ -225,6 +225,7 @@ fn draw(
                 f.buffer_mut(),
                 crate::mouse::MouseTarget::OnboardingLinks,
             );
+            app.view.wide_cells.refresh(f.buffer_mut());
         })
     })??;
     crate::pointer::sync(app);

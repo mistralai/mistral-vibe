@@ -57,5 +57,5 @@ async def test_agents_list_offers_smart_approve_from_cached_experiment(
     )
 
     response = cast(AgentsListResponse, result.response)
-    names = [agent.name for agent in response.agents]
+    names = [policy.name for policy in response.approval_policies]
     assert "smart-approve" in names

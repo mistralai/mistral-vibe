@@ -61,6 +61,17 @@ it, keeping the old name as an alias, is loaded). A session pins the model it
 runs when a turn starts, so this applies to every session that has run a turn.
 A catalog fetched while a CLI OIDC sign-in changed the account is neither held
 nor written.
+A plan upgrade unlocks models, so a catalog is old after 30 seconds rather
+than 10 minutes to a session running a model it locks and to a model picker
+showing an upsell. A session on a runnable model keeps the 10 minutes, though
+every plan below the top one lists locked models. A catalog that changes
+publishes `config/changed`, as does a session that loads a new one. Two paths
+refresh an old catalog, each in the process that holds it: a `config/read`
+(the model picker, which a client re-reads as the user returns to it) in the
+background, never waiting on it, and a turn on a locked model, which waits up
+to 2 seconds for it before it is refused. A session with no turn running loads the held
+catalog on its next `config/read` or turn. Loading the held catalog never
+fetches.
 
 MCP tool descriptors take steps 1 and 4 only. `MCPDiscoveryService` holds the
 process's Harness `MCPDiscoveryFlights`, which every session's MCP runtime

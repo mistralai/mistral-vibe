@@ -17,7 +17,7 @@ handshake = {
     "runtime/read": {"runtime": {"config": {"theme": "ansi-dark"}}},
 }
 _PROMPT = "delegate the investigation"
-_HOVER_CHILD = "\x1b[<35;10;39M"
+_HOVER_CHILD = "\x1b[<35;10;37M"
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -26,6 +26,8 @@ timeline: Timeline = [
     subagent("find the grouping code"),
     child_session_updated(context_tokens=2_500),
     turn_completed(),
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the subagent list
     take_snapshot(),
     _HOVER_CHILD,
     take_snapshot(),

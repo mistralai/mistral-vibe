@@ -1,4 +1,4 @@
-"""A shared skill's page adds it at latest into Global with one Enter on Add to My Skills, then becomes its installed page."""
+"""A shared skill's page adds it at latest into Global with one Enter on Add to My Skills, then becomes its installed page, which offers r to remove it."""
 
 from __future__ import annotations
 
@@ -30,5 +30,5 @@ request_methods = METHODS
 
 timeline: Timeline = ["/skills\r", "\t", "\r", "jj", "\r"]
 
-screen_contains = ("Remove",)
+screen_contains = ("● Enabled", "r remove")
 screen_excludes = ("not in My Skills",)

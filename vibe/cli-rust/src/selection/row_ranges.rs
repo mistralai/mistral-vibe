@@ -1,11 +1,16 @@
-//! Per-row lookups into the transcript's row-range hit maps (diff gutters, `/raw` messages).
+//! Per-row lookups into the transcript's row-range hit maps (entry chrome, `/raw` messages).
 
-/// The diff gutter width covering screen row `y`, or 0 outside an edit-diff view.
-pub(super) fn gutter_at(gutters: &[(u16, u16, u16)], y: u16) -> u16 {
-    gutters
+/// `(top, bottom, indent, border, gutter)`: rows, `Worked for` rail, border and edit-diff gutter columns.
+pub type RowChrome = (u16, u16, u16, u16, u16);
+
+/// The `(indent, border, gutter)` chrome columns of screen row `y`, or zeros outside a bordered entry.
+pub(super) fn chrome_at(chrome: &[RowChrome], y: u16) -> (u16, u16, u16) {
+    chrome
         .iter()
-        .find(|(top, bottom, _)| y >= *top && y < *bottom)
-        .map_or(0, |(_, _, gutter)| *gutter)
+        .find(|(top, bottom, ..)| y >= *top && y < *bottom)
+        .map_or((0, 0, 0), |&(_, _, indent, border, gutter)| {
+            (indent, border, gutter)
+        })
 }
 
 /// Whether row `y` belongs to a `/raw` message, whose every painted cell is text.

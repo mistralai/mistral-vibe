@@ -19,6 +19,8 @@ def _snapshot(mcp: MCPState) -> RuntimeSnapshot:
             config=SimpleNamespace(active_model=SimpleNamespace(alias="devstral")),
             active_agent="vibe",
             agents=[],
+            active_approval_policy="ask",
+            approval_policies=[],
             skills=[],
             tools=[],
             stats=SimpleNamespace(token_usage=None),

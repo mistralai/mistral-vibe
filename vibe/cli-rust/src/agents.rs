@@ -1,4 +1,4 @@
-//! Agent modes: Shift+Tab cycles the primary agents and switches the session.
+//! Agents and approval policies: Shift+Tab cycles the approval policies and switches the session.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,7 +8,8 @@ use serde_json::Value;
 
 use crate::app::{App, Severity, Status};
 use crate::server::{
-    method, AgentSafety, AgentSummary, AgentSwitchParams, AgentType, Client, RuntimeSnapshot,
+    method, AgentSafety, AgentSummary, AgentType, ApprovalPolicySummary,
+    ApprovalPolicySwitchParams, Client, RuntimeSnapshot,
 };
 use crate::utils::startup_cache::StartupConfig;
 
@@ -18,20 +19,21 @@ pub const MODE_SWITCH_SPINNER_DELAY: Duration = Duration::from_millis(500);
 /// Braille prompt spinner frames while a switch is slow.
 const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-/// A settled `session/agent/update`, applied on the main thread.
+/// A settled `session/approvalPolicy/update`, applied on the main thread.
 pub struct Event {
-    /// The agent this round-trip asked for.
+    /// The approval policy this round-trip asked for.
     pub target: String,
     /// The runtime snapshot the switch returned, or the server's reason when
     /// it refused.
     pub runtime: Result<Value, String>,
 }
 
-/// Seed the agents the UI paints and cycles before the app server answers,
-/// from the startup projection.
+/// Seed the agents and policies the UI paints and cycles before the app server
+/// answers, from the startup projection.
 pub fn show_startup_agents(app: &mut App, config: &StartupConfig) {
     app.agents.all = config.agents.clone();
-    // First-frame seed only: later snapshots must not reset the live agent.
+    app.agents.policies = config.approval_policies.clone();
+    // First-frame seed only: later snapshots must not reset the live choices.
     if !matches!(app.session.status, Status::Starting) {
         return;
     }
@@ -48,25 +50,44 @@ pub fn show_startup_agents(app: &mut App, config: &StartupConfig) {
         })
         .cloned()
         .unwrap_or_default();
+    app.agents.active_policy = app
+        .agents
+        .policies
+        .iter()
+        .find(|policy| policy.name == config.default_approval_policy)
+        .or(app.agents.policies.first())
+        .cloned()
+        .unwrap_or_default();
 }
 
-/// Refresh the agent snapshot from a runtime value (`{runtime: {...}}`). A pending
-/// switch keeps the agent it painted: a snapshot that predates it must not repaint
-/// the previous one.
+/// Refresh the agent and policy snapshot from a runtime value (`{runtime: {...}}`).
+/// A pending switch keeps the policy it painted: a snapshot that predates it must
+/// not repaint the previous one.
 pub fn apply_runtime(app: &mut App, response: &Value) {
     let Some(runtime) = response.get("runtime") else {
         return;
     };
-    if let Some(agents) = RuntimeSnapshot::read(response).and_then(|r| r.agents) {
-        app.agents.all = agents;
+    if let Some(snapshot) = RuntimeSnapshot::read(response) {
+        if let Some(agents) = snapshot.agents {
+            app.agents.all = agents;
+        }
+        if let Some(policies) = snapshot.approval_policies {
+            app.agents.policies = policies;
+        }
     }
-    let Some(active) = runtime
+    if let Some(agent) = runtime
         .get("activeAgent")
         .and_then(|active| AgentSummary::deserialize(active).ok())
+    {
+        app.agents.active = agent;
+    }
+    let Some(active) = runtime
+        .get("activeApprovalPolicy")
+        .and_then(|active| ApprovalPolicySummary::deserialize(active).ok())
     else {
         return;
     };
-    // The server folds the session-wide flag and the agent's own into one
+    // The server folds the session-wide flag and the policy's own into one
     // `bypassToolPermissions`, so only a non-YOLO snapshot reveals the former.
     // Keeping them apart is what lets a switch paint its target in one frame.
     if active.safety != AgentSafety::Yolo {
@@ -80,49 +101,66 @@ pub fn apply_runtime(app: &mut App, response: &Value) {
     }
 }
 
-/// Adopt the server's running agent. A refused switch was a step away from the
-/// agent that ran then: once another one runs, Shift+Tab cycles from it, and a
-/// snapshot that keeps the same agent keeps the refusal.
-pub fn set_active(app: &mut App, active: AgentSummary) {
-    if active.name != app.agents.active.name {
+/// Adopt the server's running policy. A refused switch was a step away from the
+/// policy that ran then: once another one runs, Shift+Tab cycles from it, and a
+/// snapshot that keeps the same policy keeps the refusal.
+pub fn set_active(app: &mut App, active: ApprovalPolicySummary) {
+    if active.name != app.agents.active_policy.name {
         app.agents.refused = None;
     }
-    app.agents.active = active;
+    app.agents.active_policy = active;
 }
 
-/// Whether every tool call is auto-approved for the agent being painted
+/// Whether every tool call is auto-approved for the policy being painted
 /// (`runtime.bypass_tool_permissions`, predicted while switching).
 pub fn bypass_tool_permissions(app: &App) -> bool {
     app.agents.force_bypass_tool_permissions || displayed(app).safety == AgentSafety::Yolo
 }
 
-/// The agent the chat input paints: the optimistic target of a switch in flight
+/// The policy the chat input paints: the optimistic target of a switch in flight
 /// (painted before the RPC answers), else the server's active one.
-pub fn displayed(app: &App) -> &AgentSummary {
+pub fn displayed(app: &App) -> &ApprovalPolicySummary {
     app.agents
         .desired
         .as_deref()
-        .and_then(|name| app.agents.all.iter().find(|agent| agent.name == name))
-        .unwrap_or(&app.agents.active)
+        .and_then(|name| {
+            app.agents
+                .policies
+                .iter()
+                .find(|policy| policy.name == name)
+        })
+        .unwrap_or(&app.agents.active_policy)
 }
 
 /// Chat input label: the lowercased display name, marked when every tool call is
 /// auto-approved.
-pub fn indicator_agent_name(agent: &AgentSummary, bypass_tool_permissions: bool) -> String {
-    let name = agent.display_name.to_lowercase();
-    if bypass_tool_permissions && agent.safety != AgentSafety::Yolo {
+pub fn indicator_policy_name(
+    policy: &ApprovalPolicySummary,
+    bypass_tool_permissions: bool,
+) -> String {
+    let name = policy.display_name.to_lowercase();
+    if bypass_tool_permissions && policy.safety != AgentSafety::Yolo {
         return format!("{name} · auto-approve");
     }
     name
 }
 
 /// Safety driving the chat input's mode label color.
-pub fn indicator_safety(agent: &AgentSummary, bypass_tool_permissions: bool) -> AgentSafety {
+pub fn indicator_safety(
+    policy: &ApprovalPolicySummary,
+    bypass_tool_permissions: bool,
+) -> AgentSafety {
     if bypass_tool_permissions {
         AgentSafety::Yolo
     } else {
-        agent.safety
+        policy.safety
     }
+}
+
+/// The agent the chat input names before the policy, `None` for the default agent.
+pub fn indicator_agent_name(app: &App) -> Option<String> {
+    let agent = &app.agents.active;
+    (!agent.name.is_empty() && agent.name != "default").then(|| agent.display_name.to_lowercase())
 }
 
 /// Spinner glyph shown in place of the prompt marker, or `None` while hidden.
@@ -137,7 +175,7 @@ pub fn switching(app: &App) -> bool {
     app.agents.switch_active
 }
 
-/// Shift+Tab: paint the next primary agent at once and ask the server to switch.
+/// Shift+Tab: paint the next approval policy at once and ask the server to switch.
 /// Presses coalesce: a switch already in flight cycles from the pending target,
 /// not the active one; after a refused switch, the press cycles from the
 /// refused target so the cycle can pass it.
@@ -151,8 +189,8 @@ pub fn cycle(app: &mut App, client: &Arc<Client>) {
         .desired
         .clone()
         .or(refused)
-        .unwrap_or_else(|| app.agents.active.name.clone());
-    let Some(target) = next_agent(app, &base) else {
+        .unwrap_or_else(|| app.agents.active_policy.name.clone());
+    let Some(target) = next_policy(app, &base) else {
         return;
     };
     app.agents.desired = Some(target);
@@ -164,7 +202,7 @@ pub fn cycle(app: &mut App, client: &Arc<Client>) {
     }
 }
 
-/// Send the agent picked while the session was still starting (nothing to do
+/// Send the policy picked while the session was still starting (nothing to do
 /// when Shift+Tab was never pressed).
 pub fn flush_pending(app: &mut App, client: &Arc<Client>) {
     if !app.agents.switch_active {
@@ -180,22 +218,16 @@ fn send_desired(app: &mut App, client: &Arc<Client>) {
     switch(app, client, target);
 }
 
-/// Name of the primary agent after `current`, wrapping at the end; subagents
-/// never cycle.
-fn next_agent(app: &App, current: &str) -> Option<String> {
-    let primary: Vec<&AgentSummary> = app
-        .agents
-        .all
-        .iter()
-        .filter(|agent| agent.agent_type == AgentType::Agent)
-        .collect();
-    let index = primary.iter().position(|agent| agent.name == current);
-    let next = index.map_or(0, |index| (index + 1) % primary.len());
-    primary.get(next).map(|agent| agent.name.clone())
+/// Name of the policy after `current`, wrapping at the end.
+fn next_policy(app: &App, current: &str) -> Option<String> {
+    let policies = &app.agents.policies;
+    let index = policies.iter().position(|policy| policy.name == current);
+    let next = index.map_or(0, |index| (index + 1) % policies.len());
+    policies.get(next).map(|policy| policy.name.clone())
 }
 
-/// Issue one `session/agent/update` and arm the delayed prompt spinner.
-fn switch(app: &mut App, client: &Arc<Client>, agent_name: String) {
+/// Issue one `session/approvalPolicy/update` and arm the delayed prompt spinner.
+fn switch(app: &mut App, client: &Arc<Client>, approval_policy: String) {
     let Some(session_id) = app.session.session_id.clone() else {
         app.agents.switch_active = false;
         return;
@@ -203,17 +235,17 @@ fn switch(app: &mut App, client: &Arc<Client>, agent_name: String) {
     app.agents.spinner_at = Some(crate::clock::now() + MODE_SWITCH_SPINNER_DELAY);
     let client = client.clone();
     crate::ui_event::spawn(app, async move {
-        let params = AgentSwitchParams {
+        let params = ApprovalPolicySwitchParams {
             session_id,
-            agent_name: agent_name.clone(),
+            approval_policy: approval_policy.clone(),
         };
         let params = serde_json::to_value(params).unwrap_or_default();
         let runtime = client
-            .request(method::SESSION_AGENT_UPDATE, params)
+            .request(method::SESSION_APPROVAL_POLICY_UPDATE, params)
             .await
             .map_err(|error| crate::server::request_error::describe(&error));
         Event {
-            target: agent_name,
+            target: approval_policy,
             runtime,
         }
     });
@@ -224,7 +256,7 @@ fn switch(app: &mut App, client: &Arc<Client>, agent_name: String) {
 pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
     // Settling first lets this runtime repaint the label; a chased switch keeps
     // painting its own target. A failed switch clears it, so the label falls
-    // back to the server's agent.
+    // back to the server's policy.
     app.agents.desired = app
         .agents
         .desired
@@ -238,11 +270,11 @@ pub fn apply_event(app: &mut App, client: &Arc<Client>, event: Event) {
             app.agents.refused = None;
             apply_runtime(app, runtime);
         }
-        // The server keeps the running agent: say why, and remember the
+        // The server keeps the running policy: say why, and remember the
         // target so the next Shift+Tab steps past it instead of asking again.
         Err(error) => {
             app.agents.refused = Some(event.target.clone());
-            let message = format!("Failed to switch agent: {error}");
+            let message = format!("Failed to switch approval policy: {error}");
             crate::notices::inline(app, Severity::Error, &message);
         }
     }

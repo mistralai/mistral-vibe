@@ -81,7 +81,7 @@ fn the_border_names_the_model_with_its_thinking_level_muted_then_the_mode() {
 fn a_narrow_border_drops_the_thinking_level_then_elides_then_hides_the_model_but_keeps_the_mode() {
     let mut app = App::default();
     app.session.startup_config.active_model = MODEL.into();
-    app.agents.active.display_name = "Accept Edits".into();
+    app.agents.active_policy.display_name = "Accept Edits".into();
     let border = |app: &App, width| composer_title::title(app, width).line.to_string();
 
     assert_eq!(
@@ -116,7 +116,7 @@ fn a_plain_click_on_the_model_opens_the_picker_and_records_the_composer_entry() 
 #[test]
 fn a_click_on_the_mode_or_the_border_does_not_open_the_picker() {
     let (mut app, _) = composer();
-    app.agents.active.display_name = "Accept Edits".into();
+    app.agents.active_policy.display_name = "Accept Edits".into();
     let buffer = redraw(&mut app);
     let (x, y) = model_cell(&buffer);
     click(&mut app, column(&row(&buffer, y), "accept edits"), y);

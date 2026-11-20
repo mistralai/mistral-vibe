@@ -11,8 +11,8 @@ use super::list::Row;
 use crate::server::deadline::{within, REQUEST_TIMEOUT};
 use crate::server::request_error::describe;
 use crate::server::{
-    method, Client, InstalledSkill, InstalledSkills, SkillCatalog, SkillChange, SkillDetail,
-    SkillUpdate, SkillUpdates, SkillVersion, SkillVersions,
+    method, Client, InstalledSkills, SkillCatalog, SkillChange, SkillDetail, SkillUpdate,
+    SkillUpdates, SkillVersion, SkillVersions,
 };
 
 /// How long a change may take: longer than a read, since an import fetches the skill from the registry first.
@@ -37,8 +37,8 @@ impl Opening {
 
 /// A `/skills` round-trip's answer.
 pub enum Event {
-    /// The installed pins `/skills` opens on; with registry skills on, the catalog is read next.
-    Opened(Result<Vec<InstalledSkill>, String>),
+    /// The installed pins `/skills` opens on, and the skills that failed to load; with registry skills on, the catalog is read next.
+    Opened(Result<InstalledSkills, String>),
     Catalog {
         generation: u64,
         catalog: SkillCatalog,
@@ -54,8 +54,10 @@ pub enum Event {
     },
     Changed {
         outcome: Outcome,
-        installed: Result<Vec<InstalledSkill>, String>,
+        installed: Result<InstalledSkills, String>,
     },
+    /// The installed pins read again with no change made, as after a skill's file comes back from the editor.
+    Reread(Result<InstalledSkills, String>),
     Updates(Result<Vec<SkillUpdate>, String>),
 }
 
@@ -92,10 +94,9 @@ async fn call<T: DeserializeOwned>(
 pub(super) async fn installed(
     client: &Client,
     session_id: &str,
-) -> Result<Vec<InstalledSkill>, String> {
+) -> Result<InstalledSkills, String> {
     let params = json!({"sessionId": session_id});
-    let answer: InstalledSkills = call(client, method::SKILLS_INSTALLED, params).await?;
-    Ok(answer.skills)
+    call(client, method::SKILLS_INSTALLED, params).await
 }
 
 /// The shared skills catalog; a failure reads as not loaded.
@@ -134,7 +135,7 @@ pub(super) async fn change(
     client: &Client,
     session_id: &str,
     changes: &[SkillChange],
-) -> (Outcome, Result<Vec<InstalledSkill>, String>) {
+) -> (Outcome, Result<InstalledSkills, String>) {
     let outcome = send(client, session_id, changes, CHANGE_TIMEOUT).await;
     (outcome, installed(client, session_id).await)
 }

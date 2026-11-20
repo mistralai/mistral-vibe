@@ -1,4 +1,6 @@
-use super::{push_command_error, push_command_status};
+use super::{push_checkpoint, push_command_error, push_command_status};
+use crate::server::{CheckpointEntry, HistoryEntry};
+use crate::transcript::grouping::renders_nothing;
 use crate::ui::markdown::LinkedLines;
 use crate::ui::theme;
 
@@ -49,4 +51,24 @@ fn an_error_row_is_sanitized_and_only_its_marker_is_colored() {
     let spans = &lines.lines()[1].spans;
     assert_eq!(spans[0].style.fg, Some(theme::error()));
     assert_eq!(spans[1].style.fg, Some(theme::foreground()));
+}
+
+fn resumed() -> CheckpointEntry {
+    CheckpointEntry {
+        generation_status: Some("completed".to_string()),
+        kind: "resumed".to_string(),
+        message: Some("Resumed after a restart".to_string()),
+        details: serde_json::json!({}),
+    }
+}
+
+#[test]
+fn a_resumed_turn_paints_a_settled_row_from_the_server() {
+    let mut lines = LinkedLines::default();
+    push_checkpoint(&mut lines, &resumed(), false, false, 0);
+    assert_eq!(texts(&lines)[1], "✓ Resumed after a restart");
+    assert!(!renders_nothing(
+        &HistoryEntry::Checkpoint(resumed()),
+        false
+    ));
 }

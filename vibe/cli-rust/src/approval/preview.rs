@@ -1,6 +1,5 @@
 //! Off-thread contextual previews for file-edit approvals.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -38,18 +37,8 @@ pub(super) fn load(app: &App) {
 fn build(input: &Value, cwd: Option<&str>) -> Option<FileEditEffectOutput> {
     let file = input.get("filePath")?.as_str()?.to_owned();
     let path = resolve(&file, cwd);
-    let handle = std::fs::File::open(path).ok()?;
-    if handle.metadata().ok()?.len() > MAX_FILE_BYTES {
-        return None;
-    }
-    let mut content = String::new();
-    handle
-        .take(MAX_FILE_BYTES + 1)
-        .read_to_string(&mut content)
-        .ok()?;
-    if content.len() as u64 > MAX_FILE_BYTES {
-        return None;
-    }
+    let bytes = crate::utils::local_file::read_bounded(&path, MAX_FILE_BYTES).ok()?;
+    let mut content = String::from_utf8(bytes).ok()?;
     let occurrences = match input.get("changes").and_then(Value::as_array) {
         Some(changes) => batch_occurrences(&mut content, changes)?,
         None => single_occurrences(&content, input)?,

@@ -16,7 +16,7 @@ mod keys;
 pub mod request;
 
 pub use edit::EditForm;
-pub use keys::{handle_key, handle_prompt_key, is_prompt_key, paste};
+pub use keys::{handle_key, handle_prompt_key, is_prompt_key, paste, window_key};
 pub use request::{apply_event, Event};
 
 pub const NO_GOAL: &str = "No goal set. Use /goal <objective>.";

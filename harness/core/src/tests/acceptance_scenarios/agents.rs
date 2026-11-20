@@ -513,7 +513,7 @@ fn pending_agent_message_survives_restore_and_is_seen_once_before_new_input() {
     assert_eq!(runtime.inspection_value()["has_pending_model_input"], true);
 
     assert_eq!(
-        runtime.checkpoint_value()["notifications"][0]["notification"]["source"],
+        runtime.checkpoint_value()["pending_input"][0]["notification"]["source"],
         json!({
             "type":"agent_message", "sender_agent_path":"/root/child",
         }),
@@ -621,7 +621,7 @@ fn agent_results_survive_restore_and_are_seen_once_before_new_input() {
         );
         assert_eq!(runtime.inspection_value()["has_pending_model_input"], true);
         assert_eq!(
-            runtime.checkpoint_value()["notifications"][0]["notification"]["source"],
+            runtime.checkpoint_value()["pending_input"][0]["notification"]["source"],
             source
         );
 

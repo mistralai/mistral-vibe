@@ -5,9 +5,10 @@ use ratatui::style::Style;
 use ratatui::widgets::{Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::super::theme;
+use super::super::{hint_line, theme};
 use crate::app::App;
 use crate::config_edit::{is_multiline, ConfigEdit, MAX_VISIBLE_CHOICES};
+use crate::hints::Hint;
 
 pub(super) struct Layout {
     pub modal: Rect,
@@ -40,12 +41,14 @@ pub(super) fn height(text: &str, width: u16) -> u16 {
 }
 
 impl Layout {
-    pub fn new(edit: &ConfigEdit, choices: &[String], area: Rect) -> Option<Self> {
+    pub fn new(edit: &ConfigEdit, choices: &[String], area: Rect, help: &[Hint]) -> Option<Self> {
         let width = area.width.saturating_sub(8).min(80);
         if width < 32 {
             return None;
         }
         let inner_width = width - 6;
+        let help_height = hint_line::height(help, inner_width);
+        let chrome = 9 + help_height;
         let side_width = if edit.field.layers.is_empty() { 0 } else { 37 };
         let multiline = choices.is_empty() && is_multiline(&edit.field);
         let minimum_editor = if choices.is_empty() { 3 } else { 1 };
@@ -59,7 +62,7 @@ impl Layout {
         let stacked = side_width > 0
             && (inner_width < 60
                 || side_by_side_description.saturating_add(minimum_editor)
-                    > area.height.saturating_sub(10));
+                    > area.height.saturating_sub(chrome));
         let main_width = if stacked {
             inner_width
         } else {
@@ -99,7 +102,7 @@ impl Layout {
         } else {
             main_height.max(side_height)
         };
-        let body_height = desired.min(area.height.saturating_sub(10));
+        let body_height = desired.min(area.height.saturating_sub(chrome));
         let main_height = if stacked {
             body_height.saturating_sub(side_height.saturating_add(1))
         } else {
@@ -112,9 +115,9 @@ impl Layout {
         }
         let modal = Rect::new(
             area.x + (area.width - width) / 2,
-            area.y + (area.height - body_height - 10) / 2,
+            area.y + (area.height - body_height - chrome) / 2,
             width,
-            body_height + 10,
+            body_height + chrome,
         );
         let body = Rect::new(modal.x + 3, modal.y + 2, inner_width, body_height);
         let main = Rect::new(body.x, body.y, main_width, main_height);
@@ -133,7 +136,7 @@ impl Layout {
             main,
             side,
             targets: Rect::new(body.x, body.bottom() + 3, inner_width, 2),
-            help: Rect::new(body.x, body.bottom() + 6, inner_width, 1),
+            help: Rect::new(body.x, body.bottom() + 6, inner_width, help_height),
             description_height,
         })
     }

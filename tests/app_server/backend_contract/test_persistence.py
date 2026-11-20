@@ -548,20 +548,29 @@ async def test_compaction_survives_a_new_host_with_the_same_public_identity(
 
 @pytest.mark.asyncio
 async def test_an_agent_change_survives_a_new_host(
+    config_dir: Path,
     backend_contract_mistral_api: respx.Route,
     backend_contract_mistral_response: Callable[[str], httpx.Response],
     backend_contract_persistent_connection: BackendContractConnection,
     process_services: ProcessServices,
 ) -> None:
-    """An agent-mode switch is kept in the persisted session journal."""
+    """An agent switch is kept in the persisted session journal, and the agent
+    and approval policy the session switched to are what it resumes on.
+    """
+    agents = config_dir / "agents"
+    agents.mkdir()
+    (agents / "reviewer.toml").write_text(
+        'display_name = "Reviewer"\n', encoding="utf-8"
+    )
     backend_contract_mistral_api.mock(
-        return_value=backend_contract_mistral_response("Answered under ask")
+        return_value=backend_contract_mistral_response("Answered")
     )
     session = await backend_contract_persistent_connection.host.open_session()
     try:
         _ = [event async for event in session.act("first question")]
         session_id = session.session_id
-        await session.resources.agents.switch("auto-approve")
+        await session.resources.agents.switch("reviewer")
+        await session.resources.agents.switch_policy("auto-approve")
     finally:
         await session.close()
 
@@ -576,7 +585,9 @@ async def test_an_agent_change_survives_a_new_host(
             entry.details
             for entry in resumed.history
             if isinstance(entry, PublicCheckpointEntry) and entry.kind == "agent_change"
-        ] == [{"agent": "auto-approve"}]
+        ] == [{"agent": "reviewer"}]
+        assert resumed.resources.agents.active.name == "reviewer"
+        assert resumed.resources.agents.active_policy.name == "auto-approve"
     finally:
         await resumed.close()
 

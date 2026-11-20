@@ -167,6 +167,56 @@ async def test_a_reader_giving_up_does_not_cancel_the_shared_fetch() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_settled_wait_timing_out_leaves_the_shared_refresh_to_finish_once() -> (
+    None
+):
+    # Two sessions wait on a slow refresh: the first one's wait running out
+    # must not cancel the fetch both share.
+    clock, fetch = _Clock(), _Fetch(values=["fresh"])
+    fetch.release = asyncio.Event()
+    store = _Store({"k": Cached("old", stored_at=clock.now - 601)})
+    cache = _cache(fetch, clock, store)
+    await _get(cache, "k")
+
+    await cache.settled("k", timeout_s=0.01)
+    second = asyncio.create_task(cache.settled("k", timeout_s=5))
+    await _settle()
+    fetch.release.set()
+    await second
+
+    assert fetch.calls == 1
+    assert cache.cached("k") == Cached("fresh", stored_at=clock.now)
+
+
+@pytest.mark.asyncio
+async def test_a_settled_wait_with_no_refresh_in_flight_returns_at_once() -> None:
+    clock, fetch = _Clock(), _Fetch()
+    store = _Store({"k": Cached("recent", stored_at=clock.now - 60)})
+    cache = _cache(fetch, clock, store)
+    await _get(cache, "k")
+
+    await cache.settled("k", timeout_s=5)
+
+    assert fetch.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_check_with_a_shorter_age_refreshes_sooner_than_the_policy() -> None:
+    clock, fetch = _Clock(), _Fetch(values=["fresh"])
+    store = _Store({"k": Cached("recent", stored_at=clock.now - 60)})
+    cache = _cache(fetch, clock, store)
+    await cache.load("k")
+
+    cache.check("k")
+    await _settle()
+    assert fetch.calls == 0
+
+    cache.check("k", refresh_after_s=30)
+    await _settle()
+    assert fetch.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_a_failure_backs_off_doubling_up_to_its_cap() -> None:
     clock = _Clock()
     fetch = _Fetch(values=[OSError("down")] * 10)

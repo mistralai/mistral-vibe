@@ -45,6 +45,7 @@ def read_provider_failure(error: BaseException) -> ProviderFailure:
         label=type(error).__name__ if response is None else f"HTTP {response.status}",
         message=_message(error),
         explanation=_provider_explanation(error),
+        error_code=_provider_error_code(error),
         response=response,
     )
 
@@ -87,6 +88,12 @@ class ProviderFailure:
     """A sentence for the user that carries the provider's own explanation."""
     explanation: str | None
     """The message the provider put in its error response body, if any."""
+    error_code: str | None
+    """The code the provider put in its error response body, such as ``3051``.
+
+    Unlike the message, it names the kind of failure whatever the request, so
+    error reports can group by it.
+    """
     response: ProviderErrorResponse | None
     """The provider's error response, or ``None`` when it never answered."""
 
@@ -315,14 +322,8 @@ def _provider_explanation(error: BaseException) -> str | None:
 
     The OpenAI-compatible ``error.message`` first, then its common variants.
     """
-    body = _response_body(error)
-    if body is None:
-        return None
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        return None
-    if not isinstance(payload, dict):
+    payload = _error_payload(error)
+    if payload is None:
         return None
     nested = payload.get("error")
     for candidate in (
@@ -334,6 +335,38 @@ def _provider_explanation(error: BaseException) -> str | None:
         if isinstance(candidate, str) and candidate.strip():
             return candidate.strip()
     return None
+
+
+def _provider_error_code(error: BaseException) -> str | None:
+    """The code a provider put in an error response body.
+
+    Mistral's top-level ``code`` first, then the OpenAI-compatible
+    ``error.code``. Numbers and strings both read as a string.
+    """
+    payload = _error_payload(error)
+    if payload is None:
+        return None
+    nested = payload.get("error")
+    for candidate in (
+        payload.get("code"),
+        nested.get("code") if isinstance(nested, dict) else None,
+    ):
+        if isinstance(candidate, bool):
+            continue
+        if isinstance(candidate, int | str) and str(candidate).strip():
+            return str(candidate).strip()
+    return None
+
+
+def _error_payload(error: BaseException) -> dict[str, object] | None:
+    body = _response_body(error)
+    if body is None:
+        return None
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _response_body(error: BaseException) -> str | None:

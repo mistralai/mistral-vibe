@@ -116,7 +116,7 @@ pub fn effect_kind(entry: &HistoryEntry) -> Option<&str> {
 /// Whether the entry paints no transcript row: a callback (the approval panel
 /// is transient), a server notice that only drives side effects (`push_notice`
 /// in `ui/transcript/entry/notice.rs` is the dispatch this must mirror), a
-/// server checkpoint other than a painted compaction or model change, or an
+/// server checkpoint other than a painted compaction, resume or model change, or an
 /// unrecognized type. Such rows must not break a run of tool calls into
 /// consecutive blocks: all calls between them collapse into one block.
 pub fn renders_nothing(entry: &HistoryEntry, local: bool) -> bool {
@@ -126,7 +126,10 @@ pub fn renders_nothing(entry: &HistoryEntry, local: bool) -> bool {
     match entry {
         HistoryEntry::Callback(_) | HistoryEntry::Unknown => true,
         HistoryEntry::Checkpoint(checkpoint) => {
-            !local && !(checkpoint.kind == "model_change" || paints_compaction(checkpoint))
+            !local
+                && !(checkpoint.kind == "model_change"
+                    || paints_compaction(checkpoint)
+                    || paints_resumed(checkpoint))
         }
         // A fired loop paints on its prompt; goal notices are the only server notices with a row.
         HistoryEntry::Notice(_) => !local && !super::goal_notice::is_goal(entry),
@@ -139,6 +142,11 @@ pub fn renders_nothing(entry: &HistoryEntry, local: bool) -> bool {
 pub fn paints_compaction(checkpoint: &CheckpointEntry) -> bool {
     checkpoint.kind == "compaction"
         && checkpoint.details.get("trigger").and_then(Value::as_str) != Some("manual")
+}
+
+/// Whether a server checkpoint marks a turn carried on after a restart.
+pub fn paints_resumed(checkpoint: &CheckpointEntry) -> bool {
+    checkpoint.kind == "resumed"
 }
 
 /// Whether a settled compaction checkpoint records a failed attempt.
@@ -271,26 +279,24 @@ fn container_key(detail: &NoticeDetail) -> String {
     }
 }
 
-/// Whether a `hook_run_started` opened the key and no `hook_run_completed`
-/// closed it yet (`_hook_containers` is popped by the run's completion).
+/// Whether the key's latest run event is a `hook_run_started`, not a
+/// `hook_run_completed` (`_hook_containers` is popped by the run's completion).
 fn container_open(detail: &NoticeDetail, prior: &[StoredEntry]) -> bool {
     let key = container_key(detail);
-    let mut open = false;
-    for stored in prior {
-        let HistoryEntry::Notice(notice) = &stored.typed else {
-            continue;
-        };
-        let Some(prior_detail) = notice.detail.as_ref() else {
-            continue;
-        };
-        if container_key(prior_detail) != key {
-            continue;
-        }
-        match prior_detail.kind.as_deref() {
-            Some("hook_run_started") => open = true,
-            Some("hook_run_completed") => open = false,
-            _ => {}
-        }
-    }
-    open
+    prior
+        .iter()
+        .rev()
+        .find_map(|stored| {
+            let HistoryEntry::Notice(notice) = &stored.typed else {
+                return None;
+            };
+            let prior_detail = notice.detail.as_ref()?;
+            let open = match prior_detail.kind.as_deref() {
+                Some("hook_run_started") => true,
+                Some("hook_run_completed") => false,
+                _ => return None,
+            };
+            (container_key(prior_detail) == key).then_some(open)
+        })
+        .unwrap_or(false)
 }

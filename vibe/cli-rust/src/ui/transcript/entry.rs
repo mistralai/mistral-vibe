@@ -1,7 +1,5 @@
 //! Transcript entry formatting, kept separate from viewport and scroll layout.
 
-use std::sync::Arc;
-
 use ratatui::text::{Line, Span};
 
 mod bordered;
@@ -12,138 +10,53 @@ mod message;
 mod notice;
 mod raw;
 mod reasoning;
+mod rendered;
 pub(super) mod startup;
 mod status;
+mod turn_details;
 mod user;
 mod user_text;
+mod view;
 
 use super::super::markdown::{self, LinkedLines};
 use super::super::theme;
-use crate::selection::Fold;
 use crate::transcript::TranscriptEntry;
-use bordered::{inset_prefix, prefix_group_body, push_group_header, BORDER_WIDTH};
+use bordered::{inset_prefix, prefix_group_body, push_group_header, BORDER_WIDTH, INSET_WIDTH};
 use effect::{push_effect, EffectView};
 use message::message_text;
 use notice::push_notice;
 use reasoning::push_reasoning;
+pub(super) use rendered::{RenderedEntry, RenderedParts};
 use status::push_checkpoint;
+pub(super) use turn_details::{DetailsView, INDENT as DETAILS_INDENT};
 use user::push_queue_header;
 pub(super) use user_text::sticky;
-
-/// Per-frame queue state a queued prompt renders with.
-#[derive(Clone, Copy, Default)]
-pub(super) struct QueueView {
-    /// Whether this prompt is the queue-mode highlight.
-    pub selected: bool,
-    /// Whether the header names the paused queue's shortcuts (held, queue mode closed).
-    pub paused: bool,
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct ExpansionView {
-    pub entry: bool,
-    pub group: bool,
-    /// `/raw`: an agent message shows its Markdown source.
-    pub raw: bool,
-}
-
-pub(super) struct RenderedEntry {
-    lines: LinkedLines,
-    prepared: Option<Arc<markdown::PreparedMarkdown>>,
-    table_cells: bool,
-}
-
-pub(super) struct RenderedParts {
-    pub lines: LinkedLines,
-    pub prepared: Option<Arc<markdown::PreparedMarkdown>>,
-}
-
-impl RenderedEntry {
-    fn owned(lines: LinkedLines) -> Self {
-        Self {
-            lines,
-            prepared: None,
-            table_cells: false,
-        }
-    }
-
-    fn prepared(prepared: Arc<markdown::PreparedMarkdown>, table_cells: bool) -> Self {
-        Self {
-            lines: LinkedLines::default(),
-            prepared: Some(prepared),
-            table_cells,
-        }
-    }
-
-    fn prepend(&mut self, mut prefix: LinkedLines) {
-        match self.prepared.take() {
-            Some(prepared) => prefix.append(prepared.linked().clone()),
-            None => prefix.append(std::mem::take(&mut self.lines)),
-        }
-        self.lines = prefix;
-    }
-
-    pub fn lines(&self) -> &[Line<'static>] {
-        self.prepared
-            .as_ref()
-            .map_or(self.lines.lines(), |prepared| prepared.lines())
-    }
-
-    pub fn folds(&self) -> &[Option<Fold>] {
-        self.prepared
-            .as_ref()
-            .map_or(self.lines.folds(), |prepared| prepared.linked().folds())
-    }
-
-    /// Rows above the header a click toggles: an ungrouped entry's leading gaps.
-    pub fn header_offset(&self, grouped: bool) -> u16 {
-        let gaps = self.gaps().iter().enumerate();
-        (!grouped as usize * gaps.take_while(|(row, gap)| row == *gap).count()) as u16
-    }
-
-    pub fn gaps(&self) -> &[usize] {
-        self.prepared
-            .as_ref()
-            .map_or(self.lines.gaps(), |prepared| prepared.linked().gaps())
-    }
-
-    pub fn prewrapped(&self, width: u16) -> bool {
-        self.prepared.as_ref().map_or_else(
-            || {
-                width > 0
-                    && self
-                        .lines
-                        .lines()
-                        .iter()
-                        .all(|line| line.width() <= width as usize)
-            },
-            |prepared| prepared.prewrapped(),
-        )
-    }
-
-    pub fn table_cells(&self) -> &[markdown::TableCell] {
-        match (&self.prepared, self.table_cells) {
-            (Some(prepared), true) => prepared.cells(),
-            _ => &[],
-        }
-    }
-
-    pub fn into_parts(self) -> RenderedParts {
-        RenderedParts {
-            lines: self.lines,
-            prepared: self.prepared,
-        }
-    }
-}
+pub(super) use view::{ExpansionView, QueueView};
 
 /// The rendered content and hit-test metadata for one transcript entry.
 pub(super) fn render(
     entry: &TranscriptEntry<'_>,
     width: u16,
-    expansion: ExpansionView,
+    expansion: ExpansionView<'_>,
     pulse_frame: usize,
     queue: QueueView,
     rewind: bool,
+    cache: Option<&mut markdown::MarkdownCache>,
+) -> RenderedEntry {
+    let Some(details) = expansion.details else {
+        return render_entry(entry, width, expansion, pulse_frame, (queue, rewind), cache);
+    };
+    turn_details::render(entry.index, details, width, |inner| {
+        render_entry(entry, inner, expansion, pulse_frame, (queue, rewind), cache)
+    })
+}
+
+fn render_entry(
+    entry: &TranscriptEntry<'_>,
+    width: u16,
+    expansion: ExpansionView<'_>,
+    pulse_frame: usize,
+    (queue, rewind): (QueueView, bool),
     cache: Option<&mut markdown::MarkdownCache>,
 ) -> RenderedEntry {
     use crate::server::HistoryEntry as H;
@@ -157,7 +70,7 @@ pub(super) fn render(
         let mut rendered = message::render(entry, value, width, view, pulse_frame, cache);
         if entry.queue_header {
             let mut header = LinkedLines::default();
-            push_queue_header(&mut header, width, queue.paused);
+            push_queue_header(&mut header, width, queue.paused, queue.hints);
             rendered.prepend(header);
         }
         return rendered;
@@ -250,14 +163,24 @@ pub(super) fn is_raw(entry: &TranscriptEntry<'_>, raw: bool) -> bool {
     raw && matches!(entry.entry, crate::server::HistoryEntry::Message(message) if message.role == "assistant")
 }
 
-/// Gutter width of the edit diff this entry paints, or `None` when it paints none.
-pub(super) fn diff_gutter(entry: &TranscriptEntry<'_>, expanded: bool) -> Option<u16> {
-    match entry.entry {
-        crate::server::HistoryEntry::Effect(effect) => {
-            effect::diff_gutter(effect, entry.entry.in_progress(), expanded)
-        }
-        _ => None,
-    }
+/// The `(border, gutter)` columns opening this entry's rows: its border glyphs, then an edit diff's gutter.
+pub(super) fn chrome(entry: &TranscriptEntry<'_>, expanded: bool) -> (u16, u16) {
+    use crate::server::HistoryEntry as H;
+    let group = if entry.group.is_some() {
+        BORDER_WIDTH
+    } else {
+        0
+    };
+    let (own, gutter) = match entry.entry {
+        H::Effect(effect) => (
+            BORDER_WIDTH,
+            effect::diff_gutter(effect, entry.entry.in_progress(), expanded).unwrap_or(0),
+        ),
+        H::Interrupt(_) => (INSET_WIDTH, 0),
+        H::Notice(_) if entry.local => (INSET_WIDTH, 0),
+        _ => (0, 0),
+    };
+    (group + own, gutter)
 }
 
 /// `.tool-group` packs its members, so only the entry opening the group is preceded by a gap.

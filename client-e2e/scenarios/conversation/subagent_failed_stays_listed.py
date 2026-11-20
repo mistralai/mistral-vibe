@@ -1,4 +1,4 @@
-"""A failed subagent stays listed once its batch ends; a waiting one hides and a stopped one leaves."""
+"""Once its batch ends a failed and a waiting subagent stay listed; a stopped one leaves."""
 
 from __future__ import annotations
 
@@ -17,11 +17,11 @@ _FAILED_ID, _FAILED_NAME = "child-session-2", "explore-2"
 _STOPPED_ID, _STOPPED_NAME = "child-session-3", "explore-3"
 
 screen_contains = (
+    "Explore (Explore 1) [ready]",
     "Explore (Explore 2) [failed]",
-    "1 subagent waiting",
     "One investigation failed.",
 )
-screen_excludes = ("Explore (Explore 1)", "Explore 3", "a to show")
+screen_excludes = ("Explore 3", "subagent waiting")
 
 timeline: Timeline = [
     f"{_PROMPT}\r",
@@ -36,4 +36,6 @@ timeline: Timeline = [
     child_session_updated("failed", child_session_id=_FAILED_ID, name=_FAILED_NAME),
     assistant_msg("One investigation failed."),
     turn_completed(),
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the subagent list
 ]

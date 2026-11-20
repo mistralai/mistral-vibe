@@ -16,9 +16,8 @@ _PROMPT = "delegate two investigations"
 _SECOND_ID = "child-session-2"
 _SECOND_NAME = "explore-2"
 
-screen_contains = ("2 subagents waiting", "Both investigations are done.")
-# The `a` hint shows only while the list owns the keys.
-screen_excludes = ("This subagent is ready", "a to show")
+screen_contains = ("○ 2 agents", "Both investigations are done.")
+screen_excludes = ("This subagent is ready", "subagents waiting")
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

@@ -16,11 +16,12 @@ from tests.app_server.storage_usage._tree import Tree, write
 from tests.stubs.background_worker import FakeBackgroundWorker
 from vibe.app_server._background_worker_process import Job
 from vibe.app_server._model import ProtocolModel
-from vibe.app_server._storage_usage import files
+from vibe.app_server._storage_usage import cleanup, deletion, files
 from vibe.app_server._storage_usage.scan import SCAN_JOB, ScanRequest, scan
 from vibe.app_server._storage_usage.service import StorageUsageService
 from vibe.app_server._time import now_ms
 from vibe.app_server.protocol import (
+    StorageLeftoversCleanParams,
     StorageUsageRefreshParams,
     StorageUsageUpdatedParams,
 )
@@ -1194,3 +1195,242 @@ async def test_a_followed_scan_that_writes_no_cache_is_reported_failed(
     assert response.reason == "running_elsewhere"
     assert answer.status == "failed"
     assert answer.snapshot is not None
+
+
+@pytest.mark.asyncio
+async def test_a_read_sizes_each_delete_and_flags_unmeasured_worktrees(
+    tree: Tree, services: Callable[..., StorageUsageService]
+) -> None:
+    """*Prepare*: A scanned cache with a session alone in a measured worktree
+    and one alone in a worktree the cache says is not measured yet, written
+    by a server before ``deleteBytes``.
+    *Do*: Read.
+    *Assert*: Each row's ``deleteBytes`` is set from the snapshot, and only
+    the unmeasured one is flagged as a lower bound, as is the delete
+    suggestion that frees it.
+    """
+    # Prepare
+    tree.session("measured", size=1_000, idle_days=40, archived=True)
+    tree.session("unmeasured", size=1_000, idle_days=40, archived=True)
+    tree.worktree("m", sessions=["measured"])
+    tree.worktree("u", sessions=["unmeasured"])
+    service = services()
+    updates = _Updates()
+    service.listen(updates)
+    await _refreshed(service, updates)
+    path = tree.home / files.CACHE_FILENAME
+    document = json.loads(path.read_text())
+    for row in document["snapshot"]["worktrees"]:
+        if row["id"].endswith("/u"):
+            row["bytes"] = None
+    for row in document["snapshot"]["sessions"]:
+        row.pop("deleteBytes", None)
+    time.sleep(0.01)
+    path.write_text(json.dumps(document))
+
+    # Do
+    response = await service.read()
+
+    # Assert
+    assert response.snapshot is not None
+    rows = {row.session_id: row for row in response.snapshot.sessions}
+    worktrees = {row.id.split("/")[1]: row for row in response.snapshot.worktrees}
+    assert worktrees["m"].bytes is not None
+    assert rows["measured"].delete_bytes == (
+        rows["measured"].history_bytes + worktrees["m"].bytes
+    )
+    assert rows["measured"].delete_bytes_at_least is False
+    assert rows["unmeasured"].delete_bytes == rows["unmeasured"].history_bytes
+    assert rows["unmeasured"].delete_bytes_at_least is True
+    assert response.snapshot.delete_suggestion.reclaimable_at_least is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", ["finish_deletes", "clean_leftovers"])
+async def test_a_removal_failing_outside_one_item_still_answers_and_refreshes(
+    tree: Tree,
+    services: Callable[..., StorageUsageService],
+    monkeypatch: pytest.MonkeyPatch,
+    step: str,
+) -> None:
+    """*Prepare*: The worktree removal after a delete, or the leftover
+    cleanup, failing as a whole (the prune lock unreadable, say).
+    *Do*: Finish a delete, or clean a worktree and a folder.
+    *Assert*: An answer comes, the cleanup's items kept with ``error``, and a
+    refresh starts.
+    """
+    # Prepare
+    tree.session("s")
+    service = services()
+    refreshes: list[StorageUsageRefreshParams] = []
+    real_refresh = service.refresh
+
+    async def refresh(params: StorageUsageRefreshParams) -> Any:
+        refreshes.append(params)
+        return await real_refresh(params)
+
+    def broken(*_args: object) -> None:
+        raise OSError("the prune lock is unreadable")
+
+    monkeypatch.setattr(service, "refresh", refresh)
+    monkeypatch.setattr(deletion, "remove_orphaned_worktrees", broken)
+    monkeypatch.setattr(cleanup, "clean", broken)
+
+    # Do
+    if step == "finish_deletes":
+        freed = await service.finish_deletes(["gone"])
+        kept = [(item.id, item.reason) for item in freed.kept_worktrees]
+    else:
+        response = await service.clean_leftovers(
+            StorageLeftoversCleanParams(worktree_ids=["b/w"], folder_ids=["b/f"])
+        )
+        kept = [(item.id, item.reason) for item in response.kept]
+
+    # Assert
+    assert kept == (
+        [] if step == "finish_deletes" else [("b/w", "error"), ("b/f", "error")]
+    )
+    assert refreshes
+
+
+@pytest.mark.asyncio
+async def test_a_cleanup_failing_after_a_removal_never_reports_it_kept(
+    tree: Tree,
+    services: Callable[..., StorageUsageService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Prepare*: Two unknown folders; emptying the trash, after both moved
+    there, fails with an unexpected error.
+    *Do*: Clean both and a worktree that does not exist.
+    *Assert*: The two moved folders are answered as removed, the missing
+    worktree keeps the reason decided before the failure; nothing removed is
+    reported kept.
+    """
+    # Prepare
+    monkeypatch.setattr(cleanup, "RESERVATION_GRACE_S", 0)
+    for name in ("a", "b"):
+        write(tree.worktrees_root / "repo-0123456789ab" / name / "lib", 10)
+    service = services()
+
+    def broken() -> None:
+        raise RuntimeError("the trash is unreadable")
+
+    monkeypatch.setattr(cleanup.ManagedWorktree, "empty_trash", broken)
+    ids = ["repo-0123456789ab/a", "repo-0123456789ab/b"]
+
+    # Do
+    response = await service.clean_leftovers(
+        StorageLeftoversCleanParams(
+            worktree_ids=["repo-0123456789ab/w"], folder_ids=ids
+        )
+    )
+
+    # Assert
+    assert response.removed == ids
+    assert [(item.id, item.reason) for item in response.kept] == [
+        ("repo-0123456789ab/w", "not_found")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["after_success", "after_failure"])
+async def test_a_failing_refresh_never_loses_what_a_cleanup_removed(
+    tree: Tree,
+    services: Callable[..., StorageUsageService],
+    monkeypatch: pytest.MonkeyPatch,
+    failing: str,
+) -> None:
+    """*Prepare*: An unknown folder; the refresh after the cleanup raises,
+    after a cleanup that finished or one that failed past the move.
+    *Do*: Clean the folder.
+    *Assert*: The call answers, with the folder removed.
+    """
+    # Prepare
+    monkeypatch.setattr(cleanup, "RESERVATION_GRACE_S", 0)
+    write(tree.worktrees_root / "repo-0123456789ab" / "a" / "lib", 10)
+    service = services()
+
+    async def broken_refresh(*_args: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(service, "refresh", broken_refresh)
+    if failing == "after_failure":
+
+        def broken() -> None:
+            raise RuntimeError("the trash is unreadable")
+
+        monkeypatch.setattr(cleanup.ManagedWorktree, "empty_trash", broken)
+
+    # Do
+    response = await service.clean_leftovers(
+        StorageLeftoversCleanParams(folder_ids=["repo-0123456789ab/a"])
+    )
+
+    # Assert
+    assert response.removed == ["repo-0123456789ab/a"]
+
+
+@pytest.mark.asyncio
+async def test_a_folder_too_large_to_check_is_not_offered_until_it_changes(
+    tree: Tree,
+    services: Callable[..., StorageUsageService],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """*Prepare*: An old unknown folder offered by a scan, and a freshness
+    check allowed fewer entries than it holds.
+    *Do*: Clean it; read; scan again; then change its top folder's time and
+    read.
+    *Assert*: Kept as too large to check; neither the read nor the next scan
+    offers it, though it still counts in Other Vibe data; once its top
+    folder's time changed it is offered again.
+    """
+    # Prepare
+    monkeypatch.setattr(cleanup, "FRESH_CHECK_MAX_ENTRIES", 10)
+    folder = tree.worktrees_root / "repo-0123456789ab" / ".cargo-target"
+    for index in range(20):
+        write(folder / f"d{index}" / "lib", 10)
+    _age_tree(folder, 3600)
+    item = "repo-0123456789ab/.cargo-target"
+    service = services()
+    updates = _Updates()
+    service.listen(updates)
+    first = await _refreshed(service, updates)
+    assert first.snapshot is not None
+    assert _offered(first.snapshot) == [item]
+
+    # Do
+    response = await service.clean_leftovers(
+        StorageLeftoversCleanParams(folder_ids=[item])
+    )
+    after_clean = await service.read()
+    rescanned = await _refreshed(service, updates, full=True)
+    when = time.time() - 1800
+    os.utime(folder, (when, when))
+    after_change = await service.read()
+
+    # Assert
+    assert [(kept.id, kept.reason) for kept in response.kept] == [
+        (item, "too_large_to_check")
+    ]
+    assert after_clean.snapshot is not None and rescanned.snapshot is not None
+    assert _offered(after_clean.snapshot) == []
+    assert after_clean.snapshot.leftover_cleanup.reclaimable_bytes == 0
+    assert _offered(rescanned.snapshot) == []
+    assert any(
+        row.kind == "worktrees_unknown" and row.bytes > 0
+        for row in rescanned.snapshot.other
+    )
+    assert after_change.snapshot is not None
+    assert _offered(after_change.snapshot) == [item]
+
+
+def _offered(snapshot: Any) -> list[str]:
+    return [row.id for row in snapshot.leftover_cleanup.unknown_folders]
+
+
+def _age_tree(root: Any, seconds: float) -> None:
+    when = time.time() - seconds
+    for folder, dirs, names in os.walk(root, topdown=False):
+        for name in [*dirs, *names]:
+            os.utime(os.path.join(folder, name), (when, when))
+    os.utime(root, (when, when))

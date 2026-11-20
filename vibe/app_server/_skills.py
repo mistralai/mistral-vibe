@@ -99,12 +99,24 @@ def installed_session_skills(
     harness_files: HarnessFilesManager,
     sandbox: SandboxSessionSkills | None = None,
     session_pins: Sequence[ManifestEntry] = (),
-) -> list[InstalledSkill]:
-    """In a sandbox, an active one is listed in the version the session runs."""
-    installed = resolve_session_skills(
+) -> tuple[list[InstalledSkill], list[ConfigIssue]]:
+    """In a sandbox, an active one is listed in the version the session runs.
+
+    The issues are the skill files and manifests that failed to load, each once.
+    """
+    manager = resolve_session_skills(
         config, harness_files=harness_files, sandbox=sandbox, session_pins=session_pins
-    ).installed_skills()
-    return installed if sandbox is None else sandbox.installed(installed)
+    )
+    installed = manager.installed_skills()
+    issues = _config_issues(manager)
+    if sandbox is None:
+        return installed, issues
+    return sandbox.installed(installed), [*issues, *sandbox.issues]
+
+
+def _config_issues(manager: SkillManager) -> list[ConfigIssue]:
+    unique = {(str(issue.file), issue.message) for issue in manager.config_issues}
+    return [ConfigIssue(file=file, message=message) for file, message in sorted(unique)]
 
 
 def registry_versions_of(skills: Iterable[SkillInfo]) -> RegistryVersions:
@@ -162,12 +174,7 @@ def discover_session_skills(
             config, harness_files, sandbox, session_pins
         )
         mark_versions_used(registry_versions_of(root_skills.values()).values())
-    issues = [
-        ConfigIssue(file=str(issue.file), message=issue.message)
-        for issue in sorted(
-            manager.config_issues, key=lambda item: (str(item.file), item.message)
-        )
-    ]
+    issues = _config_issues(manager)
     if sandbox is not None:
         issues.extend(sandbox.issues)
     contexts = tuple(plugin_contexts)

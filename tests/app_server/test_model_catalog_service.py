@@ -7,8 +7,16 @@ import time
 import pytest
 
 from tests.conftest import build_test_vibe_config
-from tests.stubs.process_services import FakeModelCatalogServer, runnable_catalog
-from vibe.app_server._model_catalog_service import ModelCatalogKey, ModelCatalogService
+from tests.stubs.process_services import (
+    FakeModelCatalogServer,
+    locked_catalog,
+    runnable_catalog,
+)
+from vibe.app_server._model_catalog_service import (
+    LOCKED_MODEL_REFRESH_AFTER_S,
+    ModelCatalogKey,
+    ModelCatalogService,
+)
 from vibe.core.model_catalog.cache import load_cached_model_catalog
 from vibe.core.utils.remote_cache import RefreshPolicy
 
@@ -191,4 +199,150 @@ async def test_each_endpoint_gets_its_own_catalog(config_dir: Path) -> None:
 
     assert server.api_bases == [key.api_base, "https://other.test/v1"]
     assert key.disk_key != other.disk_key
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_check_of_an_old_catalog_refreshes_it_and_tells_listeners(
+    config_dir: Path,
+) -> None:
+    clock = [time.time()]
+    server = FakeModelCatalogServer()
+    server.serve(runnable_catalog("locked-model"), runnable_catalog("unlocked-model"))
+    service = _service(server, clock)
+    key = await _key()
+    await service.ensure(key)
+    changed: list[ModelCatalogKey] = []
+    service.on_changed(changed.append)
+    clock[0] += _POLICY.refresh_after_s + 1
+
+    await service.check(key)
+
+    assert await service.load(key) == runnable_catalog("locked-model")
+    await _until(lambda: changed == [key])
+    assert await service.load(key) == runnable_catalog("unlocked-model")
+    assert server.fetches == 2
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_check_of_a_recent_catalog_fetches_nothing(config_dir: Path) -> None:
+    server = FakeModelCatalogServer()
+    server.serve(runnable_catalog("fetched-model"))
+    service = _service(server)
+    key = await _key()
+    await service.ensure(key)
+
+    await service.check(key)
+    await asyncio.sleep(0)
+
+    assert server.fetches == 1
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_load_of_an_old_catalog_fetches_nothing(config_dir: Path) -> None:
+    clock = [time.time()]
+    server = FakeModelCatalogServer()
+    server.serve(runnable_catalog("fetched-model"))
+    service = _service(server, clock)
+    key = await _key()
+    await service.ensure(key)
+    clock[0] += _POLICY.refresh_after_s + 1
+
+    assert await service.load(key) == runnable_catalog("fetched-model")
+    await asyncio.sleep(0)
+
+    assert server.fetches == 1
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_check_with_no_catalog_held_fetches_nothing(config_dir: Path) -> None:
+    server = FakeModelCatalogServer()
+    service = _service(server)
+
+    await service.check(await _key())
+    await asyncio.sleep(0)
+
+    assert server.fetches == 0
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_check_for_a_locked_model_refreshes_the_catalog_after_30s(
+    config_dir: Path,
+) -> None:
+    # A plan upgrade unlocks it: the user back from checkout must not wait
+    # out the full refresh interval.
+    clock = [time.time()]
+    server = FakeModelCatalogServer()
+    server.serve(locked_catalog("paid-model"), runnable_catalog("paid-model"))
+    service = _service(server, clock)
+    key = await _key()
+    await service.ensure(key)
+    clock[0] += LOCKED_MODEL_REFRESH_AFTER_S + 1
+
+    await service.checked_for_locked_model(key, timeout_s=1.0)
+
+    assert server.fetches == 2
+    assert await service.load(key) == runnable_catalog("paid-model")
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_plain_check_keeps_a_catalog_listing_locked_models_for_the_full_interval(
+    config_dir: Path,
+) -> None:
+    # Every plan below the top one lists models it locks: a session on a
+    # runnable one must not refetch every 30 s.
+    clock = [time.time()]
+    server = FakeModelCatalogServer()
+    server.serve(locked_catalog("paid-model"))
+    service = _service(server, clock)
+    key = await _key()
+    await service.ensure(key)
+    clock[0] += LOCKED_MODEL_REFRESH_AFTER_S + 1
+
+    await service.check(key)
+    await service._cache.settled(key, timeout_s=1.0)
+
+    assert server.fetches == 1
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_picker_check_refreshes_a_catalog_showing_an_upsell_after_30s(
+    config_dir: Path,
+) -> None:
+    clock = [time.time()]
+    server = FakeModelCatalogServer()
+    server.serve(locked_catalog("paid-model"), runnable_catalog("paid-model"))
+    service = _service(server, clock)
+    key = await _key()
+    await service.ensure(key)
+    clock[0] += LOCKED_MODEL_REFRESH_AFTER_S + 1
+
+    await service.check_for_picker(key)
+    await _until(lambda: server.fetches == 2)
+
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_picker_check_keeps_a_catalog_locking_nothing_for_the_full_interval(
+    config_dir: Path,
+) -> None:
+    clock = [time.time()]
+    server = FakeModelCatalogServer()
+    server.serve(runnable_catalog("free-model"))
+    service = _service(server, clock)
+    key = await _key()
+    await service.ensure(key)
+    clock[0] += LOCKED_MODEL_REFRESH_AFTER_S + 1
+
+    await service.check_for_picker(key)
+    await service._cache.settled(key, timeout_s=1.0)
+
+    assert server.fetches == 1
     await service.close()

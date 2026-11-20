@@ -14,7 +14,9 @@ pub(crate) fn cancel_capture(app: &mut App, keep_selection: bool) {
                 | MouseTarget::Trust
                 | MouseTarget::BottomBar
                 | MouseTarget::Loading
+                | MouseTarget::CodePreview
                 | MouseTarget::GoalRow
+                | MouseTarget::RailWindow
                 | MouseTarget::Question
                 | MouseTarget::Approval
                 | MouseTarget::BottomApp

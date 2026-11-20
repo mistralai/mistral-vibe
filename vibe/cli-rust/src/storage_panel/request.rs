@@ -5,19 +5,19 @@ use std::sync::Arc;
 
 use serde_json::json;
 
-use super::actions::{Acted, Outcome, Worktree};
+use super::actions::{Acted, Outcome};
 use super::{Action, Event, UNSUPPORTED};
 use crate::app::App;
 use crate::server::request_error::describe;
 use crate::server::{
-    method, Client, RequestFailure, SessionArchiveParams, StorageRefreshParams,
-    StorageRefreshResponse, StorageUsage,
+    method, Client, RequestFailure, SessionArchiveParams, StorageLeftoversCleanParams,
+    StorageRefreshParams, StorageRefreshResponse, StorageSessionsDeleteParams, StorageUsage,
 };
 
 /// `storage/usage/read`; an older server answers "method not found".
 pub(super) fn read(app: &App, client: &Arc<Client>) {
     spawn(app, client, |client| async move {
-        Event::Read(read_usage(&client).await)
+        Event::Read(read_usage(&client).await.map(Box::new))
     });
 }
 
@@ -52,29 +52,14 @@ pub(super) fn refresh(app: &App, client: &Arc<Client>, params: StorageRefreshPar
     });
 }
 
-/// One archive, unarchive or delete; a delete then removes the worktree no saved session shares.
-pub(super) fn act(
-    app: &App,
-    client: &Arc<Client>,
-    action: Action,
-    id: String,
-    worktree: Option<String>,
-) {
+/// One archive or unarchive.
+pub(super) fn act(app: &App, client: &Arc<Client>, action: Action, id: String) {
     spawn(app, client, move |client| async move {
-        let outcome = match action {
-            Action::Archive => archive(&client, &id, true).await,
-            Action::Unarchive => archive(&client, &id, false).await,
-            Action::Delete => outcome(crate::resume_picker::delete_session(&client, &id).await),
-        };
-        let worktree = match (&outcome, worktree) {
-            (Outcome::Done, Some(path)) => removal(&client, path).await,
-            _ => Worktree::None,
-        };
+        let outcome = archive(&client, &id, action == Action::Archive).await;
         Event::Acted(Acted {
             action,
             session_id: id,
             outcome,
-            worktree,
         })
     });
 }
@@ -82,12 +67,48 @@ pub(super) fn act(
 /// Archive the selection one session at a time, each refused while it works.
 pub(super) fn bulk(app: &App, client: &Arc<Client>, ids: Vec<String>) {
     spawn(app, client, move |client| async move {
-        let mut outcomes = Vec::with_capacity(ids.len());
+        let mut acted = Vec::with_capacity(ids.len());
         for id in ids {
             let outcome = archive(&client, &id, true).await;
-            outcomes.push((id, outcome));
+            acted.push(Acted {
+                action: Action::Archive,
+                session_id: id,
+                outcome,
+            });
         }
-        Event::Bulk(outcomes)
+        Event::Bulk(acted)
+    });
+}
+
+/// `storage/sessions/delete`: the server deletes each session and the worktrees no session still
+/// claims, then refreshes itself.
+pub(super) fn delete_sessions(app: &App, client: &Arc<Client>, session_ids: Vec<String>) {
+    spawn(app, client, move |client| async move {
+        let params = StorageSessionsDeleteParams { session_ids };
+        let params = serde_json::to_value(params).unwrap_or_default();
+        let result = client
+            .request(method::STORAGE_SESSIONS_DELETE, params)
+            .await;
+        Event::Deleted(
+            result
+                .map(|v| crate::utils::json::read(&v))
+                .map_err(|e| describe(&e)),
+        )
+    });
+}
+
+/// `storage/leftovers/clean`: the server removes what it still finds safe and refreshes itself.
+pub(super) fn clean(app: &App, client: &Arc<Client>, params: StorageLeftoversCleanParams) {
+    spawn(app, client, move |client| async move {
+        let params = serde_json::to_value(params).unwrap_or_default();
+        let result = client
+            .request(method::STORAGE_LEFTOVERS_CLEAN, params)
+            .await;
+        Event::Cleaned(
+            result
+                .map(|v| crate::utils::json::read(&v))
+                .map_err(|e| describe(&e)),
+        )
     });
 }
 
@@ -99,52 +120,6 @@ async fn archive(client: &Client, id: &str, archived: bool) -> Outcome {
     };
     let params = serde_json::to_value(params).unwrap_or_default();
     outcome(client.request(method::SESSION_ARCHIVE, params).await)
-}
-
-/// Removed only when no saved session is left in it now, as the runner decides:
-/// the snapshot can miss a session saved since its scan or list one deleted since.
-async fn removal(client: &Arc<Client>, path: String) -> Worktree {
-    match saved_sessions_in(client, &path).await {
-        Some(0) => Worktree::Removal(
-            crate::worktree_exit::remove_request_inner(client, &path, false, None, false, false)
-                .await,
-        ),
-        Some(left) => Worktree::Shared(left),
-        None => Worktree::Removal(None),
-    }
-}
-
-/// Saved sessions whose folder is the worktree or below it, archived ones
-/// included; `None` when the list fails. `session/list` matches a `cwd`
-/// exactly, so every page is read and filtered here.
-async fn saved_sessions_in(client: &Client, path: &str) -> Option<usize> {
-    let root = std::path::Path::new(path);
-    let mut count = 0;
-    let mut cursor: Option<String> = None;
-    loop {
-        let mut params = json!({"includeArchived": true, "limit": 500});
-        if let Some(cursor) = &cursor {
-            params["cursor"] = json!(cursor);
-        }
-        let value = client
-            .request(method::SESSION_LIST, params)
-            .await
-            .inspect_err(|error| tracing::debug!(%error, "listing saved sessions failed"))
-            .ok()?;
-        let items = value["items"]
-            .as_array()
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        count += items
-            .iter()
-            .filter_map(|session| session["cwd"].as_str())
-            .filter(|cwd| std::path::Path::new(cwd).starts_with(root))
-            .count();
-        match value["nextCursor"].as_str() {
-            Some(next) => cursor = Some(next.to_owned()),
-            None => return Some(count),
-        }
-    }
 }
 
 fn outcome(result: anyhow::Result<serde_json::Value>) -> Outcome {
@@ -161,7 +136,7 @@ fn outcome(result: anyhow::Result<serde_json::Value>) -> Outcome {
     }
 }
 
-/// `session/archive` refuses with `data.refusal: "busy"`; `session/delete` with a session-busy conflict.
+/// `session/archive` refuses with `data.refusal: "busy"` or a session-busy conflict.
 fn refused_busy(rpc: &crate::server::RpcError) -> bool {
     let refusal = rpc
         .data

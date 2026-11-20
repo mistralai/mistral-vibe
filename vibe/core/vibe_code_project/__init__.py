@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-from vibe.core.vibe_code_project.project_store import (
-    REMOTE_PROJECT_KIND,
-    VibeProjectsStore,
-)
+from vibe.core.vibe_code_project.project_store import VibeProjectsStore
 from vibe.core.vibe_code_project.selection import (
     LocalProjectLink,
     ProjectLink,
@@ -12,7 +9,6 @@ from vibe.core.vibe_code_project.selection import (
 )
 
 __all__ = [
-    "REMOTE_PROJECT_KIND",
     "LocalProjectLink",
     "ProjectLink",
     "RemoteProjectLink",

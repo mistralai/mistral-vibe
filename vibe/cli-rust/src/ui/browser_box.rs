@@ -13,6 +13,7 @@ use super::{hint_line, list_cursor, scrollbar, theme};
 use crate::app::App;
 use crate::hints::Hint;
 use crate::mouse::MouseTarget;
+use crate::tab_bar::Label;
 
 /// Columns the option list loses to the border, the padding and its own gutter.
 pub(crate) const GUTTER: u16 = 6;
@@ -37,10 +38,9 @@ pub(crate) fn split_selection(app: &mut App, (left, right): (Rect, Rect)) {
     };
     app.view.bottom_app_selection_halves = Some((left, content(right)));
 }
-
-/// Rows the box spends around its lines: borders, title and its blank, help and the blank above it, and the search row.
-pub(crate) fn chrome(search: bool) -> u16 {
-    6 + u16::from(search)
+/// Rows a box `width` wide spends around its lines: borders, title and its blank, the search row, the blank above the help and the help wrapped.
+pub(crate) fn chrome(search: bool, width: u16, help: &[Hint]) -> u16 {
+    6 + u16::from(search) + hint_line::extra(help, width)
 }
 
 /// `height` full-width rows starting `from` lines under the title, or under the search row when shown.
@@ -49,10 +49,9 @@ pub(crate) fn pane(area: Rect, search: bool, from: u16, height: u16) -> Rect {
     Rect::new(area.x + 1, top, area.width.saturating_sub(2), height)
 }
 
-/// The hint row along the bottom of the box.
+/// The hints along the bottom of the box, wrapped upward.
 pub(crate) fn draw_help(f: &mut Frame, area: Rect, help: &[Hint]) {
-    let (x, y) = (area.x + 2, area.y + area.height - 2);
-    hint_line::draw_clipped(f, x, y, area.width.saturating_sub(4), help);
+    hint_line::draw_footer(f, area, help);
 }
 
 /// Lay lines out for `visible` rows at most (`50vh`), reserving the scrollbar once they overflow.
@@ -83,47 +82,53 @@ pub(crate) fn draw_frame(f: &mut Frame, area: Rect, title: &str) {
 /// Columns between the title and the first tab, and between tabs.
 const TAB_GAP: u16 = 2;
 
-/// Tabs after the title like the question app's, the open one in brackets and alone when all do not fit; each tab's area, for clicks.
+/// Tabs after the title, each padded by a space: the open one a filled pill, the others plain, their counts dimmed; the open one alone when all do not fit. Each tab's area, for clicks.
 pub(crate) fn draw_tabs<T: Copy + PartialEq>(
     f: &mut Frame,
     area: Rect,
     title: &str,
-    tabs: &[(T, String)],
+    tabs: &[(T, Label)],
     open: T,
 ) -> Vec<(T, Rect)> {
     let right = area.right().saturating_sub(2);
     let y = area.y + 1;
     let mut x = area.x + 2 + title.width() as u16;
-    let shown = tab_texts(tabs, open);
-    let needed: u16 = shown
-        .iter()
-        .map(|(_, text)| TAB_GAP + text.width() as u16)
-        .sum();
+    let width = |label: &Label| label.text().width() as u16 + 2;
+    let needed: u16 = tabs.iter().map(|(_, label)| TAB_GAP + width(label)).sum();
     let all_fit = x + needed <= right;
     let mut areas = Vec::new();
-    for (tab, text) in shown {
-        let width = text.width() as u16;
-        if (!all_fit && tab != open) || x + TAB_GAP + width > right {
+    for (tab, label) in tabs {
+        let cells = width(label);
+        if (!all_fit && *tab != open) || x + TAB_GAP + cells > right {
             continue;
         }
         x += TAB_GAP;
-        f.buffer_mut()
-            .set_string(x, y, &text, theme::text(theme::primary()));
-        areas.push((tab, Rect::new(x, y, width, 1)));
-        x += width;
+        draw_tab(f, x, y, label, *tab == open);
+        areas.push((*tab, Rect::new(x, y, cells, 1)));
+        x += cells;
     }
     areas
 }
 
-/// Each tab's text: the open one in brackets, the others padded to the same width.
-fn tab_texts<T: Copy + PartialEq>(tabs: &[(T, String)], open: T) -> Vec<(T, String)> {
-    let text = |tab: T, label: &str| match tab == open {
-        true => format!("[{label}]"),
-        false => format!(" {label} "),
+/// ` Name count `: the open tab on the cursor bar, as a highlighted row; another tab's name plain; each count dimmed.
+fn draw_tab(f: &mut Frame, x: u16, y: u16, label: &Label, open: bool) {
+    let (name, count) = match open {
+        true => list_cursor::styles(true),
+        false => {
+            let plain = theme::text(theme::foreground()).bg(theme::background());
+            (plain, theme::muted_style().bg(theme::background()))
+        }
     };
-    tabs.iter()
-        .map(|(tab, label)| (*tab, text(*tab, label)))
-        .collect()
+    let buffer = f.buffer_mut();
+    let head = format!(" {}", label.name);
+    let tail = label
+        .count
+        .map(|number| format!(" {number}"))
+        .unwrap_or_default();
+    let width = |text: &str| text.width() as u16;
+    buffer.set_string(x, y, &head, name);
+    buffer.set_string(x + width(&head), y, &tail, count);
+    buffer.set_string(x + width(&head) + width(&tail), y, " ", name);
 }
 
 /// One option line, clipped to the option column so wide glyphs never reach the border.

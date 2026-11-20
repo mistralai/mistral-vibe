@@ -975,15 +975,12 @@ fn the_console_paints_a_scrollbar_only_when_the_log_overflows() {
     let mut terminal = Terminal::new(TestBackend::new(120, 14)).expect("terminal");
     terminal.draw(|frame| app.draw(frame)).expect("draw");
     // Twenty single-row entries overflow the 12-row body: the scrollbar's
-    // track is registered and its thumb paints a reversed cell.
+    // track is registered and its thumb paints cells in the thumb color.
     let body = app.debug_console.body_area;
     assert!(!mouse::scrollbar_tracks(&app, body).is_empty());
     let buffer = terminal.backend().buffer();
-    let thumb = (body.y..body.bottom()).any(|row| {
-        buffer[(body.right() - 1, row)]
-            .modifier
-            .contains(Modifier::REVERSED)
-    });
+    let thumb =
+        (body.y..body.bottom()).any(|row| buffer[(body.right() - 1, row)].fg == theme::scrollbar());
     assert!(thumb, "no scrollbar thumb in the body's right column");
     // A log that fits the body paints no scrollbar: no track, no thumb.
     app.debug_console.entries.truncate(2);
@@ -992,11 +989,8 @@ fn the_console_paints_a_scrollbar_only_when_the_log_overflows() {
     let body = app.debug_console.body_area;
     assert!(mouse::scrollbar_tracks(&app, body).is_empty());
     let buffer = terminal.backend().buffer();
-    let thumb = (body.y..body.bottom()).any(|row| {
-        buffer[(body.right() - 1, row)]
-            .modifier
-            .contains(Modifier::REVERSED)
-    });
+    let thumb =
+        (body.y..body.bottom()).any(|row| buffer[(body.right() - 1, row)].fg == theme::scrollbar());
     assert!(!thumb, "a fitting log still paints a scrollbar thumb");
 }
 

@@ -129,6 +129,7 @@ impl ConversationSeed {
                     ConversationSource::History => StoredMessageSource::History,
                     ConversationSource::Injection => StoredMessageSource::Injection,
                 },
+                instructions: None,
             });
         }
         if complete_prefix_len(&messages.iter().collect::<Vec<_>>()) != messages.len() {
@@ -243,6 +244,7 @@ fn close_pending_calls(
                 message: (*message).clone(),
                 source: StoredMessageSource::History,
                 turn_index: call_message.turn_index,
+                instructions: None,
             },
             None => StoredMessage {
                 message: Message::tool(
@@ -254,6 +256,7 @@ fn close_pending_calls(
                 ),
                 source: StoredMessageSource::Injection,
                 turn_index: call_message.turn_index,
+                instructions: None,
             },
         }
     });
@@ -410,6 +413,7 @@ mod tests {
                 message,
                 source: StoredMessageSource::History,
                 turn_index: Some(0),
+                instructions: None,
             })
             .collect()
     }

@@ -999,7 +999,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "3.1.3"
+version = "3.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },
@@ -1185,7 +1185,7 @@ requires-dist = [
     { name = "mcp-types", specifier = "==2.3.0" },
     { name = "miniaudio", specifier = "==1.73" },
     { name = "mistralai", specifier = "==3.5.0" },
-    { name = "mistralai-vibe-harness", specifier = "==0.1.22" },
+    { name = "mistralai-vibe-harness", specifier = "==0.1.22", index = "https://pypi.org/simple" },
     { name = "more-itertools", specifier = "==11.0.2" },
     { name = "opentelemetry-api", specifier = "==1.45.1" },
     { name = "opentelemetry-exporter-http-transport", specifier = "==0.66b1" },

@@ -26,6 +26,7 @@ impl EventLoop {
         let mut blink = clock::interval(std::time::Duration::from_millis(500));
         let mut spin = clock::interval(ui::pulse::TICK_INTERVAL);
         let mut narrator_anim = clock::interval(ui::narrator::ANIMATION_INTERVAL);
+        let mut copy_light = clock::interval(ui::copy_light::FRAME);
         let mut voice_tick = clock::interval_real(std::time::Duration::from_millis(50));
         let mut selection_scroll = clock::interval_real(std::time::Duration::from_millis(50));
         let mut redraw_tick = clock::interval_real(REDRAW_INTERVAL);
@@ -38,7 +39,8 @@ impl EventLoop {
                 suspend_once(&mut self.app, &mut self.terminal, &mut self.terminal_guard)?;
                 continue;
             }
-            if self.app.external_editor_requested {
+            let file = self.app.external_editor_file.take();
+            if self.app.external_editor_requested || file.is_some() {
                 self.app.external_editor_requested = false;
                 let handoff = TerminalHandoff {
                     terminal: &mut self.terminal,
@@ -52,6 +54,7 @@ impl EventLoop {
                     sources,
                     shutdown,
                     &mut deferred_notification,
+                    file,
                 )
                 .await?;
                 if quit {
@@ -165,6 +168,11 @@ impl EventLoop {
                         state.redraw_pending = true;
                     }
                 }
+                _ = copy_light.tick(), if self.app.view.copy_light.active() => {
+                    self.app.view.copy_light.step();
+                    state.redraw_pending = true;
+                    redraw_tick.reset_immediately();
+                }
                 _ = narrator_anim.tick(), if self.app.narrator.state != turn_summary::NarratorState::Idle => {
                     self.app.narrator.frame = self.app.narrator.frame.wrapping_add(1);
                     state.redraw_pending = true;
@@ -239,6 +247,10 @@ impl EventLoop {
                 }
                 _ = clock::sleep_until(approval_pause_deadline(&self.app)), if crate::approval::can_wake(&self.app) => {
                     crate::approval::show_pending(&mut self.app);
+                    state.redraw_pending = true;
+                }
+                _ = clock::sleep_until(self.app.code_preview.show_at) => {
+                    crate::code_preview::show(&mut self.app);
                     state.redraw_pending = true;
                 }
                 _ = clock::sleep_until(next_loop_deadline(&self.app)) => {

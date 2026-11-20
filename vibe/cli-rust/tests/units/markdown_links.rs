@@ -100,7 +100,7 @@ fn composed_lines_keep_each_link_on_its_label() {
     lines.append(prepare("[one](https://1.io)", 40));
     lines.append(guttered("# T\n\n[two](https://2.io)", 40, Color::Reset));
     lines.retain(|index, _| index != 0);
-    lines.prefix(|index| Span::raw(if index == 0 { "  ⎣ " } else { "  ⎢ " }));
+    lines.prefix(|index| Span::raw(if index == 0 { "  └ " } else { "  │ " }));
     let links = links(&lines);
     let targets: Vec<_> = links.iter().map(Link::target).collect();
     assert_eq!(targets, ["https://1.io", "https://2.io"]);

@@ -359,6 +359,11 @@ def _credential_required(
             )
         case "missing":
             message = "You are not signed in to Mistral. Sign in and retry."
+        case "credential_unavailable":
+            message = (
+                "Vibe Desktop has no Mistral sign-in for this session. "
+                "Sign in to Vibe Desktop and retry."
+            )
     return ProviderAuthRequired(
         reason=auth_reason, provider=provider.name, message=message
     )

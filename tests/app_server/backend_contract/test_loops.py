@@ -246,6 +246,47 @@ async def test_loop_schedule_survives_resume_from_a_new_host(
     assert restored == [loop]
 
 
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_loop_keeps_a_session_closed_before_its_first_prompt(
+    backend_contract_persistent_connection: BackendContractConnection,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A new persisted session that has sent no prompt.
+    *Do*: Create a loop, close the session, then resume it from a new Host.
+    *Assert*: The session is listed and resumes with its loop and no history.
+    """
+    # Prepare
+    session = await backend_contract_persistent_connection.host.open_session()
+    session_id = session.session_id
+
+    # Do
+    loop = await session.resources.loops.create(
+        None, "Daily review\nReview CI.", cron="0 9 * * *"
+    )
+    await session.close()
+    resumed_connection = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        listed = await resumed_connection.host.list_sessions()
+        resumed = await resumed_connection.host.resume_session(session_id)
+        try:
+            restored = await resumed.resources.loops.list()
+            history = resumed.history
+        finally:
+            await resumed.close()
+    finally:
+        await resumed_connection.host.close()
+
+    # Assert
+    assert session_id in {item.id for item in listed}
+    assert restored == [loop]
+    assert history == []
+
+
 @pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_clear_history_starts_without_the_cleared_sessions_loops(

@@ -101,6 +101,17 @@ def test_retired_settings_are_flagged_as_no_longer_used() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_a_custom_compaction_prompt_id_is_flagged_as_no_longer_used() -> None:
+    config = await _supplied({"compaction_prompt_id": "missing_prompt"})
+
+    assert config.validation_warnings
+    assert _issues({"compaction_prompt_id": "missing_prompt"}) == {
+        "compaction_prompt_id": KeyIssueKind.RETIRED
+    }
+    assert _issues({"compaction_prompt_id": "compact"}) == {}
+
+
 def test_tool_paths_left_in_a_config_is_flagged_as_no_longer_used() -> None:
     # The startup migration drops it from the files Vibe writes, but not from
     # an agent profile.
@@ -437,10 +448,10 @@ def test_a_refused_profile_switch_keeps_the_session_on_its_profile(
         build_config(strict_config=True, agent_paths=[agents_dir])
     )
     agents = AgentManager(orchestrator)
-    previous = agents.active_profile.name
+    previous = agents.active_agent.name
 
     with pytest.raises(UnusedConfigKeysError, match="api_timeuot"):
-        agents.switch_profile("reviewer")
+        agents.switch_agent("reviewer")
 
-    assert agents.active_profile.name == previous
+    assert agents.active_agent.name == previous
     orchestrator.rebuild()

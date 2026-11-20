@@ -31,7 +31,7 @@ screen_contains = (
     "Mistral Vibe",
     "Type /help",
     "No transcript yet.",
-    "Viewing Explore 1 · read-only · Esc to return",
+    "Viewing Explore 1 read-only",
 )
 
 
@@ -48,7 +48,8 @@ timeline: Timeline = [
     _taskless_spawn(_TASK),
     child_session_updated(),
     turn_completed(),
-    "\x1b[B",  # Down — focus the list on the Main row
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the subagent list on the Main row
     "\x1b[B",  # Down — highlight the child row
     "\r",  # Enter — open the read-only view of the empty child
 ]

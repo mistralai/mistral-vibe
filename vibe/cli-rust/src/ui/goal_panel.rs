@@ -23,12 +23,13 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     }
     let width = area.width.saturating_sub(4) as usize;
     let height = match &app.goal.panel {
-        Some(Panel::Confirm(_)) => 9,
-        _ => app
-            .goal
-            .goal
-            .as_ref()
-            .map_or(0, |goal| objective_rows(goal, width).len() as u16 + 8),
+        Some(Panel::Confirm(confirm)) => {
+            9 + hint_line::extra(&confirm_hints(confirm.nested), area.width)
+        }
+        _ => app.goal.goal.as_ref().map_or(0, |goal| {
+            let extra = hint_line::extra(&detail_hints(goal), area.width);
+            objective_rows(goal, width).len() as u16 + 8 + extra
+        }),
     };
     let kind = super::bottom_app::Kind::Goal;
     super::bottom_app::draw(app, f, area, height, kind, draw_box);
@@ -84,7 +85,8 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
         return;
     };
     let text = theme::text(theme::foreground());
-    let body = body(content);
+    let hints = detail_hints(goal);
+    let body = body(content, &hints);
     let mut y = content.y + 1;
     for row in objective_rows(goal, content.width as usize) {
         put_line(f, body, y, Line::styled(row, text));
@@ -104,21 +106,28 @@ fn draw_detail(app: &App, f: &mut Frame, area: Rect) {
         Span::styled(format::duration(goal.time_used_seconds), text),
     ];
     put_line(f, body, y + 1, Line::from(time));
-    hint_line::draw_clipped(
-        f,
-        content.x,
-        body.bottom(),
-        content.width,
-        &detail_hints(goal),
-    );
+    draw_hints(f, content, &hints);
 }
 
-/// The content above the hint row, which clips every other line in a short terminal.
-pub(super) fn body(content: Rect) -> Rect {
+/// The content above the hint rows, which clips every other line in a short terminal.
+pub(super) fn body(content: Rect, hints: &[Hint]) -> Rect {
     Rect {
-        height: content.height.saturating_sub(1),
+        height: content
+            .height
+            .saturating_sub(hint_line::height(hints, content.width)),
         ..content
     }
+}
+
+/// The hints wrapped along the bottom of the content.
+pub(super) fn draw_hints(f: &mut Frame, content: Rect, hints: &[Hint]) {
+    let bottom = content.bottom().saturating_sub(1);
+    hint_line::draw_above(f, content.x, bottom, content.width, hints);
+}
+
+fn confirm_hints(nested: bool) -> [Hint; 3] {
+    let back = if nested { hints::BACK } else { hints::CANCEL };
+    [hints::NAVIGATE, hints::SELECT, back]
 }
 
 /// Paint `line` at row `y` of `body`, or nothing when `y` falls below it.
@@ -133,7 +142,7 @@ fn label(text: &str) -> Span<'static> {
 }
 
 /// The objective wrapped to `width`, its last shown row ellipsized past the cap.
-fn objective_rows(goal: &PublicGoal, width: usize) -> Vec<String> {
+pub(crate) fn objective_rows(goal: &PublicGoal, width: usize) -> Vec<String> {
     let text = crate::utils::text::multi_line(&goal.objective);
     let mut rows = crate::utils::text::wrap_hard(&text, width.max(1));
     if rows.len() > MAX_OBJECTIVE_ROWS {
@@ -145,7 +154,7 @@ fn objective_rows(goal: &PublicGoal, width: usize) -> Vec<String> {
 }
 
 /// `p` pauses a running goal and resumes a stopped one; it is hidden when neither applies.
-fn detail_hints(goal: &PublicGoal) -> Vec<Hint> {
+pub(crate) fn detail_hints(goal: &PublicGoal) -> Vec<Hint> {
     let toggle = match goal.status {
         GoalStatus::Active => Some(("p", action::PAUSE)),
         status if format::resumable(status) => Some(("p", action::RESUME)),
@@ -165,7 +174,8 @@ fn draw_confirm(app: &mut App, f: &mut Frame, area: Rect, nested: bool) {
     let Some(content) = frame(f, area, vec![heading(title)]) else {
         return;
     };
-    let body = body(content);
+    let footer = confirm_hints(nested);
+    let body = body(content, &footer);
     let question = Line::styled(question, theme::text(theme::foreground()));
     put_line(f, body, content.y + 1, question);
     let options = Rect::new(
@@ -188,7 +198,5 @@ fn draw_confirm(app: &mut App, f: &mut Frame, area: Rect, nested: bool) {
         f.buffer_mut()
             .set_stringn(row.x + 2, row.y, *label, row.width as usize, style);
     }
-    let back = if nested { hints::BACK } else { hints::CANCEL };
-    let footer = [hints::NAVIGATE, hints::SELECT, back];
-    hint_line::draw_clipped(f, content.x, body.bottom(), content.width, &footer);
+    draw_hints(f, content, &footer);
 }

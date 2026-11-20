@@ -40,12 +40,14 @@ from vibe.app_server.models import (
     FailedEffectState,
     PublicEffectEntry,
     PublicMessageEntry,
+    RunningEffectState,
     TextContentBlock,
     WorktreeEffectDetail,
     WorktreeEffectInput,
 )
 from vibe.app_server.protocol import (
     AgentSwitchParams,
+    ApprovalPolicySwitchParams,
     AutoWorktreeInput,
     ClientCapabilities,
     NewWorktreeInput,
@@ -357,12 +359,20 @@ async def test_first_turn_response_does_not_wait_for_worktree_creation(
 
 @pytest.mark.both_paths
 @pytest.mark.asyncio
-async def test_an_agent_switch_does_not_wait_for_worktree_creation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+async def test_a_selection_switch_does_not_wait_for_worktree_creation(
+    config_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
 ) -> None:
-    """A client picks the agent before its first message, and that pick must
-    not hold the message back for the whole checkout.
+    """A client picks the agent and the approval policy before its first
+    message, and those picks must not hold the message back for the whole
+    checkout.
     """
+    (config_dir / "agents").mkdir()
+    (config_dir / "agents" / "reviewer.toml").write_text(
+        'display_name = "Reviewer"\n', encoding="utf-8"
+    )
     _init_repo(tmp_path)
     setup_started = asyncio.Event()
     release_setup = asyncio.Event()
@@ -408,20 +418,33 @@ async def test_an_agent_switch_does_not_wait_for_worktree_creation(
         session = await connection.host.start_session()
         await setup_started.wait()
 
-        switched = validate_wire(
+        switched_agent = validate_wire(
             RuntimeMutationResponse,
             await asyncio.wait_for(
                 connection.client.request(
                     "session/agent/update",
                     AgentSwitchParams(
-                        session_id=session.session_id, agent_name="auto-approve"
+                        session_id=session.session_id, agent_name="reviewer"
+                    ),
+                ),
+                timeout=1,
+            ),
+        )
+        switched_policy = validate_wire(
+            RuntimeMutationResponse,
+            await asyncio.wait_for(
+                connection.client.request(
+                    "session/approvalPolicy/update",
+                    ApprovalPolicySwitchParams(
+                        session_id=session.session_id, approval_policy="auto-approve"
                     ),
                 ),
                 timeout=1,
             ),
         )
 
-        assert switched.runtime.active_agent.name == "auto-approve"
+        assert switched_agent.runtime.active_agent.name == "reviewer"
+        assert switched_policy.runtime.active_approval_policy.name == "auto-approve"
         assert not release_setup.is_set()
     finally:
         release_setup.set()
@@ -503,13 +526,17 @@ async def test_a_turn_claimed_before_a_failed_worktree_reports_it_once(
                 and isinstance(entry.detail, WorktreeEffectDetail)
             ]
 
+        def _claimed_entry_settled(entries: list[PublicEffectEntry]) -> bool:
+            return any(
+                entry.turn_id == response.turn.id
+                and not isinstance(entry.state, RunningEffectState)
+                for entry in entries
+            )
+
+        # A regressed duplicate lands before the claimed entry settles.
         async with asyncio.timeout(5):
-            while not _worktree_entries():
+            while not _claimed_entry_settled(entries := _worktree_entries()):
                 await asyncio.sleep(0.01)
-        # A duplicate, if the single-emit guard regressed, rides the same
-        # failure wave; let the wave finish before counting.
-        await asyncio.sleep(0.5)
-        entries = _worktree_entries()
         assert len(entries) == 1
         assert isinstance(entries[0].state, FailedEffectState)
     finally:

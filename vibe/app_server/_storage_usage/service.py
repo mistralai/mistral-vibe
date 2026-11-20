@@ -14,6 +14,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import threading
 import time
@@ -22,7 +23,7 @@ import uuid
 
 from vibe.app_server._background_worker import BackgroundWorker, BackgroundWorkerError
 from vibe.app_server._model import ProtocolModel
-from vibe.app_server._storage_usage import files, live
+from vibe.app_server._storage_usage import cleanup, deletion, files, live
 from vibe.app_server._storage_usage.compat import parse_snapshot
 from vibe.app_server._storage_usage.removal import finished_worktrees, wait_until_gone
 from vibe.app_server._storage_usage.scan import (
@@ -40,6 +41,11 @@ from vibe.app_server._storage_usage.telemetry import (
 from vibe.app_server._time import now_ms
 from vibe.app_server.protocol import (
     STORAGE_USAGE_UPDATED,
+    StorageLeftoverCleanup,
+    StorageLeftoverFolder,
+    StorageLeftoverKept,
+    StorageLeftoversCleanParams,
+    StorageLeftoversCleanResponse,
     StorageUsageReadResponse,
     StorageUsageRefreshParams,
     StorageUsageRefreshResponse,
@@ -48,6 +54,7 @@ from vibe.app_server.protocol import (
     StorageUsageUpdatedParams,
 )
 from vibe.core.paths import SESSION_LOG_DIR, VIBE_HOME, WORKTREES_DIR
+from vibe.core.trusted_folders import TrustedFoldersManager
 from vibe.observability.logging import logger
 
 # Imported, not only named, so a frozen build bundles the module the worker loads.
@@ -122,6 +129,12 @@ class StorageUsageService:
         # Replaced whole, never mutated: reads iterate it from worker threads.
         self._extra_roots: frozenset[Path] = frozenset()
         self._cached: _Cached | None = None
+        # Unknown folders a cleanup could not verify, with their top folder's
+        # mtime then: not offered again until it changes or this process ends.
+        # Replaced whole, never mutated: reads use it from worker threads.
+        self._unverified: dict[str, int] = {}
+        # Written from the event loop and from read threads.
+        self._unverified_lock = threading.Lock()
         # Reads reload from threads while the loop adopts a finished scan.
         self._cache_lock = threading.Lock()
         self._failed = False
@@ -200,13 +213,26 @@ class StorageUsageService:
                 status=self._status(home, None), snapshot=None, disk=disk
             )
         open_ids = live.open_sessions(self._paths().session_roots)
+        sessions = []
+        for row in cached.snapshot.sessions:
+            freed, at_least = live.delete_bytes(cached.snapshot, row.session_id)
+            sessions.append(
+                row.model_copy(
+                    update={
+                        "open": row.session_id in open_ids,
+                        "delete_bytes": freed,
+                        "delete_bytes_at_least": at_least,
+                    }
+                )
+            )
         snapshot = cached.snapshot.model_copy(
             update={
-                "sessions": [
-                    row.model_copy(update={"open": row.session_id in open_ids})
-                    for row in cached.snapshot.sessions
-                ],
+                "sessions": sessions,
+                "leftover_cleanup": self._offer(cached.snapshot.leftover_cleanup),
                 "archive_suggestion": live.archive_suggestion(
+                    cached.snapshot, open_ids, cached.never_suggested, now
+                ),
+                "delete_suggestion": live.delete_suggestion(
                     cached.snapshot, open_ids, cached.never_suggested, now
                 ),
             }
@@ -216,6 +242,42 @@ class StorageUsageService:
             snapshot=snapshot,
             disk=disk,
             stale=files.stale_marker_ms(home) > snapshot.scan_started_at,
+        )
+
+    def _offer(self, offer: StorageLeftoverCleanup) -> StorageLeftoverCleanup:
+        """``offer`` without the folders a cleanup could not verify, while
+        their top folder's mtime is unchanged; a changed one is forgotten.
+        """
+        unverified = self._unverified
+        if not unverified:
+            return offer
+        folders: list[StorageLeftoverFolder] = []
+        withheld: list[StorageLeftoverFolder] = []
+        changed: set[str] = set()
+        for folder in offer.unknown_folders:
+            mtime = unverified.get(folder.id)
+            if mtime is None:
+                folders.append(folder)
+            elif _mtime_ns(Path(folder.path)) == mtime:
+                withheld.append(folder)
+            else:
+                changed.add(folder.id)
+                folders.append(folder)
+        if changed:
+            with self._unverified_lock:
+                self._unverified = {
+                    key: value
+                    for key, value in self._unverified.items()
+                    if key not in changed
+                }
+        if not withheld:
+            return offer
+        return offer.model_copy(
+            update={
+                "unknown_folders": folders,
+                "reclaimable_bytes": offer.reclaimable_bytes
+                - sum(folder.bytes for folder in withheld),
+            }
         )
 
     def _status(self, home: Path, cached: _Cached | None) -> StorageUsageStatus:
@@ -269,6 +331,99 @@ class StorageUsageService:
             else set(),
         )
         return True
+
+    # -- storage/leftovers/clean ----------------------------------------------
+
+    async def clean_leftovers(
+        self,
+        params: StorageLeftoversCleanParams,
+        trust_store: TrustedFoldersManager | None = None,
+    ) -> StorageLeftoversCleanResponse:
+        """Every check runs again in ``cleanup.clean``; then a refresh, so
+        the numbers show the space freed.
+        """
+        paths = self._paths()
+        progress = cleanup.CleanProgress()
+        try:
+            response = await asyncio.to_thread(
+                cleanup.clean,
+                cleanup.CleanRequest(
+                    worktrees_root=paths.worktrees_root,
+                    session_roots=paths.session_roots,
+                    worktree_ids=tuple(params.worktree_ids),
+                    folder_ids=tuple(params.folder_ids),
+                    trust_store=trust_store,
+                ),
+                progress,
+            )
+        # Broad: ``clean`` keeps a failing item as ``error``; this is the net
+        # for a failure outside one item, such as emptying the trash. What it
+        # decided before stands; every other id is kept with ``error``.
+        except Exception:
+            logger.warning("Failed to clean up storage leftovers", exc_info=True)
+            # Built first: a failing refresh must not lose what went. Refresh
+            # anyway: a failure part way may have changed the disk.
+            response = _partial_clean(params, progress)
+            self._remember_unverified(progress)
+            await self._refresh_after_change()
+            return response
+        self._remember_unverified(progress)
+        if response.removed:
+            await self._refresh_after_change()
+        return response
+
+    async def _refresh_after_change(self) -> None:
+        """A refresh after removals, whose failure never fails the call: the
+        items are gone, and the next refresh shows the numbers.
+        """
+        try:
+            await self.refresh(StorageUsageRefreshParams())
+        # Broad: the answer must still say what went.
+        except Exception:
+            logger.warning("Failed to refresh after a storage change", exc_info=True)
+
+    def _remember_unverified(self, progress: cleanup.CleanProgress) -> None:
+        if not progress.unverified:
+            return
+        # Replaced, not updated in place: reads iterate it from threads.
+        with self._unverified_lock:
+            self._unverified = {**self._unverified, **progress.unverified}
+
+    # -- storage/sessions/delete ----------------------------------------------
+
+    def open_session_ids(self, only: set[str] | None = None) -> set[str]:
+        """Sessions a live process holds, by their lease, read now; with
+        ``only``, just those of them.
+        """
+        held = live.open_sessions(self._paths().session_roots)
+        return held if only is None else held & only
+
+    async def finish_deletes(
+        self, deleted: list[str], trust_store: TrustedFoldersManager | None = None
+    ) -> deletion.Freed:
+        """Removes the worktrees the deleted sessions left with no session,
+        through the plain worktree release, then refreshes, even when the
+        removal failed. What it freed is sized from the last measurement.
+        """
+        paths = self._paths()
+        snapshot = None if self._cached is None else self._cached.snapshot
+        try:
+            freed = await asyncio.to_thread(
+                deletion.remove_orphaned_worktrees,
+                deleted,
+                paths.worktrees_root,
+                snapshot,
+                trust_store,
+            )
+        # Broad: the sessions are already deleted; the answer must still come.
+        except Exception:
+            logger.warning(
+                "Failed to remove the deleted sessions' worktrees", exc_info=True
+            )
+            freed = deletion.Freed()
+        if deleted:
+            await self._refresh_after_change()
+        return freed
 
     # -- storage/usage/refresh ------------------------------------------------
 
@@ -526,7 +681,11 @@ class StorageUsageService:
 
         async def follow() -> None:
             home = self._paths().home
-            await self._publish(await self.read(), scan_id=follower_scan_id)
+            response = await self.read()
+            await self._publish(
+                response.model_copy(update={"status": "refreshing"}),
+                scan_id=follower_scan_id,
+            )
             # Watches the marker, never the lock: only a process about to
             # scan takes it, so following cannot block a scan from starting.
             started = time.monotonic()
@@ -588,6 +747,25 @@ class StorageUsageService:
             worktrees_root=self._worktrees_root().resolve(),
             session_roots=tuple(unique),
         )
+
+
+def _mtime_ns(path: Path) -> int | None:
+    try:
+        return os.lstat(path).st_mtime_ns
+    except OSError:
+        return None
+
+
+def _partial_clean(
+    params: StorageLeftoversCleanParams, progress: cleanup.CleanProgress
+) -> StorageLeftoversCleanResponse:
+    removed = list(dict.fromkeys(progress.removed))
+    kept = list(progress.kept)
+    decided = set(removed) | {item.id for item in kept}
+    for item in dict.fromkeys([*params.worktree_ids, *params.folder_ids]):
+        if item not in decided:
+            kept.append(StorageLeftoverKept(id=item, reason="error"))
+    return StorageLeftoversCleanResponse(removed=removed, kept=kept)
 
 
 type _CacheVersion = tuple[int, int]

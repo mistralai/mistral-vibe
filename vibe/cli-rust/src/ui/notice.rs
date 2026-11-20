@@ -70,7 +70,8 @@ const CONFIRMATION_SECS: u64 = 4;
 
 /// Copy `text` and surface the copy notice.
 pub fn copied(app: &mut App, text: &str) {
-    crate::telemetry::user_copied_text(app, text);
+    let source = crate::code_preview::telemetry::note_copy(app);
+    crate::telemetry::user_copied_text(app, text, source);
     let verified = clipboard::copy_to_clipboard(text);
     copied_as(app, "Copied to clipboard", "Copied", verified);
 }
@@ -86,10 +87,12 @@ pub fn copied_as(app: &mut App, label: &str, short: &str, verified: bool) {
 
 /// Copy a finalized selection only when autocopy is on, gating the notice the
 /// same way for every surface: with autocopy off there is no copy and no notice.
-pub fn copy_if_autocopy(app: &mut App, text: &str) {
-    if !text.is_empty() && app.session.startup_config.autocopy_to_clipboard {
+pub fn copy_if_autocopy(app: &mut App, text: &str) -> bool {
+    let copy = !text.is_empty() && app.session.startup_config.autocopy_to_clipboard;
+    if copy {
         copied(app, text);
     }
+    copy
 }
 
 /// A notice of `severity` that fades after `secs`: confirmations, and failures the next action retries.

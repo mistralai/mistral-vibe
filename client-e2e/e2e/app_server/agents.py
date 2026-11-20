@@ -1,4 +1,4 @@
-"""Agent install builders for `/leanstall` and `/unleanstall` scenarios."""
+"""Agent and approval policy builders for `/agent`, `/leanstall` and Shift+Tab scenarios."""
 
 from __future__ import annotations
 
@@ -14,27 +14,44 @@ METHODS = frozenset({"agents/install", "agents/uninstall"})
 _runtime = json.loads(FIXTURE_PATH.read_text())["handshake"]["runtime/read"]["runtime"]
 FIXTURE_AGENTS: list[dict[str, Any]] = _runtime["agents"]
 FIXTURE_ACTIVE: dict[str, Any] = _runtime["activeAgent"]
+FIXTURE_POLICIES: list[dict[str, Any]] = _runtime["approvalPolicies"]
+FIXTURE_ACTIVE_POLICY: dict[str, Any] = _runtime["activeApprovalPolicy"]
 LEAN = {
     "name": "lean",
     "displayName": "Lean",
     "description": "Specialized mode for Lean 4 code analysis, proof assistance, and theorem proving",
-    "safety": "neutral",
     "agentType": "agent",
 }
 WITH_LEAN = [*FIXTURE_AGENTS, LEAN]
 
 
 def runtime_read(
-    agents: Sequence[Mapping[str, Any]], active: Mapping[str, Any] = FIXTURE_ACTIVE
+    agents: Sequence[Mapping[str, Any]],
+    active: Mapping[str, Any] = FIXTURE_ACTIVE,
+    policy: Mapping[str, Any] = FIXTURE_ACTIVE_POLICY,
 ) -> dict[str, Any]:
-    """A `runtime/read` override seeding the session's agents."""
+    """A `runtime/read` override seeding the session's agents and active policy."""
     return {
-        "runtime": {"agents": deepcopy(list(agents)), "activeAgent": deepcopy(active)}
+        "runtime": {
+            "agents": deepcopy(list(agents)),
+            "activeAgent": deepcopy(active),
+            "activeApprovalPolicy": deepcopy(policy),
+        }
     }
+
+
+def fixture_policy(name: str) -> dict[str, Any]:
+    """The fixture's approval policy named `name`."""
+    return next(policy for policy in FIXTURE_POLICIES if policy["name"] == name)
 
 
 def agents_list(
     agents: Sequence[Mapping[str, Any]], active: Mapping[str, Any] = FIXTURE_ACTIVE
 ) -> dict[str, Any]:
     """An `AgentsListResponse`, the answer to `agents/install` and `agents/uninstall`."""
-    return {"active": deepcopy(active), "agents": deepcopy(list(agents))}
+    return {
+        "active": deepcopy(active),
+        "agents": deepcopy(list(agents)),
+        "activeApprovalPolicy": deepcopy(FIXTURE_ACTIVE_POLICY),
+        "approvalPolicies": deepcopy(FIXTURE_POLICIES),
+    }

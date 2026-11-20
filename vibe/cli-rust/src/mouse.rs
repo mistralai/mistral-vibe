@@ -49,6 +49,8 @@ pub enum MouseTarget {
     ThemePicker,
     ModelPicker,
     ThinkingPicker,
+    TasksPanel,
+    RailWindow,
     LogLevelPicker,
     ArtifactsModal,
     Loops,
@@ -72,13 +74,14 @@ pub enum MouseTarget {
     ReleaseNotes,
     Trust,
     BottomBar,
-    TodoRow,
+    Rail,
     TodoSidebar,
     OnboardingThemeList,
     OnboardingPreview,
     OnboardingLinks,
     OnboardingInputs,
     SubagentList,
+    CodePreview,
 }
 
 /// Render-time hit-test metadata for one screen region.
@@ -182,6 +185,7 @@ pub fn route_at(app: &mut App, event: MouseEvent, row: f64) -> Option<MouseTarge
         if app.view.mouse.capture.is_some() {
             cancel_capture(app, true);
         }
+        crate::code_preview::hover(app);
     }
     if handle_wheel(app, event) {
         return None;
@@ -190,6 +194,8 @@ pub fn route_at(app: &mut App, event: MouseEvent, row: f64) -> Option<MouseTarge
         MouseEventKind::Down(MouseButton::Left) => {
             cancel_capture(app, true);
             selection::honor_pending_copy(app);
+            app.view.copy_light.stop();
+            crate::code_preview::press(app, at);
             if scrollbar::contains_track(app, at) {
                 if scrollbar::begin(app, at, row) {
                     app.view.mouse.capture = Some(Capture::Scrollbar);
@@ -227,7 +233,7 @@ pub fn route_at(app: &mut App, event: MouseEvent, row: f64) -> Option<MouseTarge
         _ => {
             let target = target_at(app, at);
             if event.kind == MouseEventKind::Moved && target != Some(MouseTarget::SubagentList) {
-                app.subagents.list.mouse_session_id = None;
+                crate::subagents::list::set_hover(app, None);
             }
             target
         }
@@ -275,6 +281,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         | MouseTarget::Skills
         | MouseTarget::Config
         | MouseTarget::SubagentList
+        | MouseTarget::TasksPanel
         | MouseTarget::Question => {
             if let Some(list) = option_list(app, target) {
                 list.wheel(!up, MOUSE_SCROLL_STEP as usize);
@@ -298,6 +305,8 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
             };
         }
         MouseTarget::Approval => approval::wheel(app, !up),
+        MouseTarget::RailWindow => crate::rail::scroll(app, !up, MOUSE_SCROLL_STEP as usize),
+        MouseTarget::CodePreview => crate::code_preview::wheel(app, up),
         // The wizard's own regions never reach the loop: the wizard is a
         // pre-session surface with its own mouse handling.
         MouseTarget::Blocked
@@ -311,7 +320,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         | MouseTarget::OnboardingPreview
         | MouseTarget::OnboardingLinks
         | MouseTarget::OnboardingInputs
-        | MouseTarget::TodoRow => {}
+        | MouseTarget::Rail => {}
     }
     true
 }

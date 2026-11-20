@@ -182,6 +182,26 @@ fn a_click_replays_one_round_then_rests() {
 }
 
 #[test]
+fn a_spinning_cat_never_rests() {
+    let mut cat = PetitChat::default();
+    let starting = cat.render();
+    let mut departures = 0;
+    let mut previous = starting.clone();
+    for _ in 0..200 {
+        cat.spin();
+        let current = cat.render();
+        if previous == starting && current != starting {
+            departures += 1;
+        }
+        previous = current;
+    }
+    assert!(
+        departures >= 3,
+        "the cat left its start pose {departures} times"
+    );
+}
+
+#[test]
 fn a_click_while_a_round_plays_lets_it_finish() {
     let mut cat = PetitChat::default();
     let starting = cat.render();

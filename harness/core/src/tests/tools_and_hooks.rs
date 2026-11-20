@@ -569,7 +569,20 @@ fn invalid_runtime_builtin_output_preserves_the_exact_failure() {
     let completion_action_id = dispatched_action_id(&started).to_string();
     let tool_pending = accepted_value(session.apply(input(
         2,
-        tool_call_completion(&completion_action_id, "call-invalid-output"),
+        json!({
+            "type": "completion_succeeded",
+            "action_id": completion_action_id,
+            "result": {
+                "parts": [{
+                    "type": "tool_call",
+                    "id": "call-invalid-output",
+                    "name": "write_file",
+                    "arguments_json": "{\"path\":\"original.txt\",\"content\":\"updated\"}",
+                }],
+                "finish_reason": "tool_call",
+                "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+            },
+        }),
     )));
     let tool_action = &tool_pending["transition"]["next"]["directives"][0]["action"];
     let tool_action_id = tool_action["action_id"]
@@ -604,7 +617,7 @@ fn invalid_runtime_builtin_output_preserves_the_exact_failure() {
         committed["result"]["error"],
         json!({
             "code": "runtime_builtin_output_schema_mismatch",
-            "message": "Runtime built-in file_system.read_file returned structured content that does not satisfy its Core-owned output schema: [] is not of type \"object\"",
+            "message": "Runtime built-in file_system.write_file returned structured content that does not satisfy its Core-owned output schema: [] is not of type \"object\"",
             "retryable": false,
             "details": null,
         })

@@ -1,4 +1,4 @@
-"""On a page with a long body the rows stay in view down to Remove; PageDown scrolls the body under them, and a move leaves it scrolled."""
+"""On a page with a long body the status and scope rows stay in view; PageDown scrolls the body under them, and a move leaves it scrolled."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ request_methods = METHODS
 
 _PAGE_DOWN = "\x1b[6~"
 
-timeline: Timeline = ["/skills\r", "\r", "jjj", _PAGE_DOWN, "k"]
+timeline: Timeline = ["/skills\r", "\r", "j", _PAGE_DOWN, "k"]
 
-screen_contains = ("Global", "Enabled", "Remove")
+screen_contains = ("Global", "● Enabled", "r remove")
 screen_excludes = ("# deploy",)

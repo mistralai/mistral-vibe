@@ -7,10 +7,9 @@ use serde_json::{json, Value};
 use vibe_rs::app::{App, Status};
 use vibe_rs::artifacts;
 use vibe_rs::artifacts_modal;
-use vibe_rs::input::handle_artifacts_modal_key;
 use vibe_rs::server::PublicSessionArtifact;
 
-use crate::support::{bottom_bar, bottom_bar_row, click, key, notify, render, row, stub};
+use crate::support::{click, notify, press, rail, render, row, stub};
 
 const SESSION: &str = "00000000-0000-4000-8000-000000000001";
 
@@ -113,35 +112,25 @@ fn the_status_names_the_server_reason() {
 }
 
 #[test]
-fn the_bar_shows_the_open_pr_over_merged_and_closed_ones() {
+fn the_rail_counts_every_pr_its_window_lists_whatever_its_state() {
     let mut app = app_with(vec![
         pr(1, 10, json!({ "state": "merged" })),
         pr(2, 11, json!({ "state": "open", "prStatus": "mergeable" })),
         pr(3, 12, json!({ "state": "closed" })),
     ]);
-    let row = bottom_bar_row(&mut app, 120);
-    assert!(row.contains("● PR #2 mergeable"), "{row}");
-    assert!(!row.contains("PRs (3)"));
-}
-
-#[test]
-fn the_bar_falls_back_to_every_pr_once_none_is_active() {
-    let mut app = app_with(vec![
-        pr(1, 10, json!({ "state": "merged" })),
-        pr(2, 11, json!({ "state": "closed" })),
-    ]);
-    assert!(bottom_bar_row(&mut app, 120).contains("PRs (2)"));
+    let row = row(&rail(&mut app, 120), 0);
+    assert!(row.contains("● 3 PRs"), "{row}");
 }
 
 #[tokio::test]
-async fn a_status_change_marks_the_link_until_the_modal_opens() {
+async fn a_status_change_marks_the_rail_chip_until_the_list_opens() {
     let mut app = app_with(vec![pr(1, 10, json!({ "prStatus": "waiting" }))]);
     let label_style = |app: &mut App| {
-        let buffer = bottom_bar(app, 120);
+        let buffer = rail(app, 120);
         let x = row(&buffer, 0)
             .chars()
-            .position(|c| c == 'P')
-            .expect("label") as u16;
+            .position(|c| c == '#')
+            .expect("number") as u16;
         buffer[(x, 0)].style()
     };
     assert!(!label_style(&mut app).add_modifier.contains(Modifier::BOLD));
@@ -152,8 +141,8 @@ async fn a_status_change_marks_the_link_until_the_modal_opens() {
     assert!(label_style(&mut app).add_modifier.contains(Modifier::BOLD));
 
     artifacts_modal::show(&mut app, &stub());
-    assert!(app.artifacts_modal.open);
-    assert!(!label_style(&mut app).add_modifier.contains(Modifier::BOLD));
+    assert!(artifacts_modal::is_open(&app));
+    assert!(!artifacts::is_unseen(&app, &app.session.artifacts[0]));
     // A change landing while the modal shows it is already seen.
     artifacts::upsert(&mut app, pr(1, 10, json!({ "prStatus": "action_needed" })));
     assert!(app.session.artifacts_unseen.is_empty());
@@ -171,7 +160,7 @@ fn a_never_viewed_pr_is_unseen() {
 fn showing_an_empty_list_leaves_the_modal_closed() {
     let mut app = app_with(vec![]);
     artifacts_modal::show(&mut app, &stub());
-    assert!(!app.artifacts_modal.open);
+    assert!(!artifacts_modal::is_open(&app));
 }
 
 #[test]
@@ -213,32 +202,32 @@ fn the_fix_prompt_names_the_cause() {
     );
 }
 
-#[test]
-fn f_drafts_the_fix_prompt_after_the_draft_and_closes_the_modal() {
+#[tokio::test]
+async fn f_drafts_the_fix_prompt_after_the_draft_and_closes_the_modal() {
     let mut app = app_with(vec![blocked(json!({ "prStatusReason": "conflicts" }))]);
     app.chat_input.load_full_text("keep this".into());
-    artifacts_modal::open(&mut app);
-    handle_artifacts_modal_key(&mut app, key(KeyCode::Char('f')));
-    assert!(!app.artifacts_modal.open);
+    artifacts_modal::open(&mut app, &stub());
+    press(&mut app, KeyCode::Char('f'));
+    assert!(!artifacts_modal::is_open(&app));
     assert_eq!(
         app.chat_input.full_text(),
         "keep this\n\nResolve the merge conflicts on PR #7 (https://github.com/o/r/pull/7)."
     );
 }
 
-#[test]
-fn f_does_nothing_on_a_pr_that_needs_no_action() {
+#[tokio::test]
+async fn f_does_nothing_on_a_pr_that_needs_no_action() {
     let mut app = app_with(vec![pr(1, 10, json!({ "prStatus": "mergeable" }))]);
-    artifacts_modal::open(&mut app);
-    handle_artifacts_modal_key(&mut app, key(KeyCode::Char('f')));
-    assert!(app.artifacts_modal.open);
+    artifacts_modal::open(&mut app, &stub());
+    press(&mut app, KeyCode::Char('f'));
+    assert!(artifacts_modal::is_open(&app));
     assert!(app.chat_input.full_text().is_empty());
 }
 
 #[tokio::test]
 async fn a_pr_created_while_the_modal_lists_it_is_seen() {
     let mut app = app_with(vec![pr(1, 10, json!({}))]);
-    artifacts_modal::open(&mut app);
+    artifacts_modal::open(&mut app, &stub());
     let created = json!({
         "id": "a2",
         "sessionId": SESSION,
@@ -262,20 +251,28 @@ async fn a_pr_created_while_the_modal_lists_it_is_seen() {
 }
 
 #[tokio::test]
-async fn clicking_the_footer_link_toggles_the_list_even_twice_in_a_row() {
+async fn clicking_the_rail_chip_opens_the_list_in_the_composer_place() {
     let mut app = app_with(vec![pr(1, 10, json!({ "prStatus": "mergeable" }))]);
-    let link = |app: &mut App| {
-        render(100, 30, |f| app.draw(f));
-        let link = app.view.bottom_bar_links.last().expect("PR link").area;
-        (link.x, link.y)
-    };
-    let (x, y) = link(&mut app);
-    click(&mut app, x, y);
-    assert!(app.artifacts_modal.open);
-    let (x, y) = link(&mut app);
-    click(&mut app, x, y);
-    assert!(
-        !app.artifacts_modal.open,
-        "a quick second click closes the list"
+    let buffer = render(100, 30, |f| app.draw(f));
+    let &(_, x, _) = app
+        .rail
+        .hits
+        .iter()
+        .find(|hit| hit.0 == vibe_rs::rail::Item::Prs)
+        .expect("PR chip");
+    let rail_y = app.rail.area.y;
+    click(&mut app, x, rail_y);
+    assert!(artifacts_modal::is_open(&app));
+    let after = render(100, 30, |f| app.draw(f));
+    assert_eq!(
+        row(&after, rail_y),
+        row(&buffer, rail_y),
+        "the rail stays put"
     );
+    let rows = crate::support::rows(&after);
+    let title = rows
+        .iter()
+        .position(|line| line.contains("┌─ Pull Requests 1 "))
+        .expect("the PR window");
+    assert!(title > usize::from(rail_y) && rows[title + 1].contains("● #1"));
 }

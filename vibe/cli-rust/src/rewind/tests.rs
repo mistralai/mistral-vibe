@@ -87,6 +87,7 @@ fn a_failed_read_leaves_rewind_mode_when_nothing_is_highlighted() {
 #[test]
 fn a_done_rewind_restores_the_message_into_the_composer() {
     let mut app = App::default();
+    app.session.session_id = Some("old-session-id".into());
     selected(&mut app, false);
     let state = serde_json::json!({
         "eventId": 3,
@@ -96,6 +97,7 @@ fn a_done_rewind_restores_the_message_into_the_composer() {
     apply_event(
         &mut app,
         Event::Done {
+            entry_id: "entry-1".into(),
             message: "fix the parser".into(),
             restore_errors: vec!["Failed to restore file: a.py".into()],
             old_session_id: "old-session-id".into(),
@@ -113,11 +115,13 @@ fn a_done_rewind_restores_the_message_into_the_composer() {
 }
 
 fn done(app: &mut App, message: &str) {
+    app.session.session_id = Some("session-id".into());
     selected(app, false);
     let state = serde_json::json!({"eventId": 3, "session": {"id": "session-id"}, "history": []});
     apply_event(
         app,
         Event::Done {
+            entry_id: "entry-1".into(),
             message: message.into(),
             restore_errors: Vec::new(),
             old_session_id: "session-id".into(),
@@ -155,4 +159,24 @@ fn a_done_rewind_ending_on_a_mention_keeps_completions_closed() {
     done(&mut app, "please run /code-review");
     assert_eq!(app.chat_input.cursor, "please run /code-review".len());
     assert!(app.completion.entries.is_empty());
+}
+
+#[test]
+fn a_done_rewind_for_a_session_left_meanwhile_is_ignored() {
+    let mut app = App::default();
+    app.session.session_id = Some("other-session".into());
+    let state = serde_json::json!({"eventId": 3, "session": {"id": "session-id"}, "history": []});
+    apply_event(
+        &mut app,
+        Event::Done {
+            entry_id: "entry-1".into(),
+            message: "hello".into(),
+            restore_errors: Vec::new(),
+            old_session_id: "session-id".into(),
+            inplace: true,
+            state: Box::new(serde_json::from_value(state).expect("state")),
+        },
+    );
+    assert_eq!(app.session.session_id.as_deref(), Some("other-session"));
+    assert!(app.chat_input.input.is_empty());
 }

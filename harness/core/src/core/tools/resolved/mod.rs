@@ -46,6 +46,23 @@ pub(crate) fn direct_tool_key(
         .map(|(_, target)| target.hook_tool_key())
 }
 
+/// `direct_tool_key` for each of `names`, in order, building the routes once.
+pub(crate) fn direct_tool_keys(
+    config: &HarnessConfig,
+    names: &[String],
+) -> Vec<Option<crate::core::hooks::HookToolKey>> {
+    let routes = assembly::direct_routes(config);
+    names
+        .iter()
+        .map(|name| {
+            routes
+                .iter()
+                .find(|(route_name, _)| route_name == name)
+                .map(|(_, target)| target.hook_tool_key())
+        })
+        .collect()
+}
+
 /// The call that a pre-tool-call hook's arguments make.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
@@ -490,6 +507,30 @@ mod tests {
     use crate::core::testing::CommandEnvironment;
     use crate::core::tools::resolved::testing::{config, qualified_name};
     use serde_json::json;
+
+    ///
+    /// *Prepare*: A configuration and model-facing names, one that no top-level tool has.
+    /// *Do*: Read their keys at once, and one by one.
+    /// *Assert*: Both give the same key for each name, in order, and none for the unknown one.
+    ///
+    #[test]
+    fn direct_tool_keys_match_direct_tool_key_for_each_name() {
+        // Prepare
+        let config = config();
+        let names = ["read_file", "no_such_tool", "write_file"].map(String::from);
+
+        // Do
+        let keys = direct_tool_keys(&config, &names);
+        let one_by_one = names
+            .iter()
+            .map(|name| direct_tool_key(&config, name))
+            .collect::<Vec<_>>();
+
+        // Assert
+        assert_eq!(keys, one_by_one);
+        assert!(keys[0].is_some());
+        assert!(keys[1].is_none());
+    }
 
     #[test]
     fn disabled_command_environment_omits_bash_from_model_catalogs() {

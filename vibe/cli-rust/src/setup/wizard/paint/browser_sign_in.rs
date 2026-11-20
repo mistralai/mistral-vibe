@@ -242,23 +242,36 @@ pub(super) fn draw_url_help(f: &mut Frame, x: u16, y: u16) {
     );
 }
 
-/// The bottom hint, centered in the row's `area` (Esc goes back to the
-/// sign-in target, it does not cancel the wizard).
-pub(super) fn draw_hint(f: &mut Frame, area: Rect, variant: SignInVariant) {
+/// The variant's keys; none once sign-in succeeded and setup finishes.
+fn hint_keys(variant: SignInVariant) -> &'static [hints::Hint] {
     const API_KEY: hints::Hint = ("m", action::API_KEY);
-    let keys: &[hints::Hint] = match variant {
-        SignInVariant::Success => {
-            let text = "Finishing setup...";
-            let x = area.x + area.width.saturating_sub(text.width() as u16) / 2;
-            f.buffer_mut()
-                .set_string(x, area.y, text, theme::muted_style());
-            return;
-        }
+    match variant {
+        SignInVariant::Success => &[],
         SignInVariant::Error => &[("r", action::RETRY), API_KEY, hints::BACK],
         SignInVariant::Pending => &[API_KEY, hints::BACK],
-    };
-    let x = area.x + area.width.saturating_sub(hints::width(keys)) / 2;
-    hint_line::draw_clipped(f, x, area.y, area.right().saturating_sub(x), keys);
+    }
+}
+
+/// The rows the bottom hint takes at `width`.
+pub(super) fn hint_height(variant: SignInVariant, width: u16) -> u16 {
+    hint_line::height(hint_keys(variant), width).max(1)
+}
+
+/// The bottom hint, each wrapped row centered in `area` (Esc goes back to the
+/// sign-in target, it does not cancel the wizard).
+pub(super) fn draw_hint(f: &mut Frame, area: Rect, variant: SignInVariant) {
+    if variant == SignInVariant::Success {
+        let text = "Finishing setup...";
+        let x = area.x + area.width.saturating_sub(text.width() as u16) / 2;
+        f.buffer_mut()
+            .set_string(x, area.y, text, theme::muted_style());
+        return;
+    }
+    for (y, line) in (area.y..area.bottom()).zip(hint_line::lines(hint_keys(variant), area.width)) {
+        let x = area.x + area.width.saturating_sub(line.width() as u16) / 2;
+        f.buffer_mut()
+            .set_line(x, y, &line, area.right().saturating_sub(x));
+    }
 }
 
 /// Write styled segments left to right on one row, returning the end column.

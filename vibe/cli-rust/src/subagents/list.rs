@@ -33,10 +33,6 @@ pub struct ListState {
     pub focused: bool,
     /// Rows the list renders, recomputed on every state change (Python options).
     pub rows: Vec<PublicChildSession>,
-    /// Whether waiting children outside the running batch stay listed (`a` toggles it).
-    pub show_waiting: bool,
-    /// Waiting children `show_waiting` controls, listed or not.
-    pub waiting_count: usize,
     /// The list has had a child: Main stays on screen until the session changes.
     pub shown: bool,
     /// Painted widget area, published for mouse routing while the input box is hidden.
@@ -145,6 +141,11 @@ pub(super) fn update_sessions(app: &mut App) {
         list.options.follow();
     }
     list.rows = rows;
+    // An emptied list leaves the rail, so its window closes like the others.
+    let emptied = list.rows.is_empty() && list.focused;
+    if emptied && app.subagents.viewed_subagent_id.is_none() {
+        focus_input(app);
+    }
 }
 
 /// The event-time list refresh.
@@ -181,6 +182,7 @@ pub fn show_main_chat(app: &mut App, focus_input_requested: bool) {
     app.subagents.viewed_subagent_id = None;
     app.subagents.transcripts.select(None);
     if focus_input_requested {
+        crate::rail::leave(app);
         focus_input(app);
     }
     super::refresh_context_progress(app);
@@ -197,7 +199,8 @@ pub fn show_subagent_chat(app: &mut App, session_id: &str) {
         remember_scroll(app);
     }
     app.subagents.viewed_subagent_id = Some(session_id.to_owned());
-    // Hide the composer, focus the list.
+    // Hide the composer, focus the list; a child view is no rail surface, so Esc lands on the prompt.
+    crate::rail::leave(app);
     crate::reverse_search::cancel(app);
     crate::completion_manager::dismiss(app);
     app.subagents.list.focused = true;
@@ -272,7 +275,7 @@ pub fn handle_list_key(app: &mut App, key: KeyEvent) -> bool {
         // about one visible page of options.
         KeyCode::PageUp | KeyCode::PageDown => {
             let total = app.subagents.list.rows.len() + 1;
-            let page = page_rows(app).min(total);
+            let page = MAX_ROWS.min(total);
             app.subagents.list.mouse_session_id = None;
             let down = key.code == KeyCode::PageDown;
             app.subagents.list.options.page(down, total, page);
@@ -281,10 +284,6 @@ pub fn handle_list_key(app: &mut App, key: KeyEvent) -> bool {
         KeyCode::Enter => {
             let session_id = session_id_at(app, app.subagents.list.options.selected());
             select(app, session_id);
-            return true;
-        }
-        KeyCode::Char('a') => {
-            super::waiting::toggle(app);
             return true;
         }
         _ => return false,
@@ -303,13 +302,6 @@ pub fn handle_list_key(app: &mut App, key: KeyEvent) -> bool {
     true
 }
 
-/// Rows one page shows: the cap less the view title and the waiting row.
-pub fn page_rows(app: &App) -> usize {
-    let viewing = usize::from(app.subagents.viewed_child().is_some());
-    let summary = usize::from(app.subagents.list.waiting_count > 0);
-    MAX_ROWS.saturating_sub(viewing + summary).max(1)
-}
-
 /// Leave the focused list for the composer, back on the Main row.
 pub fn leave_list(app: &mut App) {
     app.subagents.list.mouse_session_id = None;
@@ -317,10 +309,23 @@ pub fn leave_list(app: &mut App) {
     focus_input(app);
 }
 
+/// Set the row under the mouse; rows held still for it sort again once it leaves.
+pub fn set_hover(app: &mut App, session_id: Option<String>) {
+    let left = session_id.is_none() && app.subagents.list.mouse_session_id.is_some();
+    app.subagents.list.mouse_session_id = session_id;
+    if left {
+        update_sessions(app);
+    }
+}
+
 /// Give the composer back focus.
 pub fn focus_input(app: &mut App) {
-    app.subagents.list.focused = false;
+    let was_focused = std::mem::replace(&mut app.subagents.list.focused, false);
     app.set_app_focus(true);
+    // The rows held still while focused; sort them again.
+    if was_focused {
+        update_sessions(app);
+    }
 }
 
 /// The session a row stands for: `None` for Main, else the child at `index - 1`.

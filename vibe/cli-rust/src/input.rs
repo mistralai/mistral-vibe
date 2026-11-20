@@ -102,7 +102,9 @@ pub(crate) fn handle_copy_key(app: &mut App, key: &KeyEvent) -> bool {
         // Region and bottom-bar text are cached at paint time so the copy
         // works regardless of the autocopy setting.
         clipboard::copy_to_clipboard(&text);
-        crate::telemetry::user_copied_text(app, &text);
+        let source = crate::code_preview::telemetry::note_copy(app);
+        crate::telemetry::user_copied_text(app, &text, source);
+        crate::ui::selection::flash(app);
         return true;
     }
     // A mouse selection whose text the next paint reads still owns the key.
@@ -118,6 +120,11 @@ fn is_todo_key(key: &KeyEvent) -> bool {
             .modifiers
             .intersects(KeyModifiers::SUPER | KeyModifiers::ALT)
         && key.code == KeyCode::Char('\\')
+}
+
+/// Ctrl+X moves from the prompt to the rail.
+fn enters_rail(app: &App, key: &KeyEvent) -> bool {
+    crate::rail::is_toggle_key(key) && composer_reachable(app)
 }
 
 /// Handle application-level bindings before a modal consumes local keys.
@@ -170,7 +177,7 @@ pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -
         debug_console::toggle(app, client);
         return Some(false);
     }
-    if composer_reachable(app) && crate::tmux_hint::handle_key(app, &key) {
+    if crate::tmux_hint::handle_key(app, &key) {
         return Some(false);
     }
     if key.modifiers.contains(KeyModifiers::SHIFT) {
@@ -184,11 +191,6 @@ pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -
     None
 }
 
-/// Cut the selection or current line: Ctrl+X.
-fn is_cut_key(key: &KeyEvent) -> bool {
-    key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('x')
-}
-
 fn copy_selected_input(app: &App) -> bool {
     let input = &app.chat_input;
     let Some((lo, hi)) = chat_input::selection_range(&input.input, input.cursor, input.anchor)
@@ -198,7 +200,7 @@ fn copy_selected_input(app: &App) -> bool {
     // A collapsed paste copies as the text it stands for; pasted back, it collapses again.
     let text = input.mentions.expanded_range(&input.input, lo, hi);
     clipboard::copy_to_clipboard(&text);
-    crate::telemetry::user_copied_text(app, &text);
+    crate::telemetry::user_copied_text(app, &text, None);
     true
 }
 
@@ -239,6 +241,7 @@ fn handle_key_inner(
     if let Some(exit) = handle_priority_key(app, client, key) {
         return exit;
     }
+    let key = keymap::line_alias(key);
     app.chat_input.normalize_positions();
     // The subagent list owns navigation and selection while focused; other
     // keys fall through, and the unfocused composer never edits.
@@ -254,7 +257,7 @@ fn handle_key_inner(
                 | KeyCode::End
                 | KeyCode::PageUp
                 | KeyCode::PageDown
-        ) || (plain && matches!(key.code, KeyCode::Char('j' | 'k' | 'a')));
+        ) || (plain && matches!(key.code, KeyCode::Char('j' | 'k')));
         match key.code {
             _ if list_key => {
                 subagents::handle_list_key(app, key);
@@ -352,24 +355,6 @@ fn handle_key_inner(
     if crate::external_editor::request(app, &key) {
         return false;
     }
-    // Cut the chat input selection or current line; copy is an app-level priority binding.
-    if is_cut_key(&key) {
-        app.chat_input.scroll = None;
-        crate::long_paste::dismiss(app);
-        // Without a selection a cut takes the caret line, from its start.
-        let line_start = app.chat_input.line_cut_start();
-        let text = app
-            .chat_input
-            .edit_atomically(line_start, |input, cursor, anchor| {
-                chat_input::cut(input, cursor, anchor);
-            });
-        if !text.is_empty() {
-            clipboard::copy_to_clipboard(&text);
-            reset_history_state(app);
-            completion_manager::input_changed(app);
-        }
-        return false;
-    }
     if composer_yank::is_yank_key(&key) {
         composer_yank::yank(app);
         return false;
@@ -383,6 +368,9 @@ fn handle_key_inner(
         crate::long_paste::dismiss(app);
         reset_history_state(app);
         completion_manager::input_changed(app);
+        return false;
+    }
+    if enters_rail(app, &key) && crate::rail::enter(app) {
         return false;
     }
     // ChatInput editing (keymap -> Action -> apply), decoupled from the backend.
@@ -487,11 +475,6 @@ fn handle_key_inner(
             let (target, moved_row) = crate::ui::chat_input::vertical_cursor(app, true);
             let history = handle_history_down(app, !moved_row);
             if !history {
-                // Focus the subagent list at the Main row when the caret is on the last
-                // wrapped line.
-                if !moved_row && subagents::focus_first(app) {
-                    return false;
-                }
                 if !moved_row {
                     app.set_app_focus(true);
                 }
@@ -693,24 +676,6 @@ pub fn handle_thinking_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     }
 }
 
-/// The artifacts modal owns keys: arrows/jk navigate, Enter opens the
-/// highlighted link, `c` its first CI check, `f` drafts a fix prompt, Esc closes.
-pub fn handle_artifacts_modal_key(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Esc => crate::artifacts_modal::close(app),
-        KeyCode::Up | KeyCode::Char('k') => crate::artifacts_modal::navigate(app, false),
-        KeyCode::Down | KeyCode::Char('j') => crate::artifacts_modal::navigate(app, true),
-        KeyCode::PageUp => crate::artifacts_modal::page(app, false),
-        KeyCode::PageDown => crate::artifacts_modal::page(app, true),
-        KeyCode::Home => crate::artifacts_modal::edge(app, false),
-        KeyCode::End => crate::artifacts_modal::edge(app, true),
-        KeyCode::Enter => crate::artifacts_modal::select(app),
-        KeyCode::Char('c') if key.modifiers.is_empty() => crate::artifacts_modal::open_check(app),
-        KeyCode::Char('f') if key.modifiers.is_empty() => crate::artifacts_modal::fix(app),
-        _ => {}
-    }
-}
-
 /// Hand a tracked task's answer to the main thread; dropped when there is no receiver.
 pub(crate) async fn deliver<T>(tx: Option<mpsc::Sender<T>>, event: impl Into<T>) {
     if let Some(tx) = tx {
@@ -847,10 +812,9 @@ pub fn handle_paste(app: &mut App, text: String) {
     }
 }
 
-// The hidden composer takes no paste while the list is focused or a child
-// view is open.
+/// A rail window, the subagent list or a child view hides the composer, which then takes no paste.
 pub(crate) fn composer_hidden(app: &App) -> bool {
-    app.subagents.list.focused || app.subagents.viewed_subagent_id.is_some()
+    crate::rail::window_open(app)
 }
 
 /// Insert `text`; returns the inserted path list's start, text and paths when
@@ -902,9 +866,8 @@ fn handle_paste_inner(app: &mut App, text: &str) -> Option<(usize, String, Vec<S
 
 /// Ctrl+C ladder; returns true to exit.
 fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
-    // The modal hides the composer, so it closes before an unseen draft is cleared or a subagent view arms quit.
-    if app.focus() == Focus::ArtifactsModal {
-        crate::artifacts_modal::close(app);
+    // A rail window hides the composer, so it closes before an unseen draft is cleared or a subagent view arms quit.
+    if crate::rail::close_window(app) {
         return false;
     }
     if app.focus() == Focus::Loops {
@@ -970,8 +933,14 @@ fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
 /// Ctrl+D; returns true to exit. Deletes right in the main-view input, else
 /// quits (on a second press if confirmation is on).
 fn handle_ctrl_d(app: &mut App) -> bool {
-    let editable = app.subagents.viewed_subagent_id.is_none() && app.reverse_search.is_none();
-    if editable && !app.chat_input.full_text().is_empty() {
+    let draft = !app.chat_input.full_text().is_empty();
+    let viewing = app.subagents.viewed_subagent_id.is_some();
+    // A rail window hides the draft: Ctrl+D neither edits it nor quits over it.
+    if draft && !viewing && composer_hidden(app) {
+        return false;
+    }
+    let editable = !viewing && app.reverse_search.is_none();
+    if editable && draft {
         app.chat_input.normalize_positions();
         let before = crate::edit_history::Snapshot::capture(&app.chat_input);
         reset_history_state(app);

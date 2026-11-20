@@ -17,6 +17,7 @@ mod hooks;
 mod model_context;
 mod model_input_budget;
 mod model_input_projection;
+mod pending_input;
 mod prompt;
 mod router;
 mod session;
@@ -35,6 +36,7 @@ pub(crate) use checkpoint::Checkpoint;
 pub(crate) use checkpoint::decode_checkpoint;
 pub(crate) use config::HarnessConfig;
 pub(crate) use conversation::{ConversationSeed, SpawnContext};
+pub(crate) use error::RestoreError;
 #[cfg(feature = "python-binding")]
 pub(crate) use features::file_system::{BashTimeout, BashTimeoutSettings, restored_bash_call};
 #[cfg(test)]
@@ -83,9 +85,10 @@ use crate::core::features::compaction::{
     CompactionLimits, EstimateCorrection, RequestMeasurements, corrected_request_tokens,
     next_turn_compaction_unfit,
 };
-use crate::core::features::notifications::NotificationState;
+use crate::core::features::instructions;
 use crate::core::features::subagents;
 use crate::core::model_context::ModelContext;
+use crate::core::pending_input::PendingInput;
 use crate::core::prompt::{build_system_prompt, configuration_update_changes_system_prompt};
 use crate::core::router::reduce;
 use crate::core::state::{HarnessState, TurnState};
@@ -103,6 +106,20 @@ pub(crate) fn hook_tool_catalog(config: &HarnessConfig) -> Vec<hooks::HookToolKe
 /// when no top-level tool has that name.
 pub(crate) fn direct_tool_key(config: &HarnessConfig, name: &str) -> Option<hooks::HookToolKey> {
     tools::resolved::direct_tool_key(config, name)
+}
+
+/// `direct_tool_key` for each of `names`, in order, reading `config` once.
+pub(crate) fn direct_tool_keys(
+    config: &HarnessConfig,
+    names: &[String],
+) -> Vec<Option<hooks::HookToolKey>> {
+    tools::resolved::direct_tool_keys(config, names)
+}
+
+/// The model-facing names of the tools Core runs itself under `config`: no
+/// tool call Action reaches the Runtime for their calls.
+pub(crate) fn core_tool_names(config: &HarnessConfig) -> Vec<&'static str> {
+    tools::execution::batch::core_tool_names(config.settings.tools.programmatic.is_enabled())
 }
 
 /// Checks one permission rule pattern with the same glob syntax that policy
@@ -160,7 +177,7 @@ pub(crate) fn initial_state_with_history(
         rebuilt_since_reply: false,
         turn: TurnState::Idle,
         last_finished_turn_id: None,
-        notifications: NotificationState::default(),
+        pending_input: PendingInput::default(),
         tool_catalog: Default::default(),
     })
 }
@@ -221,6 +238,12 @@ pub(crate) fn reconfigure_in_place(
             .unwrap_or_else(|| state.context.messages()),
         RequestMeasurements::of(state),
     )?;
+    instructions::validate_settings(
+        state,
+        next.config(),
+        next.resolved_tools(),
+        measurements.correction,
+    )?;
     // Settings can add or remove direct tools such as `wait`, so compare the
     // compiled model tool list as well as the prompt and capability sources.
     let tool_catalog_changed = tool_catalog_source_changed(state.config(), next.config())
@@ -231,7 +254,7 @@ pub(crate) fn reconfigure_in_place(
     store_measurements(state, measurements);
     state.compiled = Arc::new(next);
     state
-        .notifications
+        .pending_input
         .retain_recent(state.config().settings.context.notifications.recent_ids);
     if tool_catalog_changed {
         state.mark_tool_catalog_changed();

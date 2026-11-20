@@ -15,7 +15,7 @@ env = {"SSH_TTY": "/dev/pts/0"}
 
 # The drag below selects "Ra" without folding the group the triple click left open.
 expected_clipboard = "Ra"
-screen_rows = {10: "⏷ Ran 3 commands", 11: "⎢ ⏵ Ran ls dir1"}
+screen_rows = {10: "⏷ Ran 3 commands", 11: "│ ⏵ Ran ls dir1"}
 
 # SGR row 11 is the group header: the arrow at column 1, "Ran" from column 3.
 _HEADER = 11

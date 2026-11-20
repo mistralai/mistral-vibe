@@ -1,7 +1,7 @@
 use crate::core::checkpoint::Checkpoint;
 use crate::core::config::HarnessConfig;
 use crate::core::conversation::ConversationSeed;
-use crate::core::error::CoreError;
+use crate::core::error::{CoreError, RestoreError};
 use crate::core::state::{ActivePhase, ActiveTurn, HarnessState, StateInspection, TurnState};
 use crate::core::step_protocol::Action;
 use crate::core::step_protocol::{
@@ -92,6 +92,7 @@ impl HarnessSession {
         resume_input_id: u64,
     ) -> Result<Self, String> {
         Self::restore_moved_from(config, checkpoint, resume_input_id, None)
+            .map_err(|error| error.to_string())
     }
 
     /// Restores Core continuation state and resumes the Runtime's input sequence.
@@ -110,7 +111,7 @@ impl HarnessSession {
         checkpoint: Checkpoint,
         resume_input_id: u64,
         moved_from: Option<&HarnessConfig>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, RestoreError> {
         Ok(Self {
             state: checkpoint.restore_moved_from(
                 config,

@@ -2,12 +2,16 @@
 //!
 //! A model that reads the same failure for the same call can issue that call again and again
 //! until the context or the session runs out. When the host sets
-//! `settings.turn.max_identical_tool_failures`, Core completes the turn once that many model
-//! replies in a row each failed the same call, with the same arguments and the same result.
+//! `settings.turn.max_identical_tool_failures`, Core completes the turn once that many tool calls
+//! in a row failed the same call, with the same arguments and the same result.
+//!
+//! Each failed call counts, including identical parallel calls in one reply, so a model cannot
+//! run more identical failures than the limit by sending them in fewer replies. Core checks the
+//! count when a reply's tool batch finishes: every call of that reply has run, and the turn stops
+//! before the model is asked again.
 //!
 //! The count comes from the model context, not from separate state, so a checkpoint restore keeps
-//! it. Calls in one reply count as one attempt, including identical parallel calls, because the
-//! model has not read those results yet.
+//! it.
 
 use serde_json::Value;
 
@@ -49,28 +53,35 @@ enum Arguments<'a> {
     InvalidJson(&'a str),
 }
 
-/// Whether the newest `limit` model replies each failed the same call the same way.
+/// Whether the newest `limit` tool calls each failed the same call the same way.
 ///
-/// Reads newest first. A success, a reply whose calls failed in more than one way, or any message
-/// that is not a reply or a tool result, such as the turn's user message, steering, a
+/// Reads newest first, one call at a time, across replies. A success, a different failure, or
+/// any message that is not a reply or a tool result, such as the turn's user message, steering, a
 /// notification or a compaction summary, ends the run.
 pub(crate) fn limit_reached(context: &ModelContext, limit: u32) -> bool {
-    let mut first: Option<Failure<'_>> = None;
-    let mut attempts = 0;
+    let mut newest: Option<Failure<'_>> = None;
+    let mut failures = 0;
     let mut results = Vec::new();
     for stored in context.messages().iter().rev() {
         match &stored.message {
             Message::Tool {
                 tool_call_id,
                 name,
-                outcome: ToolOutcome::Failure,
+                outcome,
                 content,
                 ..
-            } => results.push((tool_call_id.as_str(), name.as_str(), content.as_slice())),
+            } => results.push((
+                tool_call_id.as_str(),
+                name.as_str(),
+                *outcome,
+                content.as_slice(),
+            )),
             Message::Assistant { content } if !results.is_empty() => {
-                // Every failure in the reply, including identical parallel ones, must match the
-                // newest: the reply then counts as one attempt.
-                for (call_id, tool_name, result) in results.drain(..) {
+                // The results of this reply's calls, newest first.
+                for (call_id, tool_name, outcome, result) in results.drain(..) {
+                    if outcome == ToolOutcome::Success {
+                        return false;
+                    }
                     let Some(arguments) = call_arguments(content, call_id) else {
                         return false;
                     };
@@ -79,15 +90,15 @@ pub(crate) fn limit_reached(context: &ModelContext, limit: u32) -> bool {
                         arguments,
                         content: result,
                     };
-                    match &first {
+                    match &newest {
                         Some(newest) if !newest.same_as(&failure) => return false,
                         Some(_) => {}
-                        None => first = Some(failure),
+                        None => newest = Some(failure),
                     }
-                }
-                attempts += 1;
-                if attempts >= limit {
-                    return true;
+                    failures += 1;
+                    if failures >= limit {
+                        return true;
+                    }
                 }
             }
             _ => return false,

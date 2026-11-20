@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from vibe.app_server._dispatch import DispatchResult, RequestFailure, method_not_found
+from vibe.app_server._local_skills import (
+    ENTRY_FILE,
+    delete_skill_folder,
+    listed_skill_folder,
+)
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._skill_toggles import set_skill_enabled
 from vibe.app_server.models import (
@@ -36,6 +41,7 @@ from vibe.app_server.protocol import (
     SkillsCatalogResponse,
     SkillsConvertLocalParams,
     SkillsConvertResponse,
+    SkillsDeleteLocalParams,
     SkillsDetailParams,
     SkillsDetailResponse,
     SkillsImportParams,
@@ -110,12 +116,17 @@ class SkillsHost(Protocol):
         ...
 
     @property
+    def local_skill_dirs(self) -> list[Path]:
+        """The folders local skills are read from, as configured, links unresolved."""
+        ...
+
+    @property
     def sandboxed(self) -> bool:
         """A sandboxed session runs only the skills copied in as it opened."""
         ...
 
-    def require_idle(self) -> None:
-        """Raise if a mutation would land mid-turn."""
+    def require_no_session_rewrite(self) -> None:
+        """Raise while a compaction or a relocation rewrites the session."""
         ...
 
     def require_session(self, session_id: str) -> None:
@@ -126,9 +137,9 @@ class SkillsHost(Protocol):
         """The catalogue behind ``/skill-name``, de-duped, project-wins."""
         ...
 
-    def installed_skills(self) -> list[SkillSummary]:
+    def installed_skills(self) -> SkillsInstalledResponse:
         """Rows for the browser: one per name, scope and source, each marked
-        active when its name resolves to it.
+        active when its name resolves to it, and the skills that failed to load.
         """
         ...
 
@@ -141,8 +152,12 @@ class SkillsHost(Protocol):
         """Keep ``pins`` for the session and its next open; ``refresh`` applies them."""
         ...
 
-    async def refresh(self) -> RuntimeSnapshot:
-        """Re-read the workspace after a mutation and return the new snapshot."""
+    async def refresh(self) -> RuntimeMutationResponse:
+        """Re-read the workspace after a mutation and return the new snapshot.
+
+        During a turn the change is held until the turn ends: ``status`` is then
+        ``PENDING``, and ``runtime`` already shows the change.
+        """
         ...
 
 
@@ -226,6 +241,11 @@ class SkillsController:
                     validate_wire(SkillsConvertLocalParams, raw_params)
                 )
                 runtime_updated = True
+            case "skills/deleteLocal":
+                response = await self._delete_local(
+                    validate_wire(SkillsDeleteLocalParams, raw_params)
+                )
+                runtime_updated = True
             case "skills/setEnabled":
                 response = await self._set_enabled(
                     validate_wire(SkillsSetEnabledParams, raw_params)
@@ -245,7 +265,7 @@ class SkillsController:
 
     def _installed(self, params: SkillsInstalledParams) -> SkillsInstalledResponse:
         self._host.require_session(params.session_id)
-        return SkillsInstalledResponse(skills=self._host.installed_skills())
+        return self._host.installed_skills()
 
     async def _catalog(self, params: SkillsCatalogParams) -> SkillsCatalogResponse:
         self._host.require_session(params.session_id)
@@ -377,8 +397,8 @@ class SkillsController:
         kept = tuple(pin for pin in before if pin.skill_id != entry.skill_id)
         await self._host.save_session_skill_pins((*kept, entry))
         try:
-            runtime = await self._host.refresh()
-            loaded = _loaded_pick(runtime, entry)
+            refreshed = await self._host.refresh()
+            loaded = _loaded_pick(refreshed.runtime, entry)
             if loaded is None:
                 raise RequestFailure(
                     ProtocolErrorCode.INVALID_PARAMS,
@@ -388,7 +408,9 @@ class SkillsController:
         except BaseException:
             await self._restore_session_skill_pins(before)
             raise
-        return SkillsSessionImportResponse(runtime=runtime, skill_name=loaded)
+        return SkillsSessionImportResponse(
+            runtime=refreshed.runtime, status=refreshed.status, skill_name=loaded
+        )
 
     async def _restore_session_skill_pins(
         self, pins: tuple[ManifestEntry, ...]
@@ -487,9 +509,46 @@ class SkillsController:
             )
         except (RegistrySkillsError, OSError) as exc:
             raise RequestFailure(ProtocolErrorCode.INVALID_PARAMS, str(exc)) from exc
+        refreshed = await self._host.refresh()
         return SkillsConvertResponse(
-            converted=target is not None, runtime=await self._host.refresh()
+            converted=target is not None,
+            runtime=refreshed.runtime,
+            status=refreshed.status,
         )
+
+    async def _delete_local(
+        self, params: SkillsDeleteLocalParams
+    ) -> RuntimeMutationResponse:
+        """Only a local skill file the session lists can be deleted, never a plugin's,
+        a built-in or a registry copy, so ``path`` cannot reach anything else.
+        """
+        self._begin_mutation(params.session_id)
+        if self._host.sandboxed:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                "skills of a sandboxed session are deleted inside the sandbox",
+            )
+        installed = self._host.installed_skills().skills
+        row = next(
+            (s for s in installed if s.source == "local" and s.path == params.path),
+            None,
+        )
+        if row is None:
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_FOUND, f"no local skill at {params.path!r}"
+            )
+        folder = listed_skill_folder(Path(params.path), self._host.local_skill_dirs)
+        if folder is None:
+            raise RequestFailure(
+                ProtocolErrorCode.NOT_FOUND, f"no local skill at {params.path!r}"
+            )
+        try:
+            await asyncio.to_thread(delete_skill_folder, folder / ENTRY_FILE)
+        except OSError as exc:
+            raise RequestFailure(
+                ProtocolErrorCode.INTERNAL_ERROR, f"Cannot delete {row.name!r}: {exc}"
+            ) from exc
+        return await self._refreshed()
 
     def _require_toggleable(self, name: str) -> None:
         """Refuse a name the browser itself would not offer a toggle for.
@@ -499,7 +558,8 @@ class SkillsController:
         only hand-editing removes it. The browser already enforces this; the
         server has to as well, since it is the shared entry point.
         """
-        row = next((s for s in self._host.installed_skills() if s.name == name), None)
+        installed = self._host.installed_skills().skills
+        row = next((s for s in installed if s.name == name), None)
         if row is None:
             raise RequestFailure(
                 ProtocolErrorCode.INVALID_PARAMS, f"no installed skill named {name!r}"
@@ -511,11 +571,11 @@ class SkillsController:
             )
 
     def _begin_mutation(self, session_id: str) -> None:
-        self._host.require_idle()
         self._host.require_session(session_id)
+        self._host.require_no_session_rewrite()
 
     async def _refreshed(self) -> RuntimeMutationResponse:
-        return RuntimeMutationResponse(runtime=await self._host.refresh())
+        return await self._host.refresh()
 
     def _scope(self, scope: str) -> SkillScope:
         if scope == "project":

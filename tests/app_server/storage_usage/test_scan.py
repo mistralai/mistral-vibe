@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import os
 from pathlib import Path
 import time
@@ -7,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from tests.app_server.storage_usage._tree import NOW_MS, Tree, bump_mtime, write
+from tests.app_server.storage_usage._tree import NOW_MS, Tree, age, bump_mtime, write
 from vibe.app_server._storage_usage import scan as scan_module, sizes
 from vibe.app_server._storage_usage.scan import (
     DAILY_FULL_SCAN_MS,
@@ -178,6 +179,99 @@ def test_worktree_layout_bucket_unclaimed_and_not_a_bucket(tree: Tree) -> None:
     assert snapshot.totals.leftover_worktrees_bytes == worktrees["stray"].bytes
     histories = sum(row.history_bytes for row in snapshot.sessions)
     assert snapshot.totals.active_sessions_bytes == histories + shared
+
+
+def test_a_bucket_folder_that_is_no_worktree_goes_to_other_vibe_data(
+    tree: Tree,
+) -> None:
+    """*Prepare*: In a worktree bucket, a build cache folder with neither a
+    claim nor a ``.git``, beside an unclaimed real worktree.
+    *Do*: Scan.
+    *Assert*: The cache is Other Vibe data, never a leftover worktree; the
+    unclaimed worktree is still a leftover.
+    """
+    # Prepare
+    write(tree.worktrees_root / "repo-0123456789ab" / ".cargo-target" / "lib", 80_000)
+    tree.worktree("stray", claim=False, size=5_000)
+
+    # Do
+    snapshot = _snapshot(scan(_request(tree)))
+
+    # Assert
+    assert [row.id for row in snapshot.worktrees] == ["repo-0123456789ab/stray"]
+    stray = snapshot.worktrees[0].bytes
+    assert snapshot.totals.leftover_worktrees_bytes == stray
+    kinds = {entry.kind: entry.bytes for entry in snapshot.other}
+    assert kinds["worktrees_unknown"] >= 80_000
+
+
+def test_the_scan_offers_unclaimed_worktrees_and_unknown_folders(tree: Tree) -> None:
+    """*Prepare*: A worktree whose claim names a deleted session, one still
+    claimed, an unclaimed one with a .git, and an unknown bucket folder.
+    *Do*: Scan.
+    *Assert*: The cleanup offers the unclaimed managed worktree and the
+    folder, with their sizes, never the claimed one, the unmanaged one, or
+    an old layout's claims folder.
+    """
+    # Prepare
+    tree.session("alive")
+    tree.worktree("orphan", sessions=["deleted"], size=10_000)
+    tree.worktree("busy", sessions=["alive"], size=10_000)
+    tree.worktree("stray", claim=False, size=10_000)
+    write(tree.worktrees_root / "repo-0123456789ab" / ".cache" / "lib", 20_000)
+    write(tree.worktrees_root / "repo-0123456789ab" / ".claims" / "x" / "r", 10)
+
+    # Do
+    snapshot = _snapshot(scan(_request(tree)))
+
+    # Assert
+    offer = snapshot.leftover_cleanup
+    assert offer.worktree_ids == ["repo-0123456789ab/orphan"]
+    assert [item.id for item in offer.unknown_folders] == ["repo-0123456789ab/.cache"]
+    orphan = next(row for row in snapshot.worktrees if row.id.endswith("/orphan"))
+    assert orphan.bytes is not None
+    assert offer.reclaimable_bytes == orphan.bytes + offer.unknown_folders[0].bytes
+
+
+def test_a_new_worktree_no_session_joined_yet_is_not_offered(tree: Tree) -> None:
+    """*Prepare*: A managed worktree claimed a moment ago that no session has
+    joined, and one claimed long ago that none ever joined.
+    *Do*: Scan.
+    *Assert*: Only the old one is offered for cleanup; both are listed.
+    """
+    # Prepare
+    tree.worktree("new", claimed_at=datetime.now(UTC))
+    tree.worktree("old")
+    age(tree.worktrees_root / ".claims" / "repo-0123456789ab" / "old", 3600)
+
+    # Do
+    snapshot = _snapshot(scan(_request(tree)))
+
+    # Assert
+    assert snapshot.leftover_cleanup.worktree_ids == ["repo-0123456789ab/old"]
+    assert {row.id for row in snapshot.worktrees} == {
+        "repo-0123456789ab/new",
+        "repo-0123456789ab/old",
+    }
+
+
+def test_a_session_in_two_worktrees_lists_both(tree: Tree) -> None:
+    """*Prepare*: A session claimed by two worktrees, its folder in the second.
+    *Do*: Scan.
+    *Assert*: Its row lists both, the one its folder is in first, so the
+    panel shows every byte Active sessions counts for it.
+    """
+    # Prepare
+    tree.session("two", cwd=tree.worktrees_root / "repo-0123456789ab" / "second")
+    tree.worktree("first", sessions=["two"], size=10_000)
+    tree.worktree("second", sessions=["two"], size=20_000)
+
+    # Do
+    [row] = _snapshot(scan(_request(tree))).sessions
+
+    # Assert
+    assert row.worktree_id == "repo-0123456789ab/second"
+    assert row.worktree_ids == ["repo-0123456789ab/second", "repo-0123456789ab/first"]
 
 
 def test_a_worktree_of_archived_sessions_only_is_a_leftover(tree: Tree) -> None:

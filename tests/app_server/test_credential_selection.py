@@ -14,6 +14,7 @@ from vibe.app_server._connection_protocol import (
 )
 from vibe.app_server._credential_selection import (
     ConnectionCredentialSelection,
+    DesktopCredentialUnavailable,
     select_platform_credentials,
 )
 from vibe.app_server._platform_credentials import ConnectionPlatformCredentialProvider
@@ -63,7 +64,7 @@ def test_cli_clients_use_the_cli_session_under_the_flag(monkeypatch, entrypoint)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entrypoint", ["desktop", "unknown", None])
+@pytest.mark.parametrize("entrypoint", ["unknown", None])
 async def test_other_clients_never_borrow_the_cli_session(monkeypatch, entrypoint):
     # A stored CLI sign-in and the flag leaked into a non-CLI connection's
     # environment: the API-key fallback must not turn the marker into the CLI
@@ -84,6 +85,27 @@ async def test_other_clients_never_borrow_the_cli_session(monkeypatch, entrypoin
     )
 
     assert resolved == PlatformCredentialRequired(reason="missing")
+    assert not provider.has_credential()
+    assert provider.cached_principal() is None
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_without_its_sign_in_borrows_neither_the_cli_session_nor_a_key(
+    monkeypatch,
+):
+    monkeypatch.setenv("VIBE_CLI_OIDC_ENABLED", "true")
+    monkeypatch.setenv("MISTRAL_API_KEY", "api-key-of-another-environment")
+    monkeypatch.setattr(
+        "vibe.setup.auth._oidc_runtime.stored_oidc_credential", lambda: OIDC_API_KEY
+    )
+    provider = _select("desktop")
+    assert isinstance(provider, DesktopCredentialUnavailable)
+
+    resolved = await provider.resolve(
+        PlatformCredentialTarget("https://api.mistral.ai/v1")
+    )
+
+    assert resolved == PlatformCredentialRequired(reason="credential_unavailable")
     assert not provider.has_credential()
     assert provider.cached_principal() is None
 
@@ -137,7 +159,7 @@ def test_other_providers_keep_their_api_key(monkeypatch):
     ("entrypoint", "desktop_broker", "expected"),
     [
         ("cli", False, CliOidcPlatformCredentialProvider),
-        ("desktop", False, ApiKeyPlatformCredentialProvider),
+        ("desktop", False, DesktopCredentialUnavailable),
         ("desktop", True, ConnectionPlatformCredentialProvider),
     ],
 )

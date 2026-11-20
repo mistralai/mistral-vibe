@@ -1,4 +1,4 @@
-"""Remove on a skill's page asks for Enter again, then unpins its global pin, and the page gives way to the list once no pin is left."""
+"""r on a shared skill's page unpins it at once, the page gives way to the list once no pin is left, and a notice says how to add it back."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ handshake = {
 }
 request_methods = METHODS
 
-timeline: Timeline = ["/skills\r", "\r", "jjj", "\r", "\r"]
+timeline: Timeline = ["/skills\r", "\r", "r"]
 
-screen_contains = ("lint",)
-screen_excludes = ("deploy",)
+screen_contains = ("lint", "Removed deploy from My Skills. Add it again from Shared.")
+screen_excludes = ("● deploy",)
