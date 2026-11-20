@@ -47,6 +47,7 @@ pub mod history_manager;
 pub mod history_persist;
 pub mod input_edit;
 pub mod json;
+pub mod local_file;
 pub mod paths;
 pub mod scroll;
 pub mod settle;

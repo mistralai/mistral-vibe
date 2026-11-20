@@ -10,6 +10,8 @@ use super::FileIndex;
 
 mod thread;
 
+pub use thread::watch_events;
+
 /// Whether `VIBE_ENABLE_FILE_AUTOCOMPLETE` names a false value; the server
 /// layer parses it too, this only avoids a launch-time index build. The list
 /// matches pydantic's false values exactly ('n' and 'f' included), so a

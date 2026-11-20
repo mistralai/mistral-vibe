@@ -156,7 +156,7 @@ async fn esc_mid_answer_is_replaced_by_the_retried_reply() {
 }
 
 #[tokio::test]
-async fn esc_before_the_turn_starts_is_replaced_by_the_retried_reply() {
+async fn esc_before_the_turn_starts_takes_the_prompt_back_instead_of_offering_a_retry() {
     let mut harness = Harness::new();
     harness.app.set_status(Status::Generating {
         since: vibe_rs::clock::now(),
@@ -165,11 +165,8 @@ async fn esc_before_the_turn_starts_is_replaced_by_the_retried_reply() {
     harness.start_turn(TURN);
     harness.add(in_turn(message("user", "user", "hello")));
     harness.end_turn(TURN, "interrupted");
-    assert!(harness.app.session.can_retry);
 
-    harness.retry_and_reply("Hi there.");
-
-    assert_eq!(harness.shown(), ["hello", "Hi there."]);
+    assert!(!harness.app.session.can_retry);
     assert_eq!(harness.interrupt_markers(), 0);
 }
 

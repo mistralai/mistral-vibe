@@ -1,4 +1,4 @@
-"""A settled todo write pins a plan line above the input; cmd+\\ docks it right."""
+"""A settled todo write shows the rail's todo item; cmd+\\ docks the plan right."""
 
 from __future__ import annotations
 

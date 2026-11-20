@@ -19,6 +19,7 @@ use crate::core::features::skills::SkillDefinition;
 use crate::core::features::subagents::Mode as SubagentMode;
 use crate::core::prompt::PromptSettings;
 use crate::core::prompt::build_system_prompt;
+use crate::core::prompt::settings::GuidanceSettings;
 use crate::core::testing::config;
 use crate::core::tools::command_environment::CommandEnvironment;
 use crate::core::tools::resolved::ResolvedTools;
@@ -38,6 +39,7 @@ const ENVIRONMENTS: [(&str, CommandEnvironment); 5] = [
 fn all_features(environment: CommandEnvironment) -> HarnessConfig {
     let mut config = config();
     config.system_instructions = String::new();
+    config.settings.prompts.guidance = GuidanceSettings::Stock;
     config.settings.tools.command_environment = environment;
     config.settings.tools.background_processes = if environment.is_enabled() {
         BackgroundProcessMode::Enabled
@@ -70,6 +72,8 @@ fn system_message_with_each_optional_section() {
     without_subagents.settings.tools.subagents = SubagentMode::Disabled;
     let mut without_skills = full.clone();
     without_skills.capabilities.skills.clear();
+    let mut default_guidance = full.clone();
+    default_guidance.settings.prompts.guidance = PromptSettings::default().guidance;
 
     let mut by_profile = serde_json::Map::new();
     for (name, environment) in ENVIRONMENTS {
@@ -86,6 +90,7 @@ fn system_message_with_each_optional_section() {
             "without_background_processes": reviewable(json!(system_prompt(&without_background))),
             "without_subagents": reviewable(json!(system_prompt(&without_subagents))),
             "without_skills": reviewable(json!(system_prompt(&without_skills))),
+            "default_guidance": reviewable(json!(system_prompt(&default_guidance))),
         })
     );
 }

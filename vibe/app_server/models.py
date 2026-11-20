@@ -510,6 +510,7 @@ class AgentStatsSnapshot(ProtocolModel):
 class ConfigIssue(ProtocolModel):
     file: str
     message: str
+    code: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class DebugLogEntry(ProtocolModel):
@@ -532,8 +533,14 @@ class AgentSummary(ProtocolModel):
     name: str
     display_name: str
     description: str
-    safety: AgentSafety
     agent_type: AgentType
+
+
+class ApprovalPolicySummary(ProtocolModel):
+    name: str
+    display_name: str
+    description: str
+    safety: AgentSafety
 
 
 class RegistryRefView(ProtocolModel):
@@ -553,6 +560,10 @@ class SkillSummary(ProtocolModel):
     enabled: bool = True
     locked: bool = False
     active: bool = True
+    path: str | None = None
+    """``skills/installed`` only: the skill's ``SKILL.md``, under the root that lists it."""
+    linked: bool = False
+    """``skills/installed`` only: the listed folder is a link, so a delete drops only the link."""
 
 
 class SkillCatalogEntry(ProtocolModel):
@@ -1183,6 +1194,7 @@ class PublicSession(ProtocolModel):
     model: str | None = None
     reasoning_effort: str | None = None
     agent: AgentSummary | None = None
+    approval_policy: ApprovalPolicySummary | None = None
     token_usage: TokenUsage | None = None
     context_usage: TokenUsage | None = None
     harness: Literal["legacy", "unified"] | None = None
@@ -1194,8 +1206,8 @@ class PublicSession(ProtocolModel):
     goal: PublicGoal | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    # None while unstamped. With local projects on, a listing stamps an unstamped
-    # session whose folder is a local project's.
+    # None while unstamped. A listing stamps an unstamped session whose folder is
+    # a local project's.
     project: PublicSessionProject | None = None
 
     @model_validator(mode="after")

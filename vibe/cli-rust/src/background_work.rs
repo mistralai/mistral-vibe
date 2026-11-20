@@ -6,11 +6,13 @@ use crate::server::PublicSessionState;
 /// Follow the running background processes a session state reports, and what
 /// a running wait waits for.
 pub fn adopt_state(app: &mut App, state: &PublicSessionState) {
-    app.session.running_processes = state
+    app.session.background_tasks = state
         .background_processes
         .iter()
         .filter(|process| process.status == "running")
-        .count();
+        .cloned()
+        .collect();
+    crate::tasks_panel::sync(app);
     sync_wait_target(app);
 }
 
@@ -29,7 +31,7 @@ fn wait_target(app: &App) -> Option<String> {
         .iter()
         .filter(|child| crate::subagents::is_active(child.status))
         .count();
-    let tasks = app.session.running_processes;
+    let tasks = app.session.background_tasks.len();
     let parts: Vec<String> = [
         (subagents > 0).then(|| counted(subagents, "subagent", "subagents")),
         (tasks > 0).then(|| counted(tasks, "background task", "background tasks")),

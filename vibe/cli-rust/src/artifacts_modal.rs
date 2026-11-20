@@ -1,8 +1,9 @@
-//! The artifacts modal: every PR/MR artifact of the session as a link list,
-//! opened from the bottom bar link or `/pr`.
+//! The PR window: every PR/MR artifact of the session as a link list,
+//! opened from the rail or `/pr`.
 
 use std::sync::Arc;
 
+use crossterm::event::{KeyCode, KeyEvent};
 use serde_json::json;
 
 use crate::app::{App, Severity};
@@ -16,11 +17,23 @@ use crate::server::{
 /// How long the empty-list notice stays up.
 const NOTICE_SECS: u64 = 4;
 
-/// Open the modal highlighted on the latest artifact (the list is kept
-/// latest-first).
-pub fn open(app: &mut App) {
+/// Open the window on the latest artifact (the list is kept latest-first), refresh the statuses and mark every artifact seen.
+pub fn open(app: &mut App, client: &Arc<Client>) {
     app.artifacts_modal.list = crate::option_list::OptionList::new(0);
-    app.artifacts_modal.open = true;
+    app.rail.window = Some(crate::rail::Item::Prs);
+    let ids = app
+        .session
+        .artifacts
+        .iter()
+        .map(|artifact| artifact.id.clone())
+        .collect();
+    sync_statuses(app, client);
+    mark_viewed(app, client, ids);
+}
+
+/// Whether the PR window is on screen.
+pub fn is_open(app: &App) -> bool {
+    crate::rail::window(app) == Some(crate::rail::Item::Prs)
 }
 
 /// Open the modal for the user: mark every artifact seen and refresh the statuses.
@@ -37,15 +50,24 @@ pub fn show(app: &mut App, client: &Arc<Client>) {
         );
         return;
     }
-    open(app);
-    let ids = app
-        .session
-        .artifacts
-        .iter()
-        .map(|artifact| artifact.id.clone())
-        .collect();
-    sync_statuses(app, client);
-    mark_viewed(app, client, ids);
+    crate::rail::open(app, client, crate::rail::Item::Prs);
+}
+
+/// ↑↓/jk navigate, Enter opens the highlighted link, `c` its first CI check, `f` drafts a fix prompt.
+pub fn handle_key(app: &mut App, key: KeyEvent) {
+    let plain = key.modifiers.is_empty();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => navigate(app, false),
+        KeyCode::Down | KeyCode::Char('j') => navigate(app, true),
+        KeyCode::PageUp => page(app, false),
+        KeyCode::PageDown => page(app, true),
+        KeyCode::Home => edge(app, false),
+        KeyCode::End => edge(app, true),
+        KeyCode::Enter => select(app),
+        KeyCode::Char('c') if plain => open_check(app),
+        KeyCode::Char('f') if plain => fix(app),
+        _ => {}
+    }
 }
 
 /// Refresh every status from its provider; the changes arrive as `artifacts/updated`.
@@ -90,9 +112,11 @@ pub fn mark_viewed(app: &mut App, client: &Arc<Client>, ids: Vec<String>) {
     });
 }
 
-/// Close the modal without opening anything (Esc).
+/// Close the PR window without opening anything.
 pub fn close(app: &mut App) {
-    app.artifacts_modal.open = false;
+    if app.rail.window == Some(crate::rail::Item::Prs) {
+        app.rail.window = None;
+    }
 }
 
 /// Move the highlight up/down by one, wrapping at the ends.
@@ -197,4 +221,6 @@ pub fn fix(app: &mut App) {
     }
     crate::chat_input::append_prompt(app, &prompt);
     close(app);
+    // The drafted prompt waits in the composer, which takes the keyboard back from the rail.
+    crate::rail::leave(app);
 }

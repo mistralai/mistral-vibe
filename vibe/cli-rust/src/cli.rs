@@ -124,11 +124,20 @@ pub struct Cli {
     #[arg(long = "output-dir", value_name = "DIR", overrides_with = "output_dir")]
     pub output_dir: Option<PathBuf>,
 
-    /// Agent to use (builtin: ask, accept-edits, smart-approve, auto-approve,
-    /// or custom from ~/.vibe/agents/NAME.toml). Defaults to the 'default_agent'
-    /// config setting.
+    /// Agent to use (e.g. lean, or custom from ~/.vibe/agents/NAME.toml).
+    /// Defaults to the 'default_agent' config setting. Approval policy names
+    /// are still accepted for compatibility.
     #[arg(long = "agent", value_name = "NAME", overrides_with = "agent")]
     pub agent: Option<String>,
+
+    /// Approval policy to use (ask, accept-edits, smart-approve, auto-approve,
+    /// or custom). Defaults to the 'default_approval_policy' config setting.
+    #[arg(
+        long = "approval-policy",
+        value_name = "NAME",
+        overrides_with = "approval_policy"
+    )]
+    pub approval_policy: Option<String>,
 
     /// Model alias to use instead of 'active_model' (headless mode only, new
     /// sessions). Not saved as the default.
@@ -148,7 +157,12 @@ pub struct Cli {
 
     /// Classify each tool call and auto-run the safe ones, prompting only for
     /// risky ones.
-    #[arg(long = "smart-approve", action = ArgAction::SetTrue, overrides_with = "smart_approve")]
+    #[arg(
+        long = "smart-approve",
+        action = ArgAction::SetTrue,
+        overrides_with = "smart_approve",
+        conflicts_with = "approval_policy"
+    )]
     pub smart_approve: bool,
 
     /// Enable specific tools (headless: disables all others). Repeat the flag.
@@ -378,6 +392,7 @@ pub struct HeadlessOptions {
     pub model: Option<String>,
     pub thinking: Option<String>,
     pub agent: Option<String>,
+    pub approval_policy: Option<String>,
     pub auto_approve: bool,
     pub enabled_tools: Vec<String>,
     pub disabled_tools: Vec<String>,
@@ -395,6 +410,8 @@ pub struct HeadlessOptions {
 pub struct ExecutionControl {
     /// Resolved agent name; `None` lets the server use `default_agent`.
     pub agent: Option<String>,
+    /// Resolved approval policy; `None` lets the server use `default_approval_policy`.
+    pub approval_policy: Option<String>,
     /// Approve every tool call (`--auto-approve` / `--yolo`).
     pub auto_approve: bool,
 }
@@ -521,9 +538,9 @@ impl Cli {
         }
     }
 
-    /// Build headless options from the parsed CLI + stdin prompt. Agent and
-    /// auto-approve go through `execution_control()` so `--smart-approve`
-    /// resolves the agent in headless mode too. The error is the message a
+    /// Build headless options from the parsed CLI + stdin prompt. Agent, policy
+    /// and auto-approve go through `execution_control()` so `--smart-approve`
+    /// resolves the policy in headless mode too. The error is the message a
     /// usage error reports.
     pub fn headless_options(
         &self,
@@ -559,6 +576,7 @@ impl Cli {
             model: self.model.clone(),
             thinking: self.thinking.clone(),
             agent: execution_control.agent,
+            approval_policy: execution_control.approval_policy,
             auto_approve: execution_control.auto_approve,
             enabled_tools: self.enabled_tools.clone(),
             disabled_tools: self.disabled_tools.clone(),
@@ -571,7 +589,7 @@ impl Cli {
         })
     }
 
-    /// The shared session flags for interactive mode: `--agent`,
+    /// The shared session flags for interactive mode: `--agent`, `--approval-policy`,
     /// `--auto-approve` / `--yolo`, and `--smart-approve` (resolved via
     /// `execution_control()`), the tool filters, `--trust`, `--add-dir`, and
     /// the resolved `--worktree` request. Budget flags stay headless-only.
@@ -585,6 +603,7 @@ impl Cli {
         Ok(AgentConfig {
             cwd,
             agent: execution_control.agent,
+            approval_policy: execution_control.approval_policy,
             auto_approve: execution_control.auto_approve,
             enabled_tools: self.enabled_tools.clone(),
             disabled_tools: self.disabled_tools.clone(),
@@ -626,16 +645,17 @@ impl Cli {
         }
     }
 
-    /// Resolve `--agent` / `--auto-approve` / `--smart-approve` into the
-    /// wire-facing execution control. `--smart-approve` selects the
-    /// `smart-approve` agent unless an explicit `--agent` wins.
+    /// Resolve `--agent` / `--approval-policy` / `--auto-approve` / `--smart-approve`
+    /// into the wire-facing execution control. `--smart-approve` selects the
+    /// `smart-approve` policy.
     pub fn execution_control(&self) -> ExecutionControl {
-        let agent = self
-            .agent
+        let approval_policy = self
+            .approval_policy
             .clone()
             .or_else(|| self.smart_approve.then(|| "smart-approve".to_owned()));
         ExecutionControl {
-            agent,
+            agent: self.agent.clone(),
+            approval_policy,
             auto_approve: self.auto_approve,
         }
     }

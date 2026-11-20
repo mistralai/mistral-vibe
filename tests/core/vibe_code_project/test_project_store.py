@@ -178,7 +178,7 @@ def test_projects_store_ignores_corrupt_toml(tmp_path: Path) -> None:
     path = tmp_path / "projects.toml"
     path.write_text("{not-toml", encoding="utf-8")
 
-    assert VibeProjectsStore(path).list_remote_projects() == []
+    assert VibeProjectsStore(path).list_project_links() == []
 
 
 def test_projects_store_reads_every_link_of_a_whole_file(tmp_path: Path) -> None:

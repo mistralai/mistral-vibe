@@ -19,6 +19,7 @@ import threading
 from typing import Any
 
 from vibe.app_server.transport import JsonRpcTransport
+from vibe.core.utils.signals import waking_loop_on_signals
 from vibe.observability.logging import logger
 
 # Covers a tool's stop (its grace, then its kill: 2 s each) and the sessions'
@@ -85,6 +86,61 @@ class InputEndingTransport:
                 await aclose()
 
 
+class _SigtermDeadline:
+    """Arms the deadline from a thread started up front: the signal handler
+    only writes to a pipe, so a SIGTERM landing while another is handled (uv
+    forwards its own on top of a process-group kill) cannot re-enter it.
+    """
+
+    def __init__(
+        self,
+        deadline_s: float,
+        exit_process: Callable[[int], None],
+        on_signal: Callable[[], None],
+    ) -> None:
+        self._deadline_s = deadline_s
+        self._exit_process = exit_process
+        self._on_signal = on_signal
+        self._signalled = False
+        self._decided = threading.Event()
+        self._wound_down = threading.Event()
+        self._read, self._write = os.pipe()
+        os.set_blocking(self._write, False)
+        self._closed = False
+        self._watcher = threading.Thread(
+            target=self._watch, name="vibe-sigterm-deadline", daemon=True
+        )
+        self._watcher.start()
+
+    def notify(self, _signum: int, _frame: object) -> None:
+        try:
+            os.write(self._write, b"\0")
+        except OSError:
+            pass  # Full: a byte already waits.
+
+    def _watch(self) -> None:
+        self._signalled = bool(os.read(self._read, 1))
+        self._decided.set()
+        if not self._signalled:
+            return
+        self._on_signal()
+        if not self._wound_down.wait(self._deadline_s):
+            self._exit_process(TERMINATED_EXIT_CODE)
+
+    def stop(self) -> bool:
+        """Whether SIGTERM came. Only once :meth:`notify` is no longer the
+        handler: the pipe's descriptors are reused once closed.
+        """
+        if not self._closed:
+            self._closed = True
+            os.close(self._write)
+            self._decided.wait()
+            self._wound_down.set()
+            self._watcher.join()
+            os.close(self._read)
+        return self._signalled
+
+
 @contextmanager
 def ending_on_sigterm(
     transport: JsonRpcTransport,
@@ -102,26 +158,24 @@ def ending_on_sigterm(
     exit_process = exit_process or _exit_now
     loop = asyncio.get_running_loop()
     ending = InputEndingTransport(transport)
-    deadline = threading.Timer(deadline_s, exit_process, (TERMINATED_EXIT_CODE,))
-    deadline.daemon = True
 
-    def terminate(_signum: int, _frame: object) -> None:
-        if deadline.ident is not None:
-            return
-        # A Python handler, not the loop's: it arms the deadline even while a
-        # callback holds the loop.
-        deadline.start()
-        loop.call_soon_threadsafe(ending.end_input)
+    def end_input() -> None:
+        try:
+            loop.call_soon_threadsafe(ending.end_input)
+        except RuntimeError:
+            pass  # The loop is closed: serving is over.
 
-    previous = signal.signal(signal.SIGTERM, terminate)
+    deadline = _SigtermDeadline(deadline_s, exit_process, end_input)
+    previous = signal.signal(signal.SIGTERM, deadline.notify)
     try:
-        yield ending
+        with waking_loop_on_signals():
+            yield ending
     except Exception:
-        if deadline.ident is None:
+        signal.signal(signal.SIGTERM, previous)
+        if not deadline.stop():
             raise
         logger.exception("App-server shutdown on SIGTERM failed")
     finally:
         signal.signal(signal.SIGTERM, previous)
-        if deadline.ident is not None:
-            deadline.cancel()
+        if deadline.stop():
             exit_process(TERMINATED_EXIT_CODE)

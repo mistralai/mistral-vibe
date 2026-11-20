@@ -57,6 +57,27 @@ fn detail_key(app: &mut App, client: &Arc<Client>, key: KeyEvent, plain: bool) {
     }
 }
 
+/// Keys of the rail's goal window: the detail panel's actions; edit and clear open their panels over it.
+pub fn window_key(app: &mut App, client: &Arc<Client>, key: &KeyEvent) {
+    let Some(goal) = app.goal.goal.clone() else {
+        return;
+    };
+    if !(key.modifiers - KeyModifiers::SHIFT).is_empty() {
+        return;
+    }
+    match key.code {
+        KeyCode::Char('p') if goal.status == GoalStatus::Active => {
+            super::set_status(app, client, "paused")
+        }
+        KeyCode::Char('p') if format::resumable(goal.status) => {
+            super::set_status(app, client, "active")
+        }
+        KeyCode::Char('e') => super::open_edit(app, &goal, false),
+        KeyCode::Char('c') => super::clear(app, client, &goal, false),
+        _ => {}
+    }
+}
+
 /// Esc: a nested panel goes back to the detail panel, a top-level one closes.
 fn back(app: &mut App, nested: bool) {
     app.goal.panel = nested.then_some(Panel::Detail);

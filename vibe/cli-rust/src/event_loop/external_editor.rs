@@ -1,6 +1,7 @@
-//! Ctrl+G: hand the terminal to the external editor, then load what it saved.
+//! Ctrl+G: hand the terminal to the external editor, then load what it saved; `/skills` opens a skill's file in it as it is.
 
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -10,7 +11,7 @@ use crate::external_editor;
 use crate::server::signal::ShutdownSignal;
 use crate::server::{Client, Notification};
 
-use super::handoff::TerminalHandoff;
+use super::handoff::{Lent, TerminalHandoff};
 use super::notifications::absorb_notification;
 use super::EventSources;
 
@@ -22,7 +23,7 @@ enum Outcome {
     Failed(std::io::Error),
 }
 
-/// Edit the composer text in the external editor; true when a shutdown signal ended the run.
+/// Edit the composer text, or `file` as it is, in the external editor; true when a shutdown signal ended the run.
 pub(super) async fn open_external_editor(
     app: &mut App,
     client: &Arc<Client>,
@@ -30,10 +31,25 @@ pub(super) async fn open_external_editor(
     sources: &mut EventSources,
     shutdown: &mut ShutdownSignal,
     deferred: &mut Option<Notification>,
+    file: Option<PathBuf>,
 ) -> Result<bool> {
-    let initial = app.chat_input.submitted_text();
     let editor =
         external_editor::get_editor(std::env::var("VISUAL").ok(), std::env::var("EDITOR").ok());
+    if let Some(file) = file {
+        let argv = external_editor::command(&editor, &file);
+        let lent = handoff.begin().await;
+        let outcome = wait_for_editor(&argv, app, client, sources, shutdown, deferred).await;
+        let Some(outcome) = outcome else {
+            lent.abandon();
+            return Ok(true);
+        };
+        if let Outcome::Failed(error) = outcome {
+            show_error(app, format!("Could not open editor {editor}: {error}"));
+        }
+        crate::skills_browser::reread(app, client);
+        return finish(app, lent);
+    }
+    let initial = app.chat_input.submitted_text();
     let file = match draft_file(&initial) {
         Ok(file) => file,
         Err(error) => {
@@ -64,6 +80,11 @@ pub(super) async fn open_external_editor(
         }
         Outcome::Cancelled => {}
     }
+    finish(app, lent)
+}
+
+/// Take the terminal back from the editor.
+fn finish(app: &mut App, lent: Lent<'_>) -> Result<bool> {
     lent.end()?;
     crate::tmux_hint::refresh(app);
     app.terminal_notifier.invalidate_title();

@@ -67,33 +67,33 @@ async fn remove_on_a_page_leaves_a_same_named_skill_s_pins() {
     let mut app = two_reviews();
     open_page(&mut app, catalog_row("id-other"));
     let (client, mut frames) = session(&mut app);
-    highlight_row(&mut app, Property::Remove);
-    press(&mut app, &client, KeyCode::Enter);
-    press(&mut app, &client, KeyCode::Enter);
+    press(&mut app, &client, KeyCode::Char('r'));
     assert_eq!(removed_scopes(&mut frames).await, [json!("global")]);
 }
 
 #[tokio::test]
-async fn d_twice_on_the_list_removes_only_the_row_s_skill() {
+async fn r_on_the_list_removes_only_the_row_s_skill() {
     let mut app = two_reviews();
     let (client, mut frames) = session(&mut app);
     highlight(&mut app, &installed_row("review"));
-    press(&mut app, &client, KeyCode::Char('d'));
-    press(&mut app, &client, KeyCode::Char('d'));
+    press(&mut app, &client, KeyCode::Char('r'));
     assert_eq!(removed_scopes(&mut frames).await, [json!("project")]);
 }
 
 #[test]
-fn only_the_page_of_the_skill_its_name_loads_offers_enabled() {
+fn only_the_page_of_the_skill_its_name_loads_offers_the_switch() {
+    let space = |app: &App| {
+        let footer = skills_browser::help(&app.skills_browser);
+        footer
+            .iter()
+            .any(|(key, _)| *key == vibe_rs::hints::key::SPACE)
+    };
     let mut app = two_reviews();
     open_page(&mut app, catalog_row("id-other"));
-    assert!(
-        !page(&app).rows.contains(&Property::Enabled),
-        "the switch would turn off the other skill"
-    );
+    assert!(!space(&app), "the switch would turn off the other skill");
     let mut app = two_reviews();
     open_page(&mut app, installed_row("review"));
-    assert!(page(&app).rows.contains(&Property::Enabled));
+    assert!(space(&app));
 }
 
 #[test]
@@ -144,7 +144,7 @@ async fn a_scope_another_skill_of_the_name_holds_says_so_and_takes_no_pin() {
     press(&mut app, &client, KeyCode::Down);
     assert_eq!(
         page_row(&app),
-        Some(Property::Remove),
+        Some(Property::Scope(SkillScope::Global)),
         "the arrows step over it"
     );
     let sent = tokio::time::timeout(Duration::from_millis(200), frames.recv()).await;
@@ -160,7 +160,7 @@ fn a_scope_another_skill_takes_meanwhile_gives_up_the_highlight() {
     highlight_row(&mut app, Property::Scope(SkillScope::Project));
     let mut theirs = registry("review", "project", 1, None);
     theirs["registry"]["skillId"] = json!("id-other");
-    let installed = Ok(pins(vec![shadowed(ours), theirs]));
+    let installed = Ok(pins(vec![shadowed(ours), theirs]).into());
     let outcome = Outcome {
         answer: Some(json!({})),
         error: None,

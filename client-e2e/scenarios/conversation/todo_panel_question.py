@@ -1,4 +1,4 @@
-"""The plan survives an `ask_user_question` taking the input box, row and panel both."""
+"""The plan survives an `ask_user_question` taking the input box, rail item and panel both."""
 
 from __future__ import annotations
 
@@ -49,10 +49,5 @@ timeline: Timeline = [
     {"release": 2},
 ]
 
-# The panel keeps its column and the pinned row keeps its line, while the question
-# app owns the input box: `▶ 1/3 · Pick the database` is the row's summary.
-screen_contains = (
-    "Todos · 1/3 done",
-    "Which database should we use",
-    "1/3 · Pick the database",
-)
+# The panel keeps its column and the rail keeps its plan item while the question app owns the input box.
+screen_contains = ("Todos · 1/3 done", "Which database should we use", "≡ 1/3")

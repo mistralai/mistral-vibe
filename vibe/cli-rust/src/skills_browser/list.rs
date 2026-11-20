@@ -4,11 +4,10 @@ use std::sync::Arc;
 
 use caseless::default_case_fold_str as casefold;
 
-use super::changes;
 use super::labels::{self, MY_SKILLS, NO_MATCH, NO_SKILLS, SHARED};
-use super::page;
-use super::pins::{importable, listed, matches, of_skill};
+use super::pins::{importable, listed, matches};
 use super::State;
+use super::{files, page};
 use crate::app::App;
 use crate::hints::{self, action, key, Hint};
 use crate::search_field;
@@ -28,6 +27,10 @@ pub enum Row {
     Catalog(String),
     /// A plain line, such as an empty tab's note.
     Note(&'static str),
+    /// The heading over the skills that failed to load.
+    BrokenHeading,
+    /// A skill file or manifest that failed to load, by its index in the issues.
+    Broken(usize),
 }
 
 impl Row {
@@ -68,7 +71,7 @@ fn build(state: &mut State) {
     state.tab_rows = tabs.map(|tab| (*tab, tab_rows(state, *tab))).collect();
 }
 
-/// A tab's rows: the installed skills in server order, one row per name, or the shared skills to add by name; a query keeps only matches.
+/// A tab's rows: the installed skills by name, one row per name, or the shared skills to add by name; a query keeps only matches.
 fn tab_rows(state: &State, tab: Tab) -> Vec<Row> {
     let query = casefold(state.search.query.trim());
     let (columns, entries, empty) = match tab {
@@ -78,21 +81,42 @@ fn tab_rows(state: &State, tab: Tab) -> Vec<Row> {
             (Row::CatalogColumns, shared(state, &query), note)
         }
     };
-    if entries.is_empty() {
-        let note = if query.is_empty() { empty } else { NO_MATCH };
-        return vec![Row::Note(note)];
+    let broken = match tab {
+        Tab::Mine => broken(state, &query),
+        Tab::Shared => Vec::new(),
+    };
+    let mut rows = Vec::new();
+    if !entries.is_empty() {
+        rows.push(columns);
+        rows.extend(entries);
+    } else if broken.is_empty() {
+        rows.push(Row::Note(if query.is_empty() { empty } else { NO_MATCH }));
     }
-    let mut rows = vec![columns];
-    rows.extend(entries);
+    if !broken.is_empty() {
+        rows.push(Row::BrokenHeading);
+        rows.extend(broken);
+    }
     rows
 }
 
+fn broken(state: &State, query: &str) -> Vec<Row> {
+    let issues = state.issues.iter().enumerate();
+    issues
+        .filter(|(_, issue)| matches(query, &issue.file, &issue.message))
+        .map(|(index, _)| Row::Broken(index))
+        .collect()
+}
+
+/// The installed skills by name, whatever their scope or source.
 fn mine(state: &State, query: &str) -> Vec<Row> {
-    state
+    let mut pins: Vec<_> = state
         .installed
         .iter()
         .filter(|pin| listed(state, &pin.name) == Some(*pin))
         .filter(|pin| matches(query, &pin.name, &pin.description))
+        .collect();
+    pins.sort_by_cached_key(|pin| casefold(&pin.name));
+    pins.into_iter()
         .map(|pin| Row::Installed(pin.name.clone()))
         .collect()
 }
@@ -118,35 +142,37 @@ pub fn any_skill(state: &State) -> bool {
     rows.any(Row::selectable)
 }
 
-/// The tabs and their labels, none without registry skills; while searching each label counts its matches.
-pub fn tabs(state: &State) -> Vec<(Tab, String)> {
+/// The tabs and their labels, none without registry skills; each label counts the skills it lists, its matches while searching.
+pub fn tabs(state: &State) -> Vec<(Tab, tab_bar::Label)> {
     if !state.registry {
         return Vec::new();
     }
-    let searching = !state.search.query.trim().is_empty();
     let label = |(tab, rows): &(Tab, Vec<Row>)| {
         let name = match tab {
             Tab::Mine => MY_SKILLS,
             Tab::Shared => SHARED,
         };
-        let matches = rows.iter().filter(|row| row.selectable()).count();
-        (*tab, tab_bar::label(name, searching.then_some(matches)))
+        let skills = rows.iter().filter(|row| row.selectable()).count();
+        let label = tab_bar::Label {
+            name,
+            count: Some(skills),
+        };
+        (*tab, label)
     };
     state.tab_rows.iter().map(label).collect()
 }
 
-/// Show `tab`'s rows from its first one, a removal disarmed; only with registry skills on.
+/// Show `tab`'s rows from its first one; only with registry skills on.
 pub(super) fn open_tab(state: &mut State, tab: Tab) {
     if !state.registry {
         return;
     }
     state.tab = tab;
-    state.removing = None;
     reset(state);
 }
 
 /// The highlighted skill's row.
-pub(super) fn highlighted(state: &State) -> Option<&Row> {
+pub fn highlighted(state: &State) -> Option<&Row> {
     state
         .rows()
         .get(state.list.selected())
@@ -154,7 +180,7 @@ pub(super) fn highlighted(state: &State) -> Option<&Row> {
 }
 
 /// The pin the highlighted row shows, if it shows an installed skill.
-fn highlighted_pin(state: &State) -> Option<&InstalledSkill> {
+pub(super) fn highlighted_pin(state: &State) -> Option<&InstalledSkill> {
     match highlighted(state)? {
         Row::Installed(name) => listed(state, name),
         _ => None,
@@ -212,51 +238,18 @@ pub(super) fn activate(app: &mut App, client: &Arc<Client>) {
     }
 }
 
-/// Space: turn the highlighted skill on or off everywhere it is installed, when its name loads it.
-pub(super) fn toggle(app: &mut App, client: &Arc<Client>) {
-    let pin = highlighted_pin(&app.skills_browser).filter(|pin| pin.active);
-    if let Some(pin) = pin.cloned() {
-        changes::toggle(app, client, &pin);
-    }
-}
-
-/// `d`: arm the highlighted shared skill's removal, and remove it from every scope on the second press; a local skill is not removed here.
-pub(super) fn remove(app: &mut App, client: &Arc<Client>, armed: Option<String>) {
-    let state = &mut app.skills_browser;
-    let Some((name, skill_id)) = highlighted_pin(state)
-        .and_then(|pin| Some((pin.name.clone(), pin.registry_id()?.to_owned())))
-    else {
-        return;
-    };
-    if armed.as_deref() != Some(&name) {
-        state.removing = Some(name);
-        return;
-    }
-    changes::remove_everywhere(app, client, &name, &skill_id);
-}
-
+/// Moves, then Enter, then the highlighted skill's keys, then the list's own, then Esc.
 pub(super) fn help(state: &State) -> Vec<Hint> {
     let mut hints = navigate(state.rows().iter().any(Row::selectable));
-    match highlighted(state) {
-        Some(Row::Installed(_)) => {
-            hints.push((key::ENTER, action::VIEW));
-            if let Some(pin) = highlighted_pin(state) {
-                if pin.active && !pin.locked {
-                    hints.push((key::SPACE, switch(pin.enabled)));
-                }
-                if pin.registry_id().is_some() {
-                    hints.push(("d", action::REMOVE));
-                }
-            }
-        }
-        Some(Row::Catalog(skill_id)) if of_skill(state, skill_id).is_some() => {
-            hints.push((key::ENTER, action::VIEW));
-        }
-        Some(Row::Catalog(_)) => hints.push((key::ENTER, action::ADD)),
-        _ => {}
+    if highlighted(state).is_some() {
+        hints.push((key::ENTER, action::VIEW));
+    }
+    hints.extend(files::pin_hints(state));
+    if !state.search.focused {
+        hints.push(("n", action::NEW));
     }
     if state.registry && !state.search.focused {
-        hints.push((key::TAB, action::SWITCH_TAB));
+        hints.push((key::TAB_LEFT_RIGHT, action::SWITCH_TAB));
     }
     hints.extend([hints::SEARCH, hints::CLOSE]);
     let filtered = !state.search.query.is_empty();

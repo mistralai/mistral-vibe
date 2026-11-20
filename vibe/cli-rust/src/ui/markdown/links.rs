@@ -32,6 +32,28 @@ struct Run {
     width: usize,
 }
 
+/// The runs `row`'s linked characters paint from column `x`; a row without links skips grapheme segmentation.
+fn link_runs(row: &[Sc], mut x: usize) -> Vec<Run> {
+    let mut runs: Vec<Run> = Vec::new();
+    if row.iter().all(|sc| sc.2.is_none()) {
+        return runs;
+    }
+    let text: String = row.iter().map(|sc| sc.0).collect();
+    let mut at = 0;
+    for grapheme in text.graphemes(true) {
+        let width = grapheme.width();
+        if let Some(link) = row[at].2.filter(|_| width > 0) {
+            match runs.last_mut() {
+                Some(run) if run.link == link && run.x + run.width == x => run.width += width,
+                _ => runs.push(Run { link, x, width }),
+            }
+        }
+        at += grapheme.chars().count();
+        x += width;
+    }
+    runs
+}
+
 /// Lines and the link runs painted on each: a run moves with its line, so they never drift apart.
 #[derive(Clone, Default)]
 pub struct LinkedLines {
@@ -101,21 +123,7 @@ impl LinkedLines {
 
     /// Push `row` after its `lead` spans, recording the cells its linked characters land on.
     pub fn push_row(&mut self, mut lead: Vec<Span<'static>>, row: &[Sc]) {
-        let mut runs: Vec<Run> = Vec::new();
-        let mut x: usize = lead.iter().map(Span::width).sum();
-        let text: String = row.iter().map(|sc| sc.0).collect();
-        let mut at = 0;
-        for grapheme in text.graphemes(true) {
-            let width = grapheme.width();
-            if let Some(link) = row[at].2.filter(|_| width > 0) {
-                match runs.last_mut() {
-                    Some(run) if run.link == link && run.x + run.width == x => run.width += width,
-                    _ => runs.push(Run { link, x, width }),
-                }
-            }
-            at += grapheme.chars().count();
-            x += width;
-        }
+        let runs = link_runs(row, lead.iter().map(Span::width).sum());
         lead.extend(super::text::merge(row));
         self.lines.push(Line::from(lead));
         self.runs.push(runs);

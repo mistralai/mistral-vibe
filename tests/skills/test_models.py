@@ -96,6 +96,26 @@ class TestSkillMetadata:
 
         assert meta.metadata == {"version": "1.0", "count": "42"}
 
+    @pytest.mark.parametrize(
+        "frontmatter",
+        [
+            {"metadata": "not a mapping"},
+            {"metadata": ["a", "b"]},
+            {"allowed-tools": 3},
+            {"allowed-tools": True},
+            {"allowed-tools": {"bash": True}},
+        ],
+    )
+    def test_wrong_frontmatter_types_are_validation_errors(
+        self, frontmatter: dict[str, object]
+    ) -> None:
+        with pytest.raises(ValidationError):
+            SkillMetadata.model_validate({
+                "name": "test",
+                "description": "A test skill",
+                **frontmatter,
+            })
+
     def test_raises_error_for_missing_name(self) -> None:
         with pytest.raises(ValidationError) as exc_info:
             SkillMetadata(description="A test skill")  # type: ignore[call-arg]

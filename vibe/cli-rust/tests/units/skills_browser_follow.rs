@@ -4,7 +4,7 @@ use crossterm::event::KeyCode;
 use serde_json::json;
 
 use vibe_rs::app::App;
-use vibe_rs::server::SkillUpdate;
+use vibe_rs::server::{SkillScope, SkillUpdate};
 use vibe_rs::skills_browser::page::Property;
 use vibe_rs::skills_browser::{self, Event, Outcome};
 
@@ -21,14 +21,14 @@ fn changed(installed: Vec<serde_json::Value>) -> Event {
             answer: Some(json!({})),
             error: None,
         },
-        installed: Ok(pins(installed)),
+        installed: Ok(pins(installed).into()),
     }
 }
 
 #[test]
 fn a_page_whose_skill_is_removed_lands_on_its_rows_neighbour() {
     let client = stub();
-    let lint = pin("lint", "local", "global");
+    let lint = pin("alpha", "local", "global");
     let zed = pin("zed", "local", "global");
     let deploy = registry("deploy", "global", 2, None);
     let mut app = opened(vec![lint.clone(), deploy, zed.clone()], Some(shared()));
@@ -46,7 +46,7 @@ fn an_install_keeps_the_highlight_where_install_was() {
     highlight_row(&mut app, Property::Install);
     let installed = vec![registry("deploy", "global", 3, Some("latest"))];
     skills_browser::apply_event(&mut app, &client, changed(installed));
-    assert_eq!(page_row(&app), Some(Property::Enabled));
+    assert_eq!(page_row(&app), Some(Property::Scope(SkillScope::Global)));
 }
 
 #[tokio::test]
@@ -145,7 +145,7 @@ async fn a_page_opens_on_the_pins_its_answer_finds() {
     };
     skills_browser::apply_event(&mut app, &client, answer);
     let rows = &page_of(&app).rows;
-    assert!(rows.contains(&Property::Install) && !rows.contains(&Property::Remove));
+    assert!(rows.contains(&Property::Install));
 }
 
 #[tokio::test]

@@ -16,6 +16,7 @@ pub fn agent_config(
     Ok(AgentConfig {
         cwd,
         agent: options.agent.clone(),
+        approval_policy: options.approval_policy.clone(),
         auto_approve: options.auto_approve,
         enabled_tools: options.enabled_tools.clone(),
         disabled_tools: build_disabled_tools(&options.disabled_tools),

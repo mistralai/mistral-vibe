@@ -82,7 +82,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         return;
     }
     let hint_y = inner.bottom() - 1;
-    hint_line::draw_clipped(f, inner.x, hint_y, inner.width, CLOSE_HINTS);
+    hint_line::draw_above(f, inner.x, hint_y, inner.width, CLOSE_HINTS);
     let Some(b) = app.context_app.breakdown.clone() else {
         let message = app
             .context_app

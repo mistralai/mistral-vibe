@@ -25,6 +25,7 @@ from mistralai_vibe_local_harness.session_api.app_server.session.models import (
     HistoryEntry,
     HistoryEntryAdapter,
     HistoryEntryAddedEvent,
+    HistoryEntryBase,
     HistoryEntryCompletedEvent,
     HistoryEntryPatchedEvent,
     ImageContentBlock,
@@ -306,7 +307,7 @@ def _raw_effect(
     }
 
 
-def _base(entry: HistoryEntry, session_id: str) -> JsonObject:
+def _base(entry: HistoryEntryBase, session_id: str) -> JsonObject:
     related = entry.annotations.get(VIBE_PREFIX + "relatedEntryId")
     input_entry = entry.annotations.get(VIBE_PREFIX + "inputEntryId")
     return {
@@ -323,7 +324,7 @@ def _base(entry: HistoryEntry, session_id: str) -> JsonObject:
     }
 
 
-def _vibe_fields(entry: HistoryEntry, keys: Sequence[str]) -> JsonObject:
+def _vibe_fields(entry: HistoryEntryBase, keys: Sequence[str]) -> JsonObject:
     return {
         key: entry.annotations[VIBE_PREFIX + key]
         for key in keys

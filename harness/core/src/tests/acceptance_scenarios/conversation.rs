@@ -76,7 +76,7 @@ fn conversation_spawn_schema_matches_host_support_and_rejects_invalid_contexts()
                 assert_eq!(spawn["call"]["arguments"], args);
             } else {
                 let completion = run_typescript_completion(action_id(&first), "spawn", &source);
-                let rejected = runtime.preview_observations(completion.clone())[1].clone();
+                let rejected = runtime.preview_observations(completion.clone())[2].clone();
                 assert_eq!(rejected["type"], "tool_result_committed");
                 // The arguments come back from the program, where numbers are floats.
                 let call = &rejected["call"];
@@ -106,6 +106,9 @@ fn conversation_spawn_schema_matches_host_support_and_rejects_invalid_contexts()
                     completion,
                     running("parent")
                         .dispatch(llm_call(1))
+                        .observe(assistant_program_committed(
+                            "parent", &first, "spawn", &source,
+                        ))
                         .observe(core_tool_execution_started("parent", "spawn"))
                         .observe(rejected)
                         .observe_tool_execution_finished(

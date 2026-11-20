@@ -1400,3 +1400,93 @@ async def test_desktop_reports_its_unauthorized_after_refresh_reason() -> None:
     )
 
     assert result == PlatformCredentialRequired(reason="unauthorized_after_refresh")
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_connection_without_credentials_never_sends_an_api_key(
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    monkeypatch.setenv("MISTRAL_API_KEY", "api-key-of-another-environment")
+    client_transport, server_transport = memory_transport_pair()
+    server = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(services=process_services),
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(
+        ClientInfo(name="desktop-test", version="1", entrypoint="desktop")
+    )
+    await client.notify("initialized")
+
+    provider = server._server.platform_credentials("MISTRAL_API_KEY")
+    resolved = await provider.resolve(
+        PlatformCredentialTarget("https://api.mistral.ai/v1")
+    )
+
+    assert resolved == PlatformCredentialRequired(reason="credential_unavailable")
+    await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_session_without_credentials_starts_without_asking_for_a_key(
+    monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+    client_transport, server_transport = memory_transport_pair()
+    server = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(services=process_services),
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    session_id: str | None = None
+    try:
+        await client.initialize(
+            ClientInfo(name="desktop-test", version="1", entrypoint="desktop")
+        )
+        await client.notify("initialized")
+
+        started = validate_wire(
+            SessionStartResponse,
+            await client.request("session/start", SessionStartParams()),
+        )
+        session_id = started.state.session.id
+
+        assert session_id
+    finally:
+        if session_id is not None:
+            with suppress(Exception):
+                await client.request(
+                    "session/stop", SessionStopParams(session_id=session_id)
+                )
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("offered", [True, False])
+async def test_initialize_says_whether_the_app_server_took_desktop_credentials(
+    process_services: ProcessServices, offered: bool
+) -> None:
+    client_transport, server_transport = memory_transport_pair()
+    server = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(services=process_services),
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    try:
+        response = await client.initialize(
+            ClientInfo(name="desktop-test", version="1", entrypoint="desktop"),
+            ClientCapabilities(
+                platform_credentials=PlatformCredentialsCapability(
+                    version=1, kind="oidc_id_token"
+                )
+                if offered
+                else None
+            ),
+        )
+
+        assert response.platform_credentials is offered
+    finally:
+        await client.close()

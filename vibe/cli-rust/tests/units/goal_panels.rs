@@ -134,14 +134,17 @@ fn a_digit_rates_the_turn_before_it_answers_the_resume_prompt() {
 }
 
 #[tokio::test]
-async fn shift_tab_in_the_edit_form_switches_the_field_not_the_agent() {
+async fn shift_tab_in_the_edit_form_switches_the_field_not_the_policy() {
     let client = Arc::new(Client::stub());
     let mut app = session_app();
-    let agents: Vec<Value> = ["default", "plan"]
+    let policies: Vec<Value> = ["ask", "accept-edits"]
         .iter()
-        .map(|name| json!({"name": name, "displayName": name, "agentType": "agent"}))
+        .map(|name| json!({"name": name, "displayName": name}))
         .collect();
-    let runtime = json!({"runtime": {"activeAgent": {"name": "default"}, "agents": agents}});
+    let runtime = json!({"runtime": {
+        "activeApprovalPolicy": {"name": "ask"},
+        "approvalPolicies": policies,
+    }});
     vibe_rs::agents::apply_runtime(&mut app, &runtime);
     goal::command(&mut app, &client, "edit");
     let shift_tab = key(KeyCode::BackTab);

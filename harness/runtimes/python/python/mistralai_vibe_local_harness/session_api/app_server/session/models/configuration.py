@@ -21,8 +21,26 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from ....session_values import (
+    INSTRUCTIONS_CONTENT_PATTERN,
+    INSTRUCTIONS_KEY_MAX_LENGTH,
+    INSTRUCTIONS_KEY_PATTERN,
+)
 from .base import JsonSchema, SessionModel
 from .common import AbsolutePath
+
+type InstructionsKey = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=INSTRUCTIONS_KEY_MAX_LENGTH,
+        pattern=INSTRUCTIONS_KEY_PATTERN,
+        description="1 to 128 letters, digits, `.`, `_`, `:` or `-`.",
+    ),
+]
+type InstructionsContent = Annotated[
+    str, Field(pattern=INSTRUCTIONS_CONTENT_PATTERN, description="Text that is not blank.")
+]
 
 type HookType = Literal[
     "pre_agent_turn",
@@ -700,6 +718,19 @@ class BashTimeout(SessionModel):
         return self
 
 
+class KeyedInstructions(SessionModel):
+    """Standing instructions held under a key until they are replaced or removed.
+
+    The model reads them as an `<Instructions key="...">` note, so it sees the key: do not use
+    an identifier, such as a customer ID, that the model must not read. When the Session
+    compacts its history, the model keeps each live key once, with its newest text, right
+    after the system prompt; a removed key leaves nothing.
+    """
+
+    key: InstructionsKey
+    content: InstructionsContent
+
+
 class AgentConfig(SessionModel):
     """Serializable configuration shared by local and remote Session Runtimes."""
 
@@ -711,8 +742,9 @@ class AgentConfig(SessionModel):
     max_identical_tool_failures: Annotated[int | None, Field(gt=0)] = Field(
         default=None,
         description=(
-            "Model replies in a row whose tool calls all fail the same way before the Turn "
-            "stops with `repeated_tool_failure`. Null sets no limit."
+            "Tool calls in a row, counting identical parallel calls one by one, that may fail "
+            "the same call the same way before the Turn stops with `repeated_tool_failure`. "
+            "Null sets no limit."
         ),
     )
     first_output_timeout_seconds: Annotated[float | None, Field(gt=0)] = None

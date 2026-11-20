@@ -1,4 +1,4 @@
-//! The startup warning inside tmux with `mouse off`: how to scroll, and Ctrl+N to stop showing it.
+//! The startup warning inside tmux with `mouse off`: how to scroll, and Ctrl+X then `h` to stop showing it.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -12,9 +12,9 @@ const CACHE_KEY: &str = "dismissed";
 /// The warning as markdown, its command, file and keys in code spans.
 pub fn text() -> String {
     format!(
-        "tmux has mouse off, so the mouse wheel scrolls the terminal, not this conversation. Add `set -g mouse on` to `~/.tmux.conf`, or scroll with `{}`. Press `{}` to stop showing this.",
+        "tmux has mouse off, so the mouse wheel scrolls the terminal, not this conversation. Add `set -g mouse on` to `~/.tmux.conf`, or scroll with `{}`. Press `{}` then `h` to stop showing this.",
         key::SHIFT_ARROWS,
-        key::CTRL_N
+        key::CTRL_X
     )
 }
 
@@ -40,16 +40,22 @@ pub fn refresh(app: &mut App) {
     }
 }
 
-/// Ctrl+N while the warning is on screen: remove it and never show it again.
+/// Ctrl+X then `h` while the warning is on screen: remove it and never show it again; Ctrl+X still reaches the rail.
 pub fn handle_key(app: &mut App, key: &KeyEvent) -> bool {
-    if key.modifiers != KeyModifiers::CONTROL || key.code != KeyCode::Char('n') {
+    let armed = std::mem::take(&mut app.tmux_hint_armed);
+    if crate::rail::is_toggle_key(key) {
+        app.tmux_hint_armed =
+            crate::input::composer_reachable(app) && crate::notices::startup_lists(app, &text());
+        return false;
+    }
+    if !armed || key.modifiers != KeyModifiers::NONE || key.code != KeyCode::Char('h') {
         return false;
     }
     if !crate::notices::withdraw(app, &text()) {
         return false;
     }
     cache_store::write_int(CACHE_SECTION, CACHE_KEY, 1);
-    crate::telemetry::tmux_mouse_hint_disabled(app, "ctrl_n");
+    crate::telemetry::tmux_mouse_hint_disabled(app, "rail_h");
     true
 }
 

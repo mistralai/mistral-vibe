@@ -72,7 +72,12 @@ from tests.stubs.fake_connector_registry import FakeConnectorRegistry
 from tests.stubs.fake_utility_completion import FakeUtilityCompletion
 from tests.stubs.historical_session import write_historical_session
 from tests.stubs.mistral_responses import mistral_completion
-from tests.stubs.process_services import FakeOrgConfigServer, fake_process_services
+from tests.stubs.process_services import (
+    FakeOrgConfigServer,
+    fake_process_services,
+    locked_catalog,
+    runnable_catalog,
+)
 from vibe.app_server import _runtime as runtime_module
 from vibe.app_server._account import WhoAmIResult
 from vibe.app_server._admin_config import (
@@ -81,6 +86,7 @@ from vibe.app_server._admin_config import (
     OrgConfigReportSlot,
     OrgConfigSource,
 )
+from vibe.app_server._config_changes import ConfigChanges
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._effect_output_cap import (
     EFFECT_OUTPUT_TEXT_MAX_CHARS,
@@ -91,8 +97,10 @@ from vibe.app_server._goal_engine import TurnOrigin
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._local_projects import CloudBacking, LocalProjectStore
 from vibe.app_server._mcp_auth import MCPAuthenticationService
+from vibe.app_server._model_catalog_service import LOCKED_MODEL_REFRESH_AFTER_S
 from vibe.app_server._plugin_mcp import PluginMCPCatalog
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._project_moves import PROJECT_TOOL_NAMES
 from vibe.app_server._provided_tools import VIBE_TOOL_GROUP
 from vibe.app_server._runtime import (
     build_runtime_snapshot,
@@ -182,6 +190,7 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     AgentSwitchParams,
+    ApprovalPolicySwitchParams,
     AppServerResponseError,
     AutoWorktreeInput,
     CallbackResultError,
@@ -310,6 +319,7 @@ from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.registry import _store
 from vibe.core.telemetry.send import TelemetryClient
 from vibe.core.telemetry.types import LaunchContext
+from vibe.core.tools.builtins.ask_user_question import AskUserQuestion
 from vibe.core.tools.builtins.skill import already_loaded_message
 from vibe.core.tools.connectors.connector_registry import RemoteTool
 from vibe.core.tools.mcp.registry import MCPRegistry
@@ -793,6 +803,10 @@ def _stub_unified_context(
         model_catalog_service=context_overrides.pop(
             "model_catalog_service", fake_process_services().model_catalog
         ),
+        keep_awake=context_overrides.pop(
+            "keep_awake", fake_process_services().keep_awake
+        ),
+        config_changes=context_overrides.pop("config_changes", ConfigChanges()),
         **context_overrides,
     )
     return context, derivation
@@ -839,6 +853,8 @@ def _inert_adapter(
         org_config_service=fake_process_services().org_config,
         experiments_service=fake_process_services().experiments,
         model_catalog_service=fake_process_services().model_catalog,
+        keep_awake=fake_process_services().keep_awake,
+        config_changes=ConfigChanges(),
     )
     derivation = UnifiedRuntimeDerivation(
         runtime=cast(Any, runtime if runtime is not None else object()),
@@ -1416,6 +1432,32 @@ async def test_unified_compaction_and_output_limits_default_on(
 
 
 @pytest.mark.asyncio
+async def test_unified_session_asks_core_for_its_stock_guidance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """*Prepare*: A unified session context for a workspace.
+    *Do*: Derive its Core configuration.
+    *Assert*: It asks Core for the stock intro and autonomy guidance, which Core
+    renders only when asked.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    process = runtime_module.HarnessProcess(services=process_services)
+    try:
+        context = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path))
+        )
+        derivation = context.derive(UnifiedSessionSettings())
+    finally:
+        await process.close()
+
+    sent = derivation.core_config.model_dump(mode="json", by_alias=True)
+    assert sent["settings"]["prompts"] == {"guidance": "stock"}
+
+
+@pytest.mark.asyncio
 async def test_unified_compaction_and_output_limits_follow_config(
     tmp_path: Path,
     config_dir: Path,
@@ -1757,6 +1799,15 @@ async def test_unified_runtime_declares_the_vibe_tool_group(
     ]
     # Declaring a second group must not displace the one that was already there.
     assert groups["ui"] == ["ask_user_question"]
+    # The model reads the builtin's prompt file, the single source of its description.
+    (ask,) = next(
+        group.tools
+        for group in derivation.core_config.capabilities.tool_groups
+        if group.name == "ui"
+    )
+    assert ask.description == AskUserQuestion.get_tool_prompt()
+    # It asks for self-contained questions, never "these three" (DSK-2289).
+    assert '"these three"' in ask.description
     # Vibe binds no builtin hook: a non-empty binding list defers `commit_turn` for
     # every session that derives from this config, subagents included.
     assert derivation.core_config.capabilities.hook_bindings == []
@@ -1801,6 +1852,43 @@ async def test_unified_runtime_offers_enter_worktree_only_to_a_client_that_asks(
 
     # Assert
     assert offered == [(False, False), (True, True)]
+
+
+@pytest.mark.asyncio
+async def test_unified_runtime_offers_project_tools_only_to_a_client_that_asks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """*Prepare*: Session contexts built for a client that declares agent
+        projects and one that does not.
+    *Do*: Derive the Core configuration of each.
+    *Assert*: Only the declaring client's session offers the project tools.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    offered: list[set[str]] = []
+    process = runtime_module.HarnessProcess(services=process_services)
+    try:
+        for declared in (False, True):
+            context = await process.build_unified_session_context(
+                SessionOptions(cwd=str(tmp_path)), agent_projects=declared
+            )
+
+            # Do
+            derivation = context.derive(UnifiedSessionSettings())
+            offered.append({
+                tool.name
+                for group in derivation.core_config.capabilities.tool_groups
+                for tool in group.tools
+                if tool.name in {"list_projects", "move_to_project"}
+            })
+    finally:
+        await process.close()
+
+    # Assert
+    assert offered == [set(), {"list_projects", "move_to_project"}]
 
 
 @pytest.mark.asyncio
@@ -2119,7 +2207,7 @@ async def test_session_start_applies_its_choices_in_the_one_request(
             await client.request(
                 "session/start",
                 SessionStartParams(
-                    agent_config=SessionOptions(agent="auto-approve"),
+                    agent_config=SessionOptions(approval_policy="auto-approve"),
                     title="Flaky test",
                     model="picked",
                     reasoning_effort="high",
@@ -2134,15 +2222,15 @@ async def test_session_start_applies_its_choices_in_the_one_request(
         ).runtime
         host = cast(Any, server._session_backend_host)
         session = host._adapters[started.state.session.id]._session
-        pinned_agent = session.pin(SessionPin.AGENT_NAME)
+        pinned_policy = session.pin(SessionPin.AGENT_NAME)
     finally:
         await server.close()
 
     assert started.state.session.title == "Flaky test"
-    assert pinned_agent == "auto-approve"
+    assert pinned_policy == "auto-approve"
     assert runtime.config.active_model.alias == "picked"
     assert runtime.config.active_model.thinking == "high"
-    assert runtime.active_agent.name == "auto-approve"
+    assert runtime.active_approval_policy.name == "auto-approve"
 
 
 @pytest.mark.asyncio
@@ -3762,6 +3850,46 @@ async def test_a_message_from_another_session_never_enters_the_users_queue(
 
 
 @pytest.mark.asyncio
+async def test_a_session_message_resent_after_a_restart_is_not_delivered_again(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A message from another session that is already in the
+    session's history, its delivery record lost to a restart.
+    *Do*: Deliver it again with the same key, while no turn runs.
+    *Assert*: It starts no second turn (Benjamin on #81759), and answers the
+    turn the first delivery reached, so the bot settles the caller with that
+    turn's result (Bugbot on #81759).
+    """
+    # Prepare
+    host = cast(Any, _persisting_host(tmp_path))
+    opened = await host.start(SessionStartParams())
+    backend = opened.backend
+    started = _started_turns(backend)
+    backend._held_entry = AsyncMock(
+        return_value={"id": "bot-send-1", "turnId": "turn-7"}
+    )
+    params = TurnEnqueueParams(
+        session_id=backend.session_id,
+        idempotency_key="bot-send-1",
+        entries=[
+            TurnUserInputEntry(
+                entry_id="bot-send-1", content=[SessionTextContentBlock(text="Go")]
+            )
+        ],
+        sender=SessionMessageSender(session_id="bot-1"),
+    )
+
+    # Do
+    again = await backend.enqueue_turn(params)
+
+    # Assert
+    started.assert_not_awaited()
+    assert again.response.queue_item_id == "bot-send-1"
+    assert again.response.turn_id == "turn-7"
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_a_repeated_session_message_that_joined_a_turn_runs_once(
     tmp_path: Path,
 ) -> None:
@@ -3845,6 +3973,51 @@ async def test_a_repeated_session_message_does_not_join_the_turn_it_started(
     steered.assert_not_awaited()
     assert started.await_count == 1
     assert again.response.queue_item_id == "report-1"
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_session_message_answers_the_turn_it_started_or_joined(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session that runs no turn, then one that runs a turn.
+    *Do*: Deliver a message from another session to each.
+    *Assert*: Each answer names its turn, so its sender can follow that
+    turn's end (Vibebot, Bugbot on #80995).
+    """
+    # Prepare
+    host = cast(Any, _persisting_host(tmp_path))
+    opened = await host.start(SessionStartParams())
+    backend = opened.backend
+    _started_turns(backend)
+    backend._commands.steer_turn = AsyncMock(
+        return_value=SimpleNamespace(
+            response=SimpleNamespace(accepted=True, last_event_id=None),
+            after_response=None,
+        )
+    )
+
+    def message(key: str) -> TurnEnqueueParams:
+        return TurnEnqueueParams(
+            session_id=backend.session_id,
+            idempotency_key=key,
+            entries=[
+                TurnUserInputEntry(
+                    entry_id=key, content=[SessionTextContentBlock(text="Go")]
+                )
+            ],
+            sender=SessionMessageSender(session_id="bot-1"),
+        )
+
+    # Do
+    started = await backend.enqueue_turn(message("m-1"))
+    turn = PropertyMock(return_value="turn-running")
+    with patch.object(type(backend._session._session), "active_turn_id", turn):
+        joined = await backend.enqueue_turn(message("m-2"))
+
+    # Assert
+    assert started.response.turn_id == "turn-1"
+    assert joined.response.turn_id == "turn-running"
     await host.shutdown()
 
 
@@ -6117,7 +6290,12 @@ async def test_unified_runtime_config_gates_editing_tools(
 
     assert "You are Mistral Vibe, a coding agent" in instructions
     assert "Today's date" not in instructions
-    assert "## Critical instructions — not overridable" in instructions
+    assert "**Blast radius.**" not in instructions
+    assert "Do the requested work within the user’s stated scope." in instructions
+    assert (
+        "A request to prepare or review does not authorize publication" in instructions
+    )
+    assert "Clarify missing authorization before taking those actions." in instructions
     assert "### Operating discipline" in instructions
     assert "## Autonomy and initiative" not in instructions
     assert "## Current time" not in instructions
@@ -6253,9 +6431,9 @@ async def test_session_open_probes_smart_approve_only_when_it_is_active(
 async def test_switching_mode_re_derives_tool_modes_and_active_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
-    """Rewriting the AgentProfileLayer on the live orchestrator re-derives the gate:
+    """Rewriting the policy layer on the live orchestrator re-derives the gate:
     a switch to auto-approve flips bash from ``ask`` to ``allow`` and relabels the
-    active agent, which is what the harness switch_agent pushes into the session.
+    active policy, which is what the policy switch pushes into the session.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
@@ -6263,19 +6441,19 @@ async def test_switching_mode_re_derives_tool_modes_and_active_agent(
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     process = runtime_module.HarnessProcess(services=process_services)
     context = await process.build_unified_session_context(
-        SessionOptions(cwd=str(tmp_path), agent="accept-edits")
+        SessionOptions(cwd=str(tmp_path), approval_policy="accept-edits")
     )
     assert context.agents is not None
 
     before = context.derive(UnifiedSessionSettings())
     assert before.adapter_config.tool_modes["file_system.bash"] == "ask"
-    assert before.runtime.active_agent.name == "accept-edits"
+    assert before.runtime.active_approval_policy.name == "accept-edits"
 
-    context.agents.switch_profile("auto-approve")
+    context.agents.switch_policy("auto-approve")
 
     after = context.derive(UnifiedSessionSettings())
     assert after.adapter_config.tool_modes["file_system.bash"] == "allow"
-    assert after.runtime.active_agent.name == "auto-approve"
+    assert after.runtime.active_approval_policy.name == "auto-approve"
 
 
 @pytest.mark.asyncio
@@ -6292,7 +6470,7 @@ async def test_switching_into_smart_approve_flips_gated_tools_to_classify(
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     process = runtime_module.HarnessProcess(services=process_services)
     context = await process.build_unified_session_context(
-        SessionOptions(cwd=str(tmp_path), agent="ask")
+        SessionOptions(cwd=str(tmp_path), approval_policy="ask")
     )
     assert context.agents is not None
     assert (
@@ -6306,12 +6484,12 @@ async def test_switching_into_smart_approve_flips_gated_tools_to_classify(
     await context.config_orchestrator.apply_patch(
         [AddOperationPatch(path="/smart_approve_available", value=True)], reason="test"
     )
-    context.agents.switch_profile("smart-approve")
+    context.agents.switch_policy("smart-approve")
     entered = context.derive(UnifiedSessionSettings())
     assert entered.adapter_config.tool_modes["file_system.bash"] == "classify"
-    assert entered.runtime.active_agent.name == "smart-approve"
+    assert entered.runtime.active_approval_policy.name == "smart-approve"
 
-    context.agents.switch_profile("ask")
+    context.agents.switch_policy("ask")
     assert (
         context.derive(UnifiedSessionSettings()).adapter_config.tool_modes[
             "file_system.bash"
@@ -6335,19 +6513,19 @@ async def test_mid_turn_switch_out_of_smart_approve_regates_provided_tools(
         UnifiedHarnessBackendAdapter,
         UnifiedSessionSettings,
     )
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
     from vibe.core.config.patch import AddOperationPatch
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     process = runtime_module.HarnessProcess(services=process_services)
     context = await process.build_unified_session_context(
-        SessionOptions(cwd=str(tmp_path), agent="ask")
+        SessionOptions(cwd=str(tmp_path), approval_policy="ask")
     )
     await context.config_orchestrator.apply_patch(
         [AddOperationPatch(path="/smart_approve_available", value=True)], reason="test"
     )
     assert context.agents is not None
-    context.agents.switch_profile("smart-approve")
+    context.agents.switch_policy("smart-approve")
     derivation = context.derive(UnifiedSessionSettings())
     assert derivation.adapter_config.provided_tool_mode == "classify"
 
@@ -6357,8 +6535,10 @@ async def test_mid_turn_switch_out_of_smart_approve_regates_provided_tools(
     # running config instead of re-deriving through the idle path.
     session.active_turn_id = "turn-1"
 
-    await adapter.switch_agent(
-        AgentSwitchParams(session_id=session.session_id, agent_name="auto-approve")
+    await adapter.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=session.session_id, approval_policy="auto-approve"
+        )
     )
 
     applied = cast(Any, session.applied[-1])
@@ -6451,14 +6631,15 @@ async def test_a_worktree_context_keeps_the_agent_switched_before_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
     """A session moving into its worktree adopts a context built from the launch
-    options; the agent picked while the worktree was prepared must survive it.
+    options; the approval policy picked while the worktree was prepared must
+    survive it.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from vibe.app_server._unified_harness_backend_adapter import (
         UnifiedHarnessBackendAdapter,
         UnifiedSessionSettings,
     )
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     process = runtime_module.HarnessProcess(services=process_services)
@@ -6468,13 +6649,15 @@ async def test_a_worktree_context_keeps_the_agent_switched_before_it(
     adapter = UnifiedHarnessBackendAdapter(
         cast(Any, session), context, context.derive(UnifiedSessionSettings())
     )
-    await adapter.switch_agent(
-        AgentSwitchParams(session_id=session.session_id, agent_name="auto-approve")
+    await adapter.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=session.session_id, approval_policy="auto-approve"
+        )
     )
 
     await adapter.adopt_context(await process.build_unified_session_context(options))
 
-    assert adapter._context.agents.active_profile.name == "auto-approve"
+    assert adapter._context.agents.active_policy.name == "auto-approve"
 
 
 @pytest.mark.asyncio
@@ -6543,7 +6726,7 @@ async def _adapter_on_the_lean_agent(
     await adapter.install_agent(
         AgentInstallParams(session_id=session.session_id, agent_name="lean")
     )
-    context.agents.switch_profile("lean")
+    context.agents.switch_agent("lean")
     return context, adapter
 
 
@@ -6701,7 +6884,7 @@ async def test_uninstalling_the_active_agent_reports_the_mode_it_moves_to(
     ]
     assert len(selected) == 1
     assert selected[0]["from_agent"] == "lean"
-    assert selected[0]["to_agent"] == context.agents.active_profile.name
+    assert selected[0]["to_agent"] == context.agents.active_agent.name
     assert selected[0]["trigger"] == "agent_uninstalled"
 
 
@@ -6739,7 +6922,7 @@ async def test_uninstalling_the_active_agent_unwinds_when_the_pin_fails(
 
     assert exc_info.value.code is ProtocolErrorCode.INTERNAL_ERROR
     assert writable_installed_agents(context.config_orchestrator) == ["lean"]
-    assert context.agents.active_profile.name == "lean"
+    assert context.agents.active_agent.name == "lean"
     assert not [
         e for e in telemetry_events if e["event_name"] == "vibe.agent_mode.selected"
     ]
@@ -6773,7 +6956,7 @@ async def test_uninstalling_the_active_agent_restores_a_failed_switch(
 
     assert exc_info.value.code is ProtocolErrorCode.INTERNAL_ERROR
     assert writable_installed_agents(context.config_orchestrator) == ["lean"]
-    assert context.agents.active_profile.name == "lean"
+    assert context.agents.active_agent.name == "lean"
     assert len(session.applied) == applied_before
 
 
@@ -6781,11 +6964,11 @@ async def test_uninstalling_the_active_agent_restores_a_failed_switch(
 async def test_approval_policy_graft_covers_every_field_a_mode_switch_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
-    """Any adapter-config field a profile switch changes must live in the graft set.
+    """Any adapter-config field a policy switch changes must live in the graft set.
 
     The ``provided_tool_mode`` bug was a field read live per call that the mid-turn
     graft did not carry. This locks the invariant: fields that differ across
-    approval profiles are a subset of ``_LIVE_APPROVAL_POLICY_FIELDS`` (minus the
+    approval policies are a subset of ``_LIVE_APPROVAL_POLICY_FIELDS`` (minus the
     per-derive object churn), so a new approval field cannot silently fall out.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
@@ -6801,31 +6984,31 @@ async def test_approval_policy_graft_covers_every_field_a_mode_switch_changes(
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     process = runtime_module.HarnessProcess(services=process_services)
     context = await process.build_unified_session_context(
-        SessionOptions(cwd=str(tmp_path), agent="ask")
+        SessionOptions(cwd=str(tmp_path), approval_policy="ask")
     )
     await context.config_orchestrator.apply_patch(
         [AddOperationPatch(path="/smart_approve_available", value=True)], reason="test"
     )
     assert context.agents is not None
 
-    def derive_for(profile: str) -> Any:
-        context.agents.switch_profile(profile)
+    def derive_for(policy: str) -> Any:
+        context.agents.switch_policy(policy)
         return context.derive(UnifiedSessionSettings()).adapter_config
 
     def diff(a: Any, b: Any) -> set[str]:
         return {f.name for f in fields(a) if getattr(a, f.name) != getattr(b, f.name)}
 
     ask = derive_for("ask")
-    # Re-deriving the same profile isolates fields that churn per derive (e.g. bound
-    # sinks) from fields a profile switch actually changes.
+    # Re-deriving the same policy isolates fields that churn per derive (e.g. bound
+    # sinks) from fields a policy switch actually changes.
     churn = diff(ask, derive_for("ask"))
 
-    for profile in ("smart-approve", "auto-approve"):
-        changed = diff(ask, derive_for(profile)) - churn
-        assert changed, f"{profile} did not change approval policy"
+    for policy in ("smart-approve", "auto-approve"):
+        changed = diff(ask, derive_for(policy)) - churn
+        assert changed, f"{policy} did not change approval policy"
         leaked = changed - set(_LIVE_APPROVAL_POLICY_FIELDS)
         assert not leaked, (
-            f"{profile} changes {leaked}, which the mid-turn graft drops; "
+            f"{policy} changes {leaked}, which the mid-turn graft drops; "
             "add them to _LIVE_APPROVAL_POLICY_FIELDS"
         )
 
@@ -6877,13 +7060,13 @@ def test_mid_turn_graft_carries_the_classifier_provider() -> None:
 async def test_unified_snapshot_reports_a_bypass_the_cli_flag_forces_past_a_switch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
-    """``--auto-approve`` outlives an agent switch, so the snapshot must keep saying so.
+    """``--auto-approve`` outlives a policy switch, so the snapshot must keep saying so.
 
-    Reporting only ``active_agent.safety`` let the CLI advertise ``ask`` for a
-    session that still approved every tool call.
+    Reporting only the active policy's safety let the CLI advertise ``ask`` for
+    a session that still approved every tool call.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     session = _RecordingSession()
@@ -6891,12 +7074,12 @@ async def test_unified_snapshot_reports_a_bypass_the_cli_flag_forces_past_a_swit
         tmp_path, session, auto_approve=True, process_services=process_services
     )
 
-    response = await adapter.switch_agent(
-        AgentSwitchParams(session_id=session.session_id, agent_name="ask")
+    response = await adapter.switch_approval_policy(
+        ApprovalPolicySwitchParams(session_id=session.session_id, approval_policy="ask")
     )
     runtime = response.response.runtime
 
-    assert runtime.active_agent.name == "ask"
+    assert runtime.active_approval_policy.name == "ask"
     assert runtime.bypass_tool_permissions is True
     assert cast(Any, session.applied[-1]).bypass_approval is True
 
@@ -6972,9 +7155,11 @@ async def test_admin_disabled_auto_approve_rejects_switching_to_the_agent(
     config_dir: Path,
     process_services: ProcessServices,
 ) -> None:
-    """With the mode disabled, the auto-approve agent is not selectable mid-session."""
+    """With the mode disabled, the auto-approve policy is not selectable
+    mid-session, and the refusal says why.
+    """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     config_file = config_dir / "config.toml"
@@ -6986,10 +7171,23 @@ async def test_admin_disabled_auto_approve_rejects_switching_to_the_agent(
         tmp_path, session, process_services=process_services
     )
 
-    with pytest.raises(SessionBackendError, match="auto-approve mode is disabled"):
+    with pytest.raises(
+        SessionBackendError, match="auto-approve mode is disabled"
+    ) as refused:
+        await adapter.switch_approval_policy(
+            ApprovalPolicySwitchParams(
+                session_id=session.session_id, approval_policy="auto-approve"
+            )
+        )
+    assert refused.value.data == {"reason": "auto_approve_disabled"}
+    # A client from before the split asks for the policy as an agent.
+    with pytest.raises(
+        SessionBackendError, match="auto-approve mode is disabled"
+    ) as legacy:
         await adapter.switch_agent(
             AgentSwitchParams(session_id=session.session_id, agent_name="auto-approve")
         )
+    assert legacy.value.data == {"reason": "auto_approve_disabled"}
 
 
 @pytest.mark.asyncio
@@ -8061,9 +8259,12 @@ async def test_a_boundary_pins_the_session_choices_only_for_a_queued_turn_it_ope
 
     # Assert
     active = context.config_orchestrator.config.get_active_model().alias
-    agent = context.agents.active_profile.name
+    policy = context.agents.active_policy.name
     assert session.pin(SessionPin.ACTIVE_MODEL) == (active if pins else None)
-    assert session.pin(SessionPin.AGENT_NAME) == (agent if pins else None)
+    # On the default agent only `agent_name` holds the policy, so a build from
+    # before the split, which rewrites only that pin, can never disagree.
+    assert not session.pin(SessionPin.APPROVAL_POLICY)
+    assert session.pin(SessionPin.AGENT_NAME) == (policy if pins else None)
 
 
 @pytest.mark.asyncio
@@ -8130,9 +8331,12 @@ async def test_a_scheduled_loop_pins_the_session_choices_only_for_a_turn_it_open
 
     # Assert
     active = context.config_orchestrator.config.get_active_model().alias
-    agent = context.agents.active_profile.name
+    policy = context.agents.active_policy.name
     assert pinned_at_start == [active if pins else None]
-    assert session.pin(SessionPin.AGENT_NAME) == (agent if pins else None)
+    # On the default agent only `agent_name` holds the policy, so a build from
+    # before the split, which rewrites only that pin, can never disagree.
+    assert not session.pin(SessionPin.APPROVAL_POLICY)
+    assert session.pin(SessionPin.AGENT_NAME) == (policy if pins else None)
     # Only for the turn being opened: a later boundary pins for its own.
     await adapter._settle_configuration()  # pyright: ignore[reportPrivateUsage]
     assert session.pin(SessionPin.ACTIVE_MODEL) == (active if pins else None)
@@ -11797,11 +12001,11 @@ async def test_unified_agent_switch_to_auto_approve_bypasses_tool_approval(
 ) -> None:
     """Shift+Tab into auto-approve has to reach the Runtime's approval policy.
 
-    The backend used to reject ``session/agent/update`` outright, so the CLI
+    The backend used to reject the switch outright, so the CLI
     showed the new mode while every tool call still asked for approval.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     session = _RecordingSession()
@@ -11812,14 +12016,14 @@ async def test_unified_agent_switch_to_auto_approve_bypasses_tool_approval(
     assert derivation.adapter_config.bypass_approval is False
     assert derivation.adapter_config.tool_modes["file_system.bash"] == "ask"
 
-    result = await adapter.switch_agent(
-        AgentSwitchParams(
-            session_id=_RecordingSession.session_id, agent_name="auto-approve"
+    result = await adapter.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=_RecordingSession.session_id, approval_policy="auto-approve"
         )
     )
 
     applied = cast(Any, session.applied[-1])
-    assert result.response.runtime.active_agent.name == "auto-approve"
+    assert result.response.runtime.active_approval_policy.name == "auto-approve"
     assert applied.bypass_approval is True
     assert applied.tool_modes["file_system.bash"] == "allow"
     assert applied.tool_modes["file_system.write_file"] == "allow"
@@ -11831,7 +12035,7 @@ async def test_unified_agent_switch_away_from_auto_approve_restores_approval(
 ) -> None:
     """Cycling past auto-approve must not leave the bypass latched on."""
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     session = _RecordingSession()
@@ -11839,17 +12043,19 @@ async def test_unified_agent_switch_away_from_auto_approve_restores_approval(
         tmp_path, session, process_services=process_services
     )
 
-    await adapter.switch_agent(
-        AgentSwitchParams(
-            session_id=_RecordingSession.session_id, agent_name="auto-approve"
+    await adapter.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=_RecordingSession.session_id, approval_policy="auto-approve"
         )
     )
-    result = await adapter.switch_agent(
-        AgentSwitchParams(session_id=_RecordingSession.session_id, agent_name="ask")
+    result = await adapter.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=_RecordingSession.session_id, approval_policy="ask"
+        )
     )
 
     applied = cast(Any, session.applied[-1])
-    assert result.response.runtime.active_agent.name == "ask"
+    assert result.response.runtime.active_approval_policy.name == "ask"
     assert applied.bypass_approval is False
     assert applied.tool_modes["file_system.bash"] == "ask"
 
@@ -11864,7 +12070,7 @@ async def test_unified_agent_switch_applies_while_a_turn_is_running(
     policy lands on the running turn's next tool call.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     session = _RecordingSession()
@@ -11873,13 +12079,13 @@ async def test_unified_agent_switch_applies_while_a_turn_is_running(
         tmp_path, session, process_services=process_services
     )
 
-    result = await adapter.switch_agent(
-        AgentSwitchParams(
-            session_id=_RecordingSession.session_id, agent_name="auto-approve"
+    result = await adapter.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=_RecordingSession.session_id, approval_policy="auto-approve"
         )
     )
 
-    assert result.response.runtime.active_agent.name == "auto-approve"
+    assert result.response.runtime.active_approval_policy.name == "auto-approve"
     assert cast(Any, session.applied[-1]).bypass_approval is True
 
 
@@ -12013,6 +12219,14 @@ def _agent_mode_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _policy_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        e["properties"]
+        for e in events
+        if e["event_name"] == "vibe.approval_policy.selected"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_unified_agent_switch_reports_the_mode_change_once_it_applies(
     tmp_path: Path,
@@ -12040,11 +12254,53 @@ async def test_unified_agent_switch_reports_the_mode_change_once_it_applies(
     await adapter.switch_agent(params)
     await adapter.switch_agent(params)
 
-    selected = _agent_mode_events(telemetry_events)
+    selected = _policy_events(telemetry_events)
     assert len(selected) == 1
-    assert selected[0]["from_agent"] == "ask"
-    assert selected[0]["to_agent"] == "auto-approve"
+    assert selected[0]["from_policy"] == "ask"
+    assert selected[0]["to_policy"] == "auto-approve"
     assert selected[0]["trigger"] == "user"
+    assert _agent_mode_events(telemetry_events) == []
+
+
+@pytest.mark.asyncio
+async def test_an_agent_switch_and_a_policy_switch_report_what_they_changed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    telemetry_events: list[dict[str, Any]],
+    config_dir: Path,
+) -> None:
+    """*Prepare*: A session on the default agent in ask, and a custom agent.
+    *Do*: Switch the agent, then the approval policy.
+    *Assert*: Each event says which of the two the user changed.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server.protocol import AgentSwitchParams, ApprovalPolicySwitchParams
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    agents_dir = config_dir / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "reviewer.toml").write_text('display_name = "Reviewer"\n')
+    session = _RecordingSession()
+    adapter, _ = await _unified_adapter_with_real_context(
+        tmp_path, session, process_services=process_services
+    )
+
+    await adapter.switch_agent(
+        AgentSwitchParams(
+            session_id=_RecordingSession.session_id, agent_name="reviewer"
+        )
+    )
+    await adapter.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=_RecordingSession.session_id, approval_policy="auto-approve"
+        )
+    )
+
+    assert [e["to_agent"] for e in _agent_mode_events(telemetry_events)] == ["reviewer"]
+    assert [e["to_policy"] for e in _policy_events(telemetry_events)] == [
+        "auto-approve"
+    ]
 
 
 @pytest.mark.asyncio
@@ -12085,7 +12341,7 @@ async def test_unified_agent_switch_reports_nothing_when_the_switch_is_refused(
             )
         )
 
-    assert adapter._context.agents.active_profile.name == "ask"
+    assert adapter._context.agents.active_policy.name == "ask"
     assert _agent_mode_events(telemetry_events) == []
 
 
@@ -12113,7 +12369,7 @@ async def test_unified_agent_switch_applies_when_its_event_cannot_be_sent(
         )
     )
 
-    assert result.response.runtime.active_agent.name == "auto-approve"
+    assert result.response.runtime.active_approval_policy.name == "auto-approve"
 
 
 @pytest.mark.asyncio
@@ -12166,16 +12422,16 @@ async def test_unified_agent_switch_keeps_the_mcp_and_connector_projection(
 async def test_unified_agent_switch_restores_the_profile_when_deriving_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
-    """A half-applied switch must not strand the session on an agent it never ran.
+    """A half-applied switch must not strand the session on a policy it never ran.
 
-    ``switch_profile`` mutates the orchestrator before anything can fail, so a
-    failing ``derive`` used to leave the new agent layer installed while the
+    ``aswitch_policy`` mutates the orchestrator before anything can fail, so a
+    failing ``derive`` used to leave the new policy layer installed while the
     Runtime kept the old policy -- and raised an untyped error past the adapter.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from dataclasses import replace
 
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     session = _RecordingSession()
@@ -12195,14 +12451,14 @@ async def test_unified_agent_switch_restores_the_profile_when_deriving_fails(
     adapter._context = replace(adapter._context, derive=derive_once_then_fail)
 
     with pytest.raises(SessionBackendError) as excinfo:
-        await adapter.switch_agent(
-            AgentSwitchParams(
-                session_id=_RecordingSession.session_id, agent_name="auto-approve"
+        await adapter.switch_approval_policy(
+            ApprovalPolicySwitchParams(
+                session_id=_RecordingSession.session_id, approval_policy="auto-approve"
             )
         )
 
     assert excinfo.value.code is ProtocolErrorCode.INTERNAL_ERROR
-    assert adapter._context.agents.active_profile.name == "ask"
+    assert adapter._context.agents.active_policy.name == "ask"
     assert cast(Any, session.applied[-1]).tool_modes["file_system.write_file"] == "ask"
 
 
@@ -14824,6 +15080,113 @@ def test_terminal_tool_effect_extracts_decision_and_approval_type() -> None:
     assert result_none.decision is None
     assert result_none.approval_type is None
     assert result_none.approval_source is None
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "reason"),
+    [
+        (
+            {
+                "code": "tool_failed",
+                "message": "x",
+                "details": {"reason": "session_depth"},
+            },
+            "tool_failed",
+            "session_depth",
+        ),
+        ({"code": "tool_denied", "message": "x", "details": None}, "tool_denied", None),
+        ({"message": "x"}, None, None),
+        (
+            {"code": "tool_failed", "message": "x", "details": {"reason": "x"}},
+            "tool_failed",
+            None,
+        ),
+        ({"code": "x x", "message": "x"}, None, None),
+        (
+            {"code": "tool_failed", "message": "x", "details": {"reason": ["x"]}},
+            "tool_failed",
+            None,
+        ),
+        (
+            {"code": "tool_failed", "message": "x", "details": {"reason": {"x": 1}}},
+            "tool_failed",
+            None,
+        ),
+    ],
+    ids=[
+        "refusal_reason",
+        "code_only",
+        "no_code",
+        "free_text_reason",
+        "free_text_code",
+        "list_reason",
+        "object_reason",
+    ],
+)
+def test_a_failed_tool_call_finished_carries_its_error_code_and_reason(
+    tmp_path: Path,
+    telemetry_events: list[dict[str, Any]],
+    error: JsonObject,
+    code: str | None,
+    reason: str | None,
+) -> None:
+    """*Prepare*: A failed ``vibe.start_session`` effect with an error.
+    *Do*: Reconcile the terminal state.
+    *Assert*: ``tool_call_finished`` carries the error code and the refusal
+    reason, never the message.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from mistralai_vibe_local_harness.session_protocol import (
+        IdleSessionStatus,
+        LatestPublicHistoryPage,
+        PublicSession as HarnessPublicSession,
+        PublicSessionState as HarnessPublicSessionState,
+        TurnQueue as HarnessTurnQueue,
+    )
+
+    effect = _tool_effect("effect-1", "vibe.start_session", "failed")
+    effect["state"] = {"status": "failed", "error": error}
+    session = HarnessPublicSession(
+        id="session-root", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+    state = HarnessPublicSessionState(
+        session=session,
+        history=LatestPublicHistoryPage(entries=[effect]),
+        turn_queue=HarnessTurnQueue(items=[], paused=False, max_items=32),
+    )
+    adapter = _inert_adapter(
+        _session_stub(session_id="session-root", cwd=None),
+        str(tmp_path),
+        str(tmp_path),
+        runtime=_priced_runtime(),
+        telemetry_client=TelemetryClient(
+            config_getter=lambda: build_test_vibe_config(enable_telemetry=True)
+        ),
+    )
+
+    adapter._record_tool_telemetry(state)
+
+    (props,) = [
+        e["properties"]
+        for e in telemetry_events
+        if e["event_name"] == "vibe.tool_call_finished"
+    ]
+    assert props["status"] == "failure"
+    assert props["error_code"] == code
+    assert props["error_reason"] == reason
+    assert "x" not in props.values()
+
+
+def test_a_successful_tool_call_finished_carries_no_error() -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import _terminal_tool_effect
+
+    tool = _terminal_tool_effect(
+        _tool_effect("e1", "vibe.start_session", "completed", {"prompt": "go"})
+    )
+
+    assert tool is not None
+    assert (tool.error_code, tool.error_reason) == (None, None)
 
 
 def test_ordinary_tool_call_finished_carries_turn_client_message_id(
@@ -18676,14 +19039,13 @@ async def test_listing_stamps_an_unstamped_session_in_a_local_project_folder(
 ) -> None:
     """*Prepare*: A local project on `repo`; unstamped sessions in `repo`,
     `repo/sub` and `repo-2`, and one in `repo` already stamped with another project.
-    *Do*: List with local projects on.
+    *Do*: List.
     *Assert*: The folder and subfolder sessions take the project, on disk too.
     """
     config = build_test_vibe_config(
-        experimental_enable_local_projects=True,
         session_logging=SessionLoggingConfig(
             enabled=True, save_dir=str(tmp_path / "sessions")
-        ),
+        )
     )
     storage_root = tmp_path / "sessions"
     repo = (tmp_path / "repo").resolve()
@@ -18734,8 +19096,7 @@ async def test_listing_leaves_a_session_another_process_holds_for_a_later_listin
     from mistralai_vibe_local_harness.vibe._storage import SessionLease as HarnessLease
 
     config = build_test_vibe_config(
-        experimental_enable_local_projects=True,
-        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
     )
     repo = (tmp_path / "repo").resolve()
     repo.mkdir()
@@ -18763,8 +19124,7 @@ async def test_a_pin_made_while_a_listing_stamps_the_session_is_kept(
     import vibe.app_server._unified_harness_backend_adapter as adapter_module
 
     config = build_test_vibe_config(
-        experimental_enable_local_projects=True,
-        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
     )
     repo = (tmp_path / "repo").resolve()
     repo.mkdir()
@@ -18806,8 +19166,7 @@ async def test_listing_stamps_a_session_open_here_through_its_adapter(
 ) -> None:
     """The open session's next save keeps the stamp the listing gave it."""
     config = build_test_vibe_config(
-        experimental_enable_local_projects=True,
-        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
     )
     repo = (tmp_path / "repo").resolve()
     repo.mkdir()
@@ -18834,8 +19193,7 @@ async def test_listing_restamps_a_cloud_stamp_no_local_project_goes_by(
 ) -> None:
     """A system default stamp is restamped by folder; a backed project's cloud stamp is kept."""
     config = build_test_vibe_config(
-        experimental_enable_local_projects=True,
-        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
     )
     repo = (tmp_path / "repo").resolve()
     repo.mkdir()
@@ -18878,8 +19236,7 @@ async def test_listing_restamps_a_session_whose_local_project_was_removed(
 ) -> None:
     """A removed project's sessions rejoin by folder; a live project's session stays put."""
     config = build_test_vibe_config(
-        experimental_enable_local_projects=True,
-        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
     )
     repo = (tmp_path / "repo").resolve()
     (repo / "sub").mkdir(parents=True)
@@ -18912,8 +19269,7 @@ async def test_listing_keeps_a_local_project_this_server_cannot_parse(
 ) -> None:
     """A project entry a newer server wrote is not a removed one: its sessions keep it."""
     config = build_test_vibe_config(
-        experimental_enable_local_projects=True,
-        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
     )
     repo = (tmp_path / "repo").resolve()
     (repo / "app").mkdir(parents=True)
@@ -18944,8 +19300,7 @@ async def test_a_move_made_while_a_listing_restamps_the_session_is_kept(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, open_here: bool
 ) -> None:
     config = build_test_vibe_config(
-        experimental_enable_local_projects=True,
-        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
     )
     repo = (tmp_path / "repo").resolve()
     repo.mkdir()
@@ -20055,6 +20410,40 @@ async def test_a_prompt_that_closes_while_its_answer_is_in_flight_is_not_remembe
 
 
 @pytest.mark.asyncio
+async def test_an_approval_answer_names_the_agent_and_its_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    telemetry_events: list[dict[str, Any]],
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _AcceptingCallbackSession()
+    adapter = _inert_adapter(
+        session,
+        None,
+        str(tmp_path),
+        telemetry_client=TelemetryClient(
+            config_getter=lambda: build_test_vibe_config(enable_telemetry=True)
+        ),
+    )
+    monkeypatch.setattr(
+        adapter, "_active_selection_names", lambda: ("task-lead", "smart-approve")
+    )
+    callback_id = _open_approval(adapter, session_id=session.session_id, created_at=1)
+
+    await adapter.respond_to_callback(
+        _approval_answer(session.session_id, callback_id, {"type": "approve"}, None)
+    )
+
+    (event,) = [
+        e["properties"]
+        for e in telemetry_events
+        if e["event_name"] == "vibe.tool_approval.resolved"
+    ]
+    assert event["agent_profile_name"] == "task-lead"
+    assert event["approval_policy"] == "smart-approve"
+
+
+@pytest.mark.asyncio
 async def test_a_subagent_approval_answer_names_no_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -20089,7 +20478,9 @@ async def test_a_subagent_approval_answer_names_no_mode(
             config_getter=lambda: build_test_vibe_config(enable_telemetry=True)
         ),
     )
-    monkeypatch.setattr(adapter, "_active_agent_profile_name", lambda: "auto-approve")
+    monkeypatch.setattr(
+        adapter, "_active_selection_names", lambda: ("default", "auto-approve")
+    )
     callback_id = _open_approval(adapter, session_id="session-child", created_at=1)
 
     await adapter.respond_to_callback(
@@ -20104,6 +20495,7 @@ async def test_a_subagent_approval_answer_names_no_mode(
     assert len(resolved) == 1
     assert resolved[0]["is_subagent"] is True
     assert resolved[0]["agent_profile_name"] is None
+    assert resolved[0]["approval_policy"] is None
 
 
 @pytest.mark.asyncio
@@ -20295,12 +20687,12 @@ async def test_unified_resume_and_cold_read_use_the_stored_cwd(tmp_path: Path) -
 async def test_unified_resume_and_continue_restore_the_running_mode(
     tmp_path: Path,
 ) -> None:
-    """*Prepare*: A promoted session switched to the ``auto-approve`` running mode.
+    """*Prepare*: A promoted session switched to the ``auto-approve`` policy.
     *Do*: Cold-reopen it through resume and through continue-latest.
     *Assert*: Both put the session back on ``auto-approve`` rather than the
-    default agent.
+    default policy.
     """
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     # Prepare
     config = build_test_vibe_config(
@@ -20310,11 +20702,15 @@ async def test_unified_resume_and_continue_restore_the_running_mode(
     )
     first_host = _harness_backend_host(config)
     started = await first_host.start(
-        SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path), agent="ask"))
+        SessionStartParams(
+            agent_config=SessionOptions(cwd=str(tmp_path), approval_policy="ask")
+        )
     )
     session_id = started.backend.session_id
-    await started.backend.switch_agent(
-        AgentSwitchParams(session_id=session_id, agent_name="auto-approve")
+    await started.backend.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=session_id, approval_policy="auto-approve"
+        )
     )
     await started.backend.start_turn(
         TurnStartParams(
@@ -20331,7 +20727,9 @@ async def test_unified_resume_and_continue_restore_the_running_mode(
         )
     )
     assert isinstance(resumed.backend, SessionBackendRuntimeView)
-    resumed_agent = resumed.backend.runtime_updated_params().runtime.active_agent.name
+    resumed_policy = (
+        resumed.backend.runtime_updated_params().runtime.active_approval_policy.name
+    )
     await second_host.shutdown()
 
     third_host = _harness_backend_host(config)
@@ -20339,14 +20737,14 @@ async def test_unified_resume_and_continue_restore_the_running_mode(
         SessionContinueParams(agent_config=SessionOptions(cwd=str(tmp_path)))
     )
     assert isinstance(continued.backend, SessionBackendRuntimeView)
-    continued_agent = (
-        continued.backend.runtime_updated_params().runtime.active_agent.name
+    continued_policy = (
+        continued.backend.runtime_updated_params().runtime.active_approval_policy.name
     )
     await third_host.shutdown()
 
     # Assert
-    assert resumed_agent == "auto-approve"
-    assert continued_agent == "auto-approve"
+    assert resumed_policy == "auto-approve"
+    assert continued_policy == "auto-approve"
 
 
 @pytest.mark.asyncio
@@ -20356,11 +20754,14 @@ async def test_unified_cold_read_reports_the_session_pins_without_resuming(
     """*Prepare*: A promoted session pinned to a non-default model and to
     ``auto-approve``.
     *Do*: Cold-read it from a fresh host, never resuming it.
-    *Assert*: The read names the session's own model and running mode, and no
+    *Assert*: The read names the session's own model and policy, and no
     session was loaded to answer. Both differ from the host's own values, so a
     read that ignored the pins could not pass.
     """
-    from vibe.app_server.protocol import AgentSwitchParams, ModelConfigWriteParams
+    from vibe.app_server.protocol import (
+        ApprovalPolicySwitchParams,
+        ModelConfigWriteParams,
+    )
 
     # Prepare
     config = build_test_vibe_config(
@@ -20376,14 +20777,18 @@ async def test_unified_cold_read_reports_the_session_pins_without_resuming(
     pinned_model = next(alias for alias in config.models if alias != host_model)
     first_host = _harness_backend_host(config)
     started = await first_host.start(
-        SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path), agent="ask"))
+        SessionStartParams(
+            agent_config=SessionOptions(cwd=str(tmp_path), approval_policy="ask")
+        )
     )
     session_id = started.backend.session_id
     await started.backend.write_model_config(
         ModelConfigWriteParams(session_id=session_id, model_alias=pinned_model)
     )
-    await started.backend.switch_agent(
-        AgentSwitchParams(session_id=session_id, agent_name="auto-approve")
+    await started.backend.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=session_id, approval_policy="auto-approve"
+        )
     )
     await started.backend.start_turn(
         TurnStartParams(
@@ -20400,10 +20805,54 @@ async def test_unified_cold_read_reports_the_session_pins_without_resuming(
 
     # Assert
     assert cold_read.state.session.model == pinned_model
-    assert cold_read.state.session.agent is not None
-    assert cold_read.state.session.agent.name == "auto-approve"
+    assert cold_read.state.session.approval_policy is not None
+    assert cold_read.state.session.approval_policy.name == "auto-approve"
     assert live_after_read == frozenset()
     assert pinned_model != host_model
+
+
+@pytest.mark.asyncio
+async def test_unified_cold_read_reports_a_pre_split_mode_as_its_policy(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session a build from before the split saved: its mode is
+    the agent pin and it has no policy pin.
+    *Do*: Cold-read it from a fresh host.
+    *Assert*: The read reports that mode as the policy, on the default agent.
+    """
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    # Prepare
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path), session_prefix="session"
+        )
+    )
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path)))
+    )
+    session_id = started.backend.session_id
+    await started.backend.start_turn(
+        TurnStartParams(
+            session_id=session_id, message=[TextContentBlock(text="persist me")]
+        )
+    )
+    session = cast(Any, started.backend)._session
+    await session.persist_pin(SessionPin.APPROVAL_POLICY, None)
+    await session.persist_pin(SessionPin.AGENT_NAME, "auto-approve")
+    await first_host.shutdown()
+
+    # Do
+    second_host = _harness_backend_host(config)
+    cold_read = await second_host.read(SessionReadParams(session_id=session_id))
+    await second_host.shutdown()
+
+    # Assert
+    assert cold_read.state.session.approval_policy is not None
+    assert cold_read.state.session.approval_policy.name == "auto-approve"
+    assert cold_read.state.session.agent is not None
+    assert cold_read.state.session.agent.name == "default"
 
 
 @pytest.mark.asyncio
@@ -20412,7 +20861,7 @@ async def test_unified_cold_read_resolves_the_pinned_agent_from_the_read_context
 ) -> None:
     vibe_runtime = pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from vibe.app_server._unified_harness_backend_adapter import adapt_harness_host
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     config = build_test_vibe_config(
         session_logging=SessionLoggingConfig(
@@ -20421,11 +20870,15 @@ async def test_unified_cold_read_resolves_the_pinned_agent_from_the_read_context
     )
     first_host = _harness_backend_host(config)
     started = await first_host.start(
-        SessionStartParams(agent_config=SessionOptions(cwd=str(tmp_path), agent="ask"))
+        SessionStartParams(
+            agent_config=SessionOptions(cwd=str(tmp_path), approval_policy="ask")
+        )
     )
     session_id = started.backend.session_id
-    await started.backend.switch_agent(
-        AgentSwitchParams(session_id=session_id, agent_name="auto-approve")
+    await started.backend.switch_approval_policy(
+        ApprovalPolicySwitchParams(
+            session_id=session_id, approval_policy="auto-approve"
+        )
     )
     await started.backend.start_turn(
         TurnStartParams(
@@ -20460,8 +20913,8 @@ async def test_unified_cold_read_resolves_the_pinned_agent_from_the_read_context
     cold_read = await second_host.read(SessionReadParams(session_id=session_id))
     await second_host.shutdown()
 
-    assert cold_read.state.session.agent is not None
-    assert cold_read.state.session.agent.name == "auto-approve"
+    assert cold_read.state.session.approval_policy is not None
+    assert cold_read.state.session.approval_policy.name == "auto-approve"
     assert session_contexts == []
 
 
@@ -20734,9 +21187,9 @@ async def test_unified_resume_restores_the_thinking_level_the_session_ran(
 async def test_unified_first_turn_records_the_agent_the_session_started_on(
     tmp_path: Path,
 ) -> None:
-    """*Prepare*: A session started on a non-default agent that never switches.
-    *Do*: Run its first turn, then cold-reopen it without naming an agent.
-    *Assert*: The session's storage names the agent, and the reopen runs on it.
+    """*Prepare*: A session started on a non-default policy that never switches.
+    *Do*: Run its first turn, then cold-reopen it without naming a policy.
+    *Assert*: The session's storage names the policy, and the reopen runs on it.
     """
     # Prepare
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
@@ -20749,7 +21202,9 @@ async def test_unified_first_turn_records_the_agent_the_session_started_on(
     first_host = _harness_backend_host(config)
     started = await first_host.start(
         SessionStartParams(
-            agent_config=SessionOptions(cwd=str(tmp_path), agent="auto-approve")
+            agent_config=SessionOptions(
+                cwd=str(tmp_path), approval_policy="auto-approve"
+            )
         )
     )
     session_id = started.backend.session_id
@@ -20761,7 +21216,7 @@ async def test_unified_first_turn_records_the_agent_the_session_started_on(
             session_id=session_id, message=[TextContentBlock(text="persist me")]
         )
     )
-    stored_agent = cast(Any, started.backend)._session.pin(SessionPin.AGENT_NAME)
+    stored_policy = cast(Any, started.backend)._session.pin(SessionPin.AGENT_NAME)
     await first_host.shutdown()
     second_host = _harness_backend_host(config)
     resumed = await second_host.resume(
@@ -20770,46 +21225,48 @@ async def test_unified_first_turn_records_the_agent_the_session_started_on(
         )
     )
     assert isinstance(resumed.backend, SessionBackendRuntimeView)
-    resumed_agent = resumed.backend.runtime_updated_params().runtime.active_agent.name
+    resumed_policy = (
+        resumed.backend.runtime_updated_params().runtime.active_approval_policy.name
+    )
     await second_host.shutdown()
 
     # Assert
-    assert stored_agent == "auto-approve"
-    assert resumed_agent == "auto-approve"
+    assert stored_policy == "auto-approve"
+    assert resumed_policy == "auto-approve"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent", [None, "ask"])
-async def test_unified_start_turns_auto_approve_into_the_auto_approve_agent(
-    tmp_path: Path, agent: str | None
+@pytest.mark.parametrize("policy", [None, "ask"])
+async def test_unified_start_turns_auto_approve_into_the_auto_approve_policy(
+    tmp_path: Path, policy: str | None
 ) -> None:
-    """*Prepare*: A host whose default agent is a built-in permission mode.
+    """*Prepare*: A host whose default policy is ``ask``.
     *Do*: Start a session with auto-approve, then switch to ``ask``.
-    *Assert*: It runs and pins the auto-approve agent, which a switch leaves.
+    *Assert*: It runs and pins the auto-approve policy, which a switch leaves.
     """
     # Prepare
     from mistralai_vibe_local_harness.vibe._storage import SessionPin
 
-    host = _harness_backend_host(build_test_vibe_config(default_agent="ask"))
+    host = _harness_backend_host(build_test_vibe_config(default_approval_policy="ask"))
 
     # Do
     started = await host.start(
         SessionStartParams(
             agent_config=SessionOptions(
-                cwd=str(tmp_path), agent=agent, auto_approve=True
+                cwd=str(tmp_path), approval_policy=policy, auto_approve=True
             )
         )
     )
     backend = cast(Any, started.backend)
     runtime = backend.runtime_updated_params().runtime
     pinned = backend._session.pin(SessionPin.AGENT_NAME)
-    switched = await backend.switch_agent(
-        AgentSwitchParams(session_id=backend.session_id, agent_name="ask")
+    switched = await backend.switch_approval_policy(
+        ApprovalPolicySwitchParams(session_id=backend.session_id, approval_policy="ask")
     )
     await host.shutdown()
 
     # Assert
-    assert runtime.active_agent.name == "auto-approve"
+    assert runtime.active_approval_policy.name == "auto-approve"
     assert pinned == "auto-approve"
     assert switched.response.runtime.bypass_tool_permissions is False
 
@@ -23175,6 +23632,7 @@ def _test_session_runtime_builder(
             orchestrator,
             options.agent or orchestrator.config.default_agent,
             harness_files=harness_files,
+            initial_policy=options.approval_policy,
         )
 
         def derive(_settings: Any) -> Any:
@@ -23247,6 +23705,8 @@ def _test_session_runtime_builder(
             model_catalog_service=(
                 process_services or fake_process_services()
             ).model_catalog,
+            keep_awake=(process_services or fake_process_services()).keep_awake,
+            config_changes=(process_services or fake_process_services()).config_changes,
             session_peers=session_peers,
         )
 
@@ -23735,7 +24195,10 @@ async def test_unified_relocation_preparation_failure_restores_the_host(
         )
         assert cast(Any, host)._host._configured_adapter_config.workspace.cwd == origin
         vibe_tools = cast(Any, host)._host._provided_tool_groups[VIBE_TOOL_GROUP]
-        assert vibe_tools.root_only == frozenset(GOAL_TOOL_NAMES)
+        assert vibe_tools.root_only == frozenset((
+            *GOAL_TOOL_NAMES,
+            *PROJECT_TOOL_NAMES,
+        ))
     finally:
         await host.shutdown()
 
@@ -23918,10 +24381,9 @@ async def test_unified_relocation_maps_busy_session_to_conflict(
 
 def _move_config(tmp_path: Path) -> VibeConfigSchema:
     return build_test_vibe_config(
-        experimental_enable_local_projects=True,
         session_logging=SessionLoggingConfig(
             enabled=True, save_dir=str(tmp_path / "sessions")
-        ),
+        )
     )
 
 
@@ -24294,10 +24756,9 @@ async def test_moving_a_session_open_on_another_connection_moves_nothing(
 @pytest.mark.asyncio
 async def test_moving_a_legacy_session_asks_to_open_it_first(tmp_path: Path) -> None:
     config = build_test_vibe_config(
-        experimental_enable_local_projects=True,
         session_logging=SessionLoggingConfig(
             enabled=True, save_dir=str(tmp_path / "sessions"), session_prefix="session"
-        ),
+        )
     )
     projects = _two_projects(tmp_path)
     legacy_id = str(uuid4())
@@ -24523,7 +24984,7 @@ async def test_unified_harness_reloads_plugins_and_reports_nothing(
 async def test_unified_harness_parks_a_plugin_reload_until_the_turn_ends(
     process_services: ProcessServices,
 ) -> None:
-    """A reload asked for during a turn waits for the turn boundary.
+    """A reload asked for during a turn waits for the turn boundary, and says so.
 
     Reload swaps the Core's tool catalogue, which must not change mid-decision,
     and the switch it follows is already saved: refusing it would leave this
@@ -24550,7 +25011,7 @@ async def test_unified_harness_parks_a_plugin_reload_until_the_turn_ends(
     finally:
         await server.close()
 
-    assert reloaded == {}
+    assert reloaded == {"deferred": True}
 
 
 @pytest.mark.asyncio
@@ -26444,6 +26905,372 @@ async def test_unified_queued_first_turn_waits_for_a_held_catalog_fetch(
     assert len(session.sent) == 1
     config = adapter._context.config_orchestrator.config
     assert config.get_active_model().alias == "fetched-model"
+
+
+async def _upgraded_plan_adapter(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    process_services: ProcessServices,
+    active_model: str = "paid-model",
+) -> tuple[Any, _RecordingSession, AsyncMock, list[float]]:
+    """An idle adapter whose catalog locks ``paid-model`` and runs
+    ``free-model``, the user's plan upgraded since: the next fetch unlocks
+    it. The session runs ``active_model``; the returned clock ages the
+    catalog.
+    """
+    from vibe.app_server._model_catalog_service import ModelCatalogService
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["experimental_enable_model_catalog"] = True
+    config["active_model"] = active_model
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    clock = [time.time()]
+    locked = locked_catalog("paid-model")
+    unlocked = runnable_catalog("paid-model")
+    free = runnable_catalog("free-model").models
+    fetch = AsyncMock(
+        side_effect=[
+            locked.model_copy(update={"models": [*locked.models, *free]}),
+            unlocked.model_copy(update={"models": [*unlocked.models, *free]}),
+        ]
+    )
+    services = replace(
+        process_services,
+        model_catalog=ModelCatalogService(fetch=fetch, clock=lambda: clock[0]),
+    )
+    session = _RecordingSession()
+    adapter = await _skill_adapter(tmp_path, session, process_services=services)
+    monkeypatch.setattr(adapter, "_announce_runtime", AsyncMock())
+    monkeypatch.setattr(adapter, "wait_announced", AsyncMock())
+    adapter._start_model_catalog_fetch()
+    if (task := adapter._model_catalog_task) is not None:
+        await task
+    adapter.mark_announced()
+    config = adapter._context.config_orchestrator.config
+    assert config.get_active_model().alias == active_model
+    clock[0] += LOCKED_MODEL_REFRESH_AFTER_S + 1
+    return adapter, session, fetch, clock
+
+
+@pytest.mark.asyncio
+async def test_unified_config_read_on_a_locked_model_refreshes_the_catalog(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    # Back from the upgrade page, the client re-reads the session's models:
+    # that read starts the refresh, and the next one shows the model unlocked.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, _session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path, config_dir, monkeypatch, process_services=process_services
+    )
+
+    await adapter.dispatch_extension("config/read", {})
+    config = adapter._context.config_orchestrator
+    for _ in range(100):
+        await adapter.dispatch_extension("config/read", {})
+        if config.config.get_active_model().requires is None:
+            break
+        await asyncio.sleep(0.01)
+
+    assert fetch.await_count == 2
+    assert config.config.get_active_model().requires is None
+
+
+@pytest.mark.asyncio
+async def test_unified_turn_on_a_runnable_model_fetches_no_catalog_locking_another(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    # Every plan below the top one lists locked models: a session running a
+    # free one must not wait on a refetch before each turn.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path,
+        config_dir,
+        monkeypatch,
+        process_services=process_services,
+        active_model="free-model",
+    )
+
+    await adapter.start_turn(
+        TurnStartParams(
+            session_id=session.session_id, message=[TextContentBlock(text="hi")]
+        )
+    )
+    await asyncio.sleep(0.05)
+
+    assert fetch.await_count == 1
+    assert len(session.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_unified_config_read_on_a_runnable_model_refreshes_an_upsell(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    # The running session's picker shows the paid model as an upsell: back
+    # from the upgrade page, the user must see it unlocked there too.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, _session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path,
+        config_dir,
+        monkeypatch,
+        process_services=process_services,
+        active_model="free-model",
+    )
+
+    await adapter.dispatch_extension("config/read", {})
+    for _ in range(100):
+        if fetch.await_count == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    assert fetch.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unified_turn_on_a_model_a_plan_upgrade_unlocked_is_accepted(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path, config_dir, monkeypatch, process_services=process_services
+    )
+
+    await adapter.start_turn(
+        TurnStartParams(
+            session_id=session.session_id, message=[TextContentBlock(text="hi")]
+        )
+    )
+
+    assert fetch.await_count == 2
+    assert len(session.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_unified_queued_turn_on_a_model_a_plan_upgrade_unlocked_is_accepted(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path, config_dir, monkeypatch, process_services=process_services
+    )
+
+    await adapter.enqueue_turn(
+        TurnEnqueueParams(
+            session_id=session.session_id,
+            entries=[TurnUserInputEntry(content=[SessionTextContentBlock(text="hi")])],
+        )
+    )
+
+    assert fetch.await_count == 2
+    assert len(session.sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_unified_scheduled_loop_on_a_model_a_plan_upgrade_unlocked_runs(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path, config_dir, monkeypatch, process_services=process_services
+    )
+    started: list[str] = []
+
+    async def start_scheduled_turn(_params: Any, loop_id: str) -> Any:
+        started.append(loop_id)
+        return SimpleNamespace(after_response=None)
+
+    cast(Any, session).start_scheduled_turn = start_scheduled_turn
+
+    await adapter._start_scheduled_loop(  # pyright: ignore[reportPrivateUsage]
+        ScheduledPrompt(
+            id="loop-1",
+            interval_seconds=3600,
+            prompt="Check the CI pipeline",
+            next_fire_at=1_800_000_000.0,
+            created_at=1_700_000_000.0,
+        )
+    )
+
+    assert fetch.await_count == 2
+    assert started == ["loop-1"]
+
+
+@pytest.mark.asyncio
+async def test_unified_goal_waiting_on_a_model_a_plan_upgrade_unlocked_continues(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path, config_dir, monkeypatch, process_services=process_services
+    )
+    await adapter._goal.controller.dispatch(
+        "goal/set", {"sessionId": session.session_id, "objective": "Keep going"}
+    )
+    continuations: list[Any] = []
+
+    async def record(goal: Any) -> None:
+        continuations.append(goal)
+
+    monkeypatch.setattr(adapter, "_start_goal_continuation", record)
+    monkeypatch.setattr(adapter, "_user_work_waiting", lambda: False)
+    adapter._events_subscribed = True
+
+    await adapter._continue_goal_if_idle()  # pyright: ignore[reportPrivateUsage]
+
+    assert fetch.await_count == 2
+    assert len(continuations) == 1
+
+
+@pytest.mark.asyncio
+async def test_unified_queued_turn_promoted_on_a_model_a_plan_upgrade_unlocked(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    # The Session promotes a turn queued earlier at the boundary, never
+    # through enqueue_turn: the boundary refreshes the catalog before refusing.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path, config_dir, monkeypatch, process_services=process_services
+    )
+    session.queued_item_ids = ["queue-1"]
+    monkeypatch.setattr(adapter, "_publish_notice", lambda *_, **__: None)
+
+    await adapter._pin_for_session_opened_turn()  # pyright: ignore[reportPrivateUsage]
+
+    assert fetch.await_count == 2
+    config = adapter._context.config_orchestrator.config
+    assert config.get_active_model().requires is None
+
+
+@pytest.mark.asyncio
+async def test_unified_turn_queued_on_a_locked_model_mid_turn_fetches_nothing(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    # The running turn keeps the catalog it started with: a message queued
+    # meanwhile neither fetches one nor takes the catalog locks.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path, config_dir, monkeypatch, process_services=process_services
+    )
+    session.active_turn_id = "turn-1"
+
+    async with adapter._context.admin_config_lock:
+        with pytest.raises(SessionBackendError):
+            await asyncio.wait_for(
+                adapter.enqueue_turn(
+                    TurnEnqueueParams(
+                        session_id=session.session_id,
+                        entries=[
+                            TurnUserInputEntry(
+                                content=[SessionTextContentBlock(text="hi")]
+                            )
+                        ],
+                    )
+                ),
+                timeout=5,
+            )
+    await asyncio.sleep(0.05)
+
+    assert fetch.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unified_turn_on_a_locked_model_waits_briefly_for_a_hung_refresh(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    # A hung catalog endpoint must not hold the turn, nor the loops behind it,
+    # for the fetch's own timeout.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server import _unified_harness_backend_adapter as adapter_module
+
+    adapter, session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path, config_dir, monkeypatch, process_services=process_services
+    )
+    hung = asyncio.Event()
+
+    async def hang(*_args: object) -> object:
+        await hung.wait()
+        return runnable_catalog("paid-model")
+
+    fetch.side_effect = hang
+    monkeypatch.setattr(adapter_module, "_LOCKED_MODEL_REFETCH_WAIT_S", 0.05)
+
+    with pytest.raises(SessionBackendError) as exc_info:
+        await asyncio.wait_for(
+            adapter.start_turn(
+                TurnStartParams(
+                    session_id=session.session_id, message=[TextContentBlock(text="hi")]
+                )
+            ),
+            timeout=5,
+        )
+
+    assert exc_info.value.data == {
+        "reason": "model_requires_upgrade",
+        "model": "paid-model",
+    }
+    assert session.sent == []
+    hung.set()
+
+
+@pytest.mark.asyncio
+async def test_unified_turn_on_a_locked_model_loads_a_catalog_another_session_fetched(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    # The process already holds the unlocked catalog: a turn loads it even
+    # when it is too recent to fetch again.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    adapter, session, fetch, _clock = await _upgraded_plan_adapter(
+        tmp_path, config_dir, monkeypatch, process_services=process_services
+    )
+    key = adapter._model_catalog_key
+    assert key is not None
+    await adapter._context.model_catalog_service.refresh(key)
+    assert fetch.await_count == 2
+
+    await adapter.start_turn(
+        TurnStartParams(
+            session_id=session.session_id, message=[TextContentBlock(text="hi")]
+        )
+    )
+
+    assert fetch.await_count == 2
+    assert len(session.sent) == 1
 
 
 _ROUTED_ALIAS = "experiment-routed"
@@ -29260,7 +30087,7 @@ async def test_adopting_a_context_without_the_sessions_mode_keeps_the_session(
     backend, _ = await _unified_adapter_with_real_context(
         original_cwd, _RecordingSession(), process_services=process_services
     )
-    backend._context.agents.switch_profile("accept-edits")
+    backend._context.agents.switch_policy("accept-edits")
     notices: list[tuple[str, str]] = []
     backend._publish_notice = lambda message, level="warning": notices.append((
         message,
@@ -29276,8 +30103,8 @@ async def test_adopting_a_context_without_the_sessions_mode_keeps_the_session(
         layer.load_managed_toml('disabled_agents = ["accept-edits"]\n')
         await incoming.config_orchestrator.reload()
     else:
-        incoming.agents.aswitch_profile = AsyncMock(
-            side_effect=ValueError("Agent 'accept-edits' not found.")
+        incoming.agents.aswitch_policy = AsyncMock(
+            side_effect=ValueError("Approval policy 'accept-edits' not found.")
         )
 
     # Do
@@ -29285,16 +30112,16 @@ async def test_adopting_a_context_without_the_sessions_mode_keeps_the_session(
 
     # Assert
     assert backend._context is incoming
-    assert backend._context.agents.active_profile.name == "ask"
+    assert backend._context.agents.active_policy.name == "ask"
     assert notices == [(notice, "warning")]
     selected = [
         e["properties"]
         for e in telemetry_events
-        if e["event_name"] == "vibe.agent_mode.selected"
+        if e["event_name"] == "vibe.approval_policy.selected"
     ]
     assert len(selected) == 1
-    assert selected[0]["from_agent"] == "accept-edits"
-    assert selected[0]["to_agent"] == "ask"
+    assert selected[0]["from_policy"] == "accept-edits"
+    assert selected[0]["to_policy"] == "ask"
     assert selected[0]["trigger"] == (
         "org_policy" if org_excludes else "agent_unavailable"
     )
@@ -29323,7 +30150,7 @@ async def test_adopting_a_context_whose_config_clashes_with_the_sessions_mode_re
     backend, _ = await _unified_adapter_with_real_context(
         original_cwd, _RecordingSession(), process_services=process_services
     )
-    backend._context.agents.switch_profile("lean")
+    backend._context.agents.switch_agent("lean")
     previous = backend._context
     notices: list[tuple[str, str]] = []
     backend._publish_notice = lambda message, level="warning": notices.append((
@@ -29343,7 +30170,7 @@ async def test_adopting_a_context_whose_config_clashes_with_the_sessions_mode_re
     assert refused.value.data == {"kind": "configuration"}
     assert str(refused.value) == _LEAN_CLASHES_WITH_CONFIG_TOML
     assert backend._context is previous
-    assert backend._context.agents.active_profile.name == "lean"
+    assert backend._context.agents.active_agent.name == "lean"
     assert notices == []
 
 
@@ -29368,7 +30195,7 @@ async def test_a_move_that_fails_to_apply_shows_no_notices(
     backend, _ = await _unified_adapter_with_real_context(
         original_cwd, _RecordingSession(), process_services=process_services
     )
-    backend._context.agents.switch_profile("accept-edits")
+    backend._context.agents.switch_policy("accept-edits")
     previous = backend._context
     notices: list[tuple[str, str]] = []
     backend._publish_notice = lambda message, level="warning": notices.append((
@@ -29379,8 +30206,8 @@ async def test_a_move_that_fails_to_apply_shows_no_notices(
         moved_cwd, _RecordingSession(), process_services=process_services
     )
     incoming = moved._context
-    incoming.agents.aswitch_profile = AsyncMock(
-        side_effect=ValueError("Agent 'accept-edits' not found.")
+    incoming.agents.aswitch_policy = AsyncMock(
+        side_effect=ValueError("Approval policy 'accept-edits' not found.")
     )
     incoming.org_config_report.report = OrgConfigReport(
         AdminConfigApplyResult(AdminConfigOutcome.APPLY_FAILED, error="bad")
@@ -29663,10 +30490,12 @@ async def test_two_opens_of_one_session_at_once_each_keep_the_picks_they_read(
     raw_host._restore_session_pins = AsyncMock(return_value=False)
     raw_host._host.configure_runtime = Mock()
     picks = iter(("first", "second"))
+    read_by: dict[asyncio.Task[Any] | None, str] = {}
     both_read = asyncio.Barrier(2)
 
     async def read_picks(*_: Any) -> UnifiedSessionSettings:
         name = next(picks)
+        read_by[asyncio.current_task()] = name
         await both_read.wait()
         return UnifiedSessionSettings(
             skill_pins=(ManifestEntry(name=name, skill_id=name, version=1),)
@@ -29678,8 +30507,8 @@ async def test_two_opens_of_one_session_at_once_each_keep_the_picks_they_read(
     context.derive = Mock(return_value=Mock())
 
     # Do
-    opened = await asyncio.gather(
-        *(
+    opens = [
+        asyncio.create_task(
             raw_host._pin_for_fork(
                 SessionOptions(),
                 "session-1",
@@ -29688,15 +30517,16 @@ async def test_two_opens_of_one_session_at_once_each_keep_the_picks_they_read(
                 require_api_key=True,
                 settings=None,
             )
-            for _ in range(2)
         )
-    )
+        for _ in range(2)
+    ]
+    await asyncio.gather(*opens)
 
     # Assert
-    assert [[pin.name for pin in settings.skill_pins] for *_, settings in opened] == [
-        ["first"],
-        ["second"],
-    ]
+    assert sorted(read_by.values()) == ["first", "second"]
+    for opened in opens:
+        *_, settings = opened.result()
+        assert [pin.name for pin in settings.skill_pins] == [read_by[opened]]
 
 
 _LEAN_CLASHES_WITH_CONFIG_TOML = (
@@ -29740,7 +30570,7 @@ async def test_a_restored_mode_whose_shell_timeouts_clash_refuses_the_session(
     _write_lean_user_config(config_dir, bash_timeouts=True)
     orchestrator = await build_default_orchestrator()
     agents = AgentManager(orchestrator, None)
-    started = agents.active_profile.name
+    started = agents.active_agent.name
     context = SimpleNamespace(agents=agents, config_orchestrator=orchestrator)
     raw_host = Mock()
     raw_host.session_pins = AsyncMock(
@@ -29757,15 +30587,58 @@ async def test_a_restored_mode_whose_shell_timeouts_clash_refuses_the_session(
     # Assert
     assert refused.value.data == {"kind": "configuration"}
     assert str(refused.value) == _LEAN_CLASHES_WITH_CONFIG_TOML
-    assert agents.active_profile.name == started
+    assert agents.active_agent.name == started
 
 
 @pytest.mark.asyncio
-async def test_a_restored_mode_the_org_excludes_is_not_switched_to() -> None:
+async def test_a_restored_plan_pin_reopens_on_ask() -> None:
+    """*Prepare*: A session a pre-3.0 build saved in the removed plan mode.
+    *Do*: Restore its agent pin.
+    *Assert*: It reopens on the default agent under ask, as a config naming
+    plan as its default does.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from types import SimpleNamespace
+
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendHostAdapter,
+    )
+    from vibe.core.agents.manager import AgentManager
+    from vibe.core.config.layers.overrides import OverridesLayer
+    from vibe.core.config.orchestrator import ConfigOrchestrator
+
+    # Prepare
+    local = OverridesLayer(data={})
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema, layers=[local], default_layer_resolver=lambda: local
+    )
+    agents = AgentManager(orchestrator, "accept-edits")
+    context = SimpleNamespace(agents=agents, config_orchestrator=orchestrator)
+    host = UnifiedHarnessBackendHostAdapter(cast(Any, Mock()), AsyncMock())
+
+    # Do
+    applied = await cast(Any, host)._apply_restored_pin(
+        SessionPin.AGENT_NAME, context, "plan"
+    )
+
+    # Assert
+    assert applied is True
+    assert agents.active_agent.name == "default"
+    assert agents.active_policy.name == "ask"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pin_name", ["approval_policy", "agent_name"])
+async def test_a_restored_mode_the_org_excludes_falls_back_to_ask(
+    pin_name: str,
+) -> None:
     """*Prepare*: A session saved in auto-approve, which the org now disables;
-    the user's own enabled_agents still lists it.
-    *Do*: Restore the session's mode pin.
-    *Assert*: The session stays on the mode it started in.
+    the user's own enabled_agents still lists it. A build from before the split
+    saved it as the agent pin.
+    *Do*: Restore the session's pin.
+    *Assert*: The session runs `ask`, not the default it would otherwise start
+    in, keeps its agent, and says why.
     """
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from types import SimpleNamespace
@@ -29794,12 +30667,17 @@ async def test_a_restored_mode_the_org_excludes_is_not_switched_to() -> None:
 
     # Do
     applied = await cast(Any, host)._apply_restored_pin(
-        SessionPin.AGENT_NAME, context, "auto-approve"
+        SessionPin(pin_name), context, "auto-approve"
     )
 
     # Assert
-    assert applied is False
-    assert agents.active_profile.name == "accept-edits"
+    assert applied is True
+    assert agents.active_policy.name == "ask"
+    assert agents.active_agent.name == "default"
+    assert agents.restore_warnings == [
+        "This session ran the 'auto-approve' approval policy, which is no "
+        "longer available, so it continues in 'ask'."
+    ]
 
 
 @pytest.mark.asyncio
@@ -31917,6 +32795,37 @@ async def test_a_turn_waiting_on_a_cold_load_is_refused_when_the_session_closes(
 
 
 @pytest.mark.asyncio
+async def test_a_session_closed_while_it_opens_never_polls_keep_awake(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session whose MCP read waits while its integrations load.
+    *Do*: Close the session during that wait, then let the read finish.
+    *Assert*: No keep-awake poll is left running for the closed session.
+    """
+    # Prepare
+    release = asyncio.Event()
+    adapter, session = _discovering_adapter(tmp_path, release)
+    read = cast(Any, session).read_mcp.side_effect
+
+    async def slow_read_mcp() -> Any:
+        await release.wait()
+        return await read()
+
+    cast(Any, session).read_mcp = AsyncMock(side_effect=slow_read_mcp)
+    opening = asyncio.create_task(adapter.initialize_integrations())
+    await asyncio.sleep(0.01)
+
+    # Do
+    adapter._closed = True
+    release.set()
+    await opening
+
+    # Assert
+    assert adapter._keep_awake_task is None
+    adapter._cancel_mcp_discovery_task()
+
+
+@pytest.mark.asyncio
 async def test_a_turn_starts_once_an_uncached_mcp_server_fails(tmp_path: Path) -> None:
     """*Prepare*: A session waiting on an MCP server with nothing cached.
     *Do*: Send a message, and let that server's discovery fail.
@@ -33788,6 +34697,9 @@ class _RefusingOnceSession(_RecordingSession):
 async def _registry_synced(backend: Any) -> None:
     while backend._registry_sync._tasks:
         await asyncio.gather(*backend._registry_sync._tasks)
+        # A gather of done tasks does not yield, and the done callbacks that
+        # drop them from the set only run once the loop turns.
+        await asyncio.sleep(0)
 
 
 def _registry_versions(backend: Any) -> dict[str, int]:
@@ -33829,6 +34741,15 @@ async def test_unified_session_start_syncs_registry_skills_once_then_applies_the
         await host.shutdown()
 
 
+def _registry_syncs(backend: Any) -> list[asyncio.Task[None]]:
+    """Its manifest syncs, not the restore or cleanup a session runs with them off."""
+    return [
+        task
+        for task in backend._registry_sync._tasks
+        if task.get_name() == "vibe-unified-registry-sync"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_unified_session_start_skips_the_registry_sync_when_flag_off(
     respx_mock: respx.MockRouter,
@@ -33842,7 +34763,7 @@ async def test_unified_session_start_skips_the_registry_sync_when_flag_off(
         assert started.after_response is not None
         started.after_response()
 
-        assert not cast(Any, started.backend)._registry_sync._tasks
+        assert not _registry_syncs(started.backend)
         assert not deploy.called
     finally:
         await host.shutdown()
@@ -34190,7 +35111,7 @@ async def test_closing_a_session_cancels_its_registry_sync(
     started = await host.start(SessionStartParams())
     assert started.after_response is not None
     started.after_response()
-    [task] = cast(Any, started.backend)._registry_sync._tasks
+    [task] = _registry_syncs(started.backend)
     await reached.wait()
 
     await host.shutdown()
@@ -34620,12 +35541,12 @@ async def test_session_start_is_built_from_the_fetched_org_config(
     process_services: ProcessServices,
     org_server: FakeOrgConfigServer,
 ) -> None:
-    # Mode and connectors come from the org config from the first message,
+    # Policy and connectors come from the org config from the first message,
     # with no turn and no wait involved.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from vibe.core.config.managed_config_cache import load_cached_managed_config
 
-    policy = 'default_agent = "ask"\nenable_connectors = false\n'
+    policy = 'default_approval_policy = "ask"\nenable_connectors = false\n'
     _serve_org_config(monkeypatch, org_server, policy)
 
     services, process, host, backend = await _start_unified_session(
@@ -34633,7 +35554,7 @@ async def test_session_start_is_built_from_the_fetched_org_config(
     )
     try:
         config = backend._context.config_orchestrator.config
-        assert backend._context.agents.active_profile.name == "ask"
+        assert backend._context.agents.active_policy.name == "ask"
         assert config.enable_connectors is False
         selection = backend._context.connector_selection
         assert selection is not None
@@ -34655,14 +35576,14 @@ async def test_an_org_that_forbids_auto_approve_keeps_its_config_at_start(
     org_server: FakeOrgConfigServer,
 ) -> None:
     # The user's saved default is auto-approve. The org config forbids it: the
-    # session starts another mode under the org config, with prompts on,
+    # session starts another policy under the org config, with prompts on,
     # rather than failing back to local config, where YOLO would be allowed.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
 
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
-    config["default_agent"] = "auto-approve"
+    config["default_approval_policy"] = "auto-approve"
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
     _serve_org_config(monkeypatch, org_server, "enable_auto_approve = false\n")
 
@@ -34673,7 +35594,7 @@ async def test_an_org_that_forbids_auto_approve_keeps_its_config_at_start(
     try:
         context = backend._context
         assert context.config_orchestrator.config.enable_auto_approve is False
-        assert context.agents.active_profile.name == "accept-edits"
+        assert context.agents.active_policy.name == "accept-edits"
         derivation = context.derive(UnifiedSessionSettings())
         assert derivation.runtime.bypass_tool_permissions is False
         assert not [m for m, _ in notices if m.startswith(_ORG_CONFIG_NOT_APPLIED)]
@@ -34690,13 +35611,15 @@ async def test_session_start_falls_back_to_the_cached_org_config(
     # session is built from.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
-    _cache_fresh_org_config('default_agent = "ask"\nenable_connectors = false\n')
+    _cache_fresh_org_config(
+        'default_approval_policy = "ask"\nenable_connectors = false\n'
+    )
 
     services, process, host, backend = await _start_unified_session(
         tmp_path, monkeypatch, process_services=process_services
     )
     try:
-        assert backend._context.agents.active_profile.name == "ask"
+        assert backend._context.agents.active_policy.name == "ask"
         assert backend._context.config_orchestrator.config.enable_connectors is False
     finally:
         await host.shutdown()
@@ -34865,7 +35788,9 @@ async def test_clear_keeps_the_org_config_without_fetching(
 ) -> None:
     # /clear starts a new conversation on the session's current config.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    fetches = _serve_org_config(monkeypatch, org_server, 'default_agent = "ask"\n', "")
+    fetches = _serve_org_config(
+        monkeypatch, org_server, 'default_approval_policy = "ask"\n', ""
+    )
 
     services, process, host, backend = await _start_unified_session(
         tmp_path, monkeypatch, process_services=process_services
@@ -34883,8 +35808,11 @@ async def test_clear_keeps_the_org_config_without_fetching(
         cleared.after_response()
 
         assert fetches.fetches == 1
-        assert replacement._context.agents.active_profile.name == "ask"
-        assert replacement._context.config_orchestrator.config.default_agent == "ask"
+        assert replacement._context.agents.active_policy.name == "ask"
+        assert (
+            replacement._context.config_orchestrator.config.default_approval_policy
+            == "ask"
+        )
     finally:
         await host.shutdown()
         await process.close()
@@ -34901,9 +35829,9 @@ async def test_reload_fetches_the_org_config_for_the_whole_process(
     from vibe.app_server.protocol import ConfigReloadParams
     from vibe.core.config.managed_config_cache import load_cached_managed_config
 
-    changed = 'default_agent = "auto-approve"\nenable_connectors = false\n'
+    changed = 'default_approval_policy = "auto-approve"\nenable_connectors = false\n'
     fetches = _serve_org_config(
-        monkeypatch, org_server, 'default_agent = "ask"\n', changed
+        monkeypatch, org_server, 'default_approval_policy = "ask"\n', changed
     )
 
     services, process, host, backend = await _start_unified_session(
@@ -34915,11 +35843,11 @@ async def test_reload_fetches_the_org_config_for_the_whole_process(
         # Fetched at once, whatever the age of the cached copy.
         assert fetches.fetches == 2
         config = backend._context.config_orchestrator.config
-        assert config.default_agent == "auto-approve"
+        assert config.default_approval_policy == "auto-approve"
         assert config.enable_connectors is False
-        # The mode the session runs is the user's; only one the org
+        # The policy the session runs is the user's; only one the org
         # disables is left.
-        assert backend._context.agents.active_profile.name == "ask"
+        assert backend._context.agents.active_policy.name == "ask"
         key = backend._context.org_config_key.key.cache_key
         assert load_cached_managed_config(key) == changed
     finally:
@@ -34999,7 +35927,7 @@ async def test_a_session_open_never_waits_for_an_org_config_it_has_cached(
     _serve_org_config(monkeypatch, org_server, "")
     org_server.release = asyncio.Event()
     _cache_fresh_org_config(
-        'default_agent = "ask"\n',
+        'default_approval_policy = "ask"\n',
         stored_at=int(time.time()) - 2 * ORG_CONFIG_REFRESH_AFTER_S,
     )
 
@@ -35007,7 +35935,7 @@ async def test_a_session_open_never_waits_for_an_org_config_it_has_cached(
         tmp_path, monkeypatch, process_services=process_services
     )
     try:
-        assert backend._context.agents.active_profile.name == "ask"
+        assert backend._context.agents.active_policy.name == "ask"
         # The old copy is refreshed in the background, once, and neither the
         # open nor the boundary waits for it.
         await asyncio.wait_for(backend._settle_configuration(), timeout=5)
@@ -35032,7 +35960,7 @@ async def test_a_stricter_org_config_takes_tools_and_mode_away_at_the_boundary(
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     config_file = config_dir / "config.toml"
     local = tomllib.loads(config_file.read_text(encoding="utf-8"))
-    local["default_agent"] = "auto-approve"
+    local["default_approval_policy"] = "auto-approve"
     config_file.write_text(tomli_w.dumps(local), encoding="utf-8")
     stricter = 'enable_auto_approve = false\ndisabled_tools = ["bash"]\n'
     _serve_org_config(monkeypatch, org_server, stricter)
@@ -35043,12 +35971,12 @@ async def test_a_stricter_org_config_takes_tools_and_mode_away_at_the_boundary(
         tmp_path, monkeypatch, notices, process_services=process_services
     )
     try:
-        assert backend._context.agents.active_profile.name == "auto-approve"
+        assert backend._context.agents.active_policy.name == "auto-approve"
         assert backend._adapter_config.tool_modes["file_system.bash"] != "deny"
 
         await _refresh_org_config_and_settle(backend)
 
-        assert backend._context.agents.active_profile.name != "auto-approve"
+        assert backend._context.agents.active_policy.name != "auto-approve"
         assert backend._adapter_config.bypass_approval is False
         assert backend._adapter_config.tool_modes["file_system.bash"] == "deny"
         assert (
@@ -35612,7 +36540,7 @@ async def test_a_mode_the_org_config_disables_is_left_at_the_boundary(
     services, process, host, backend = await _start_unified_session(
         tmp_path, monkeypatch, notices, process_services=process_services
     )
-    mode = backend._context.agents.active_profile.name
+    mode = backend._context.agents.active_policy.name
     assert mode == "accept-edits"
     disabled = "The 'accept-edits' mode is disabled by your organization."
     try:
@@ -35620,28 +36548,30 @@ async def test_a_mode_the_org_config_disables_is_left_at_the_boundary(
             backend, org_server, 'disabled_agents = ["accept-edits"]\n'
         )
         # Heard, not loaded: the session moves at its boundary only.
-        assert backend._context.agents.active_profile.name == mode
+        assert backend._context.agents.active_policy.name == mode
         assert (disabled, "warning") not in notices
 
         await backend._settle_configuration()
         await backend._settle_configuration()
 
-        assert backend._context.agents.active_profile.name != mode
+        assert backend._context.agents.active_policy.name != mode
         assert notices.count((disabled, "warning")) == 1
         selected = [
             e["properties"]
             for e in telemetry_events
-            if e["event_name"] == "vibe.agent_mode.selected"
+            if e["event_name"] == "vibe.approval_policy.selected"
         ]
         assert len(selected) == 1
-        assert selected[0]["from_agent"] == mode
-        assert selected[0]["to_agent"] == backend._context.agents.active_profile.name
+        assert selected[0]["from_policy"] == mode
+        assert selected[0]["to_policy"] == backend._context.agents.active_policy.name
         assert selected[0]["trigger"] == "org_policy"
         # What clients read is derived from the policy too, not the config
         # the session ran before it.
         runtime = backend._runtime
-        assert runtime.active_agent.name == backend._context.agents.active_profile.name
-        assert mode not in {agent.name for agent in runtime.agents}
+        assert runtime.active_approval_policy.name == (
+            backend._context.agents.active_policy.name
+        )
+        assert mode not in {policy.name for policy in runtime.approval_policies}
     finally:
         await host.shutdown()
         await process.close()
@@ -35657,12 +36587,13 @@ async def test_a_mode_switch_during_an_org_config_install_ends_on_one_agent(
     """*Prepare*: An org config disabling the session's mode, landing at a
       boundary: the install switches the session off it, and that switch is
       still rebuilding the config.
-    *Do*: Switch the mode meanwhile, as a user does.
-    *Assert*: The session ends on one agent, with that agent's overrides.
+    *Do*: Switch the approval policy meanwhile, as a user does.
+    *Assert*: The session ends on one agent and one policy, with their
+    overrides.
     """
     # Prepare
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
     from vibe.core.config.layers.agent_profile import AgentProfileLayer
 
     notices: list[tuple[str, str]] = []
@@ -35691,9 +36622,9 @@ async def test_a_mode_switch_during_an_org_config_install_ends_on_one_agent(
 
         # Do
         switching = asyncio.create_task(
-            backend.switch_agent(
-                AgentSwitchParams(
-                    session_id=backend.session_id, agent_name="auto-approve"
+            backend.switch_approval_policy(
+                ApprovalPolicySwitchParams(
+                    session_id=backend.session_id, approval_policy="auto-approve"
                 )
             )
         )
@@ -35711,7 +36642,10 @@ async def test_a_mode_switch_during_an_org_config_install_ends_on_one_agent(
             if layer.name == AgentProfileLayer.NAME
         )
         assert isinstance(layer, AgentProfileLayer)
-        assert layer.profile_name == agents.active_profile.name
+        assert layer.profile_name == agents.active_agent.name
+        assert orchestrator.config.bypass_tool_permissions is (
+            agents.active_policy.name == "auto-approve"
+        )
     finally:
         await host.shutdown()
         await process.close()
@@ -35834,7 +36768,7 @@ async def test_a_policy_core_refuses_at_the_push_leaves_the_session_as_it_ran(
 
     monkeypatch.setattr(mcp_service, "converge", counting)
     monkeypatch.setattr(backend._deferred, "_push", refusing)
-    mode = context.agents.active_profile.name
+    mode = context.agents.active_policy.name
     policy = f'disabled_tools = ["bash"]\ndisabled_agents = ["{mode}"]\n'
     try:
         if via_reload:
@@ -35849,7 +36783,7 @@ async def test_a_policy_core_refuses_at_the_push_leaves_the_session_as_it_ran(
 
         assert layer.snapshot() == before
         assert "bash" not in context.config_orchestrator.config.disabled_tools
-        assert context.agents.active_profile.name == mode
+        assert context.agents.active_policy.name == mode
         assert not [m for m, _ in notices if "disabled by your organization" in m]
         assert "grep" not in context.config_orchestrator.config.disabled_tools
         assert context.org_config_report.loaded == skipped
@@ -36174,7 +37108,7 @@ async def test_a_mode_left_for_an_org_policy_is_reported_only_once_installed(
         return [
             e["properties"]
             for e in telemetry_events
-            if e["event_name"] == "vibe.agent_mode.selected"
+            if e["event_name"] == "vibe.approval_policy.selected"
         ]
 
     monkeypatch.setattr(backend, "_install_candidate", flaky)
@@ -36188,8 +37122,43 @@ async def test_a_mode_left_for_an_org_policy_is_reported_only_once_installed(
         await backend._settle_configuration()
 
         assert len(selected()) == 1
-        assert selected()[0]["from_agent"] == "accept-edits"
+        assert selected()[0]["from_policy"] == "accept-edits"
         assert selected()[0]["trigger"] == "org_policy"
+    finally:
+        await host.shutdown()
+        await process.close()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_install_of_an_org_policy_keeps_the_running_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    """*Prepare*: A session in accept-edits, and reinstalling its layers fails.
+    *Do*: Land a policy disabling accept-edits and settle.
+    *Assert*: The session still reports accept-edits, which its config runs.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    _serve_org_config(monkeypatch, org_server, "")
+    services, process, host, backend = await _start_unified_session(
+        tmp_path, monkeypatch, process_services=process_services
+    )
+    live = backend._context.agents
+    before = (live.active_agent, live.active_policy)
+
+    async def failing() -> None:
+        raise RuntimeError("rebuild refused")
+
+    monkeypatch.setattr(live, "areapply", failing)
+    try:
+        await _land_org_config(
+            backend, org_server, 'disabled_agents = ["accept-edits"]\n'
+        )
+        await backend._settle_configuration()
+
+        assert (live.active_agent, live.active_policy) == before
     finally:
         await host.shutdown()
         await process.close()
@@ -36467,7 +37436,7 @@ async def test_a_reload_a_turn_overtakes_is_a_conflict_and_moves_nothing(
         tmp_path, monkeypatch, process_services=process_services
     )
     context = backend._context
-    mode = context.agents.active_profile.name
+    mode = context.agents.active_policy.name
     turn_running = backend._deferred._turn_running
     turn = [False]
 
@@ -36486,7 +37455,7 @@ async def test_a_reload_a_turn_overtakes_is_a_conflict_and_moves_nothing(
             )
 
         assert caught.value.code is ProtocolErrorCode.CONFLICT
-        assert context.agents.active_profile.name == mode
+        assert context.agents.active_policy.name == mode
         assert context.org_config_report.loaded == ""
         assert backend._org_config.due
     finally:
@@ -37135,7 +38104,7 @@ async def test_a_refreshed_org_config_the_session_cannot_build_keeps_the_one_it_
 
     _serve_org_config(monkeypatch, org_server, _UNBUILDABLE_ORG_CONFIG)
     key = managed_config_cache_key(VibeConfigSchema())
-    store_cached_managed_config(key, 'default_agent = "ask"\n')
+    store_cached_managed_config(key, 'default_approval_policy = "ask"\n')
 
     notices: list[tuple[str, str]] = []
     services, process, host, backend = await _start_unified_session(
@@ -37145,7 +38114,7 @@ async def test_a_refreshed_org_config_the_session_cannot_build_keeps_the_one_it_
         await _refresh_org_config_and_settle(backend)
 
         context = backend._context
-        assert context.agents.active_profile.name == "ask"
+        assert context.agents.active_policy.name == "ask"
         assert context.config_orchestrator.config.active_model != "corp"
         ((message, level),) = notices
         assert message.startswith(_ORG_CONFIG_NOT_APPLIED)
@@ -37243,7 +38212,7 @@ async def test_a_cached_org_config_the_core_rejects_starts_on_local_config(
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     key = managed_config_cache_key(VibeConfigSchema())
-    cached = 'default_agent = "ask"\n'
+    cached = 'default_approval_policy = "ask"\n'
     store_cached_managed_config(key, cached)
 
     services = FakeSessionBackendServices()
@@ -37280,7 +38249,7 @@ async def test_a_cached_org_config_the_core_rejects_starts_on_local_config(
         ))
         assert started.after_response is not None
         started.after_response()
-        assert backend._context.agents.active_profile.name != "ask"
+        assert backend._context.agents.active_policy.name != "ask"
         ((message, _level),) = notices
         assert message.startswith(_ORG_CONFIG_NOT_APPLIED)
         assert "Core rejected the org config" in message
@@ -37352,22 +38321,22 @@ async def test_a_session_build_never_tries_the_same_org_config_twice(
 
 
 @pytest.mark.asyncio
-async def test_an_org_disabled_local_default_agent_starts_a_builtin_under_the_policy(
+async def test_an_org_disabled_local_default_policy_starts_a_builtin_under_the_org(
     tmp_path: Path,
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     process_services: ProcessServices,
     org_server: FakeOrgConfigServer,
 ) -> None:
-    # The org's agent rules exclude the user's own default: the session starts
-    # a builtin mode and keeps every other org key.
+    # The org's agent rules exclude the user's own default policy: the session
+    # starts a builtin policy and keeps every other org key.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.core.agents.models import BuiltinAgentName
+    from vibe.core.agents.models import ApprovalPolicyName
     from vibe.core.config.managed_config_cache import load_cached_managed_config
 
     config_file = config_dir / "config.toml"
     local = tomllib.loads(config_file.read_text(encoding="utf-8"))
-    local["default_agent"] = "auto-approve"
+    local["default_approval_policy"] = "auto-approve"
     config_file.write_text(tomli_w.dumps(local), encoding="utf-8")
     policy = 'disabled_agents = ["auto-approve"]\nenable_connectors = false\n'
     _serve_org_config(monkeypatch, org_server, policy)
@@ -37378,7 +38347,7 @@ async def test_an_org_disabled_local_default_agent_starts_a_builtin_under_the_po
     )
     try:
         context = backend._context
-        assert context.agents.active_profile.name == BuiltinAgentName.ACCEPT_EDITS
+        assert context.agents.active_policy.name == ApprovalPolicyName.ACCEPT_EDITS
         assert context.config_orchestrator.config.enable_connectors is False
         assert notices == []
         key = context.org_config_key.key.cache_key
@@ -37394,7 +38363,7 @@ async def test_an_org_disabled_local_default_agent_starts_a_builtin_under_the_po
     [
         # The user asked for this mode and got another: say why, once.
         (
-            'default_agent = "ask"\ndisabled_agents = ["auto-approve"]\n',
+            'default_approval_policy = "ask"\ndisabled_agents = ["auto-approve"]\n',
             "auto-approve",
             "ask",
             [("The 'auto-approve' mode is disabled by your organization.", "warning")],
@@ -37417,7 +38386,7 @@ async def test_only_an_explicitly_requested_mode_the_org_excludes_is_reported(
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
     config_file = config_dir / "config.toml"
     local = tomllib.loads(config_file.read_text(encoding="utf-8"))
-    local["default_agent"] = "auto-approve"
+    local["default_approval_policy"] = "auto-approve"
     config_file.write_text(tomli_w.dumps(local), encoding="utf-8")
     _serve_org_config(monkeypatch, org_server, policy)
 
@@ -37430,7 +38399,9 @@ async def test_only_an_explicitly_requested_mode_the_org_excludes_is_reported(
     try:
         started = await host.start(
             SessionStartParams(
-                agent_config=SessionOptions(cwd=str(tmp_path), agent=requested)
+                agent_config=SessionOptions(
+                    cwd=str(tmp_path), approval_policy=requested
+                )
             )
         )
         backend = cast(Any, started.backend)
@@ -37442,7 +38413,7 @@ async def test_only_an_explicitly_requested_mode_the_org_excludes_is_reported(
         assert started.after_response is not None
         started.after_response()
 
-        assert backend._context.agents.active_profile.name == active
+        assert backend._context.agents.active_policy.name == active
         assert published == notices
     finally:
         await host.shutdown()
@@ -37461,7 +38432,7 @@ async def test_an_org_config_that_changes_the_mistral_key_is_still_found_offline
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
 
     policy = (
-        'default_agent = "ask"\n'
+        'default_approval_policy = "ask"\n'
         "[[providers]]\n"
         'name = "mistral"\n'
         'api_base = "https://api.mistral.ai/v1"\n'
@@ -37474,7 +38445,7 @@ async def test_an_org_config_that_changes_the_mistral_key_is_still_found_offline
         tmp_path, monkeypatch, process_services=process_services
     )
     try:
-        assert backend._context.agents.active_profile.name == "ask"
+        assert backend._context.agents.active_policy.name == "ask"
     finally:
         await host.shutdown()
         await process.close()
@@ -37486,7 +38457,7 @@ async def test_an_org_config_that_changes_the_mistral_key_is_still_found_offline
         tmp_path, monkeypatch, process_services=later
     )
     try:
-        assert backend._context.agents.active_profile.name == "ask"
+        assert backend._context.agents.active_policy.name == "ask"
     finally:
         await host.shutdown()
         await process.close()
@@ -37504,7 +38475,7 @@ async def test_an_unresolvable_enforced_default_agent_still_starts(
     # another checkout (or that an enforced combination excludes) must not
     # fail the start.
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.core.agents.models import BuiltinAgentName
+    from vibe.core.agents.models import ApprovalPolicyName, BuiltinAgentName
 
     _serve_org_config(monkeypatch, org_server, 'default_agent = "no-such-agent"\n')
 
@@ -37512,9 +38483,9 @@ async def test_an_unresolvable_enforced_default_agent_still_starts(
         tmp_path, monkeypatch, process_services=process_services
     )
     try:
-        assert (
-            backend._context.agents.active_profile.name == BuiltinAgentName.ACCEPT_EDITS
-        )
+        agents = backend._context.agents
+        assert agents.active_agent.name == BuiltinAgentName.DEFAULT
+        assert agents.active_policy.name == ApprovalPolicyName.ACCEPT_EDITS
     finally:
         await host.shutdown()
         await process.close()
@@ -37561,8 +38532,9 @@ async def test_agents_list_honors_the_cached_enforced_default_agent(
 
     response = cast(AgentsListResponse, result.response)
     # The enforced "plan" is a removed builtin; the projection resolves its
-    # replacement, ask.
-    assert response.active.name == "ask"
+    # replacement policy, ask, on the default agent.
+    assert response.active.name == "default"
+    assert response.active_approval_policy.name == "ask"
     assert fetches.fetches == 0
 
 
@@ -37597,8 +38569,10 @@ async def test_agents_list_falls_back_to_local_config_like_a_session_start(
     )
 
     response = cast(AgentsListResponse, result.response)
-    assert response.active.name == "accept-edits"
-    assert "ask" in {agent.name for agent in response.agents}
+    assert response.active.name == "default"
+    # An org list naming no policy it knows allows only `ask`.
+    assert response.active_approval_policy.name == "ask"
+    assert [policy.name for policy in response.approval_policies] == ["ask"]
 
 
 @pytest.mark.asyncio
@@ -38061,8 +39035,8 @@ async def test_an_agent_switch_during_a_variant_reload_does_not_hang(
 ) -> None:
     """*Prepare*: A session whose new eval's variants reload its config, which
       reads the config files off the event loop.
-    *Do*: Switch the agent while that reload is in flight, as Desktop's first
-      message does.
+    *Do*: Switch the approval policy while that reload is in flight, as
+      Desktop's first message does.
     *Assert*: Both finish. The switch builds the same config: it waits for the
       reload on the loop, where a synchronous rebuild would block the loop the
       reload needs and hang the whole app server.
@@ -38074,7 +39048,7 @@ async def test_an_agent_switch_during_a_variant_reload_does_not_hang(
         UnifiedHarnessBackendAdapter,
         UnifiedSessionSettings,
     )
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
     process = runtime_module.HarnessProcess(services=process_services)
@@ -38091,15 +39065,17 @@ async def test_an_agent_switch_during_a_variant_reload_does_not_hang(
 
     # Do
     await asyncio.wait_for(
-        adapter.switch_agent(
-            AgentSwitchParams(session_id=session.session_id, agent_name="ask")
+        adapter.switch_approval_policy(
+            ApprovalPolicySwitchParams(
+                session_id=session.session_id, approval_policy="ask"
+            )
         ),
         timeout=5,
     )
     await asyncio.wait_for(reload, timeout=5)
 
     # Assert
-    assert context.agents.active_profile.name == "ask"
+    assert context.agents.active_policy.name == "ask"
     assert "experiment-routed" in context.config_orchestrator.config.available_models()
 
 
@@ -38107,13 +39083,14 @@ async def test_an_agent_switch_during_a_variant_reload_does_not_hang(
 async def test_an_agent_switch_in_flight_reaches_the_worktree_the_session_moves_to(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
-    """*Prepare*: A session switching its agent, the switch still rebuilding
-      its config, as Desktop's first message on a --worktree start does.
+    """*Prepare*: A session switching its approval policy, the switch still
+      rebuilding its config, as Desktop's first message on a --worktree start
+      does.
     *Do*: Move the session into its worktree meanwhile.
-    *Assert*: The session runs the agent it switched to there.
+    *Assert*: The session runs the policy it switched to there.
     """
     # Prepare
-    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.app_server.protocol import ApprovalPolicySwitchParams
 
     source_cwd = tmp_path / "source"
     moved_cwd = tmp_path / "moved"
@@ -38135,8 +39112,10 @@ async def test_an_agent_switch_in_flight_reaches_the_worktree_the_session_moves_
 
     monkeypatch.setattr(orchestrator, "arebuild", slow_rebuild)
     switching = asyncio.create_task(
-        backend.switch_agent(
-            AgentSwitchParams(session_id=session.session_id, agent_name="auto-approve")
+        backend.switch_approval_policy(
+            ApprovalPolicySwitchParams(
+                session_id=session.session_id, approval_policy="auto-approve"
+            )
         )
     )
     await asyncio.wait_for(rebuilding.wait(), timeout=5)
@@ -38152,16 +39131,17 @@ async def test_an_agent_switch_in_flight_reaches_the_worktree_the_session_moves_
 
     # Assert
     assert backend._context is moved._context
-    assert backend._context.agents.active_profile.name == "auto-approve"
+    assert backend._context.agents.active_policy.name == "auto-approve"
 
 
 @pytest.mark.asyncio
 async def test_an_eval_landing_while_a_worktree_move_switches_the_agent_is_kept(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
 ) -> None:
-    """*Prepare*: A session on another agent than its worktree's context.
+    """*Prepare*: A session on another approval policy than its worktree's
+      context.
     *Do*: Move it there, and let its opening eval land while the move puts the
-      worktree's context on the session's agent.
+      worktree's context on the session's policy.
     *Assert*: The session holds that eval in the context it runs on now.
     """
     # Prepare
@@ -38174,19 +39154,19 @@ async def test_an_eval_landing_while_a_worktree_move_switches_the_agent_is_kept(
     backend, _ = await _unified_adapter_with_real_context(
         source_cwd, _RecordingSession(), process_services=process_services
     )
-    await backend._context.agents.aswitch_profile("auto-approve")
+    await backend._context.agents.aswitch_policy("auto-approve")
     moved, _ = await _unified_adapter_with_real_context(
         moved_cwd, _RecordingSession(), process_services=process_services
     )
     landed = routing_eval_response("experiment-routed")
-    switch = moved._context.agents.aswitch_profile
+    switch = moved._context.agents.aswitch_policy
 
     async def switch_while_the_eval_lands(name: str) -> None:
         backend._context.experiment_manager.hydrate(landed)
         await switch(name)
 
     monkeypatch.setattr(
-        moved._context.agents, "aswitch_profile", switch_while_the_eval_lands
+        moved._context.agents, "aswitch_policy", switch_while_the_eval_lands
     )
 
     # Do
@@ -38609,6 +39589,86 @@ async def test_a_subagent_s_usage_moves_the_live_goal_counts(
 
 
 @pytest.mark.asyncio
+async def test_a_loop_whose_session_cannot_be_saved_is_not_created(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A new persisted session that has sent nothing, whose save fails.
+    *Do*: Create a loop.
+    *Assert*: The request fails, and no loop is left scheduled or published.
+    """
+    # Prepare
+    host = _harness_backend_host(
+        build_test_vibe_config(
+            session_logging=SessionLoggingConfig(
+                enabled=True, save_dir=str(tmp_path / "sessions")
+            )
+        )
+    )
+    started = await host.start(SessionStartParams(agent_config=SessionOptions()))
+    backend = cast(Any, started.backend)
+    published: list[Any] = []
+    try:
+        monkeypatch.setattr(
+            backend._session, "promote", AsyncMock(side_effect=OSError("disk full"))
+        )
+        monkeypatch.setattr(backend, "_publish_session_metadata", published.append)
+
+        # Do
+        with pytest.raises(OSError, match="disk full"):
+            await backend._dispatch_scheduled_loops(
+                "loops/create",
+                {"sessionId": backend.session_id, "interval": "10m", "prompt": "Ping"},
+            )
+
+        # Assert
+        assert backend._scheduled_loops.snapshot() == []
+        assert published[-1].patch[0].value == []
+    finally:
+        monkeypatch.undo()
+        await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_loop_leaves_a_worktree_session_to_its_first_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A new persisted session started in a worktree.
+    *Do*: Create a loop before its first prompt.
+    *Assert*: The loop is created without saving the session: its first turn
+    saves it and records the worktree.
+    """
+    # Prepare
+    host = _harness_backend_host(
+        build_test_vibe_config(
+            session_logging=SessionLoggingConfig(
+                enabled=True, save_dir=str(tmp_path / "sessions")
+            )
+        )
+    )
+    started = await host.start(SessionStartParams(agent_config=SessionOptions()))
+    backend = cast(Any, started.backend)
+    promote = AsyncMock(return_value=True)
+    try:
+        backend._turns_deferred = asyncio.Event()
+        monkeypatch.setattr(backend._session, "promote", promote)
+
+        # Do
+        await backend._dispatch_scheduled_loops(
+            "loops/create",
+            {"sessionId": backend.session_id, "interval": "10m", "prompt": "Ping"},
+        )
+
+        # Assert
+        assert [loop.prompt for loop in backend._scheduled_loops.snapshot()] == ["Ping"]
+        promote.assert_not_awaited()
+        assert backend._session.ephemeral
+    finally:
+        monkeypatch.undo()
+        backend._turns_deferred = None
+        await host.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_an_attempted_loop_publishes_its_next_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -38688,7 +39748,9 @@ async def test_a_loop_created_while_a_subagent_charges_the_goal_rides_its_patch(
         monkeypatch.setattr(
             backend,
             "_session",
-            SimpleNamespace(active_turn_id="t-1", session_id=backend.session_id),
+            SimpleNamespace(
+                active_turn_id="t-1", session_id=backend.session_id, ephemeral=False
+            ),
         )
         monkeypatch.setattr(backend, "_publish_session_metadata", published.append)
         progressed = backend._goal.turn_progressed
@@ -39840,3 +40902,1053 @@ async def test_a_pause_while_the_model_is_pinned_stops_the_continuation(
     finally:
         monkeypatch.undo()
         await host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_only", [False, True])
+async def test_a_model_pick_keeps_the_model_the_agent_runs_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path,
+    process_services: ProcessServices,
+    session_only: bool,
+) -> None:
+    """*Prepare*: A session started on an agent that names its own model.
+    *Do*: Pick another model, as Desktop does with the composer's stored one.
+    *Assert*: The session keeps running the agent's model.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._runtime import HarnessProcess
+    from vibe.app_server._unified_harness_backend_adapter import (
+        UnifiedHarnessBackendAdapter,
+        UnifiedSessionSettings,
+    )
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["models"].append({
+        "name": "mistral-prover",
+        "provider": "mistral",
+        "alias": "prover-model",
+    })
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    probe = await HarnessProcess(
+        services=process_services
+    ).build_unified_session_context(SessionOptions(cwd=str(tmp_path)))
+    default = probe.config_orchestrator.config.get_active_model().alias
+    own = "prover-model"
+    picked = next(
+        alias
+        for alias in probe.config_orchestrator.config.models
+        if alias not in {default, own}
+    )
+    agent = tmp_path / ".vibe" / "agents" / "prover.toml"
+    agent.parent.mkdir(parents=True)
+    agent.write_text(f'active_model = "{own}"\n', encoding="utf-8")
+    process = HarnessProcess(services=process_services)
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path), agent="prover", trust_workspace=True)
+    )
+    assert context.agents.active_agent.name == "prover"
+    assert context.config_orchestrator.config.get_active_model().alias == own
+    adapter = UnifiedHarnessBackendAdapter(
+        cast(Any, _RecordingSession()),
+        context,
+        context.derive(UnifiedSessionSettings()),
+    )
+
+    await adapter.write_model_config(
+        ModelConfigWriteParams(
+            session_id=_RecordingSession.session_id,
+            model_alias=picked,
+            session_only=session_only,
+        )
+    )
+
+    assert context.config_orchestrator.config.get_active_model().alias == own
+    await process.close()
+
+
+@pytest.mark.asyncio
+async def test_a_model_pick_keeps_leanstral_on_the_lean_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """*Prepare*: A session on the lean agent, which names its own model.
+    *Do*: Pick the user's stored model, as Desktop does after a create.
+    *Assert*: The pick lands without error and the session still runs leanstral.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server.protocol import ModelConfigWriteParams
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    session = _RecordingSession()
+    context, adapter = await _adapter_on_the_lean_agent(
+        tmp_path, session, process_services=process_services
+    )
+    picked = next(
+        alias
+        for alias in context.config_orchestrator.config.models
+        if alias != "leanstral"
+    )
+
+    result = await adapter.write_model_config(
+        ModelConfigWriteParams(session_id=session.session_id, model_alias=picked)
+    )
+
+    assert result.response.failures == []
+    assert context.config_orchestrator.config.get_active_model().alias == "leanstral"
+    assert adapter._runtime.config.active_model.alias == "leanstral"
+
+
+@pytest.mark.asyncio
+async def test_leaving_an_excluded_agent_skips_a_fallback_that_cannot_load() -> None:
+    """*Prepare*: The org config excludes the running agent, and the first
+    agent it allows clashes with the configuration.
+    *Do*: Leave the excluded agent.
+    *Assert*: The next allowed agent is taken instead of the clash raising out
+    of the org config commit.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import _leave_excluded_mode
+    from vibe.core.config.builder import InvalidConfigError
+
+    switched: list[str] = []
+
+    async def aswitch_agent(name: str) -> None:
+        if name == "clashing":
+            raise InvalidConfigError("tools.bash.default_timeout: too high")
+        switched.append(name)
+
+    agents = SimpleNamespace(
+        active_agent=SimpleNamespace(name="excluded"),
+        active_policy=SimpleNamespace(name="ask"),
+        org_excludes=lambda name: name == "excluded",
+        primary_agents=lambda: [
+            SimpleNamespace(name="clashing"),
+            SimpleNamespace(name="fine"),
+        ],
+        aswitch_agent=aswitch_agent,
+    )
+
+    left = await _leave_excluded_mode(cast(Any, agents), cast(Any, None))
+
+    assert switched == ["fine"]
+    assert left == "excluded"
+
+
+@pytest.mark.asyncio
+async def test_leaving_an_excluded_policy_takes_any_policy_the_org_allows() -> None:
+    """*Prepare*: The org config excludes the running `auto-approve` and
+    allows only `smart-approve`, which is not the configured default.
+    *Do*: Leave the excluded policy.
+    *Assert*: The session moves to `smart-approve` instead of keeping
+    auto-approve.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import _leave_excluded_mode
+
+    allowed = {"smart-approve"}
+    active = SimpleNamespace(name="auto-approve")
+
+    async def aswitch_policy(name: str) -> None:
+        if name not in allowed:
+            raise ValueError(name)
+        active.name = name
+
+    agents = SimpleNamespace(
+        active_agent=SimpleNamespace(name="default"),
+        active_policy=active,
+        org_excludes=lambda name: name == "auto-approve",
+        get_policy_order=lambda: sorted(allowed),
+        aswitch_policy=aswitch_policy,
+    )
+    orchestrator = SimpleNamespace(
+        config=SimpleNamespace(default_approval_policy="accept-edits")
+    )
+
+    left = await _leave_excluded_mode(cast(Any, agents), cast(Any, orchestrator))
+
+    assert active.name == "smart-approve"
+    assert left == "auto-approve"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "requested",
+    [
+        {"auto_approve": True},
+        {"approval_policy": "auto-approve"},
+        {"agent": "auto-approve"},
+    ],
+    ids=["auto_approve", "approval_policy", "legacy_agent_alias"],
+)
+async def test_a_fork_runs_the_sources_policy_whatever_the_client_asks(
+    tmp_path: Path, requested: dict[str, Any]
+) -> None:
+    """*Prepare*: A saved session on `ask`.
+    *Do*: Fork it live and cold, with a client that asks for auto-approve.
+    *Assert*: Both forks run `ask`, with no bypass.
+    """
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(approval_policy="ask"))
+    )
+    source_id = started.backend.session_id
+    await _persist_with_a_turn(started.backend, "persist source")
+
+    live = await first_host.fork(
+        SessionForkParams(
+            source_session_id=source_id,
+            attach=True,
+            agent_config=SessionOptions(**requested),
+        )
+    )
+    await first_host.shutdown()
+    second_host = _harness_backend_host(config)
+    cold = await second_host.fork(
+        SessionForkParams(
+            source_session_id=source_id,
+            attach=True,
+            agent_config=SessionOptions(**requested),
+        )
+    )
+
+    for fork in (live.backend, cold.backend):
+        backend = cast(Any, fork)
+        assert backend._context.agents.active_policy.name == "ask"
+        assert backend._runtime.bypass_tool_permissions is False
+        assert backend._adapter_config.bypass_approval is False
+    await second_host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_fork_runs_the_policy_the_live_source_runs_now(tmp_path: Path) -> None:
+    """*Prepare*: A live session pinned on `auto-approve`, whose user then
+    picks `ask` without the pin being rewritten yet.
+    *Do*: Fork it.
+    *Assert*: The fork runs `ask`, the policy the source runs, not its pin.
+    """
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path))
+    )
+    host = _harness_backend_host(config)
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(approval_policy="auto-approve"))
+    )
+    source = cast(Any, started.backend)
+    await _persist_with_a_turn(source, "persist source")
+    assert source._session.pin(SessionPin.AGENT_NAME) == "auto-approve"
+    await source._context.agents.aswitch_policy("ask")
+
+    forked = await host.fork(
+        SessionForkParams(source_session_id=source.session_id, attach=True)
+    )
+
+    fork = cast(Any, forked.backend)
+    assert fork._context.agents.active_policy.name == "ask"
+    assert fork._adapter_config.bypass_approval is False
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_fork_whose_sources_policy_is_refused_runs_ask(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A live session that runs `auto-approve`, and a fork context
+    that refuses that policy (say, a rollout gate turned off since).
+    *Do*: Fork it.
+    *Assert*: The fork starts in `ask`, never the looser default, and says why.
+    """
+    from vibe.core.agents.manager import AgentManager
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(enabled=True, save_dir=str(tmp_path)),
+        default_approval_policy="accept-edits",
+    )
+    host = _harness_backend_host(config)
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(approval_policy="ask"))
+    )
+    source = cast(Any, started.backend)
+    await _persist_with_a_turn(source, "persist source")
+    await source._context.agents.aswitch_policy("auto-approve")
+
+    switch_policy = AgentManager.aswitch_policy
+
+    async def refuse_auto_approve(self: AgentManager, name: str) -> None:
+        if name == "auto-approve":
+            raise ValueError(name)
+        await switch_policy(self, name)
+
+    monkeypatch.setattr(AgentManager, "aswitch_policy", refuse_auto_approve)
+
+    forked = await host.fork(
+        SessionForkParams(source_session_id=source.session_id, attach=True)
+    )
+
+    fork = cast(Any, forked.backend)
+    assert fork._context.agents.active_policy.name == "ask"
+    assert fork._adapter_config.bypass_approval is False
+    assert any(
+        "auto-approve" in warning for warning in fork._context.agents.restore_warnings
+    )
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_session_whose_policy_is_gone_falls_back_to_ask(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session saved on `smart-approve`, and a config that now
+    leaves that policy out while its default is `accept-edits`.
+    *Do*: Resume it.
+    *Assert*: It runs `ask`, never the looser default, and says why.
+    """
+    save_dir = str(tmp_path / "sessions")
+    first_host = _harness_backend_host(
+        build_test_vibe_config(
+            session_logging=SessionLoggingConfig(enabled=True, save_dir=save_dir)
+        )
+    )
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(approval_policy="smart-approve"))
+    )
+    session_id = started.backend.session_id
+    await _persist_with_a_turn(started.backend, "persist me")
+    await first_host.shutdown()
+
+    second_host = _harness_backend_host(
+        build_test_vibe_config(
+            session_logging=SessionLoggingConfig(enabled=True, save_dir=save_dir),
+            default_approval_policy="accept-edits",
+            disabled_agents=["smart-approve"],
+        )
+    )
+    resumed = await second_host.resume(SessionResumeParams(session_id=session_id))
+
+    backend = cast(Any, resumed.backend)
+    assert backend._context.agents.active_policy.name == "ask"
+    assert any("smart-approve" in issue.message for issue in backend._runtime.issues)
+    await second_host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_session_saved_on_the_default_agent_resumes_on_it_under_another_default(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session saved on the `default` agent in `ask`, and a config
+    whose `default_agent` is now `lean`.
+    *Do*: Resume it.
+    *Assert*: It runs the `default` agent in `ask`, not lean.
+    """
+    save_dir = str(tmp_path / "sessions")
+    first_host = _harness_backend_host(
+        build_test_vibe_config(
+            session_logging=SessionLoggingConfig(enabled=True, save_dir=save_dir)
+        )
+    )
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(approval_policy="ask"))
+    )
+    session_id = started.backend.session_id
+    await _persist_with_a_turn(started.backend, "persist me")
+    await first_host.shutdown()
+
+    second_host = _harness_backend_host(
+        build_test_vibe_config(
+            session_logging=SessionLoggingConfig(enabled=True, save_dir=save_dir),
+            installed_agents=["lean"],
+            default_agent="lean",
+            default_approval_policy="ask",
+        )
+    )
+    resumed = await second_host.resume(SessionResumeParams(session_id=session_id))
+
+    backend = cast(Any, resumed.backend)
+    assert backend._context.agents.active_agent.name == "default"
+    assert backend._context.agents.active_policy.name == "ask"
+    await second_host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_session_wide_bypass_keeps_the_agents_never_tools_off(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: An agent that sets `write_file` to `never`, run in `ask`.
+    *Do*: Derive it with the session-wide bypass, as a resume with `--yolo`
+    keeps its policy and bypasses every call.
+    *Assert*: `write_file` is denied: bypassing approvals never runs a tool the
+    agent refused.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    agents_dir = config_dir / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "careful.toml").write_text(
+        '[tools.write_file]\npermission = "never"\n', encoding="utf-8"
+    )
+    process = runtime_module.HarnessProcess(services=process_services)
+    context = await process.build_unified_session_context(
+        SessionOptions(
+            cwd=str(tmp_path), agent="careful", approval_policy="ask", auto_approve=True
+        )
+    )
+
+    derivation = context.derive(UnifiedSessionSettings())
+
+    assert context.agents.active_policy.name == "ask"
+    assert derivation.adapter_config.bypass_approval is True
+    assert derivation.adapter_config.tool_modes["file_system.write_file"] == "deny"
+    assert derivation.adapter_config.tool_modes["file_system.edit"] == "allow"
+    await process.close()
+
+
+def test_a_pin_naming_an_unavailable_policy_reads_as_the_default_agent_on_ask() -> None:
+    """*Prepare*: A config that leaves `smart-approve` out.
+    *Do*: Read pins saved as `agent_name = "smart-approve"`, as a session that
+    ran the default agent saves them.
+    *Assert*: The default agent on `ask`, what a resume of it runs; never read
+    as an agent, nor dropped.
+    """
+    from vibe.app_server._unified_harness_backend_adapter import _pinned_selection
+    from vibe.core.agents.manager import AgentManager
+
+    agents = AgentManager(
+        FakeConfigOrchestrator(
+            build_test_vibe_config(disabled_agents=["smart-approve"])
+        )
+    )
+
+    agent, policy = _pinned_selection(agents, "smart-approve", None)
+
+    assert agent is not None and agent.name == "default"
+    assert policy is not None and policy.name == "ask"
+
+
+@pytest.mark.asyncio
+async def test_a_policy_an_older_build_picked_wins_over_the_newer_pin(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A session saved in `auto-approve` on the default agent, then
+    switched to `accept-edits` by a build from before the split, which only
+    rewrites `agent_name` and keeps the `approval_policy` it does not know.
+    *Do*: Resume it.
+    *Assert*: It runs `accept-edits`, the last pick, never the looser pin.
+    """
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+    first_host = _harness_backend_host(config)
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(approval_policy="auto-approve"))
+    )
+    session_id = started.backend.session_id
+    await _persist_with_a_turn(started.backend, "persist me")
+    await cast(Any, started.backend)._session.persist_pin(
+        SessionPin.AGENT_NAME, "accept-edits"
+    )
+    await first_host.shutdown()
+
+    second_host = _harness_backend_host(config)
+    resumed = await second_host.resume(SessionResumeParams(session_id=session_id))
+
+    backend = cast(Any, resumed.backend)
+    assert backend._context.agents.active_agent.name == "default"
+    assert backend._context.agents.active_policy.name == "accept-edits"
+    await second_host.shutdown()
+
+
+async def _starter_on(host: Any, policy: str) -> Any:
+    """A live session on ``policy``."""
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(approval_policy=policy))
+    )
+    return cast(Any, started.backend)
+
+
+def _spawned(starter: Any, attached: bool, **options: Any) -> SessionStartParams:
+    """The start a client sends for a session ``starter`` asked for."""
+    return SessionStartParams(
+        agent_config=SessionOptions(**options),
+        spawned_by_session_id=starter.session_id,
+        started_by_session_id=starter.session_id if attached else None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attached", [True, False])
+@pytest.mark.parametrize(
+    ("requested", "reason"),
+    [
+        ({"approval_policy": "auto-approve"}, "policy_must_match_starter"),
+        ({"agent": "auto-approve"}, "policy_must_match_starter"),
+        ({"auto_approve": True}, "auto_approve_on_spawned_start"),
+    ],
+    ids=["approval_policy", "legacy_agent_alias", "auto_approve"],
+)
+async def test_a_spawned_start_cannot_run_a_policy_its_starter_does_not(
+    attached: bool, requested: dict[str, Any], reason: str
+) -> None:
+    """*Prepare*: A session on `ask` that started a session.
+    *Do*: Start that session asking for auto-approve, attached or detached.
+    *Assert*: The start is refused with a reason, and no session runs.
+    """
+    host = cast(Any, _harness_backend_host())
+    starter = await _starter_on(host, "ask")
+
+    with pytest.raises(SessionBackendError) as refused:
+        await host.start(_spawned(starter, attached, **requested))
+
+    assert refused.value.data == {"reason": reason}
+    assert [adapter.session_id for adapter in host._adapters.values()] == [
+        starter.session_id
+    ]
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attached", [True, False])
+async def test_a_spawned_start_runs_its_starters_policy(attached: bool) -> None:
+    """*Prepare*: A session on `ask` that started a session.
+    *Do*: Start it with the same policy, and with none.
+    *Assert*: Both run `ask`, with no bypass.
+    """
+    host = cast(Any, _harness_backend_host())
+    starter = await _starter_on(host, "ask")
+
+    same = await host.start(_spawned(starter, attached, approval_policy="ask"))
+    unnamed = await host.start(_spawned(starter, attached))
+
+    for started in (same, unnamed):
+        child = cast(Any, started.backend)
+        assert child._context.agents.active_policy.name == "ask"
+        assert child._adapter_config.bypass_approval is False
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("attached", "link"), [(True, "attached"), (False, "detached")]
+)
+async def test_a_spawned_start_announces_its_starter_and_link(
+    attached: bool, link: str, telemetry_events: list[dict[str, Any]]
+) -> None:
+    """*Prepare*: A session that asked for a session.
+    *Do*: Start that session, attached or detached.
+    *Assert*: Its ``vibe.new_session`` names the starter and the link; the
+    starter's own one names neither.
+    """
+    host = cast(Any, _harness_backend_host())
+    starter = await _starter_on(host, "ask")
+    await host.start(_spawned(starter, attached))
+    await asyncio.sleep(0)
+
+    started = [
+        event["properties"]
+        for event in telemetry_events
+        if event["event_name"] == "vibe.new_session"
+    ]
+    assert [props.get("started_by_session_id") for props in started] == [
+        None,
+        starter.session_id,
+    ]
+    assert [props.get("start_link") for props in started] == [None, link]
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_attached_start_from_a_client_before_spawned_by_announces_its_starter(
+    telemetry_events: list[dict[str, Any]],
+) -> None:
+    """*Prepare*: A session that asked for a session.
+    *Do*: Start it as a client from before `spawnedBySessionId` does: attached,
+    naming only `startedBySessionId`.
+    *Assert*: Its ``vibe.new_session`` still names the starter, attached.
+    """
+    host = cast(Any, _harness_backend_host())
+    starter = await _starter_on(host, "ask")
+    await host.start(SessionStartParams(started_by_session_id=starter.session_id))
+    await asyncio.sleep(0)
+
+    (_, child) = [
+        event["properties"]
+        for event in telemetry_events
+        if event["event_name"] == "vibe.new_session"
+    ]
+    assert child.get("started_by_session_id") == starter.session_id
+    assert child.get("start_link") == "attached"
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_spawned_start_takes_the_policy_its_starter_runs_when_it_starts() -> (
+    None
+):
+    """*Prepare*: A session on `auto-approve` that asked for a session, then the
+    user tightened it to `ask` before the client started that session.
+    *Do*: Start the session the client was told to start in auto-approve.
+    *Assert*: It is refused: the starter runs `ask` now. Started without a
+    policy, it runs `ask`.
+    """
+    host = cast(Any, _harness_backend_host())
+    starter = await _starter_on(host, "auto-approve")
+    await starter._context.agents.aswitch_policy("ask")
+
+    with pytest.raises(SessionBackendError) as refused:
+        await host.start(_spawned(starter, False, approval_policy="auto-approve"))
+    started = await host.start(_spawned(starter, False))
+
+    assert refused.value.data == {"reason": "policy_must_match_starter"}
+    child = cast(Any, started.backend)
+    assert child._context.agents.active_policy.name == "ask"
+    assert child._adapter_config.bypass_approval is False
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("starter_agent", [None, "careful"])
+async def test_a_spawned_start_in_another_process_checks_the_starters_saved_policy(
+    tmp_path: Path, config_dir: Path, starter_agent: str | None
+) -> None:
+    """*Prepare*: A session on `ask` held open by one app server process, on
+    the default agent or a custom one.
+    *Do*: Start the session it asked for in another process, which Desktop's
+    pool picks by free room, asking for auto-approve, then for nothing.
+    *Assert*: The first is refused and the second runs `ask`: the other
+    process reads the starter's saved policy.
+    """
+    agents_dir = config_dir / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "careful.toml").write_text('description = "Careful"\n')
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+    starter_host = cast(Any, _harness_backend_host(config))
+    started = await starter_host.start(
+        SessionStartParams(
+            agent_config=SessionOptions(agent=starter_agent, approval_policy="ask")
+        )
+    )
+    starter = cast(Any, started.backend)
+    await _persist_with_a_turn(starter, "persist me")
+    other_host = cast(Any, _harness_backend_host(config))
+
+    with pytest.raises(SessionBackendError) as refused:
+        await other_host.start(_spawned(starter, False, approval_policy="auto-approve"))
+    child = await other_host.start(_spawned(starter, False))
+
+    assert refused.value.data == {"reason": "policy_must_match_starter"}
+    assert cast(Any, child.backend)._context.agents.active_policy.name == "ask"
+    await other_host.shutdown()
+    await starter_host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_api", [False, True])
+async def test_a_spawned_start_in_another_process_from_a_starter_on_the_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, session_api: bool
+) -> None:
+    """*Prepare*: A session started without naming an agent or a policy, so on
+    the host's defaults, held open by one app server process, during the turn
+    whose model asks for a session: each turn start saves what it runs, on
+    both turn paths.
+    *Do*: Start the session it asked for in another process.
+    *Assert*: The start runs the starter's policy rather than being refused.
+    """
+    if session_api:
+        monkeypatch.setenv("VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API", "true")
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        ),
+        default_approval_policy="ask",
+    )
+    starter_host = cast(Any, _harness_backend_host(config))
+    started = await starter_host.start(SessionStartParams())
+    starter = cast(Any, started.backend)
+    await _persist_with_a_turn(starter, "persist me")
+    other_host = cast(Any, _harness_backend_host(config))
+
+    child = await other_host.start(_spawned(starter, False))
+
+    assert cast(Any, child.backend)._context.agents.active_policy.name == "ask"
+    await other_host.shutdown()
+    await starter_host.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attached", [True, False])
+async def test_a_session_started_from_the_default_agent_runs_it_under_another_default(
+    config_dir: Path, attached: bool
+) -> None:
+    """*Prepare*: A config whose `default_agent` is a custom agent, and a
+    session switched to the built-in `default` agent.
+    *Do*: Start the session it asks for, which names no agent, as clients do
+    for a starter on `default`.
+    *Assert*: The new session runs `default` too, not the configured default.
+    """
+    agents_dir = config_dir / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "careful.toml").write_text('description = "Careful"\n')
+    host = cast(
+        Any, _harness_backend_host(build_test_vibe_config(default_agent="careful"))
+    )
+    started = await host.start(
+        SessionStartParams(agent_config=SessionOptions(agent="default"))
+    )
+    starter = cast(Any, started.backend)
+
+    child = await host.start(_spawned(starter, attached))
+
+    assert cast(Any, child.backend)._context.agents.active_agent.name == "default"
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_spawned_start_from_a_custom_agent_session_an_older_build_saved(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """*Prepare*: A session on a custom agent saved by a build from before the
+    split, so with `agent_name` and no `approval_policy`, resumed by one app
+    server process and given a turn, the earliest its model can ask for a
+    session.
+    *Do*: Start the session it asks for in another process.
+    *Assert*: The start runs the starter's policy rather than being refused.
+    """
+    from mistralai_vibe_local_harness.vibe._storage import SessionPin
+
+    agents_dir = config_dir / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "careful.toml").write_text('description = "Careful"\n')
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        ),
+        default_approval_policy="ask",
+    )
+    first_host = cast(Any, _harness_backend_host(config))
+    started = await first_host.start(
+        SessionStartParams(agent_config=SessionOptions(agent="careful"))
+    )
+    await _persist_with_a_turn(started.backend, "persist me")
+    session = cast(Any, started.backend)._session
+    await session.persist_pin(SessionPin.APPROVAL_POLICY, "")
+    session_id = started.backend.session_id
+    await first_host.shutdown()
+
+    starter_host = cast(Any, _harness_backend_host(config))
+    resumed = await starter_host.resume(SessionResumeParams(session_id=session_id))
+    starter = cast(Any, resumed.backend)
+    await _persist_with_a_turn(starter, "after the upgrade")
+    other_host = cast(Any, _harness_backend_host(config))
+
+    child = await other_host.start(_spawned(starter, False))
+
+    agents = cast(Any, child.backend)._context.agents
+    assert (agents.active_agent.name, agents.active_policy.name) == ("careful", "ask")
+    await other_host.shutdown()
+    await starter_host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_spawned_start_from_a_custom_agent_named_like_a_removed_mode(
+    tmp_path: Path, config_dir: Path
+) -> None:
+    """*Prepare*: A session on a custom agent named `plan`, the name of a mode
+    removed before the split, in `accept-edits`, held open by one process.
+    *Do*: Start the session it asks for in another process.
+    *Assert*: The child runs that `plan` agent in `accept-edits`, read from the
+    starter's pins as a resume reads them, not as the removed mode.
+    """
+    agents_dir = config_dir / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "plan.toml").write_text('description = "Plans"\n')
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+    starter_host = cast(Any, _harness_backend_host(config))
+    started = await starter_host.start(
+        SessionStartParams(
+            agent_config=SessionOptions(agent="plan", approval_policy="accept-edits")
+        )
+    )
+    starter = cast(Any, started.backend)
+    await _persist_with_a_turn(starter, "persist me")
+    other_host = cast(Any, _harness_backend_host(config))
+
+    child = await other_host.start(_spawned(starter, False))
+
+    agents = cast(Any, child.backend)._context.agents
+    assert (agents.active_agent.name, agents.active_policy.name) == (
+        "plan",
+        "accept-edits",
+    )
+    await other_host.shutdown()
+    await starter_host.shutdown()
+
+
+_VIBEBOT_STARTER = "vibebot:vibe-bot--u1--default:local_cb-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ceiling", "user_default", "requested", "runs"),
+    [
+        (None, "auto-approve", "auto-approve", "ask"),
+        (None, "auto-approve", None, "ask"),
+        ("smart-approve", "auto-approve", "auto-approve", "smart-approve"),
+        ("smart-approve", "accept-edits", "auto-approve", "accept-edits"),
+        ("smart-approve", "auto-approve", "accept-edits", "accept-edits"),
+        ("smart-approve", "auto-approve", None, "smart-approve"),
+        ("auto-approve", "auto-approve", "auto-approve", "auto-approve"),
+        ("auto-approve", "ask", "auto-approve", "ask"),
+    ],
+)
+async def test_a_session_a_vibebot_thread_starts_runs_at_most_the_machines_ceiling(
+    ceiling: str | None, user_default: str, requested: str | None, runs: str
+) -> None:
+    """*Prepare*: This machine's ceiling for Vibebot sessions (`ask` unless the
+    user raised it), the user's own default policy, and a start a Vibebot
+    thread asked for, in the cloud.
+    *Do*: Start it with the policy the bot requested, or none.
+    *Assert*: It runs the strictest of the three.
+    """
+    ceiling_setting: dict[str, Any] = (
+        {"vibe_bot_max_approval_policy": ceiling} if ceiling else {}
+    )
+    config = build_test_vibe_config(
+        default_approval_policy=user_default, **ceiling_setting
+    )
+    host = cast(Any, _harness_backend_host(config))
+
+    started = await host.start(
+        SessionStartParams(
+            agent_config=SessionOptions(approval_policy=requested),
+            started_by_session_id=_VIBEBOT_STARTER,
+        )
+    )
+
+    child = cast(Any, started.backend)
+    assert child._context.agents.active_policy.name == runs
+    assert child._adapter_config.bypass_approval is False
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_vibebot_start_announces_no_starter(
+    telemetry_events: list[dict[str, Any]],
+) -> None:
+    """A Vibebot thread is not a session, so its start names no starter."""
+    host = cast(Any, _harness_backend_host())
+
+    await host.start(SessionStartParams(started_by_session_id=_VIBEBOT_STARTER))
+    await asyncio.sleep(0)
+
+    (props,) = [
+        event["properties"]
+        for event in telemetry_events
+        if event["event_name"] == "vibe.new_session"
+    ]
+    assert props.get("started_by_session_id") is None
+    assert props.get("start_link") is None
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_vibebot_asking_for_auto_approve_without_the_users_opt_in_runs_ask() -> (
+    None
+):
+    """The user never raised this machine's Vibebot ceiling, and even runs
+    `auto-approve` themselves: the bot's request for it still runs `ask`.
+    """
+    config = build_test_vibe_config(default_approval_policy="auto-approve")
+    host = cast(Any, _harness_backend_host(config))
+
+    started = await host.start(
+        SessionStartParams(
+            agent_config=SessionOptions(approval_policy="auto-approve"),
+            started_by_session_id=_VIBEBOT_STARTER,
+        )
+    )
+
+    child = cast(Any, started.backend)
+    assert child._context.agents.active_policy.name == "ask"
+    assert child._adapter_config.bypass_approval is False
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_vibebot_start_cannot_ask_for_the_session_wide_bypass() -> None:
+    host = cast(Any, _harness_backend_host())
+
+    started = await host.start(
+        SessionStartParams(
+            agent_config=SessionOptions(auto_approve=True),
+            started_by_session_id=_VIBEBOT_STARTER,
+        )
+    )
+
+    child = cast(Any, started.backend)
+    assert child._context.agents.active_policy.name == "ask"
+    assert child._adapter_config.bypass_approval is False
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_start_whose_starter_is_unknown_is_refused() -> None:
+    host = cast(Any, _harness_backend_host())
+
+    with pytest.raises(SessionBackendError) as refused:
+        await host.start(
+            SessionStartParams(
+                agent_config=SessionOptions(approval_policy="auto-approve"),
+                spawned_by_session_id="no-such-session",
+            )
+        )
+
+    assert refused.value.data == {"reason": "starter_unknown"}
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_session_reopened_on_another_agent_than_its_first_runs_only_that_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """*Prepare*: A session started as `swan`, switched to `duck` after a turn,
+    then closed. Its Core was created with swan's prompt and kept it.
+    *Do*: Reopen it and read what the reopened Core is told.
+    *Assert*: It runs `duck`, and its instructions carry duck's prompt only.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server.protocol import AgentSwitchParams
+    from vibe.core.trusted_folders import trusted_folders_manager
+
+    agents_dir = tmp_path / ".vibe" / "agents"
+    agents_dir.mkdir(parents=True)
+    prompts_dir = tmp_path / ".vibe" / "prompts"
+    prompts_dir.mkdir(parents=True)
+    for name, line in (("swan", "You are a swan."), ("duck", "You are a duck.")):
+        (agents_dir / f"{name}.toml").write_text(
+            f'description = "{name}"\nsystem_prompt_id = "{name}"\n', encoding="utf-8"
+        )
+        (prompts_dir / f"{name}.md").write_text(line, encoding="utf-8")
+    trusted_folders_manager.trust_for_session(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+
+    def open_host() -> Any:
+        process = runtime_module.HarnessProcess(services=process_services)
+        monkeypatch.setattr(
+            process.connector_catalog, "resolve_catalog", AsyncMock(return_value=None)
+        )
+        return process.create_session_backend_host(
+            cast(Any, FakeSessionBackendServices())
+        )
+
+    first = open_host()
+    started = await first.start(
+        SessionStartParams(
+            agent_config=SessionOptions(
+                cwd=str(tmp_path), agent="swan", trust_workspace=True
+            )
+        )
+    )
+    session_id = started.backend.session_id
+    await _persist_with_a_turn(started.backend, "as swan")
+    await started.backend.switch_agent(
+        AgentSwitchParams(session_id=session_id, agent_name="duck")
+    )
+    await _persist_with_a_turn(started.backend, "as duck")
+    live = cast(Any, started.backend)._session._runtime_for_host().config
+    # Core holds duck's instructions for the next prompt it builds.
+    assert live.system_instructions.startswith("You are a duck.")
+    await first.shutdown()
+
+    second = open_host()
+    resumed = await second.resume(
+        SessionResumeParams(
+            session_id=session_id,
+            agent_config=SessionOptions(cwd=str(tmp_path), trust_workspace=True),
+        )
+    )
+
+    backend = cast(Any, resumed.backend)
+    await _persist_with_a_turn(backend, "after reopen")
+    instructions = backend._session._runtime_for_host().config.system_instructions
+    assert backend._context.agents.active_agent.name == "duck"
+    assert instructions.startswith("You are a duck.")
+    assert "You are a swan." not in instructions
+    await second.shutdown()
+
+
+def test_a_missing_pick_reported_before_the_client_subscribes_reaches_it_once_it_does(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _inert_adapter(_RecordingSession(), None, str(tmp_path))
+    notices: list[str] = []
+    monkeypatch.setattr(
+        adapter, "_publish_notice", lambda message, **_: notices.append(message)
+    )
+
+    adapter._report_unrestored_skills(["ask-data"], False)  # pyright: ignore[reportPrivateUsage]
+    held = list(notices)
+    adapter._publish_startup_notices()  # pyright: ignore[reportPrivateUsage]
+
+    assert held == []
+    assert len(notices) == 1
+    assert "ask-data" in notices[0]
+
+
+def test_a_pick_back_after_a_retry_reaches_a_subscribed_client_as_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _inert_adapter(_RecordingSession(), None, str(tmp_path))
+    notices: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        adapter,
+        "_publish_notice",
+        lambda message, level="warning", **_: notices.append((message, level)),
+    )
+    adapter._publish_startup_notices()  # pyright: ignore[reportPrivateUsage]
+
+    adapter._report_restored_skills(["ask-data"])  # pyright: ignore[reportPrivateUsage]
+
+    assert [level for _, level in notices] == ["info"]
+    assert "ask-data" in notices[0][0]
+
+
+def test_a_held_notice_keeps_its_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = _inert_adapter(_RecordingSession(), None, str(tmp_path))
+    notices: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        adapter,
+        "_publish_notice",
+        lambda message, level="warning", **_: notices.append((message, level)),
+    )
+
+    adapter._report_restored_skills(["ask-data"])  # pyright: ignore[reportPrivateUsage]
+    adapter._publish_startup_notices()  # pyright: ignore[reportPrivateUsage]
+
+    assert [level for _, level in notices] == ["info"]

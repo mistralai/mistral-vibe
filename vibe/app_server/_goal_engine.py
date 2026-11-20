@@ -229,16 +229,30 @@ def end_turn(
 
 
 def settle_abandoned_turns(
-    goal: PublicGoal | None, accounting: GoalAccounting
+    goal: PublicGoal | None,
+    accounting: GoalAccounting,
+    *,
+    running_turn_id: str | None = None,
 ) -> tuple[PublicGoal | None, GoalAccounting]:
     """Charge the turns a closed session left running, then forget them.
 
-    No turn survives the session, so a binding found on restore is stale: kept,
-    it would count again in the live total and the budget forever.
+    A binding found on restore is stale: kept, it would count again in the live
+    total and the budget forever. Except ``running_turn_id``, the turn the
+    reopened session carries on: its end charges it, once.
     """
-    if not accounting.turns:
+    kept = {
+        turn_id: turn
+        for turn_id, turn in accounting.turns.items()
+        if turn_id == running_turn_id
+    }
+    abandoned_turns = {
+        turn_id: turn
+        for turn_id, turn in accounting.turns.items()
+        if turn_id not in kept
+    }
+    if not abandoned_turns:
         return goal, accounting
-    abandoned = accounting.turns.values()
+    abandoned = abandoned_turns.values()
     remainder_ms = accounting.time_remainder_ms
     if goal is not None:
         own = [turn for turn in abandoned if turn.goal_id == goal.goal_id]
@@ -251,10 +265,10 @@ def settle_abandoned_turns(
                 "time_used_seconds": goal.time_used_seconds + seconds,
             }
         )
-    charged = [*accounting.charged_turn_ids, *accounting.turns][-MAX_CHARGED_TURNS:]
+    charged = [*accounting.charged_turn_ids, *abandoned_turns][-MAX_CHARGED_TURNS:]
     return goal, accounting.model_copy(
         update={
-            "turns": {},
+            "turns": kept,
             "charged_turn_ids": charged,
             "time_remainder_ms": remainder_ms,
         }

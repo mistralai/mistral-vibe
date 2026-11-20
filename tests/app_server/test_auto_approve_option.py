@@ -22,63 +22,37 @@ def agents_for(
 
 
 def test_without_auto_approve_the_options_are_unchanged(agents_for) -> None:
-    options = SessionOptions(agent="ask")
+    options = SessionOptions(approval_policy="ask")
 
-    assert resolve_start_auto_approve(options, agents_for("ask")) is options
+    assert resolve_start_auto_approve(options, agents_for()) is options
 
 
-@pytest.mark.parametrize("default_agent", ["ask", "accept-edits", "smart-approve"])
-def test_a_builtin_default_becomes_the_auto_approve_agent(
-    agents_for, default_agent: str
+@pytest.mark.parametrize("policy", ["ask", "accept-edits", "smart-approve"])
+def test_a_builtin_policy_becomes_the_auto_approve_policy(
+    agents_for, policy: str
 ) -> None:
-    agents = agents_for(default_agent=default_agent)
+    options = SessionOptions(approval_policy=policy, auto_approve=True)
 
-    resolved = resolve_start_auto_approve(SessionOptions(auto_approve=True), agents)
+    resolved = resolve_start_auto_approve(options, agents_for())
 
-    assert resolved.agent == "auto-approve"
+    assert resolved.approval_policy == "auto-approve"
     assert resolved.auto_approve is False
 
 
-@pytest.mark.parametrize("agent", ["ask", "accept-edits", "smart-approve"])
-def test_a_named_builtin_permission_mode_becomes_the_auto_approve_agent(
-    agents_for, agent: str
-) -> None:
-    options = SessionOptions(agent=agent, auto_approve=True)
-
-    resolved = resolve_start_auto_approve(options, agents_for(agent))
-
-    assert resolved.agent == "auto-approve"
-    assert resolved.auto_approve is False
-
-
-@pytest.mark.parametrize("agent", ["auto-approve", None])
-def test_the_auto_approve_agent_needs_no_bypass(agents_for, agent: str | None) -> None:
-    agents = agents_for(agent, default_agent="auto-approve")
-
-    resolved = resolve_start_auto_approve(
-        SessionOptions(agent=agent, auto_approve=True), agents
-    )
-
-    assert resolved.agent == agent
-    assert resolved.auto_approve is False
-
-
-@pytest.mark.parametrize("named", [True, False])
-def test_a_custom_agent_keeps_the_bypass(
-    agents_for, tmp_path: Path, named: bool
+def test_a_custom_agent_keeps_its_agent_and_takes_the_auto_approve_policy(
+    agents_for, tmp_path: Path
 ) -> None:
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir()
     (agents_dir / "reviewer.toml").write_text('description = "Reviews"\n')
-    agents = agents_for(
-        "reviewer" if named else None,
-        default_agent="ask" if named else "reviewer",
-        agent_paths=[str(agents_dir)],
-    )
-    options = SessionOptions(agent="reviewer" if named else None, auto_approve=True)
+    agents = agents_for("reviewer", agent_paths=[str(agents_dir)])
+    options = SessionOptions(agent="reviewer", auto_approve=True)
 
-    assert agents.active_profile.name == "reviewer"
-    assert resolve_start_auto_approve(options, agents) is options
+    resolved = resolve_start_auto_approve(options, agents)
+
+    assert resolved.agent == "reviewer"
+    assert resolved.approval_policy == "auto-approve"
+    assert resolved.auto_approve is False
 
 
 def test_a_disabled_auto_approve_mode_keeps_the_clamped_bypass(agents_for) -> None:
@@ -91,33 +65,13 @@ def test_a_disabled_auto_approve_mode_keeps_the_clamped_bypass(agents_for) -> No
     assert resolved is options
 
 
-def test_a_start_that_fell_back_from_its_agent_keeps_the_bypass(agents_for) -> None:
-    options = SessionOptions(agent="gone", auto_approve=True)
-
-    assert resolve_start_auto_approve(options, agents_for("ask")) is options
-
-
-@pytest.mark.parametrize("name", ["ask", "auto-approve"])
-def test_an_override_of_a_builtin_name_keeps_the_bypass(
-    agents_for, tmp_path: Path, name: str
-) -> None:
-    agents_dir = tmp_path / "agents"
-    agents_dir.mkdir()
-    (agents_dir / f"{name}.toml").write_text('description = "Mine"\n')
-    agents = agents_for(default_agent=name, agent_paths=[str(agents_dir)])
-    options = SessionOptions(auto_approve=True)
-
-    assert agents.active_profile.source_path is not None
-    assert resolve_start_auto_approve(options, agents) is options
-
-
 def test_an_auto_approve_override_that_asks_is_not_the_target(
     agents_for, tmp_path: Path
 ) -> None:
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir()
     (agents_dir / "auto-approve.toml").write_text('description = "Asks"\n')
-    agents = agents_for(default_agent="ask", agent_paths=[str(agents_dir)])
+    agents = agents_for(agent_paths=[str(agents_dir)])
     options = SessionOptions(auto_approve=True)
 
     assert resolve_start_auto_approve(options, agents) is options

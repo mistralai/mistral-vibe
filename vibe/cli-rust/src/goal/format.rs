@@ -38,15 +38,14 @@ pub fn status_label(status: GoalStatus) -> &'static str {
     }
 }
 
-/// The goal row's right part: progress while it runs, else what to do next.
+/// The goal row's right part: progress while it runs, else its status.
 pub fn row_detail(goal: &PublicGoal) -> String {
     let time = duration(goal.time_used_seconds);
     match goal.status {
         GoalStatus::Active => format!("{} · {time}", usage(goal)),
         GoalStatus::Complete => format!("complete · {} · {time}", tokens(goal.tokens_used)),
-        GoalStatus::BudgetLimited => "budget reached · /goal edit".to_owned(),
         GoalStatus::Unknown => String::new(),
-        status => format!("{} · /goal resume", status_label(status)),
+        status => status_label(status).to_owned(),
     }
 }
 

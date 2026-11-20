@@ -23,10 +23,12 @@ use crate::core::features::compaction::{
     model_input_reaches_compaction_threshold, record_reply_size, start_automatic_compaction,
     start_manual_compaction as start_manual_compaction_request,
 };
-use crate::core::features::notifications::notification_messages;
+use crate::core::features::instructions;
+use crate::core::features::notifications::{Notification, notification_messages};
 use crate::core::features::permissions::{ApprovalFailureReason, ApprovalOutcome};
 use crate::core::features::repeated_tool_failure;
 use crate::core::hooks::{HookCall, HookPoint, HookResult};
+use crate::core::pending_input::PendingEntry;
 use crate::core::state::hook_binding_ids;
 use crate::core::state::{
     ActivePhase, ActiveTurn, HarnessState, InterruptionResolution, TurnState,
@@ -61,6 +63,13 @@ pub(crate) enum TurnEvent {
     },
     ContextMessage {
         content: Vec<ContentBlock>,
+    },
+    InstructionsUpsert {
+        key: String,
+        content: String,
+    },
+    InstructionsDelete {
+        key: String,
     },
     ManualCompaction {
         extra_instructions: String,
@@ -132,6 +141,19 @@ pub(crate) fn dispatch(
             handle_context_message(state, content)
         }
         TurnEvent::ContextMessage { .. } => Err(invalid_state(state)),
+        TurnEvent::InstructionsUpsert { key, content }
+            if state.active().is_some() || state.pending_action_ids().is_empty() =>
+        {
+            handle_instructions_upsert(state, key, &content)
+        }
+        TurnEvent::InstructionsDelete { key }
+            if state.active().is_some() || state.pending_action_ids().is_empty() =>
+        {
+            handle_instructions_delete(state, key)
+        }
+        TurnEvent::InstructionsUpsert { .. } | TurnEvent::InstructionsDelete { .. } => {
+            Err(invalid_state(state))
+        }
 
         TurnEvent::ManualCompaction { extra_instructions }
             if !matches!(
@@ -268,7 +290,6 @@ fn apply_compaction_resolution(
         }
         CompactionResolution::ReturnIdle { outcome } => {
             state.turn = TurnState::Idle;
-            state.notifications.mark_ready();
             Ok(outcome)
         }
         CompactionResolution::FailTurn {
@@ -619,7 +640,7 @@ fn apply_completion_transition(
             // The discarded candidate leaves the context at the boundary its
             // request ended on, so context a hook sent precedes the feedback,
             // unless it waits for a pending steer.
-            let context = active.take_context_unless_steering_waits();
+            let context = state.take_context_unless_steering_waits()?;
             state.context.extend_current_turn(context);
             state.context.push_in_current_turn(feedback);
             let action = continue_active_turn(state)?;
@@ -729,20 +750,19 @@ fn apply_accepted_completion(
         context_tokens,
         input_tokens,
         message,
-        observable_candidate,
+        candidate,
         continuation,
     } = accepted;
     state.require_active_mut()?.iterations = next_iteration;
     record_reply_size(state, input_tokens, context_tokens)?;
     state.context.push_in_current_turn(message);
     let mut outcome = Outcome::quiet();
-    if let Some(candidate) = observable_candidate {
-        outcome.observe(Observation::AssistantMessageCommitted {
-            turn_id: active_turn_id(state)?.to_string(),
-            action_id,
-            candidate,
-        });
-    }
+    // Even a private-only candidate settles provisional output from a retried call.
+    outcome.observe(Observation::AssistantMessageCommitted {
+        turn_id: active_turn_id(state)?.to_string(),
+        action_id,
+        candidate,
+    });
     match continuation {
         AcceptedCompletionContinuation::Complete {
             output,
@@ -831,22 +851,42 @@ fn handle_context_message(
     content: Vec<ContentBlock>,
 ) -> Result<Outcome, CoreError> {
     validate_non_empty_content(&content, "context message content")?;
-    let message = StoredMessage::injected(Message::context(content));
-    match state.turn {
-        // During a Turn, context waits for the Turn's next Agent completion, or for the
-        // one that delivers the steering or notifications admitted before it. Unlike
-        // steering, it never extends a Turn that would otherwise finish: a Turn that
-        // ends first commits it for the next Turn.
-        TurnState::Active(_) => {
-            state.defer_context(message)?;
-            return Ok(Outcome::quiet());
-        }
-        TurnState::Compacting { .. } => {
-            return Err(CoreError::invalid_command(
-                "context cannot be injected while compaction is pending",
-            ));
-        }
-        TurnState::Idle | TurnState::Terminal { .. } => {}
+    add_context(state, StoredMessage::injected(Message::context(content)))
+}
+
+/// Appends a note that delivers `content` as the live instructions for `key`,
+/// even when they are already live with that text. A live key gets the note
+/// that says its previous text no longer applies.
+fn handle_instructions_upsert(
+    state: &mut HarnessState,
+    key: String,
+    content: &str,
+) -> Result<Outcome, CoreError> {
+    instructions::validate_upsert(&key, content).map_err(CoreError::invalid_command)?;
+    let note = instructions::upsert_note(state, key, content);
+    instructions::admit(state, std::slice::from_ref(&note))?;
+    add_context(state, note)
+}
+
+/// Appends a note that the instructions for `key` no longer apply, without the
+/// history before it changing. Nothing happens when the key is not live.
+fn handle_instructions_delete(state: &mut HarnessState, key: String) -> Result<Outcome, CoreError> {
+    crate::core::wire::message::validate_instructions_key(&key)
+        .map_err(CoreError::invalid_command)?;
+    let Some(note) = instructions::delete_note(state, key) else {
+        return Ok(Outcome::quiet());
+    };
+    add_context(state, note)
+}
+
+fn add_context(state: &mut HarnessState, message: StoredMessage) -> Result<Outcome, CoreError> {
+    // During a Turn, context waits for the Turn's next Agent completion, or for the
+    // one that delivers the steering or notifications admitted before it. Unlike
+    // steering, it never extends a Turn that would otherwise finish: a Turn that
+    // ends first commits it for the next Turn.
+    if matches!(state.turn, TurnState::Active(_)) {
+        state.defer_context(message)?;
+        return Ok(Outcome::quiet());
     }
     state.ensure_system_prompt();
     state.context.push_before_next_turn(message)?;
@@ -890,7 +930,7 @@ fn handle_user_message(
                 turn_id: turn_id.clone(),
                 content: observed_content,
             });
-            state.require_active_mut()?.defer_steer(message)?;
+            state.defer_steer(message)?;
             Ok(outcome)
         }
     }
@@ -928,81 +968,92 @@ fn outcome_for_action(state: &mut HarnessState, action: Action) -> Result<Outcom
     Ok(outcome.after(preflight_agent_action(state, action)?))
 }
 
+/// Commits pending input to model context in admission order. Consecutive
+/// notifications share one injected message.
 fn commit_pending_model_input(state: &mut HarnessState) -> Result<Outcome, CoreError> {
-    let active = state.require_active_mut()?;
     // An Agent request always ends where the model accepts input, so hook context joins every
     // one, including a retry, which does not mark model input ready, unless it waits for a steer.
-    if !active.take_model_input_ready() {
-        let context = active.take_context_unless_steering_waits();
+    if !state.require_active_mut()?.take_model_input_ready() {
+        let context = state.take_context_unless_steering_waits()?;
         state.context.extend_current_turn(context);
         return Ok(Outcome::quiet());
     }
+    let active = state.require_active_mut()?;
     let context = std::mem::take(&mut active.pending_context);
     let turn_id = active.turn_id.clone();
-    let steering = active.take_pending_steer();
-    let steering_count = steering.len();
+    let entries = state
+        .pending_input
+        .take_all(state.config().settings.context.notifications.recent_ids);
     // Context messages wait with the steering but are injected, so only the user's steering
     // counts toward finding a rejected request's input.
-    let user_steering = steering
+    let user_steering = entries
         .iter()
-        .filter(|message| !message.is_injected())
+        .filter(|entry| matches!(entry, PendingEntry::Steering(message) if !message.is_injected()))
         .count();
+    let active = state.require_active_mut()?;
     active.delivered_steering = active
         .delivered_steering
         .saturating_add(u32::try_from(user_steering).unwrap_or(u32::MAX));
-    let mut steering = steering.into_iter();
-    let mut notifications = state
-        .notifications
-        .take_ready(state.config().settings.context.notifications.recent_ids)
-        .into_iter()
-        .peekable();
     state.context.extend_current_turn(context);
     let mut outcome = Outcome::quiet();
-    for position in 0..=steering_count {
-        let mut group = Vec::new();
-        while notifications
-            .peek()
-            .is_some_and(|entry| entry.preceding_steers.min(steering_count) <= position)
-        {
-            group.push(
-                notifications
-                    .next()
-                    .expect("notification was inspected")
-                    .notification,
-            );
-        }
-        state.context.extend_current_turn(notification_messages(
-            &group,
-            &state.config().settings.prompts.agent_messages,
-            state
-                .config()
-                .settings
-                .tools
-                .subagents
-                .messages_resume_idle_children(),
-        )?);
-        for notification in group {
-            outcome.observe(Observation::NotificationDelivered {
+    let mut notifications = Vec::new();
+    for entry in entries {
+        let message = match entry {
+            PendingEntry::Notification(notification) => {
+                notifications.push(notification);
+                continue;
+            }
+            PendingEntry::Steering(message) => message,
+        };
+        commit_notifications(
+            state,
+            &turn_id,
+            std::mem::take(&mut notifications),
+            &mut outcome,
+        )?;
+        let Message::User {
+            content, context, ..
+        } = &message.message
+        else {
+            return Err(CoreError::invariant(
+                "pending steering must contain user or context messages",
+            ));
+        };
+        if !context {
+            outcome.observe(Observation::TurnSteered {
                 turn_id: turn_id.clone(),
-                notification,
+                content: content.clone(),
             });
         }
-        if let Some(message) = steering.next() {
-            let Message::User { content, context } = &message.message else {
-                return Err(CoreError::invariant(
-                    "pending steering must contain user or context messages",
-                ));
-            };
-            if !context {
-                outcome.observe(Observation::TurnSteered {
-                    turn_id: turn_id.clone(),
-                    content: content.clone(),
-                });
-            }
-            state.context.push_in_current_turn(message);
-        }
+        state.context.push_in_current_turn(message);
     }
+    commit_notifications(state, &turn_id, notifications, &mut outcome)?;
     Ok(outcome)
+}
+
+fn commit_notifications(
+    state: &mut HarnessState,
+    turn_id: &str,
+    notifications: Vec<Notification>,
+    outcome: &mut Outcome,
+) -> Result<(), CoreError> {
+    state.context.extend_current_turn(notification_messages(
+        &notifications,
+        &state.config().settings.prompts.agent_messages,
+        state
+            .config()
+            .settings
+            .tools
+            .subagents
+            .messages_resume_idle_children(),
+    )?);
+    for notification in notifications {
+        outcome.observe(Observation::NotificationDelivered {
+            turn_id: turn_id.to_string(),
+            notification,
+        });
+    }
+    Ok(())
 }
 
 fn preflight_agent_action(state: &mut HarnessState, action: Action) -> Result<Outcome, CoreError> {
@@ -1036,7 +1087,6 @@ fn start_turn(
             turn_id: turn_id.clone(),
             iterations: 0,
             phase: ActivePhase::AwaitingHook { pending },
-            pending_steer: Vec::new(),
             pending_context: Vec::new(),
             model_input_ready: false,
             output_limit_retries: 0,
@@ -1071,14 +1121,18 @@ fn commit_turn(
     });
     state.ensure_system_prompt();
     // Inputs retained while idle precede the command that starts this Turn.
-    state.notifications.mark_ready();
-    let pending = state
-        .notifications
-        .take_ready(state.config().settings.context.notifications.recent_ids);
-    let notifications = pending
+    // Steering cannot wait here: ending a Turn commits its steering.
+    let notifications = state
+        .pending_input
+        .take_all(state.config().settings.context.notifications.recent_ids)
         .into_iter()
-        .map(|entry| entry.notification)
-        .collect::<Vec<_>>();
+        .map(|entry| match entry {
+            PendingEntry::Notification(notification) => Ok(notification),
+            PendingEntry::Steering(_) => Err(CoreError::invariant(
+                "pending steering requires an active turn",
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let messages = notification_messages(
         &notifications,
         &state.config().settings.prompts.agent_messages,
@@ -1105,7 +1159,6 @@ fn commit_turn(
         turn_id,
         iterations: 0,
         phase,
-        pending_steer: Vec::new(),
         pending_context: Vec::new(),
         model_input_ready: true,
         output_limit_retries: 0,

@@ -4,6 +4,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import Field, model_validator
 
+from ....session_values import EXPERIMENTAL
 from ....session_values import (
     CancelledCause as CancelledCause,
 )
@@ -40,6 +41,7 @@ from .common import (
 from .history import HistoryEntry
 
 type SortDirection = Literal["forward", "backward"]
+type BackgroundProcessStatus = Literal["running", "completed", "failed", "stopped", "orphaned"]
 
 
 class ListPageRequest(SessionModel):
@@ -103,6 +105,15 @@ class Session(SessionModel):
     created_at: UnixMs
     updated_at: UnixMs
     archived_at: UnixMs | None = None
+    content_encrypted: bool = Field(
+        default=False, exclude_if=lambda value: not value, json_schema_extra=EXPERIMENTAL
+    )
+    """Whether the Session's content is encrypted with a key that the control plane does not hold.
+
+    The client that creates the Session sets it, and it never changes. In such a Session, history
+    entries, callbacks, callback answers and the content blocks a client sends use their encrypted
+    models, such as ``EncryptedHistoryEntry``. This field is experimental: a minor release can
+    change it without a compatibility path."""
 
     @model_validator(mode="after")
     def validate_termination(self) -> Self:
@@ -116,6 +127,20 @@ class Session(SessionModel):
         return self
 
 
+class BackgroundProcess(SessionModel):
+    """One background process of a Session, as the model started it.
+
+    `orphaned` means the Runtime lost track of the process, for example after a restart, and
+    cannot say how it ended. `exitCode` is set only for `completed` and `failed`.
+    """
+
+    process_id: str
+    command: str
+    status: BackgroundProcessStatus | UnknownValue
+    exit_code: int | None = Field(default=None, exclude_if=lambda value: value is None)
+    started_at: UnixMs
+
+
 class SessionState(SessionModel):
     """Public projection returned by stateless Session reads."""
 
@@ -124,3 +149,14 @@ class SessionState(SessionModel):
     history: Page[HistoryEntry] | None = None
     turns: Page[TurnState] | None = None
     active_callbacks: list[SessionCallback] = Field(default_factory=list)
+    background_processes: list[BackgroundProcess] = Field(
+        default_factory=list,
+        exclude_if=lambda processes: not processes,
+        description=(
+            "The Session's background processes, ordered by `startedAt` then `processId`: the "
+            "running ones and the most recently finished ones. Absent means the same as empty. "
+            "`background_processes_updated` replaces the list on each change. Only a Host that "
+            "reports background processes to clients fills it; on any other, it stays empty "
+            "even while processes run."
+        ),
+    )

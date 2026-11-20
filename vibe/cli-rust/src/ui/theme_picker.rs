@@ -15,7 +15,8 @@ use crate::theme_picker::options;
 /// area shrinks to make room for the bottom-app.
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let kind = super::bottom_app::Kind::Theme;
-    super::bottom_app::draw(app, f, area, box_height(area.height), kind, draw_box);
+    let height = box_height(area.height) + hint_line::extra(HINTS, area.width);
+    super::bottom_app::draw(app, f, area, height, kind, draw_box);
 }
 
 /// Visible option rows: at most half the screen height.
@@ -57,7 +58,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
             .add_modifier(Modifier::BOLD),
     );
 
-    let visible = h.saturating_sub(5) as usize;
+    let visible = h.saturating_sub(5 + hint_line::extra(HINTS, w)) as usize;
     let top = by + 2;
     let opts = options();
     let total = opts.len();
@@ -103,7 +104,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         );
     }
 
-    hint_line::draw(f, bx + 2, by + h - 2, HINTS);
+    hint_line::draw_footer(f, area, HINTS);
 }
 
 const HINTS: &[Hint] = &[(key::NAV, action::PREVIEW), hints::SELECT, hints::CANCEL];

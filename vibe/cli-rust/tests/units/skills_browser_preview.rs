@@ -1,4 +1,4 @@
-//! `/skills` body pane on the list and per page row: what each highlight shows, fetched once.
+//! `/skills` description above the list, and the body pane per page row: what each highlight shows, fetched once.
 
 use std::time::Duration;
 
@@ -13,108 +13,58 @@ use vibe_rs::skills_browser::picker::PickerRow;
 use vibe_rs::skills_browser::{self, Event};
 
 use crate::skills_browser_support::{
-    answer, catalog_row, highlight_pick, highlight_row, installed_row, next, open, open_page,
-    opened, pin, press, registry, search, session, shadowed, shared, shown_body,
+    catalog_row, highlight_pick, highlight_row, installed_row, next, open, open_page, opened, pin,
+    press, registry, session, shadowed, shared, shown_body,
 };
 use crate::support::{render, rows, stub};
 
 #[test]
-fn an_installed_row_previews_the_body_its_name_resolves_to() {
+fn the_list_shows_the_highlighted_description_above_its_rows_and_no_body() {
     let mut lint = pin("lint", "local", "global");
-    lint["prompt"] = json!("# lint\n\nCheck the style.");
-    let app = opened(vec![lint], None);
-    let shown = bodies::shown(&app.skills_browser).map(|shown| shown.content);
-    let lint_pin = Content::Pin {
-        name: "lint".to_owned(),
-        scope: "global".to_owned(),
-        source: "local".to_owned(),
-    };
-    assert_eq!(shown, Some(lint_pin));
-    let body = shown_body(&app);
-    assert_eq!(
-        body,
-        Some(Body::Ready("# lint\n\nCheck the style.".to_owned()))
-    );
+    lint["description"] = json!("Check the style before every commit.");
+    lint["prompt"] = json!("# lint body");
+    let mut app = opened(vec![lint], None);
+    assert_eq!(shown_body(&app), None);
+    let screen = rows(&render(100, 40, |frame| app.draw(frame)));
+    let at = |text: &str| screen.iter().position(|row| row.contains(text));
+    let description = at("Check the style before every commit.").expect("drawn");
+    let headings = at("Scope").expect("drawn");
+    assert!(description < headings, "above the rows");
+    assert_eq!(at("# lint body"), None, "the body stays on the page");
 }
 
 #[tokio::test]
-async fn shared_rows_fetch_one_newest_body_at_a_time_the_highlighted_one_next() {
+async fn the_shared_tab_fetches_no_body() {
     let mut app = App::default();
     let (client, mut frames) = session(&mut app);
     open(&mut app, &client, Vec::new(), Some(shared()));
     assert_eq!(next(&mut frames).await.0, "skills/catalog");
     press(&mut app, &client, KeyCode::Tab);
-    let (method, params) = next(&mut frames).await;
-    assert_eq!(
-        (method.as_str(), params["skillId"].clone()),
-        ("skills/detail", json!("id-alpha"))
-    );
     press(&mut app, &client, KeyCode::Char('j'));
-    press(&mut app, &client, KeyCode::Char('j'));
-    let early = tokio::time::timeout(Duration::from_millis(200), frames.recv()).await;
-    assert!(early.is_err(), "nothing more while Alpha is on its way");
-    assert_eq!(shown_body(&app), Some(Body::Loading));
-    answer(&mut app, &client, "id-alpha", 1);
-    let (_, params) = next(&mut frames).await;
-    let zeta = (params["skillId"].clone(), params["version"].clone());
-    assert_eq!(
-        zeta,
-        (json!("id-zeta"), json!(2)),
-        "the highlighted row, deploy passed over"
-    );
-    press(&mut app, &client, KeyCode::Char('k'));
-    answer(&mut app, &client, "id-zeta", 2);
-    let (_, params) = next(&mut frames).await;
-    let deploy = (params["skillId"].clone(), params["version"].clone());
-    assert_eq!(deploy, (json!("id-deploy"), json!(4)), "the newest version");
-    answer(&mut app, &client, "id-deploy", 4);
-    press(&mut app, &client, KeyCode::Char('k'));
-    press(&mut app, &client, KeyCode::Char('j'));
-    let again = tokio::time::timeout(Duration::from_millis(200), frames.recv()).await;
-    assert!(again.is_err(), "each body is fetched once");
-    let shown = bodies::shown(&app.skills_browser).unwrap();
-    let deploy = Content::Version(("id-deploy".to_owned(), Some(4)));
-    assert_eq!(
-        (shown.content, shown.intro.as_deref()),
-        (deploy, Some("Ship it"))
+    let fetched = tokio::time::timeout(Duration::from_millis(200), frames.recv()).await;
+    assert!(
+        fetched.is_err(),
+        "the list reads descriptions from the catalog"
     );
 }
 
-#[tokio::test]
-async fn a_body_answer_for_an_earlier_opening_is_dropped() {
-    let mut app = App::default();
-    let (client, mut frames) = session(&mut app);
-    let reopen = |app: &mut App| {
-        open(app, &client, Vec::new(), Some(shared()));
-        press(app, &client, KeyCode::Tab);
-    };
-    reopen(&mut app);
-    assert_eq!(next(&mut frames).await.0, "skills/catalog");
-    assert_eq!(next(&mut frames).await.1["skillId"], "id-alpha");
+#[test]
+fn a_body_answer_for_an_earlier_opening_is_dropped() {
+    let client = stub();
+    let mut app = opened(Vec::new(), Some(shared()));
     let earlier = app.skills_browser.generation;
     press(&mut app, &client, KeyCode::Esc);
-    assert!(!app.skills_browser.open);
-    reopen(&mut app);
-    assert_eq!(next(&mut frames).await.0, "skills/catalog");
-    assert_eq!(
-        next(&mut frames).await.1["skillId"],
-        "id-alpha",
-        "the new opening asks again"
-    );
+    open(&mut app, &client, Vec::new(), Some(shared()));
     let stale = Event::Body {
         generation: earlier,
         key: ("id-alpha".to_owned(), Some(1)),
         body: Err("skills/detail timed out".to_owned()),
     };
     skills_browser::apply_event(&mut app, &client, stale);
-    assert_eq!(
-        shown_body(&app),
-        Some(Body::Loading),
-        "the stale failure is dropped"
+    assert!(
+        app.skills_browser.bodies.is_empty(),
+        "the stale answer is dropped"
     );
-    answer(&mut app, &client, "id-alpha", 1);
-    let body = Body::Ready("# id-alpha v1".to_owned());
-    assert_eq!(shown_body(&app), Some(body));
 }
 
 #[test]
@@ -139,28 +89,22 @@ fn a_pending_install_previews_what_it_would_load_the_project_choice_first() {
 }
 
 #[test]
-fn no_row_to_show_means_no_pane() {
+fn a_skill_without_a_description_says_so_and_the_rows_stay_put() {
     let client = stub();
-    let mut app = opened(vec![pin("lint", "local", "global")], None);
-    press(&mut app, &client, KeyCode::Char('/'));
-    search(&mut app, &client, "zzz");
-    assert_eq!(shown_body(&app), None);
-}
-
-#[test]
-fn a_box_from_140_columns_previews_beside_the_list_and_under_it_below() {
     let mut lint = pin("lint", "local", "global");
-    lint["prompt"] = json!("# lint\n\nCheck the style.");
-    let mut app = opened(vec![lint], None);
-    let mut headings = |width: u16| {
-        let screen = rows(&render(width, 40, |frame| app.draw(frame)));
-        let found = screen
-            .into_iter()
-            .find(|row| row.contains("Skill") && row.contains("Scope"));
-        found.expect("the column names are drawn")
+    lint["description"] = json!("Check the style before every commit, then run the formatter on every file you changed and fix what it reports, and repeat.");
+    let mut app = opened(vec![lint, pin("zed", "local", "global")], None);
+    let heading_row = |app: &mut App| {
+        let screen = rows(&render(60, 40, |frame| app.draw(frame)));
+        let at = screen.iter().position(|row| row.contains("Scope"));
+        (at.expect("drawn"), screen.join("\n"))
     };
-    assert!(headings(140).contains("# lint"), "beside the list");
-    assert!(!headings(139).contains("# lint"), "under the rows");
+    let (long, screen) = heading_row(&mut app);
+    assert!(screen.contains('…'), "a long description is cut");
+    press(&mut app, &client, KeyCode::Char('j'));
+    let (none, screen) = heading_row(&mut app);
+    assert!(screen.contains("No description"));
+    assert_eq!(long, none, "the rows never move");
 }
 
 #[test]
@@ -178,12 +122,6 @@ fn each_scope_row_shows_its_own_pin_and_the_other_rows_the_page_s() {
     assert_eq!(shown(&app), Some(Body::Ready("# deploy v2".to_owned())));
     highlight_row(&mut app, Property::Scope(SkillScope::Project));
     assert_eq!(shown(&app), Some(Body::Ready("# deploy v3".to_owned())));
-    highlight_row(&mut app, Property::Enabled);
-    assert_eq!(
-        shown(&app),
-        Some(Body::Ready("# deploy v3".to_owned())),
-        "the nearest pin"
-    );
     let shared_row = catalog_row("id-deploy");
     assert!(
         !app.skills_browser.rows().contains(&shared_row),

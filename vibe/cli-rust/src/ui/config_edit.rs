@@ -6,13 +6,14 @@ mod persistence;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::Frame;
 
 use super::{composer_layout::ComposerLayout, scrollbar, tab_cells::cells, theme};
 use crate::app::App;
 use crate::config_edit::{self, ConfigEdit};
-use crate::hints::{self, action, key};
+use crate::config_fields::ConfigField;
+use crate::hints::{self, action, key, Hint};
 pub(super) use layout::draw_too_small;
 use layout::{height, paragraph, Layout};
 
@@ -25,7 +26,12 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         .iter()
         .map(|choice| config_edit::choice_label(&edit.field, choice))
         .collect();
-    let Some(layout) = Layout::new(edit, &choices, area) else {
+    let help = help(
+        area.width.saturating_sub(8).min(80) < 66,
+        &choices,
+        &edit.field,
+    );
+    let Some(layout) = Layout::new(edit, &choices, area, &help) else {
         draw_too_small(
             app,
             f,
@@ -41,7 +47,6 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme::primary()).bg(bg))
             .title(Line::from(vec![
                 Span::raw("─ "),
@@ -92,12 +97,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         ),
     );
     persistence::targets(f, layout.targets, &app.config_screen.targets, edit.target);
-    help(
-        f,
-        layout.help,
-        !choices.is_empty(),
-        config_edit::is_multiline(&edit.field),
-    );
+    super::hint_line::draw(f, layout.help, &help);
     if let Some(error) = &edit.error {
         f.render_widget(
             Paragraph::new(error.as_str()).style(Style::default().fg(theme::error())),
@@ -207,6 +207,7 @@ fn draw_choices(
         .flat_map(|(index, count)| std::iter::repeat_n(Some(index), *count))
         .collect();
     let total = lines.len();
+    let overflows = total > visible;
     let offset = edit.list.layout(&lines, content);
     let selected = edit.list.selected();
     let mut row = 0;
@@ -224,7 +225,12 @@ fn draw_choices(
             let (style, _) = super::list_cursor::styles_on(index == selected, theme::surface());
             if index == selected {
                 f.buffer_mut().set_style(
-                    Rect::new(rect.x, rect.y, area.width - 2, rect.height),
+                    Rect::new(
+                        rect.x,
+                        rect.y,
+                        area.width - 2 - u16::from(overflows),
+                        rect.height,
+                    ),
                     style,
                 );
             }
@@ -240,15 +246,16 @@ fn draw_choices(
             break;
         }
     }
-    (total > visible).then_some((
+    overflows.then_some((
         Rect::new(area.right() - 2, area.y, 1, area.height),
         total,
         offset,
     ))
 }
 
-fn help(f: &mut Frame, area: Rect, choices: bool, multiline: bool) {
-    let narrow = area.width < 60;
+/// The footer: a narrow editor (content under 60 columns) shortens the layer hint and drops navigation.
+fn help(narrow: bool, choices: &[String], field: &ConfigField) -> Vec<Hint> {
+    let (choices, multiline) = (!choices.is_empty(), config_edit::is_multiline(field));
     let save = match (choices, multiline) {
         (true, _) => hints::SELECT,
         (false, true) => (key::CTRL_S, action::SAVE),
@@ -264,5 +271,5 @@ fn help(f: &mut Frame, area: Rect, choices: bool, multiline: bool) {
         list.push(hints::NAVIGATE);
     }
     list.extend([save, hints::CANCEL, (key::TAB, layer)]);
-    super::hint_line::draw_clipped(f, area.x, area.y, area.width, &list);
+    list
 }

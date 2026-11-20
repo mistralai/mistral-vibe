@@ -31,7 +31,7 @@ const CHROME: u16 = 7;
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let rows = model_picker::rows(app);
     let visible = (area.height as usize / 2).min(rows.len());
-    let height = visible as u16 + CHROME;
+    let height = visible as u16 + CHROME + hint_line::extra(&footer(app), area.width);
     let kind = super::bottom_app::Kind::Model;
     super::bottom_app::draw(app, f, area, height, kind, |app, f, area| {
         draw_box(app, f, area, &rows)
@@ -39,7 +39,9 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
 }
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect, rows: &[Row]) {
-    if area.height < CHROME {
+    let footer = footer(app);
+    let chrome = CHROME + hint_line::extra(&footer, area.width);
+    if area.height < chrome {
         return;
     }
     f.render_widget(Clear, area);
@@ -75,7 +77,7 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, rows: &[Row]) {
         MouseTarget::ModelPicker,
     );
 
-    let visible = h.saturating_sub(CHROME) as usize;
+    let visible = h.saturating_sub(chrome) as usize;
     let top = by + 4;
     let total = rows.len();
     let list_area = Rect::new(bx + 1, top, w.saturating_sub(2), visible as u16);
@@ -124,9 +126,12 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, rows: &[Row]) {
         );
     }
 
+    hint_line::draw_footer(f, area, &footer);
+}
+
+fn footer(app: &App) -> Vec<Hint> {
     let search = &app.model_picker.search;
-    let hints = search_model::hints(search.focused, !search.query.is_empty(), HINTS);
-    hint_line::draw(f, bx + 2, by + h - 2, &hints);
+    search_model::hints(search.focused, !search.query.is_empty(), HINTS)
 }
 
 /// Whether a row takes the list cursor and whether it is the current choice.

@@ -91,6 +91,8 @@ class PlatformCredentialRequired:
         "transient",
         # A user token was refused again right after a successful refresh.
         "unauthorized_after_refresh",
+        # The client owns the sign-in but lent none to this connection.
+        "credential_unavailable",
     ]
     observed_revision: str | None = None
 

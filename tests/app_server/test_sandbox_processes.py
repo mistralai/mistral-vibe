@@ -34,7 +34,7 @@ from vibe.app_server.local import (
 )
 from vibe.app_server.models import TurnStop
 from vibe.app_server.protocol import ClientCapabilities, ClientInfo, SessionOptions
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 
 pytestmark = [
     pytest.mark.skipif(
@@ -139,7 +139,7 @@ def _options(workspace: Path, sandbox: RecordingSandbox | None) -> LocalHarnessO
         ),
         session_options=SessionOptions(
             cwd=None if sandbox is not None else str(workspace),
-            agent=BuiltinAgentName.AUTO_APPROVE,
+            approval_policy=ApprovalPolicyName.AUTO_APPROVE,
             trust_workspace=sandbox is None,
             headless=True,
         ),

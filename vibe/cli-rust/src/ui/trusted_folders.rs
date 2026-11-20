@@ -18,14 +18,15 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let kind = super::bottom_app::Kind::TrustedFolders;
     if let Some(add) = app.trusted_folders.add.as_ref() {
         let lines = browser_box::fit(area.width, max_visible, |width| adding::lay_out(add, width));
-        let height = lines.len().min(max_visible) as u16 + adding::chrome();
+        let height = lines.len().min(max_visible) as u16 + adding::chrome(add, area.width);
         return super::bottom_app::draw(app, f, area, height, kind, |app, f, area| {
             adding::draw_box(app, f, area, &lines)
         });
     }
     let lines = browser_box::fit(area.width, max_visible, |width| lay_out(app, width));
     let visible = lines.len().min(max_visible) as u16;
-    let height = visible + browser_box::chrome(true);
+    let help = rows::help(&app.trusted_folders);
+    let height = visible + browser_box::chrome(true, area.width, &help);
     super::bottom_app::draw(app, f, area, height, kind, |app, f, area| {
         draw_box(app, f, area, &lines)
     });
@@ -65,7 +66,9 @@ fn lay_out(app: &App, width: usize) -> Vec<VisualLine> {
 }
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
-    if area.height < browser_box::chrome(true) {
+    let help = rows::help(&app.trusted_folders);
+    let chrome = browser_box::chrome(true, area.width, &help);
+    if area.height < chrome {
         return;
     }
     draw_frame(f, area, &rows::title(&app.trusted_folders));
@@ -78,9 +81,9 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, lines: &[VisualLine]) {
         "Search folders",
         target,
     );
-    let visible = area.height.saturating_sub(browser_box::chrome(true));
+    let visible = area.height.saturating_sub(chrome);
     let list_area = browser_box::pane(area, true, 0, visible);
     app.trusted_folders.list_area = list_area;
     browser_box::draw_list(app, f, area, list_area, lines, target);
-    browser_box::draw_help(f, area, &rows::help(&app.trusted_folders));
+    browser_box::draw_help(f, area, &help);
 }

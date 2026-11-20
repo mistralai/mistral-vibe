@@ -45,7 +45,7 @@ request_methods = frozenset({"session/read"})
 
 
 screen_contains = (
-    "Viewing Explore 1 · read-only · Esc to return",
+    "Viewing Explore 1 read-only",
     "This subagent is ready for a new instruction. Return to Main conversation and ask the main agent to give it a new",
     _CHILD_RESULT,
 )
@@ -60,7 +60,8 @@ timeline: Timeline = [
     turn_completed(),
     child_session_updated(status="idle"),
     {"release": 5},  # the running turn plus the blocked child; the rest held
-    "\x1b[B",  # Down — focus the list on the Main row
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the subagent list on the Main row
     "\x1b[B",  # Down — highlight the blocked child row
     "\r",  # Enter — open the view: Waiting for input, then the child history
     {"release": 2},  # turn completes; the child goes idle: ready message

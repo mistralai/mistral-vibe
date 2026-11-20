@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 from typing import Protocol
 
+from vibe.utils.io import atomic_write_bytes
+
 
 class Filesystem(Protocol):
     """Disk operations the checkpoint file store needs. ``read_bytes`` returns
@@ -29,9 +31,9 @@ class DiskFilesystem:
             return None
 
     def write_bytes(self, path: str, data: bytes) -> None:
-        target = Path(path)
+        target = Path(path).resolve()
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+        atomic_write_bytes(target, data)
 
     def remove(self, path: str) -> None:
         os.remove(path)

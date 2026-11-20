@@ -38,7 +38,7 @@ fn changed(installed: Vec<serde_json::Value>, error: Option<&str>) -> Event {
             answer: Some(json!({})),
             error: error.map(str::to_owned),
         },
-        installed: Ok(pins(installed)),
+        installed: Ok(pins(installed).into()),
     }
 }
 
@@ -47,14 +47,17 @@ fn a_local_skill_page_shows_its_switch_and_body_and_esc_returns_to_its_row() {
     let client = stub();
     let mut app = opened(
         vec![
-            pin("other", "local", "global"),
+            pin("alpha", "local", "global"),
             pin("lint", "local", "global"),
         ],
         None,
     );
     press(&mut app, &client, KeyCode::Down);
     press(&mut app, &client, KeyCode::Enter);
-    assert_eq!(page(&app).rows, [Property::Enabled]);
+    assert!(
+        page(&app).rows.is_empty(),
+        "a local skill's page acts through its keys"
+    );
     let body = shown_body(&app);
     assert_eq!(body, Some(Body::Ready("# lint".to_owned())));
     press(&mut app, &client, KeyCode::Esc);
@@ -80,8 +83,6 @@ fn a_skill_pinned_in_both_scopes_is_one_row_whose_page_shows_each_pin() {
     let expected = [
         Property::Scope(SkillScope::Global),
         Property::Scope(SkillScope::Project),
-        Property::Enabled,
-        Property::Remove,
     ];
     assert_eq!(page(&app).rows, expected);
     let global = ("v2  pinned".to_owned(), Some(labels::SHADOWED));
@@ -131,7 +132,7 @@ fn a_globally_pinned_skill_opened_from_shared_is_its_installed_page() {
     open_page(&mut app, catalog_row("id-deploy"));
     assert!(page(&app).subject.installed());
     assert_eq!(scopes(&app)[1].0, labels::NOT_PINNED);
-    assert!(page(&app).rows.contains(&Property::Remove));
+    assert!(!page(&app).rows.contains(&Property::Install));
 }
 
 #[test]
@@ -140,11 +141,7 @@ fn without_a_project_a_page_lists_only_the_global_scope() {
     catalog.project_available = false;
     let mut app = opened(vec![registry("deploy", "global", 2, None)], Some(catalog));
     open_page(&mut app, installed_row("deploy"));
-    let rows = &page(&app).rows;
-    assert_eq!(
-        rows[..2],
-        [Property::Scope(SkillScope::Global), Property::Enabled]
-    );
+    assert_eq!(page(&app).rows, [Property::Scope(SkillScope::Global)]);
 }
 
 #[test]
@@ -152,7 +149,7 @@ fn a_locked_skill_says_where_it_is_managed_instead_of_toggling() {
     let client = stub();
     let mut plugin = pin("pdf", "plugin", "global");
     plugin["locked"] = json!(true);
-    let mut patterned = pin("legacy", "local", "global");
+    let mut patterned = pin("zz-legacy", "local", "global");
     patterned["locked"] = json!(true);
     let mut app = opened(vec![plugin, patterned], None);
     press(&mut app, &client, KeyCode::Char(' '));
@@ -160,7 +157,7 @@ fn a_locked_skill_says_where_it_is_managed_instead_of_toggling() {
     press(&mut app, &client, KeyCode::Down);
     press(&mut app, &client, KeyCode::Char(' '));
     let config =
-        "'legacy' is set by a config pattern; edit enabled_skills or disabled_skills to change it.";
+        "'zz-legacy' is set by a config pattern; edit enabled_skills or disabled_skills to change it.";
     assert_eq!(notice(&app), Some(config));
     assert!(app.skills_browser.busy.is_none());
 }
@@ -202,7 +199,7 @@ fn an_install_turns_the_page_into_the_installed_one() {
     skills_browser::apply_event(&mut app, &client, changed(installed, None));
     let page = page(&app);
     assert!(page.subject.installed());
-    assert!(page.rows.contains(&Property::Remove));
+    assert!(!page.rows.contains(&Property::Install));
     press(&mut app, &client, KeyCode::Esc);
     assert_eq!(
         highlighted(&app),
@@ -222,7 +219,7 @@ fn a_change_that_fails_midway_still_applies_what_landed_and_says_what_failed() {
             answer: Some(runtime.clone()),
             error: Some("network down".to_owned()),
         },
-        installed: Ok(Vec::new()),
+        installed: Ok(Vec::new().into()),
     };
     skills_browser::apply_event(&mut app, &client, event);
     assert_eq!(app.session.runtime, runtime);
@@ -254,19 +251,13 @@ fn the_page_footer_names_what_enter_does_to_the_highlighted_row() {
     ];
     let mut app = opened(both, Some(shared()));
     open_page(&mut app, installed_row("deploy"));
+    let skill = [(key::SPACE, action::DISABLE), ("r", action::REMOVE)];
+    let page_footer = |verb| [[hints::NAVIGATE, verb].as_slice(), &skill, &[hints::BACK]].concat();
+    assert_eq!(
+        help(&app.skills_browser),
+        page_footer((key::ENTER, action::CHANGE))
+    );
     let footer = |verb| [hints::NAVIGATE, verb, hints::BACK];
-    assert_eq!(
-        help(&app.skills_browser),
-        footer((key::ENTER, action::CHANGE))
-    );
-    highlight_row(&mut app, Property::Enabled);
-    let switch = (key::SPACE_ENTER, action::DISABLE);
-    assert_eq!(help(&app.skills_browser), footer(switch));
-    highlight_row(&mut app, Property::Remove);
-    assert_eq!(
-        help(&app.skills_browser),
-        footer((key::ENTER, action::REMOVE))
-    );
     highlight_row(&mut app, Property::Scope(SkillScope::Global));
     press(&mut app, &client, KeyCode::Enter);
     assert_eq!(help(&app.skills_browser), footer(hints::SELECT));
@@ -280,6 +271,6 @@ fn the_page_footer_names_what_enter_does_to_the_highlighted_row() {
     highlight_row(&mut unpinned, Property::Scope(SkillScope::Project));
     assert_eq!(
         help(&unpinned.skills_browser),
-        footer((key::ENTER, action::PIN))
+        page_footer((key::ENTER, action::PIN))
     );
 }

@@ -1,6 +1,6 @@
 //! Cached transcript heights and cumulative positions for fast viewport lookup.
 
-use crate::transcript::Transcript;
+use crate::transcript::{Transcript, TurnDetails};
 
 #[derive(Clone, Copy)]
 pub struct EntryGeometry {
@@ -30,9 +30,19 @@ pub struct TranscriptLayout {
     pub queue_top: Option<u16>,
     /// Positions in `entries` of the settled user prompts, in order.
     pub prompts: Vec<usize>,
+    /// The `Worked for` groups laid out, in transcript order.
+    pub details: Vec<TurnDetails>,
 }
 
 impl TranscriptLayout {
+    /// The `Worked for` group the entry at `index` belongs to, as one of its steps.
+    pub fn details_of(&self, index: usize) -> Option<&TurnDetails> {
+        let at = self.details.partition_point(|details| details.last < index);
+        self.details
+            .get(at)
+            .filter(|details| details.contains(index))
+    }
+
     /// The blank rows that push the queued run down by `free` rows, to the viewport bottom.
     pub fn queue_spacer(&self, free: u16) -> QueueSpacer {
         self.queue_top
@@ -66,9 +76,19 @@ pub struct TranscriptCache {
     theme: usize,
     queue_paused: bool,
     raw: bool,
+    /// The `collapse_turn_details` state the layouts were built for: whether a turn was running then.
+    details: Option<bool>,
 }
 
 impl TranscriptCache {
+    /// Relayout when turns start or stop collapsing their details, or a turn starts or settles.
+    pub fn ensure_details(&mut self, details: Option<bool>) {
+        if self.details != details {
+            self.details = details;
+            self.invalidate_layouts();
+        }
+    }
+
     pub fn start_history(&mut self, entries: usize) {
         self.history_from = Some(entries);
         self.invalidate_layouts();
@@ -166,7 +186,7 @@ impl TranscriptCache {
         entries: Vec<LayoutEntry>,
         queue_top: Option<u16>,
         prompts: Vec<usize>,
-    ) {
+    ) -> &mut TranscriptLayout {
         let slot = self.width_slot(width);
         self.layouts[slot] = TranscriptLayout {
             revision,
@@ -174,7 +194,9 @@ impl TranscriptCache {
             entries,
             queue_top,
             prompts,
+            details: Vec::new(),
         };
+        &mut self.layouts[slot]
     }
 
     pub fn invalidate_layouts(&mut self) {

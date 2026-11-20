@@ -2,6 +2,7 @@
 
 from typing import Literal
 
+from ....session_values import EncryptedValue as EncryptedValue
 from ....session_values import OutputType as OutputType
 from ....session_values import ProtocolError as ProtocolError
 from ....session_values import UnknownValue as UnknownValue

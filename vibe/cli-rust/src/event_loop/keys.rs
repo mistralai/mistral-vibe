@@ -7,6 +7,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, MouseEventKind};
 use tokio::sync::mpsc;
 
 use crate::app::App;
+use crate::code_preview::telemetry::Close;
 use crate::focus::Focus;
 use crate::server::Client;
 use crate::{config, input};
@@ -137,7 +138,19 @@ fn handle_input_event(
             }
             // Esc aborts a drag in flight; any other key ends it like a release.
             crate::mouse::cancel_capture(app, key.code != KeyCode::Esc);
-            if dispatch_key(app, client, config_tx, key, vim_pending) {
+            // Esc only closes an open code preview; other keys close it and act.
+            let close = match key.code {
+                KeyCode::Esc => Close::Escape,
+                _ => Close::Key,
+            };
+            if crate::code_preview::dismiss(app) && key.code == KeyCode::Esc {
+                crate::code_preview::telemetry::closed(app, close);
+                return InputOutcome::Redraw { reset_blink: false };
+            }
+            let exit = dispatch_key(app, client, config_tx, key, vim_pending);
+            // Recorded after the key acts, so a copy key's copy counts toward the preview.
+            crate::code_preview::telemetry::closed(app, close);
+            if exit {
                 return InputOutcome::Exit;
             }
             app.set_app_focus_from_terminal(true);
@@ -168,7 +181,7 @@ fn handle_input_event(
                 | Focus::ThemePicker
                 | Focus::LogLevelPicker
                 | Focus::ThinkingPicker
-                | Focus::ArtifactsModal
+                | Focus::RailWindow
                 | Focus::ContextApp => {}
                 Focus::Loops => crate::loops::paste(app, &text),
                 Focus::Goal => crate::goal::paste(app, &text),
@@ -181,6 +194,10 @@ fn handle_input_event(
                 Focus::Plugins => crate::plugins::paste(app, &text),
                 Focus::TrustedFolders => crate::trusted_folders::paste(app, client, &text),
                 Focus::Skills => crate::skills_browser::paste(app, client, &text),
+                Focus::Rail => {
+                    crate::rail::back(app);
+                    input::handle_paste(app, text);
+                }
                 Focus::SubagentList | Focus::Composer => input::handle_paste(app, text),
             }
             InputOutcome::Redraw { reset_blink: false }
@@ -200,6 +217,7 @@ fn handle_input_event(
             app.set_app_focus(false);
             crate::mouse::cancel_capture(app, true);
             app.view.mouse_position = None;
+            crate::subagents::list::set_hover(app, None);
             InputOutcome::Redraw { reset_blink: false }
         }
         Some(_) => InputOutcome::Ignore,
@@ -214,7 +232,15 @@ fn drop_box_selection(app: &mut App) {
     }
 }
 
-fn dispatch_key(
+/// Route one key press the way the event loop does; true means exit. For integration tests.
+#[doc(hidden)]
+pub fn route_key(app: &mut App, client: &Arc<Client>, key: crossterm::event::KeyEvent) -> bool {
+    let (config_tx, _config_rx) = mpsc::channel(1);
+    let pending = app.vim.pending.take();
+    dispatch_key(app, client, &config_tx, key, pending)
+}
+
+pub(crate) fn dispatch_key(
     app: &mut App,
     client: &Arc<Client>,
     config_tx: &mpsc::Sender<config::Loaded>,
@@ -226,10 +252,20 @@ fn dispatch_key(
     if app.focus() == Focus::Trust {
         return crate::trust_folders::handle_key(app, key);
     }
+    if crate::rail::enter_from_box(app, client, &key) {
+        return false;
+    }
     if let Some(exit) = input::handle_priority_key(app, client, key) {
+        // The jump letters last one key, a priority key such as Ctrl+C included.
+        if app.rail.letters {
+            crate::rail::back(app);
+        }
         return exit;
     }
     drop_box_selection(app);
+    if crate::rail::nav_key(app, client, &key) {
+        return false;
+    }
     let esc = key.code == KeyCode::Esc;
     match app.focus() {
         // Handled above, before the priority keys.
@@ -257,10 +293,12 @@ fn dispatch_key(
         Focus::ModelPicker => input::handle_model_key(app, client, key),
         Focus::LogLevelPicker => input::handle_log_level_key(app, client, key),
         Focus::ThinkingPicker => input::handle_thinking_key(app, client, key),
-        Focus::ArtifactsModal => input::handle_artifacts_modal_key(app, key),
         Focus::Loops => crate::loops::handle_key(app, client, key),
         Focus::Goal => crate::goal::handle_key(app, client, key),
-        Focus::SubagentList | Focus::Composer => {
+        Focus::RailWindow => crate::rail::handle_window_key(app, client, key),
+        // The rail owns its keys; any other key leaves it and reaches the prompt.
+        Focus::Rail if crate::rail::handle_key(app, client, &key) => {}
+        Focus::Rail | Focus::SubagentList | Focus::Composer => {
             return crate::vim::route(app, key, vim_pending, |app, key| {
                 input::handle_key(app, client, config_tx, key)
             });
@@ -269,5 +307,7 @@ fn dispatch_key(
     false
 }
 
+#[cfg(test)]
+mod skills_tests;
 #[cfg(test)]
 mod tests;

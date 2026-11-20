@@ -36,20 +36,24 @@ fn omitted_builtin_switches_keep_the_legacy_catalog() {
     );
 }
 
-/// *Prepare*: A Session disables programmatic tool calling, subagents, and command execution.
+/// *Prepare*: A Session with the stock guidance disables programmatic tool calling, subagents,
+/// and command execution.
 /// *Do*: Start a Turn, then call `run_typescript` and `search_tool_functions` anyway.
 /// *Assert*: Neither tool nor its prompt guidance reaches the model, and both calls fail as
 /// unsupported without starting a program or a search.
 #[test]
 fn disabled_programmatic_tool_calling_removes_its_tools_and_guidance() {
-    let configuration = with_tools(
+    let mut configuration = serde_json::to_value(with_tools(
         config(),
         json!({
             "programmatic": {"mode": "disabled"},
             "subagents": {"mode": "disabled"},
         }),
-    );
-    let mut runtime = SynchronousRuntime::new(configuration);
+    ))
+    .unwrap();
+    // The stock guidance names its features in the autonomy section too.
+    configuration["settings"]["prompts"] = json!({"guidance": "stock"});
+    let mut runtime = SynchronousRuntime::new(serde_json::from_value(configuration).unwrap());
     let completion = runtime.start_turn("direct-only", "work");
 
     assert_eq!(
@@ -82,8 +86,6 @@ fn disabled_programmatic_tool_calling_removes_its_tools_and_guidance() {
             json!({"mode": "best_match", "query": "files"}),
         ),
     ];
-    // The committed assistant message omits `run_typescript` calls by name, as it
-    // does when programmatic tool calling is enabled.
     runtime.apply(
         tool_call_completion(action_id(&completion), calls.clone()),
         running("direct-only")
@@ -91,7 +93,7 @@ fn disabled_programmatic_tool_calling_removes_its_tools_and_guidance() {
             .observe(assistant_tool_calls_committed(
                 "direct-only",
                 &completion,
-                &calls[1..],
+                &calls,
             ))
             .observe(tool_execution_started("direct-only", "program"))
             .observe(tool_execution_started("direct-only", "search"))
@@ -226,6 +228,9 @@ fn disabled_file_system_removes_file_tools_from_every_catalog() {
         run_typescript_completion(action_id(&next), "program", source),
         running("no-files")
             .dispatch(llm_call(2))
+            .observe(assistant_program_committed(
+                "no-files", &next, "program", source,
+            ))
             .observe(core_tool_execution_started("no-files", "program"))
             .observe_tool_execution_finished(
                 "program",
@@ -285,7 +290,7 @@ fn native_read_file_images_are_described_only_while_the_model_receives_images() 
     assert_eq!(
         read_file_tool_description(&first),
         format!(
-            "{READ_FILE_TEXT_DESCRIPTION} PDF, Word, PowerPoint, and email files return their extracted text. An image file returns the image itself."
+            "{READ_FILE_TEXT_DESCRIPTION} PDF, Word, PowerPoint, and email files return their extracted text. An image file returns the image itself. `offset` and `limit` do not apply to an image file."
         )
     );
     runtime.finish_turn_with_text("vision", &first, "done");
@@ -335,8 +340,8 @@ fn enabled_skills_advertise_the_skill_tool_only_with_a_skill() {
     assert!(!catalog_names(&without).contains(&"skill".to_string()));
     let system = system_text(&without);
     assert!(!system.contains("skill"), "system prompt mentions skills");
-    assert!(system.contains(
-        "Act directly and proactively. Discover additional tools with `search_tool_functions`"
+    assert!(system.starts_with(
+        "Discover additional tools with `search_tool_functions`, and call them using `run_typescript`.\n\n"
     ));
     assert!(catalog_names(&with).contains(&"skill".to_string()));
     assert!(system_text(&with).contains("## Available Skills"));
@@ -355,8 +360,8 @@ fn disabled_skills_remove_the_tool_and_reject_configured_skills() {
     assert!(!catalog_names(&completion).contains(&"skill".to_string()));
     let system = system_text(&completion);
     assert!(!system.contains("skill"), "system prompt mentions skills");
-    assert!(system.contains(
-        "Act directly and proactively. Discover additional tools with `search_tool_functions`"
+    assert!(system.starts_with(
+        "Discover additional tools with `search_tool_functions`, and call them using `run_typescript`.\n\n"
     ));
     let calls = vec![tool_call("load", "skill", json!({"name": "review"}))];
     runtime.apply(
@@ -407,6 +412,12 @@ fn disabled_sleep_removes_self_sleep() {
         run_typescript_completion(action_id(&completion), "program", source),
         running("no-sleep")
             .dispatch(llm_call(1))
+            .observe(assistant_program_committed(
+                "no-sleep",
+                &completion,
+                "program",
+                source,
+            ))
             .observe(core_tool_execution_started("no-sleep", "program"))
             .observe_tool_execution_finished("program", run_typescript_success(json!("no sleep"))),
     );

@@ -98,10 +98,13 @@ class ConfigView(ProtocolModel):
     # Cold-cache first launch
     awaiting_experiment_model: bool = False
     default_model_alias: str
-    default_agent: str = "accept-edits"
+    default_agent: str = "default"
+    default_approval_policy: str = "accept-edits"
     theme: str
     log_level: str | None
     disable_welcome_banner_animation: bool
+    # Preserve the copy animation when reading an older app-server response (ADR 0014).
+    disable_selection_animation: bool = False
     # Preserve blinking when reading an older app-server response (ADR 0014).
     cursor_blink: bool = True
     # Preserve the plain input when reading an older app-server response (ADR 0014).
@@ -113,6 +116,8 @@ class ConfigView(ProtocolModel):
     enable_mouse_capture: bool = True
     # Preserve the pinned prompt when reading an older app-server response (ADR 0014).
     enable_sticky_prompt: bool = True
+    # Keep every turn's details shown when reading an older app-server response (ADR 0014).
+    collapse_turn_details: bool = False
     # Preserve @ file completion when reading an older app-server response (ADR 0014).
     enable_file_autocomplete: bool = True
     file_watcher_for_autocomplete: bool
@@ -135,7 +140,6 @@ class ConfigView(ProtocolModel):
     # is not self-hosted. Datalake events stay server-gated.
     crash_reports_enabled: bool = False
     experimental_enable_registry_skills: bool = False
-    experimental_enable_local_projects: bool = True
     enable_pr_monitoring: bool = True
     # Hides or shows the storage UI only: storage/usage/* answer either way.
     experimental_enable_storage_usage: bool = False

@@ -3,11 +3,20 @@
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
 
-/// A tab's label: its name, then how many rows match while a query is typed.
-pub fn label(name: &str, matches: Option<usize>) -> String {
-    match matches {
-        Some(count) => format!("{name} {count}"),
-        None => name.to_owned(),
+/// A tab's label: its name, and how many rows it lists, drawn apart so the number never reads as part of the name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Label {
+    pub name: &'static str,
+    pub count: Option<usize>,
+}
+
+impl Label {
+    /// The label as plain text, `My Skills 30`.
+    pub fn text(&self) -> String {
+        match self.count {
+            Some(count) => format!("{} {count}", self.name),
+            None => self.name.to_owned(),
+        }
     }
 }
 

@@ -45,6 +45,8 @@ fn ctrl_letters_map_to_line_edit_actions() {
     );
     assert_eq!(mapped(KeyCode::Char('k'), ctrl), Action::DeleteToEndOfLine);
     assert_eq!(mapped(KeyCode::Char('w'), ctrl), Action::DeleteWordLeft);
+    assert_eq!(mapped(KeyCode::Char('b'), ctrl), Action::CursorLeft);
+    assert_eq!(mapped(KeyCode::Char('f'), ctrl), Action::CursorRight);
     assert_eq!(mapped(KeyCode::Char('j'), ctrl), Action::Insert('\n'));
     // Unbound Ctrl/Alt combos are swallowed, never self-inserted.
     assert_eq!(action_for(&key(KeyCode::Char('x'), ctrl)), None);

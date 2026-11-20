@@ -3,11 +3,11 @@
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear};
+use ratatui::widgets::{Block, Borders, Clear};
 use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
-use super::{scrollbar, theme};
+use super::{markdown, scrollbar, theme};
 use crate::app::App;
 use crate::hints::{self, action, key, Hint};
 use crate::mouse::MouseTarget;
@@ -50,19 +50,19 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     ]);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
         .border_style(primary)
         .title(title);
     f.render_widget(block, box_area);
 
     let cx = bx + 3;
     draw_search(app, f, Rect::new(cx, by + 2, w - 6, 1));
-    let body = Rect::new(bx + 1, by + 4, w - 4, h.saturating_sub(9));
-    draw_body(app, f, body);
-    draw_link(app, f, Rect::new(cx, by + h - 4, w - 6, 1));
     let search = &app.release_notes.search;
     let help = search_field::hints(search.focused, !search.query.is_empty(), HELP);
-    super::hint_line::draw_clipped(f, cx, by + h - 2, w - 6, &help);
+    let extra = super::hint_line::height(&help, w - 6).saturating_sub(1);
+    let body = Rect::new(bx + 1, by + 4, w - 4, h.saturating_sub(9 + extra));
+    draw_body(app, f, body);
+    draw_link(app, f, Rect::new(cx, by + h - 4 - extra, w - 6, 1));
+    super::hint_line::draw_above(f, cx, by + h - 2, w - 6, &help);
 }
 
 /// The full-changelog link under the notes; the URL stays readable to copy without a click.
@@ -98,6 +98,7 @@ fn draw_body(app: &mut App, f: &mut Frame, body: Rect) {
     let region = Rect::new(body.x, body.y, body.width + 1, body.height);
     crate::mouse::register_region(app, region, MouseTarget::ReleaseNotes);
     let state = &mut app.release_notes;
+    state.links.clear();
     let total = state.lines(body.width).len();
     state.page = body.height as usize;
     state.total = total;
@@ -109,8 +110,9 @@ fn draw_body(app: &mut App, f: &mut Frame, body: Rect) {
             .set_stringn(body.x + 2, body.y, NO_MATCH, body.width as usize, muted);
         return;
     }
-    let lines = app.release_notes.lines(body.width);
-    for (row, line) in lines
+    let linked = app.release_notes.linked(body.width);
+    for (row, line) in linked
+        .lines()
         .iter()
         .skip(scroll)
         .take(body.height as usize)
@@ -119,6 +121,13 @@ fn draw_body(app: &mut App, f: &mut Frame, body: Rect) {
         f.buffer_mut()
             .set_line(body.x, body.y + row as u16, line, body.width);
     }
+    let links = markdown::screen_links(linked, true, body, scroll as u16);
+    if let Some(at) = app.view.mouse_position {
+        for link in links.iter().filter(|link| link.contains(at)) {
+            link.paint_hover(f.buffer_mut());
+        }
+    }
+    app.release_notes.links = links;
     if total > body.height as usize {
         let bar = Rect::new(body.right(), body.y, 1, body.height);
         scrollbar::draw_large(

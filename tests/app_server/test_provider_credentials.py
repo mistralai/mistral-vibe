@@ -733,6 +733,7 @@ async def test_a_signed_out_connection_never_falls_back_to_an_api_key(
         ("invalid", "missing", "Sign in again"),
         ("missing", "missing", "Sign in"),
         ("transient", "unavailable", "retry in a moment"),
+        ("credential_unavailable", "missing", "Sign in to Vibe Desktop and retry"),
     ],
 )
 @pytest.mark.asyncio

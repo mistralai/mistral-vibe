@@ -223,10 +223,10 @@ def test_a_run_config_with_another_trust_store_fails_and_another_log_level_warns
     """
     from tests.conftest import build_test_vibe_config
 
-    settings = ProcessSettings(log_level="WARNING", enable_system_trust_store=False)
+    settings = ProcessSettings(log_level="WARNING", enable_system_trust_store=True)
 
     with pytest.raises(SessionBackendError) as exc_info:
-        settings.check(build_test_vibe_config(enable_system_trust_store=True))
+        settings.check(build_test_vibe_config(enable_system_trust_store=False))
     with caplog.at_level(logging.WARNING, logger=logger.name):
         settings.check(build_test_vibe_config(log_level="DEBUG"))
     issues = settings.issues(build_test_vibe_config(log_level="DEBUG"))
@@ -414,7 +414,7 @@ async def test_a_run_whose_config_sets_another_trust_store_fails_as_config_error
         response = await run_client.start(
             "1",
             sockets[0],
-            config={"active_model": "fake-model", "enable_system_trust_store": True},
+            config={"active_model": "fake-model", "enable_system_trust_store": False},
             credentials=_KEY,
         )
 

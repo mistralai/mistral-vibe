@@ -854,3 +854,135 @@ class TestSignedInConnection:
         )
 
         assert content is None
+
+
+def _title_model_config():
+    """A session whose title model has its own sampling and offers thinking off."""
+    title_model = ModelConfig(
+        name="house-large-1",
+        provider="mistral",
+        alias="house-large",
+        temperature=0.7,
+        top_p=0.9,
+        thinking="high",
+        thinking_levels=["off", "low", "high"],
+    )
+    config = build_test_vibe_config(
+        models=[
+            ModelConfig(
+                name="mistral-vibe-cli-latest",
+                provider="mistral",
+                alias="devstral-latest",
+            ),
+            title_model,
+        ],
+        active_model="devstral-latest",
+    )
+    return config, title_model
+
+
+class TestCallerSettings:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("feature", "call_type"),
+        [(None, "worktree_title"), (UtilityFeature.SMART_APPROVE, None)],
+    )
+    async def test_without_them_the_call_is_greedy_on_the_selected_model(
+        self, monkeypatch, feature, call_type
+    ) -> None:
+        """*Prepare*: A session whose active model has its own sampling.
+        *Do*: Run a utility completion as worktree naming and as a Smart
+            Approve classifier call do, with none of the caller settings.
+        *Assert*: It runs on the fast model, greedily, with no top_p, at the
+            model's configured thinking level.
+        """
+        # Prepare
+        config, _ = _title_model_config()
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+
+        # Do
+        await run_utility_completion(
+            config=config,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            feature=feature,
+            call_type=call_type,
+        )
+
+        # Assert
+        [request] = completion.requests
+        assert request.route.model == FAST_MODEL_CANDIDATES[0].name
+        assert request.route.temperature == 0.0
+        assert request.route.top_p is None
+        assert request.route.thinking == "off"
+        assert request.route.request_thinking is None
+
+    @pytest.mark.asyncio
+    async def test_a_fixed_model_runs_with_its_own_sampling_and_thinking_off(
+        self, monkeypatch
+    ) -> None:
+        """*Prepare*: A session whose title model has its own sampling.
+        *Do*: Run a title call on that model, at its own temperature, with
+            thinking off, as the session title call does.
+        *Assert*: The request goes to that model, not a fast one, with its
+            temperature and top_p, thinking off, and the title label.
+        """
+        # Prepare
+        config, title_model = _title_model_config()
+        completion = FakeUtilityCompletion("Billing retries").install(monkeypatch)
+
+        # Do
+        content = await run_utility_completion(
+            config=config,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=1024,
+            request_timeout_seconds=6.0,
+            retry_budget_seconds=10.0,
+            feature=UtilityFeature.TITLE,
+            fixed_model=(title_model, config.get_provider_for_model(title_model)),
+            use_model_temperature=True,
+            thinking="off",
+        )
+
+        # Assert
+        [request] = completion.requests
+        assert content == "Billing retries"
+        assert request.route.model == "house-large-1"
+        assert request.route.temperature == 0.7
+        assert request.route.top_p == 0.9
+        assert request.route.reasoning_setting(WireFormat.MISTRAL) == "off"
+        assert request.config.max_tokens == 1024
+        assert request.metadata is not None
+        assert request.metadata["call_type"] == "title_generation"
+
+    @pytest.mark.asyncio
+    async def test_without_a_thinking_level_a_fixed_model_keeps_its_own(
+        self, monkeypatch
+    ) -> None:
+        """*Prepare*: A session whose title model thinks at ``high``.
+        *Do*: Run a call on that model with no thinking level.
+        *Assert*: The request keeps the model's ``high``.
+        """
+        # Prepare
+        config, title_model = _title_model_config()
+        completion = FakeUtilityCompletion("ok").install(monkeypatch)
+
+        # Do
+        await run_utility_completion(
+            config=config,
+            system_prompt="system",
+            user_content="user",
+            max_tokens=24,
+            request_timeout_seconds=1.0,
+            retry_budget_seconds=0.0,
+            fixed_model=(title_model, config.get_provider_for_model(title_model)),
+        )
+
+        # Assert
+        [request] = completion.requests
+        assert request.route.reasoning_setting(WireFormat.MISTRAL) == "high"
+        assert request.route.temperature == 0.0

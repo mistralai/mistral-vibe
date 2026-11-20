@@ -20,30 +20,6 @@ class ConfigSchemaResponse(BaseModel):
     config_schema: dict[str, Any] = Field(alias="schema")
 
 
-# -- Project links ------------------------------------------------------------
-#
-# Request params for the projectLinks/* ACP ext methods. Every method is
-# stateless and takes the absolute `rootPath` held by desktop-main; the
-# app-server ProjectLinksController intentionally returns `repoLocalPath`;
-# renderers that need compact labels should derive them from the basename.
-
-
-class ProjectLinksListRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore", populate_by_name=True)
-
-
-class ProjectLinksResolveRootRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-
-    root_path: str = Field(alias="rootPath", min_length=1)
-
-
-class ProjectLinksUnlinkRequest(BaseModel):
-    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-
-    root_path: str = Field(alias="rootPath", min_length=1)
-
-
 # -- Connectors ---------------------------------------------------------------
 # Declared here, not reused from the app-server's internal MCPSourceSummary.
 

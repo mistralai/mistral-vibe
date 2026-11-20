@@ -52,10 +52,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         box_height,
     );
     f.render_widget(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(border),
+        Block::default().borders(Borders::ALL).border_style(border),
         dialog,
     );
     let chrome = paint(app, f, dialog, content_width, &layout);

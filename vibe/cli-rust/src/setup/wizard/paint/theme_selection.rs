@@ -3,7 +3,7 @@
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -120,7 +120,6 @@ fn draw_list(
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
             .border_style(theme::border_style()),
         Rect::new(list_x, selected_y, list_w, 3),
     );
@@ -160,8 +159,10 @@ fn hovered_row(app: &App, rect: Rect) -> bool {
 fn draw_navigation_hints(f: &mut Frame, list_x: u16, list_w: u16, y: u16) {
     let left = [hints::NAVIGATE];
     let x = list_x.saturating_sub(hints::width(&left) + 2);
-    hint_line::draw_clipped(f, x, y, list_x.saturating_sub(x), &left);
-    hint_line::draw(f, list_x + list_w + 2, y, &[hints::SELECT]);
+    hint_line::draw(f, Rect::new(x, y, list_x.saturating_sub(x), 1), &left);
+    let right = list_x + list_w + 2;
+    let width = f.area().right().saturating_sub(right);
+    hint_line::draw(f, Rect::new(right, y, width, 1), &[hints::SELECT]);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -256,7 +257,6 @@ fn draw_preview(
     f.render_widget(
         Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
             .border_style(theme::border_style())
             .title(Line::styled(
                 " Preview ",

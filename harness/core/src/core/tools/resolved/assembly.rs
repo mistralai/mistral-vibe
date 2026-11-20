@@ -439,7 +439,7 @@ Example:
     /// *Do*: Compile their tools and select the direct `read_file` definition and the
     /// `tools.file_system.read_file` declaration.
     /// *Assert*: Each description adds one sentence per declared value, documents first, and
-    /// the declaration a program calls leaves out the native image sentence.
+    /// the declaration a program calls says that an image returns its media type and size.
     ///
     #[test]
     fn declared_read_file_support_extends_the_read_file_descriptions() {
@@ -490,8 +490,12 @@ Example:
         assert_eq!(
             documents_and_native_images,
             (
-                format!("{text} {documents} An image file returns the image itself."),
-                format!("{text} {documents}"),
+                format!(
+                    "{text} {documents} An image file returns the image itself. `offset` and `limit` do not apply to an image file."
+                ),
+                format!(
+                    "{text} {documents} An image file returns its media type and size. `offset` and `limit` do not apply to an image file."
+                ),
             )
         );
         let image_text_description =

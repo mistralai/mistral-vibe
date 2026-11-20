@@ -63,12 +63,13 @@ fn tool_name(name: &str) -> Option<ToolName> {
         .find(|tool_name| tool_name.direct_name() == name)
 }
 
-pub(crate) fn is_direct_name(name: &str) -> bool {
-    tool_name(name).is_some()
+/// The model-facing names of the tools this feature runs.
+pub(crate) fn direct_names() -> impl Iterator<Item = &'static str> {
+    ToolName::ALL.into_iter().map(ToolName::direct_name)
 }
 
-pub(crate) fn is_private_wrapper(name: &str) -> bool {
-    tool_name(name) == Some(ToolName::RunTypeScript)
+pub(crate) fn is_direct_name(name: &str) -> bool {
+    tool_name(name).is_some()
 }
 
 pub(crate) fn dispatch(

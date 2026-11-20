@@ -32,7 +32,7 @@ pub fn help_text(app: &App) -> String {
         "- `Ctrl+R` Search prompt history".to_owned(),
         "- `Ctrl+S` Stash the input (restored after the next submit)".to_owned(),
         "- `Ctrl+T` Start or stop voice recording (voice mode)".to_owned(),
-        "- `Shift+Tab` Cycle through agents (ask, accept-edits, ...)".to_owned(),
+        "- `Shift+Tab` Cycle through approval policies (ask, accept-edits, ...)".to_owned(),
         "- `Esc Esc` Rewind to a previous message (when input is empty)".to_owned(),
         String::new(),
         "### Special Features".to_owned(),
@@ -66,7 +66,7 @@ pub(super) fn copy_last_agent_message(app: &mut App) {
         return;
     };
     crate::clipboard::copy_to_clipboard(&text);
-    crate::telemetry::user_copied_text(app, &text);
+    crate::telemetry::user_copied_text(app, &text, None);
     ui::notice::show(
         app,
         Severity::Information,

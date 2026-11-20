@@ -7,7 +7,7 @@ use vibe_rs::app::{App, Status};
 use vibe_rs::telemetry::{self, event, TelemetryEvent};
 use vibe_rs::ui::bottom_bar;
 
-use crate::support::{bottom_bar_row, click, column, mouse, send_mouse};
+use crate::support::{bottom_bar_row, click, column, mouse, send_mouse, stub};
 use crossterm::event::{MouseButton, MouseEventKind};
 
 const WIDTH: u16 = 120;
@@ -75,4 +75,18 @@ async fn a_click_on_the_cwd_does_not_open_the_context_app() {
     assert!(!bottom_bar::tokens_at(&app, (counter - 1, 0)));
     click(&mut app, 1, 0);
     assert!(!app.context_app.open);
+}
+
+#[tokio::test]
+async fn the_counter_stays_clickable_over_an_open_rail_window() {
+    let (mut app, start) = footer();
+    app.session.background_tasks = vec![serde_json::from_value(serde_json::json!({
+        "processId": "p", "command": "watch", "status": "running",
+    }))
+    .unwrap()];
+    vibe_rs::rail::open(&mut app, &stub(), vibe_rs::rail::Item::Tasks);
+    assert!(bottom_bar::tokens_at(&app, (start + 3, 0)));
+
+    click(&mut app, start + 3, 0);
+    assert!(app.context_app.open);
 }

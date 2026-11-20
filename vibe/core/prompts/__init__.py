@@ -30,7 +30,6 @@ class SystemPrompt(Prompt):
 
 class UtilityPrompt(Prompt):
     AGENTS_DOC = auto()
-    COMPACT = auto()
     DANGEROUS_DIRECTORY = auto()
     PROJECT_CONTEXT = auto()
     SESSION_TITLE = auto()

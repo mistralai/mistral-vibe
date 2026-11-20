@@ -243,7 +243,8 @@ def test_agent_config_carries_app_server_and_vibe_launch_fields() -> None:
         "instructions": "Use the project conventions.",
         "workdir": "/workspace",
         "workspaceRoots": ["/workspace", "/shared"],
-        "agent": "ask",
+        "agent": "reviewer",
+        "approvalPolicy": "ask",
         "tools": [
             {
                 "name": "select_customer",
@@ -259,6 +260,7 @@ def test_agent_config_carries_app_server_and_vibe_launch_fields() -> None:
     assert config.completion.model == "mistral-large-latest"
     assert config.workdir == "/workspace"
     assert config.workspace_roots == ["/workspace", "/shared"]
+    assert (config.agent, config.approval_policy) == ("reviewer", "ask")
     assert config.tools[0].input_schema == {"type": "object"}
 
 
@@ -289,6 +291,7 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
             "workspaceRoots": [],
             "worktree": None,
             "agent": None,
+            "approvalPolicy": None,
             "autoApprove": False,
             "enabledTools": None,
             "disabledTools": [],
@@ -311,6 +314,7 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
         "sessionOnly": False,
         "firstTurn": None,
         "startedBySessionId": None,
+        "spawnedBySessionId": None,
     }
 
 

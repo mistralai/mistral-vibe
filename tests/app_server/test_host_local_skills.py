@@ -265,6 +265,7 @@ async def test_what_an_interrupted_save_leaves_is_not_shown(config_dir: Path) ->
     staging.mkdir()
     (staging / "SKILL.md").write_text("---\nname: triage\ndescription: d\n---\n")
     (skills / "triage" / ".notes.md.0123456789abcdef").write_text("half")
+    (skills / "triage" / ".vibe-0123456789abcdef.tmp").write_text("half")
 
     listed = await _handler().dispatch("skills/local/list", {})
     read = await _read("triage")

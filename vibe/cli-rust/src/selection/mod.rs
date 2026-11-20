@@ -16,6 +16,7 @@ pub use composer::{blur_composer, in_input, offset_at};
 pub use fold::{Fold, Folds};
 pub use gesture::{chained, ClickChain, Granularity};
 pub use region::{Region, RegionId, RowSpan, ScrollTarget};
+pub use row_ranges::RowChrome;
 pub use table::{TableCellHit, TableCellKey, TableCellSelection, TableCellSpan};
 
 use crate::app::{App, Selection, Surface};
@@ -292,7 +293,7 @@ pub fn honor_pending_copy(app: &mut App) {
         selection.text = text.clone();
         selection.pending_copy = false;
     }
-    crate::ui::notice::copy_if_autocopy(app, &text);
+    crate::ui::selection::autocopy(app, &text);
 }
 
 /// Clear a selection when its rendered region disappears or changes content.

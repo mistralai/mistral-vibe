@@ -80,7 +80,7 @@ impl EffectEntry {
             return None;
         }
         let call = connector_web::Call {
-            tool_name: self.tool_name(),
+            tool_name: self.connector_tool(),
             input: self.input(),
             output: self.output(),
             completed,
@@ -123,9 +123,9 @@ impl EffectEntry {
                 python_json_lines(self.output())
             }
             Some("completed") if self.output().is_some() => {
-                let web = self
-                    .output()
-                    .and_then(|out| connector_web::output(self.tool_name(), self.input(), out));
+                let web = self.output().and_then(|out| {
+                    connector_web::output(self.connector_tool(), self.input(), out)
+                });
                 return match web {
                     Some(web) => format_effect_output(self.kind(), Some(&web)),
                     None => format_effect_output(self.detail_kind(), self.output()),
@@ -208,7 +208,7 @@ impl EffectEntry {
 
     /// The call display's `statusText`, which steers the loading label.
     pub fn status_text(&self) -> &str {
-        if let Some(text) = connector_web::status_text(self.tool_name()) {
+        if let Some(text) = connector_web::status_text(self.connector_tool()) {
             return text;
         }
         self.detail
@@ -235,7 +235,7 @@ impl EffectEntry {
 
     /// The effect's call category (the server's `ToolEffectKind`); web connectors read as built-ins.
     pub fn kind(&self) -> Option<&str> {
-        connector_web::kind(self.tool_name()).or(self.detail_kind())
+        connector_web::kind(self.connector_tool()).or(self.detail_kind())
     }
 
     /// The category the server sent, before any connector reinterpretation.
@@ -243,6 +243,11 @@ impl EffectEntry {
         self.detail
             .as_ref()
             .and_then(|detail| detail.kind.as_deref())
+    }
+
+    fn connector_tool(&self) -> Option<&str> {
+        self.tool_name()
+            .filter(|_| self.detail_kind() == Some("tool"))
     }
 
     fn tool_name(&self) -> Option<&str> {

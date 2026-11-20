@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::core::config::HarnessConfig;
 use crate::core::model_context::ModelContext;
 use crate::core::prompt::build_system_prompt;
-use crate::core::wire::message::{Message, StoredMessage, StoredMessageSource};
+use crate::core::wire::message::{
+    InstructionsNote, Message, StoredMessage, StoredMessageSource, validate_instructions_key,
+};
 
 use super::schema::CheckpointMessage;
 
@@ -83,6 +85,8 @@ pub(super) struct CheckpointStoredMessage {
     source: CheckpointMessageSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     turn_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instructions: Option<InstructionsNote>,
 }
 
 impl CheckpointStoredMessage {
@@ -102,6 +106,7 @@ impl CheckpointStoredMessage {
             message: CheckpointMessage::capture(&message.message),
             source,
             turn_index: message.turn_index,
+            instructions: message.instructions.clone(),
         })
     }
 
@@ -110,9 +115,23 @@ impl CheckpointStoredMessage {
         message
             .validate()
             .map_err(|error| error.detail().to_string())?;
+        if let Some(note) = &self.instructions {
+            validate_instructions_key(note.key())?;
+            if let InstructionsNote::Overwrite { carried, .. } = note
+                && carried.trim().is_empty()
+            {
+                return Err("an instructions overwrite note must carry text".to_string());
+            }
+            if self.source != CheckpointMessageSource::Injection
+                || !matches!(message, Message::User { context: true, .. })
+            {
+                return Err("only injected context messages can be instructions notes".to_string());
+            }
+        }
         Ok(StoredMessage {
             message,
             turn_index: self.turn_index,
+            instructions: self.instructions,
             source: match self.source {
                 CheckpointMessageSource::History => StoredMessageSource::History,
                 CheckpointMessageSource::Injection => StoredMessageSource::Injection,
@@ -199,5 +218,77 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn instructions_notes_round_trip_beside_unmarked_context() {
+        let previous: CheckpointStoredMessage = serde_json::from_value(serde_json::json!({
+            "message": {"role": "user", "content": [{"type": "text", "text": "frozen"}], "context": true},
+            "source": "injection",
+        }))
+        .unwrap();
+        assert_eq!(
+            previous.restore(),
+            Ok(StoredMessage::injected(Message::context(text_content(
+                "frozen"
+            ))))
+        );
+
+        for (note, expected) in [
+            (
+                InstructionsNote::Upsert {
+                    key: "model".to_string(),
+                },
+                serde_json::json!({"kind": "upsert", "key": "model"}),
+            ),
+            (
+                InstructionsNote::Overwrite {
+                    key: "model".to_string(),
+                    carried: "plain".to_string(),
+                },
+                serde_json::json!({"kind": "overwrite", "key": "model", "carried": "plain"}),
+            ),
+            (
+                InstructionsNote::Delete {
+                    key: "model".to_string(),
+                },
+                serde_json::json!({"kind": "delete", "key": "model"}),
+            ),
+        ] {
+            let stored = StoredMessage::instructions(note, "text".to_string());
+            let value =
+                serde_json::to_value(CheckpointStoredMessage::capture(&stored).unwrap()).unwrap();
+            assert_eq!(value["instructions"], expected);
+            let restored: CheckpointStoredMessage = serde_json::from_value(value).unwrap();
+            assert_eq!(restored.restore(), Ok(stored));
+        }
+    }
+
+    #[test]
+    fn an_overwrite_note_without_carried_text_does_not_restore() {
+        let checkpoint: CheckpointStoredMessage = serde_json::from_value(serde_json::json!({
+            "message": {"role": "user", "content": [{"type": "text", "text": "deploy"}], "context": true},
+            "source": "injection",
+            "instructions": {"kind": "overwrite", "key": "deploys", "carried": " "},
+        }))
+        .unwrap();
+        assert_eq!(
+            checkpoint.restore(),
+            Err("an instructions overwrite note must carry text".to_string())
+        );
+    }
+
+    #[test]
+    fn only_injected_context_messages_restore_as_instructions_notes() {
+        let checkpoint: CheckpointStoredMessage = serde_json::from_value(serde_json::json!({
+            "message": {"role": "user", "content": [{"type": "text", "text": "deploy"}]},
+            "source": "history",
+            "instructions": {"kind": "upsert", "key": "deploys"},
+        }))
+        .unwrap();
+        assert_eq!(
+            checkpoint.restore(),
+            Err("only injected context messages can be instructions notes".to_string())
+        );
     }
 }

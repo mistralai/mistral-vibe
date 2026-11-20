@@ -60,9 +60,11 @@ _WAIT_SECONDS = 10.0
 def _runtime_path(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Desktop sessions run on the Session API; the CLI may not."""
-    if request.param == "session_api":
-        monkeypatch.setenv("VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API", "true")
+    """Sessions run on the Session API unless the switch turns it off."""
+    monkeypatch.setenv(
+        "VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API",
+        "true" if request.param == "session_api" else "false",
+    )
 
 
 class _Peers:
@@ -250,6 +252,9 @@ async def _replies_sent(backend: Any) -> None:
         await asyncio.gather(
             *backend._replies_in_flight.values(), return_exceptions=True
         )
+        # A gather of done tasks does not yield, and the done callbacks that
+        # drop them from the dict only run once the loop turns.
+        await asyncio.sleep(0)
 
 
 async def _send(backend: Any, params: TurnEnqueueParams) -> None:
@@ -996,3 +1001,42 @@ async def test_a_parent_waiting_through_a_restart_reads_the_reply_without_an_err
     assert "timeout" in requests[1]
     assert "Found one about a cat." in requests[2]
     await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_queued_session_message_survives_an_app_server_restart(
+    tmp_path: Path,
+) -> None:
+    """gabriel/vb-review on #81707: Vibebot's deferred send is queued into
+    the local session (`delivery: "queue"`) and the workflow counts it
+    delivered, so it must be in the saved session, not only in memory.
+    """
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+    first_host = cast(Any, _harness_backend_host(config))
+    backend = (await first_host.start(SessionStartParams())).backend
+    session_id = backend.session_id
+
+    await backend.enqueue_turn(
+        TurnEnqueueParams(
+            session_id=session_id,
+            idempotency_key="fyi-1",
+            entries=[
+                TurnUserInputEntry(
+                    entry_id="fyi-1",
+                    content=[SessionTextContentBlock(text="FYI: CI is red")],
+                )
+            ],
+            sender=SessionMessageSender(session_id="vibebot:bot:local_cb-1"),
+            delivery="queue",
+        )
+    )
+    await first_host.shutdown()
+    second_host = _harness_backend_host(config)
+    stored = await second_host.read(SessionReadParams(session_id=session_id))
+    await second_host.shutdown()
+
+    assert "FYI: CI is red" in stored.model_dump_json()

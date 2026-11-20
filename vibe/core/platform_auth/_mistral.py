@@ -9,7 +9,8 @@ default. None of them reads an API key itself.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -198,6 +199,44 @@ async def credential_request(
     return response
 
 
+@asynccontextmanager
+async def credential_stream(
+    credentials: PlatformCredentialProvider,
+    method: str,
+    url: str,
+    *,
+    timeout: float | httpx2.Timeout | None = None,
+    client: httpx2.AsyncClient | None = None,
+) -> AsyncIterator[httpx2.Response]:
+    """``credential_request`` for a streamed response, its body not read yet."""
+    from vibe.core.platform_auth._http import PlatformCredentialUnavailable
+
+    snapshot = await resolve_snapshot(credentials, url)
+    if isinstance(snapshot, PlatformCredentialRequired):
+        raise PlatformCredentialUnavailable(snapshot)
+    async with AsyncExitStack() as stack:
+        if client is None:
+            client = await stack.enter_async_context(
+                VibeAsyncHTTPClient(verify=build_ssl_context())
+            )
+        response = await stack.enter_async_context(
+            client.stream(
+                method,
+                url,
+                headers=dict(snapshot.headers),
+                follow_redirects=snapshot.follows_redirects,
+                **({} if timeout is None else {"timeout": timeout}),  # type: ignore[arg-type]
+            )
+        )
+        if response.status_code == httpx2.codes.UNAUTHORIZED:
+            await credentials.reject(
+                PlatformCredentialTarget(_origin_and_path(url)),
+                observed=snapshot.identity,
+                reason="http_unauthorized",
+            )
+        yield response
+
+
 def _origin_and_path(url: str) -> str:
     parsed = httpx2.URL(url)
     scheme = {"wss": "https", "ws": "http"}.get(parsed.scheme, parsed.scheme)
@@ -209,6 +248,7 @@ __all__ = [
     "MistralCredentials",
     "api_key_credentials",
     "credential_request",
+    "credential_stream",
     "fetched_for_current_account",
     "is_user_principal",
     "may_cache_under",

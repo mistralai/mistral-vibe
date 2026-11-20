@@ -1,6 +1,6 @@
 use ratatui::style::Style;
 
-use super::{wrap_chars, Words};
+use super::{graphemes, word_width, wrap_chars, Words};
 use crate::ui::markdown::Sc;
 
 fn chars(text: &str) -> Vec<Sc> {
@@ -35,6 +35,27 @@ fn height_matches_wrap_chars() {
                 text.iter().map(|sc| sc.0).collect::<String>(),
             );
         }
+    }
+}
+
+#[test]
+fn word_width_matches_grapheme_widths() {
+    let ascii = (' '..='~').collect::<String>();
+    for text in [
+        ascii.as_str(),
+        "tab\there",
+        "na\u{ef}ve",
+        "e\u{301}",
+        "漢字",
+        "👍🏽",
+        "\u{7f}",
+    ] {
+        let text = chars(text);
+        let segmented = graphemes(&text)
+            .iter()
+            .map(|&(_, width)| width)
+            .sum::<usize>();
+        assert_eq!(word_width(&text), segmented, "{text:?}");
     }
 }
 

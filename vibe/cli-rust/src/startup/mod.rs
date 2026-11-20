@@ -64,9 +64,9 @@ pub use launch::{
     resolve_launch, resolve_launch_cwd, StartupRecorder,
 };
 pub use reads::{
-    read_ask_confirmation_on_exit, read_enable_sticky_prompt, read_pr_monitoring,
-    read_show_subagent_status_list, read_show_thinking_nodes, read_tokens, read_vim_keybindings,
-    ConfigRead,
+    read_ask_confirmation_on_exit, read_collapse_turn_details, read_enable_sticky_prompt,
+    read_pr_monitoring, read_show_subagent_status_list, read_show_thinking_nodes, read_tokens,
+    read_vim_keybindings, ConfigRead,
 };
 
 pub enum StartupEvent {

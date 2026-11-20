@@ -17,9 +17,11 @@ from pydantic import (
 )
 
 from ....agent_messages import AgentMessageMetadata, AgentResultInput
+from ....session_values import EXPERIMENTAL
 from .base import JsonSchema, SessionModel, read_unknown_variant, write_unknown_variant
 from .common import (
     AbsolutePath,
+    EncryptedValue,
     GenerationStatus,
     HistoryEntryId,
     MessageRole,
@@ -37,6 +39,23 @@ type FileChangeStatus = Literal["proposed", "approved", "denied", "applied", "fa
 type NoticeLevel = Literal["info", "warning", "error"]
 type NoticeKind = Literal["tool_discovery", "operation_progress"]
 type CheckpointKind = Literal["compaction", "rollback", "resume", "custom"]
+type HistoryEntryType = Annotated[
+    Literal[
+        "message",
+        "reasoning",
+        "plan",
+        "tool_call",
+        "tool_result",
+        "file_change",
+        "resource",
+        "checkpoint",
+        "error",
+        "notice",
+    ],
+    Field(json_schema_extra=EXPERIMENTAL),
+]
+"""The ``type`` of a history entry that is not encrypted. ``EncryptedHistoryEntry.entry_type`` takes
+one of these values. This alias is experimental."""
 
 
 class HistoryImportMessage(SessionModel):
@@ -115,8 +134,8 @@ type HistoryImportEntry = Annotated[
 or a snapshot."""
 
 
-class HistoryEntryBase(SessionModel):
-    """Fields shared by every retained public history entry."""
+class HistoryEntryMetadata(SessionModel):
+    """Fields that every retained public history entry has, encrypted or not."""
 
     id: HistoryEntryId
     index: Annotated[int, Field(ge=0)]
@@ -124,6 +143,11 @@ class HistoryEntryBase(SessionModel):
     generation_status: GenerationStatus | UnknownValue
     created_at: UnixMs
     updated_at: UnixMs
+
+
+class HistoryEntryBase(HistoryEntryMetadata):
+    """Fields shared by every retained public history entry that is not encrypted."""
+
     annotations: dict[str, JsonValue] = Field(default_factory=dict)
 
 
@@ -325,6 +349,38 @@ class NoticeHistoryEntry(HistoryEntryBase):
     details: JsonValue = None
 
 
+class EncryptedHistoryEntry(HistoryEntryMetadata):
+    """A history entry of an encrypted Session, with its content sealed.
+
+    The worker writes it instead of the entry. ``encrypted`` holds the whole entry as JSON, except
+    ``index``, which the control plane assigns. A few fields stay in plain text so that the control
+    plane can order, filter and route entries: the id, ``index``, ``turn_id``,
+    ``generation_status`` and timestamps, the entry's ``type`` as ``entry_type``, and its ``role``,
+    ``tool_call_id`` and tool ``name`` when it has them. Every other field, ``annotations``
+    included, is only in ``encrypted``.
+
+    The plain-text fields repeat the sealed ones. The control plane updates ``index``,
+    ``generation_status`` and ``updated_at``, so a client reads these three from the plain text.
+
+    This model is experimental: a minor release can change it without a compatibility path.
+    """
+
+    model_config = ConfigDict(json_schema_extra=EXPERIMENTAL)
+
+    type: Literal["encrypted"] = "encrypted"
+    entry_type: HistoryEntryType | UnknownValue
+    """The ``type`` of the sealed entry."""
+    role: MessageRole | Literal["context"] | UnknownValue | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    """The ``role`` of a sealed message entry."""
+    tool_call_id: ToolCallId | None = Field(default=None, exclude_if=lambda value: value is None)
+    """The ``tool_call_id`` of a sealed tool call or tool result entry."""
+    name: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    """The tool ``name`` of a sealed tool call or tool result entry."""
+    encrypted: EncryptedValue
+
+
 class UnknownHistoryEntry(HistoryEntryBase):
     """A history entry of a type added after your SDK version.
 
@@ -373,6 +429,7 @@ type HistoryEntry = Annotated[
     | Annotated[CheckpointHistoryEntry, Tag("checkpoint")]
     | Annotated[ErrorHistoryEntry, Tag("error")]
     | Annotated[NoticeHistoryEntry, Tag("notice")]
+    | Annotated[EncryptedHistoryEntry, Tag("encrypted")]
     | Annotated[UnknownHistoryEntry, Tag("unknown")],
     Discriminator(_history_entry_variant),
 ]

@@ -1,8 +1,7 @@
-"""A PR created while the modal is open joins the list without moving the highlight."""
+"""A PR created while the PR window is open joins the list without moving the highlight."""
 
 from __future__ import annotations
 
-from e2e.app_server.config import ROWS
 from e2e.app_server.events import (
     artifact,
     artifact_created,
@@ -12,6 +11,7 @@ from e2e.app_server.events import (
     user_msg,
 )
 from e2e.app_server.scenario import Action, Timeline
+from scenarios.artifacts._rail import OPEN_PRS
 
 
 def _pr(number: int, hour: int) -> dict[str, object]:
@@ -24,16 +24,16 @@ def _pr(number: int, hour: int) -> dict[str, object]:
     )
 
 
-handshake = {"artifacts/list": {"artifacts": [_pr(123, 9), _pr(124, 10)]}}
-request_methods = {"artifacts/list"}
+handshake = {
+    "artifacts/list": {"artifacts": [_pr(123, 9), _pr(124, 10)]},
+    "artifacts/sync": {},
+    "artifacts/markViewed": {},
+}
+request_methods = {"artifacts/list", "artifacts/sync", "artifacts/markViewed"}
 
 # Enter after the live PR still opens the older PR the highlight was on.
 expected_actions = [Action("open_url", "https://github.com/mistral-ai/vibe/pull/123")]
-screen_contains = ("PRs (3)",)
-
-_LABEL = "PRs (2)"
-_CLICK_COL = len("/test/workdir  ") + len(_LABEL) // 2 + 1
-_BAR_CLICK = f"\x1b[<0;{_CLICK_COL};{ROWS}M\x1b[<0;{_CLICK_COL};{ROWS}m"
+screen_contains = ("● 3 PRs",)
 
 timeline: Timeline = [
     "open the PR\r",
@@ -43,8 +43,8 @@ timeline: Timeline = [
     turn_completed(),
     artifact_created(_pr(125, 11)),
     {"release_after": 5},  # the turn, its queue drain included; the PR waits
-    _BAR_CLICK,
+    *OPEN_PRS,
     "\x1b[B",  # Down: the older PR
-    {"release_after": 1},  # the new PR lands while the modal is open
+    {"release_after": 1},  # the new PR lands while the window is open
     "\r",
 ]

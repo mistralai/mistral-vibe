@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::config::{ContextSettings, HarnessConfig};
+use crate::core::error::RestoreError;
 use crate::core::state::HarnessState;
 
 mod v1;
@@ -30,6 +31,7 @@ impl Checkpoint {
     #[cfg(test)]
     pub(crate) fn restore(self, config: HarnessConfig) -> Result<HarnessState, String> {
         self.restore_moved_from(config, None)
+            .map_err(|error| error.to_string())
     }
 
     /// Restores the checkpoint under `config`. With `moved_from`, the context
@@ -39,7 +41,7 @@ impl Checkpoint {
         self,
         config: HarnessConfig,
         moved_from: Option<&ContextSettings>,
-    ) -> Result<HarnessState, String> {
+    ) -> Result<HarnessState, RestoreError> {
         match self.0 {
             CheckpointVersion::V1(checkpoint) => checkpoint.restore(config, moved_from),
         }

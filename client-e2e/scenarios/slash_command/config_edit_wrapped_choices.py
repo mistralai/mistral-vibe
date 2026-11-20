@@ -8,11 +8,11 @@ handshake = {
     "config/fields/read": {
         "fields": [
             {
-                "name": "compaction_prompt_id",
+                "name": "vision_model",
                 "kind": "enum",
                 "value": "0",
-                "description": "Choose a compaction prompt.",
-                "path": "/compaction_prompt_id",
+                "description": "Choose a vision model.",
+                "path": "/vision_model",
                 "popular": True,
                 "enumChoices": ["0", "1", "2", "3", "4", "5", "6", "7"],
                 "valueLabels": {

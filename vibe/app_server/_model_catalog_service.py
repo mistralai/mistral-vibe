@@ -53,6 +53,13 @@ from vibe.observability.logging import logger
 # a token refresh included.
 MODEL_CATALOG_FETCH_TIMEOUT_S: Final = 3 * MODEL_CATALOG_TIMEOUT_SECONDS
 
+# A catalog goes out of date as soon as the user upgrades their plan. A check
+# from a session running a model it locks, or from a model picker showing an
+# upsell, refreshes it this much sooner. A session on a runnable model keeps
+# the policy's interval, though every plan below the top one holds locked
+# models.
+LOCKED_MODEL_REFRESH_AFTER_S: Final = 30.0
+
 MODEL_CATALOG_POLICY: Final = RefreshPolicy(
     refresh_after_s=10 * 60,
     max_age_s=MODEL_CATALOG_CACHE_TTL_SECONDS,
@@ -161,11 +168,62 @@ class ModelCatalogService:
             clock=clock,
         )
 
+    def on_changed(
+        self, callback: Callable[[ModelCatalogKey], None]
+    ) -> Callable[[], None]:
+        """Be told when the catalog held for a key changes, before any session
+        loads it. Returns the function that stops the callback.
+        """
+        return self._cache.on_changed(callback)
+
     async def load(self, key: ModelCatalogKey | None) -> ModelCatalogResponse | None:
+        """The catalog held, from memory or disk, never fetched."""
         if key is None:
             return None
         entry = await self._cache.load(key)
         return entry.value if entry is not None else None
+
+    async def check(
+        self, key: ModelCatalogKey | None, *, model_locked: bool = False
+    ) -> None:
+        """Start a background refresh of a held catalog once it is old; never
+        waits on the network, and never fetches a key holding nothing. A
+        client's model-list read calls it: a plan upgrade unlocks models, and
+        that read is how an idle client learns it. With ``model_locked`` (the
+        caller runs a model the catalog locks), it is old after
+        ``LOCKED_MODEL_REFRESH_AFTER_S``.
+        """
+        if key is None or await self._cache.load(key) is None:
+            return
+        self._cache.check(
+            key, refresh_after_s=LOCKED_MODEL_REFRESH_AFTER_S if model_locked else None
+        )
+
+    async def check_for_picker(self, key: ModelCatalogKey | None) -> None:
+        """``check`` for a model picker: one that shows an upsell (the
+        catalog locks a model) may show the model the user just paid for, so
+        it is old after ``LOCKED_MODEL_REFRESH_AFTER_S``. That is every plan
+        below the top one, but a picker read follows a user's action (opening
+        it, returning to the app), not a timer or a turn: at most one fetch
+        per 30 s per process, and only while the user is in the app.
+        """
+        catalog = await self.load(key)
+        if catalog is None:
+            return
+        await self.check(
+            key,
+            model_locked=any(model.requires is not None for model in catalog.models),
+        )
+
+    async def checked_for_locked_model(
+        self, key: ModelCatalogKey, *, timeout_s: float
+    ) -> None:
+        """``check`` for a model the catalog locks, then wait at most
+        ``timeout_s`` for the refresh in flight, whatever its outcome. The
+        catalog held is ``load``'s.
+        """
+        await self.check(key, model_locked=True)
+        await self._cache.settled(key, timeout_s=timeout_s)
 
     async def ensure(self, key: ModelCatalogKey) -> ModelCatalogResponse | None:
         """The catalog held for *key*, or the first one fetched for it;
@@ -217,4 +275,9 @@ class ModelCatalogService:
         return catalog
 
 
-__all__ = ["MODEL_CATALOG_POLICY", "ModelCatalogKey", "ModelCatalogService"]
+__all__ = [
+    "LOCKED_MODEL_REFRESH_AFTER_S",
+    "MODEL_CATALOG_POLICY",
+    "ModelCatalogKey",
+    "ModelCatalogService",
+]

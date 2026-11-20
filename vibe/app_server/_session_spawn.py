@@ -169,14 +169,19 @@ class SessionSettings:
     # None when the config leaves it unset: the model's lowest setting applies.
     reasoning_effort: ThinkingLevel | None
     approval_policy: str
+    agent: str | None = None
 
 
 def session_settings(config: VibeConfigSchema, agents: AgentManager) -> SessionSettings:
     model = config.get_active_model()
+    from vibe.core.agents.models import BuiltinAgentName
+
+    agent = agents.active_agent.name
     return SessionSettings(
         model=model.alias,
         reasoning_effort=model.thinking if model.thinking_is_set else None,
-        approval_policy=agents.active_profile.name,
+        approval_policy=agents.active_policy.name,
+        agent=None if agent == BuiltinAgentName.DEFAULT else agent,
     )
 
 
@@ -258,6 +263,9 @@ async def run_start_session(
         )
     inherited = origin.settings
     model, reasoning_effort = _model_choice(args, origin)
+    idempotency_key = str(
+        uuid.uuid5(_IDEMPOTENCY_NAMESPACE, f"{parent_session_id}/{invocation_id}")
+    )
     params = SessionSpawnParams(
         parent_session_id=parent_session_id,
         prompt=args.prompt,
@@ -267,12 +275,11 @@ async def run_start_session(
             if args.placement == "new_worktree"
             else origin.checkout
         ),
-        idempotency_key=str(
-            uuid.uuid5(_IDEMPOTENCY_NAMESPACE, f"{parent_session_id}/{invocation_id}")
-        ),
+        idempotency_key=idempotency_key,
         model=model,
         reasoning_effort=reasoning_effort,
         approval_policy=inherited.approval_policy,
+        agent=inherited.agent,
         hops=origin.hops + 1,
         attached=args.link == "attached",
     )

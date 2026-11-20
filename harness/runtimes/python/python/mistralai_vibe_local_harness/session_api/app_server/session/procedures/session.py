@@ -3,11 +3,11 @@
 from collections.abc import Sequence
 from typing import Annotated, Literal, Self, cast
 
-from pydantic import Field, JsonValue, field_validator, model_validator
+from pydantic import Discriminator, Field, JsonValue, Tag, field_validator, model_validator
 
-from ....session_values import REQUEST_CONTEXT
+from ....session_values import REQUEST_CONTEXT, EncryptedValue, sealed_variant
 from ..models.base import SessionModel
-from ..models.callbacks import CallbackResult, TreeCallback
+from ..models.callbacks import CallbackResult, EncryptedCallbackResult, TreeCallback
 from ..models.common import (
     DEFAULT_INTERRUPT_REASON,
     AbsolutePath,
@@ -18,11 +18,24 @@ from ..models.common import (
     SessionId,
     TurnId,
 )
-from ..models.configuration import AgentConfig
+from ..models.configuration import (
+    AgentConfig,
+    InstructionsContent,
+    InstructionsKey,
+    KeyedInstructions,
+)
 from ..models.content import ContentBlock, TextContentBlock, refuse_unsupported_blocks
 from ..models.events import EventBatch
 from ..models.history import HistoryEntry, HistoryImportEntry
-from ..models.state import ListPageRequest, Page, PageRequest, Session, SessionState, TurnState
+from ..models.state import (
+    BackgroundProcess,
+    ListPageRequest,
+    Page,
+    PageRequest,
+    Session,
+    SessionState,
+    TurnState,
+)
 
 type Capability = dict[str, JsonValue]
 type PluginComponentKind = Literal[
@@ -48,6 +61,8 @@ type Procedure = Literal[
     "app_server/session/history/list",
     "app_server/session/turns/list",
     "app_server/session/message/send",
+    "app_server/session/instructions/upsert",
+    "app_server/session/instructions/delete",
     "app_server/session/turn/start",
     "app_server/session/turn/steer",
     "app_server/session/turn/interrupt",
@@ -59,6 +74,8 @@ type Procedure = Literal[
     "app_server/session/callback/result",
     "app_server/session/callbacks/tree",
     "app_server/session/events/read",
+    "app_server/session/backgroundProcess/output",
+    "app_server/session/backgroundProcess/stop",
     "app_server/catalog/list",
     "app_server/catalog/rename",
     "app_server/catalog/archive",
@@ -126,6 +143,8 @@ APP_SERVER_SESSION_IMPLEMENTED_PROCEDURES: tuple[Procedure, ...] = (
     "app_server/session/history/list",
     "app_server/session/turns/list",
     "app_server/session/message/send",
+    "app_server/session/instructions/upsert",
+    "app_server/session/instructions/delete",
     "app_server/session/turn/start",
     "app_server/session/turn/steer",
     "app_server/session/turn/interrupt",
@@ -142,6 +161,8 @@ APP_SERVER_SESSION_PROTOCOL_PROCEDURES: tuple[Procedure, ...] = (
     "app_server/session/plugin/info",
     "app_server/session/plugin/reload",
     "app_server/session/cancel",
+    "app_server/session/backgroundProcess/output",
+    "app_server/session/backgroundProcess/stop",
 )
 
 APP_SERVER_CAPABILITY_PROCEDURES: dict[str, tuple[Procedure, ...]] = {
@@ -350,6 +371,14 @@ def _require_non_blank_text(content: list[ContentBlock], subject: str) -> list[C
 class InitialTurn(UserMessageInput):
     """The message that starts the first Turn of a Session in `app_server/session/start`."""
 
+    message_entry_id: HistoryEntryId | None = Field(
+        default=None,
+        description=(
+            "The ID of the first user message entry. When omitted, the host names it as it names a "
+            "`turn/start` message without one: the Agents SDK Worker uses the Turn ID."
+        ),
+    )
+
 
 class SessionStartParams(SessionModel):
     idempotency_key: str | None = None
@@ -370,6 +399,32 @@ class SessionStartParams(SessionModel):
             "a host may refuse a different one."
         ),
     )
+    # Omitted when empty, so a server that predates the field accepts a default start.
+    keyed_instructions: list[KeyedInstructions] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+        description=(
+            "The instructions the Session starts with, delivered to the model in list order, "
+            "each key once. Only the start reads them: change them with "
+            "`app_server/session/instructions/upsert` and "
+            "`app_server/session/instructions/delete`. A child Session starts with none."
+        ),
+    )
+
+    @field_validator("keyed_instructions")
+    @classmethod
+    def reject_repeated_instructions_keys(
+        cls, value: list[KeyedInstructions]
+    ) -> list[KeyedInstructions]:
+        seen: set[str] = set()
+        repeated: set[str] = set()
+        for instructions in value:
+            if instructions.key in seen:
+                repeated.add(instructions.key)
+            seen.add(instructions.key)
+        if repeated:
+            raise ValueError(f"keyed_instructions repeat key(s): {', '.join(sorted(repeated))}")
+        return value
 
 
 class SessionStartResponse(SessionModel):
@@ -561,7 +616,9 @@ class MessageSendParams(MessageSendInput):
     session_id: SessionId
     # The schema the answer of the Turn this message starts must match. A message that steers
     # the active Turn carries none or that Turn's own.
-    output_type: OutputType | None = Field(default=None, exclude_if=lambda value: value is None)
+    output_type: OutputType | EncryptedValue | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _require_message_for_output_type(self) -> Self:
@@ -585,12 +642,58 @@ class MessageSendResponse(SessionModel):
     steered: bool | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
+class InstructionsUpsertParams(SessionModel):
+    """Set the instructions held under `key`, replacing any text the key held.
+
+    It starts no Turn and extends none: the running Turn's model reads the change at its next
+    call, or the next Turn's first call reads it when no Turn runs. The model reads the text in
+    an `<Instructions key="...">` note, so it sees the key, and a note replacing live text says
+    the earlier text no longer applies. When the Session compacts its history, the model keeps
+    each live key once, with its newest text, right after the system prompt. The Session refuses
+    instructions that would not fit the room it gives them, and applies nothing.
+
+    Reusing `idempotency_key` returns the first answer without applying the change again.
+
+    In an encrypted Session, the client sends `content` as a sealed value (`EncryptedValue`), and
+    `key` stays in plain text. That form is experimental: a minor release can change it without a
+    compatibility path.
+    """
+
+    idempotency_key: Annotated[str, Field(min_length=1)] | None = None
+    session_id: SessionId
+    key: InstructionsKey
+    content: InstructionsContent | EncryptedValue
+
+
+class InstructionsUpsertResponse(SessionModel):
+    accepted: Literal[True] = True
+
+
+class InstructionsDeleteParams(SessionModel):
+    """Remove the instructions held under `key`; the model reads that they no longer apply.
+
+    After a compaction nothing of them is left. A key that holds no instructions changes
+    nothing. Reusing `idempotency_key` returns the
+    first answer without applying the change again.
+    """
+
+    idempotency_key: Annotated[str, Field(min_length=1)] | None = None
+    session_id: SessionId
+    key: InstructionsKey
+
+
+class InstructionsDeleteResponse(SessionModel):
+    accepted: Literal[True] = True
+
+
 class TurnStartParams(UserMessageInput):
     idempotency_key: str | None = None
     session_id: SessionId
     message_entry_id: HistoryEntryId | None = None
     # Every agent model call of this Turn must answer with JSON that follows this schema.
-    output_type: OutputType | None = Field(default=None, exclude_if=lambda value: value is None)
+    output_type: OutputType | EncryptedValue | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class TurnStartResponse(SessionModel):
@@ -668,7 +771,12 @@ class PluginReloadResponse(SessionModel):
 
 class CallbackResultParams(SessionModel):
     session_id: SessionId
-    result: CallbackResult
+    # In an encrypted Session, an EncryptedCallbackResult (experimental).
+    result: Annotated[
+        Annotated[CallbackResult, Tag("plain")]
+        | Annotated[EncryptedCallbackResult, Tag("encrypted")],
+        Discriminator(sealed_variant),
+    ]
 
 
 class CallbackResultResponse(SessionModel):
@@ -703,3 +811,59 @@ class EventsReadParams(SessionModel):
 
 class EventsReadResponse(SessionModel):
     batch: EventBatch
+
+
+class BackgroundProcessOutputParams(SessionModel):
+    """Follow one background process's output: its past output, then new output as written.
+
+    A streaming procedure, like `app_server/session/events/read`. The stream ends after the chunk
+    whose `ended` is true, or with an error if the Runtime closes before the process ends.
+    """
+
+    session_id: SessionId
+    process_id: str
+    after_cursor: str | None = Field(
+        default=None,
+        description=(
+            "The opaque `cursor` of the last chunk received, to resume after it. Omitted, the "
+            "stream starts from the oldest output still kept."
+        ),
+    )
+
+
+class BackgroundProcessOutputChunk(SessionModel):
+    """One chunk of a background process's output, as raw bytes."""
+
+    output_base64: str = Field(description="The output bytes, base64-encoded and not decoded.")
+    cursor: str = Field(
+        description="Opaque; pass it as `afterCursor` to resume the stream after this chunk."
+    )
+    truncated_before: bool = Field(
+        default=False,
+        description=(
+            "Output before this chunk was discarded, and the stream skipped it: the stream "
+            "started before the output still kept, or the reader fell behind."
+        ),
+    )
+    ended: bool = Field(
+        default=False,
+        description="The process has ended and this chunk holds the last of its output.",
+    )
+
+
+class BackgroundProcessStopParams(SessionModel):
+    """Stop one background process.
+
+    A retry with the same `idempotencyKey` gets the first result.
+    """
+
+    idempotency_key: str | None = None
+    session_id: SessionId
+    process_id: str
+
+
+class BackgroundProcessStopResponse(SessionModel):
+    """The process once it has ended. A process that had already ended is returned as it is."""
+
+    process: BackgroundProcess
+    last_event_id: EventId

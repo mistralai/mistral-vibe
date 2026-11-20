@@ -18,12 +18,13 @@ use ratatui::style::{Modifier, Style};
 use ratatui::Frame;
 
 use super::browser_sign_in;
+pub(super) use super::hint_row::Hint;
 use super::input;
 use super::options;
 use crate::app::App;
 use crate::setup::wizard::sign_in;
 use crate::setup::wizard::{
-    BrowserSignInState, InputCard, OnboardingInput, OnboardingState, SignInVariant, ValidationState,
+    BrowserSignInState, InputCard, OnboardingInput, OnboardingState, ValidationState,
 };
 use crate::ui::theme;
 
@@ -73,16 +74,8 @@ pub(super) enum Row {
     UrlHelp,
     /// The wrapped sign-in URL reveal lines, one row per line.
     UrlLines(Vec<String>),
-    /// The bottom hint line.
+    /// The bottom hint, wrapped to the panel width.
     Hint(Hint),
-}
-
-/// The hint line's copy, one flavor per screen family.
-pub(super) enum Hint {
-    /// Shortcut hints, left-aligned.
-    Keys(&'static [crate::hints::Hint]),
-    /// The browser sign-in's centered variant hint.
-    Browser(SignInVariant),
 }
 
 impl Row {
@@ -98,7 +91,8 @@ impl Row {
             }
             Row::Feedback(_) => 1,
             Row::Text(text) => crate::utils::text::wrap_hard(text, width as usize).len() as u16,
-            Row::Link(_) | Row::UrlHelp | Row::Hint(_) => 1,
+            Row::Link(_) | Row::UrlHelp => 1,
+            Row::Hint(hint) => hint.height(width),
             // One four-row card per option, with a blank row, the "or"
             // divider, and another blank between cards.
             Row::OptionCards { opts, .. } => opts.len() as u16 * 7 - 3,
@@ -160,7 +154,7 @@ pub(super) fn render(
                     Row::Steps { step_idx, state } if smallest => {
                         sign_in::steps_height(state, *step_idx, width, 0)
                     }
-                    Row::Hint(_) => 1,
+                    Row::Hint(hint) => hint.height(width),
                     _ if smallest && last_card.is_some_and(|last| index > last) => 0,
                     _ => row.height(width),
                 })
@@ -221,11 +215,11 @@ pub(super) fn render(
     // The hint row carries the screen's keys, so the body fits above the
     // frame's last line and the hint is pinned there instead of dropped when
     // a tall body (a wrapped error, a revealed URL) overflows the frame.
-    let body_bottom = if body.iter().any(|row| matches!(row, Row::Hint(_))) {
-        bottom.saturating_sub(1)
-    } else {
-        bottom
-    };
+    let pinned_rows = body.iter().find_map(|row| match row {
+        Row::Hint(hint) => Some(hint.height(width)),
+        _ => None,
+    });
+    let body_bottom = bottom.saturating_sub(pinned_rows.unwrap_or(0));
     let mut row_y = y + chrome;
     for (index, row) in body.iter().enumerate() {
         let row = *row;
@@ -244,7 +238,7 @@ pub(super) fn render(
         // drawn is pinned on the body's last row instead of dropped.
         if row_y.saturating_add(height) > body_bottom {
             if let Some(hint) = pinned_hint(&body, index) {
-                draw_hint_row(f, x, width, body_bottom, hint);
+                hint.draw(f, Rect::new(x, body_bottom, width, hint.height(width)));
             }
             break;
         }
@@ -298,7 +292,7 @@ pub(super) fn render(
                         .set_string(x, row_y + offset as u16, line, theme::muted_style());
                 }
             }
-            Row::Hint(hint) => draw_hint_row(f, x, width, row_y, hint),
+            Row::Hint(hint) => hint.draw(f, rect),
         }
         row_y += height;
     }
@@ -316,17 +310,6 @@ fn pinned_hint<'a>(rows: &'a [&'a Row], index: usize) -> Option<&'a Hint> {
         Row::Hint(hint) => Some(hint),
         _ => None,
     })
-}
-
-/// One hint line: the wizard's key affordances, drawn by the walk and by its
-/// overflow pinning alike.
-fn draw_hint_row(f: &mut Frame, x: u16, width: u16, y: u16, hint: &Hint) {
-    match hint {
-        Hint::Keys(keys) => crate::ui::hint_line::draw(f, x, y, keys),
-        Hint::Browser(variant) => {
-            browser_sign_in::draw_hint(f, Rect::new(x, y, width, 1), *variant)
-        }
-    }
 }
 
 /// One external link line, like the transcript's markdown links: the shared

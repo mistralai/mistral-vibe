@@ -8,11 +8,10 @@ where those features silently do nothing.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 import shutil
 import tomllib
-from typing import Any
 
 import httpx
 import pytest
@@ -23,13 +22,17 @@ from tests.app_server.backend_contract.conftest import (
     BackendContractConnection,
     connect_backend_contract_host,
 )
-from tests.skills.registry.conftest import REGISTRY_SKILLS_URL
+from tests.skills.registry.conftest import REGISTRY_SKILLS_URL, registry_stalls
+from vibe.app_server import _unified_harness_backend_adapter as _adapter_module
 from vibe.app_server._model import validate_wire
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server.events import ServerWarning
 from vibe.app_server.protocol import (
     AppServerResponseError,
     ClientCapabilities,
     ProtocolErrorCode,
+    RuntimeMutationResponse,
+    RuntimeMutationStatus,
     SessionDeleteParams,
     SessionForkParams,
     SessionForkResponse,
@@ -37,6 +40,7 @@ from vibe.app_server.protocol import (
     SessionResumeParams,
     SkillsCatalogParams,
     SkillsCatalogResponse,
+    SkillsDeleteLocalParams,
     SkillsImportParams,
     SkillsInstalledParams,
     SkillsInstalledResponse,
@@ -359,6 +363,7 @@ async def test_set_enabled_refuses_a_plugin_skill(
 
     assert plugin.locked is True
     assert "fixed by configuration" in error.error.message
+    assert plugin.path is not None and Path(plugin.path).is_file()
 
 
 @pytest.mark.asyncio
@@ -414,6 +419,271 @@ async def test_the_catalog_says_when_it_could_not_load(
     catalog = await _catalog(backend_contract_connection, backend_contract_session)
 
     assert (catalog.authenticated, catalog.loaded, catalog.skills) == (True, False, [])
+
+
+async def _installed(
+    connection: BackendContractConnection, session: AppServerSession
+) -> SkillsInstalledResponse:
+    return validate_wire(
+        SkillsInstalledResponse,
+        await connection.client.request(
+            "skills/installed",
+            SkillsInstalledParams(session_id=session.state.session.id),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_installed_lists_each_skill_s_file_and_the_ones_that_failed_to_load(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+    tmp_path: Path,
+) -> None:
+    """Prepare a workspace skill, and a second one whose description is too long.
+
+    Do read ``skills/installed``.
+
+    Assert the loaded skill says where its file is, and the broken one is an
+    issue naming its file: without them a browser cannot say which skill
+    failed or where to fix it.
+    """
+    _write_skill(tmp_path, "too-long", "x" * 1025, _PROMPT)
+
+    installed = await _installed(backend_contract_connection, backend_contract_session)
+
+    rows = {skill.name: skill for skill in installed.skills}
+    skill_file = tmp_path / ".vibe" / "skills" / "code-review" / "SKILL.md"
+    assert rows["code-review"].path == str(skill_file.resolve())
+    broken = tmp_path / ".vibe" / "skills" / "too-long" / "SKILL.md"
+    assert [issue.file for issue in installed.issues] == [str(broken.resolve())]
+    assert "too-long" not in rows
+
+
+@pytest.mark.both_paths
+@pytest.mark.asyncio
+async def test_a_skill_turned_off_mid_turn_is_gone_from_the_next_turn(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_mistral_api: respx.Route,
+) -> None:
+    """Prepare a session running a turn, with the ``code-review`` skill.
+
+    Do turn the skill off while the turn runs, end it, then run another turn.
+
+    Assert the switch is accepted as pending and its runtime already lists the
+    skill off, the running turn keeps the skills it started with, and the next
+    turn no longer offers the skill to the model.
+    """
+    started = asyncio.Event()
+    release = asyncio.Event()
+    requests: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request.content.decode())
+        if len(requests) == 1:
+            return backend_contract_gated_mistral_response(
+                "finished", started=started, release=release
+            )
+        return backend_contract_mistral_response("noted")
+
+    backend_contract_mistral_api.mock(side_effect=respond)
+    session = backend_contract_session
+
+    async def consume_turn(message: str) -> None:
+        _ = [event async for event in session.act(message)]
+
+    turn = asyncio.create_task(consume_turn("wait"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        answer = validate_wire(
+            RuntimeMutationResponse,
+            await backend_contract_connection.client.request(
+                "skills/setEnabled",
+                SkillsSetEnabledParams(
+                    session_id=session.state.session.id,
+                    name="code-review",
+                    enabled=False,
+                ),
+            ),
+        )
+    finally:
+        release.set()
+        await turn
+    await consume_turn("again")
+
+    assert answer.status is RuntimeMutationStatus.PENDING
+    assert "code-review" not in {skill.name for skill in answer.runtime.skills}
+    assert "code-review" in requests[0]
+    assert "code-review" not in requests[-1]
+
+
+@pytest.mark.asyncio
+async def test_delete_local_removes_a_listed_skill_s_folder_and_nothing_else(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+    tmp_path: Path,
+) -> None:
+    """Prepare a workspace skill, and a file that is not a skill.
+
+    Do delete the skill by the path ``skills/installed`` lists, then ask to
+    delete the other file.
+
+    Assert the skill's folder is gone and no longer listed, and the other file
+    is refused and kept: the path must name a local skill the session lists.
+    """
+    session_id = backend_contract_session.state.session.id
+    installed = await _installed(backend_contract_connection, backend_contract_session)
+    path = next(s.path for s in installed.skills if s.name == "code-review")
+    assert path is not None
+    other = tmp_path / "notes.md"
+    other.write_text("keep me", encoding="utf-8")
+
+    await backend_contract_connection.client.request(
+        "skills/deleteLocal", SkillsDeleteLocalParams(session_id=session_id, path=path)
+    )
+    with pytest.raises(AppServerResponseError) as refused:
+        await backend_contract_connection.client.request(
+            "skills/deleteLocal",
+            SkillsDeleteLocalParams(session_id=session_id, path=str(other)),
+        )
+
+    assert not Path(path).parent.exists()
+    listed = await _installed(backend_contract_connection, backend_contract_session)
+    assert "code-review" not in {skill.name for skill in listed.skills}
+    assert refused.value.error.code is ProtocolErrorCode.NOT_FOUND
+    assert other.read_text(encoding="utf-8") == "keep me"
+
+
+@pytest.mark.asyncio
+async def test_delete_local_drops_only_the_link_of_a_linked_skill_folder(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Prepare a workspace skill folder that links to a folder outside the project.
+
+    Do delete it by the path ``skills/installed`` lists.
+
+    Assert the link is gone and the folder it pointed at survives: the listed
+    path is the link's target, and deleting it would wipe the user's files.
+    """
+    outside = tmp_path_factory.mktemp("outside") / "linked"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text(
+        f"---\nname: linked\ndescription: Linked skill.\n---\n\n{_PROMPT}\n",
+        encoding="utf-8",
+    )
+    link = tmp_path / ".vibe" / "skills" / "linked"
+    link.symlink_to(outside, target_is_directory=True)
+    session_id = backend_contract_session.state.session.id
+    installed = await _installed(backend_contract_connection, backend_contract_session)
+    path = next(s.path for s in installed.skills if s.name == "linked")
+    assert path is not None
+
+    await backend_contract_connection.client.request(
+        "skills/deleteLocal", SkillsDeleteLocalParams(session_id=session_id, path=path)
+    )
+
+    assert not link.exists() and not link.is_symlink()
+    assert (outside / "SKILL.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_delete_local_drops_a_link_named_apart_from_its_target(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+    tmp_path: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Prepare a workspace link ``alias`` to a skill folder named ``target``.
+
+    Do delete it by the path ``skills/installed`` lists.
+
+    Assert the row names the link and says it is one, and the delete drops the
+    link and keeps the folder: the listed path must never be the link's target.
+    """
+    outside = tmp_path_factory.mktemp("outside") / "target"
+    outside.mkdir()
+    (outside / "SKILL.md").write_text(
+        f"---\nname: target\ndescription: Linked skill.\n---\n\n{_PROMPT}\n",
+        encoding="utf-8",
+    )
+    link = tmp_path / ".vibe" / "skills" / "alias"
+    link.symlink_to(outside, target_is_directory=True)
+    session_id = backend_contract_session.state.session.id
+    installed = await _installed(backend_contract_connection, backend_contract_session)
+    row = next(s for s in installed.skills if s.name == "target")
+
+    await backend_contract_connection.client.request(
+        "skills/deleteLocal",
+        SkillsDeleteLocalParams(session_id=session_id, path=str(row.path)),
+    )
+
+    assert row.path == str(link / "SKILL.md") and row.linked
+    assert not link.is_symlink()
+    assert (outside / "SKILL.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_delete_local_of_a_global_skill_keeps_a_project_link_to_it(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+    tmp_path: Path,
+    config_dir: Path,
+) -> None:
+    """Prepare a global skill and a workspace link to that same folder.
+
+    Do delete the global row.
+
+    Assert the global folder is gone and the workspace link is untouched: each
+    row deletes the entry its own root lists.
+    """
+    folder = config_dir / "skills" / "shared"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        f"---\nname: shared\ndescription: Shared skill.\n---\n\n{_PROMPT}\n",
+        encoding="utf-8",
+    )
+    link = tmp_path / ".vibe" / "skills" / "shared"
+    link.symlink_to(folder, target_is_directory=True)
+    session_id = backend_contract_session.state.session.id
+    installed = await _installed(backend_contract_connection, backend_contract_session)
+    rows = [s for s in installed.skills if s.name == "shared"]
+    global_row = next(s for s in rows if s.scope == "global")
+
+    await backend_contract_connection.client.request(
+        "skills/deleteLocal",
+        SkillsDeleteLocalParams(session_id=session_id, path=str(global_row.path)),
+    )
+
+    assert {s.scope for s in rows} == {"global", "project"}
+    assert not folder.exists()
+    assert link.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_lists_skills_without_their_files(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_session: AppServerSession,
+) -> None:
+    """Prepare a session with a workspace skill.
+
+    Do list its skills through ``skills/list``.
+
+    Assert no row carries a file: only ``skills/installed`` names files, for
+    the browser that opens and deletes them.
+    """
+    session_id = backend_contract_session.state.session.id
+
+    listed = await backend_contract_connection.client.request(
+        "skills/list", SkillsListParams(session_id=session_id)
+    )
+
+    skills = SkillsListResponse.model_validate(listed).skills
+    assert skills and all(skill.path is None for skill in skills)
 
 
 def _serve_registry_skill(
@@ -673,6 +943,28 @@ async def test_a_fork_of_a_closed_session_saves_its_picks(
     assert [(pin.skill_id, pin.version) for pin in saved.skill_pins] == [("cid", 2)]
 
 
+async def _skill_warnings(
+    session: AppServerSession, *, until: str
+) -> AsyncIterator[ServerWarning]:
+    async for event in session.events():
+        if not isinstance(event, ServerWarning):
+            continue
+        if "cloud skills picked in this session" not in event.params.warning.message:
+            continue
+        yield event
+        if until in event.params.warning.message:
+            return
+
+
+async def _restored() -> None:
+    """Until the reopened session holds the version it fetched again, which it does
+    once that version loads.
+    """
+    async with asyncio.timeout(10):
+        while ("cid", 2) not in _leases.held_versions():
+            await asyncio.sleep(0.02)
+
+
 @pytest.mark.one_path
 @pytest.mark.asyncio
 async def test_a_reopen_fetches_again_a_pick_a_cleanup_took(
@@ -687,7 +979,8 @@ async def test_a_reopen_fetches_again_a_pick_a_cleanup_took(
 
     Do resume the session.
 
-    Assert the session fetches that version again and still offers the skill.
+    Assert the session fetches that version again after the open, and then offers
+    the skill.
     """
     registry = _serve_registry_skill(respx_mock, name="ask-data")
     session_id = await _saved_session_with_a_pick(
@@ -708,6 +1001,7 @@ async def test_a_reopen_fetches_again_a_pick_a_cleanup_took(
         await reopened.client.request(
             "session/resume", SessionResumeParams(session_id=session_id)
         )
+        await _restored()
         skills = await _skills_of(reopened, session_id)
     finally:
         await reopened.host.close()
@@ -773,9 +1067,7 @@ async def test_a_pick_whose_reload_fails_is_not_kept(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from vibe.app_server._unified_harness_backend_adapter import (
-        UnifiedHarnessBackendAdapter,
-    )
+    from vibe.app_server._unified_harness_backend_adapter import _UnifiedSkillsHost
 
     session_id = backend_contract_persistent_session.session_id
     backend_contract_mistral_api.mock(
@@ -783,17 +1075,17 @@ async def test_a_pick_whose_reload_fails_is_not_kept(
     )
     _ = [event async for event in backend_contract_persistent_session.act("hello")]
     _serve_registry_skill(respx_mock, name="ask-data")
-    apply = UnifiedHarnessBackendAdapter._apply_derivation
+    refresh = _UnifiedSkillsHost.refresh
     calls = 0
 
-    async def fails_once(self: UnifiedHarnessBackendAdapter, **kwargs: Any) -> bool:
+    async def fails_once(self: _UnifiedSkillsHost) -> RuntimeMutationResponse:
         nonlocal calls
         calls += 1
         if calls == 1:
             raise OSError("config unreadable")
-        return await apply(self, **kwargs)
+        return await refresh(self)
 
-    monkeypatch.setattr(UnifiedHarnessBackendAdapter, "_apply_derivation", fails_once)
+    monkeypatch.setattr(_UnifiedSkillsHost, "refresh", fails_once)
 
     with pytest.raises(AppServerResponseError):
         await _import_for_session(backend_contract_persistent_connection, session_id)
@@ -802,6 +1094,206 @@ async def test_a_pick_whose_reload_fails_is_not_kept(
     )
 
     assert saved.skill_pins == []
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_a_reopen_does_not_wait_on_the_registry_for_a_pick_a_cleanup_took(
+    backend_contract_persistent_connection: BackendContractConnection,
+    backend_contract_persistent_session: AppServerSession,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    respx_mock: respx.MockRouter,
+    process_services: ProcessServices,
+) -> None:
+    """Prepare a saved session whose picked version a cleanup removed, and a
+    registry that never answers.
+
+    Do resume the session.
+
+    Assert the resume answers while the download still hangs, without the pick.
+    """
+    _serve_registry_skill(respx_mock, name="ask-data")
+    session_id = await _saved_session_with_a_pick(
+        backend_contract_persistent_connection,
+        backend_contract_persistent_session,
+        backend_contract_mistral_api,
+        backend_contract_mistral_response,
+    )
+    shutil.rmtree(_store.skill_dir("cid", 2))
+    respx_mock.routes.clear()
+    reached = registry_stalls(respx_mock)
+
+    reopened = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        async with asyncio.timeout(10):
+            await reopened.client.request(
+                "session/resume", SessionResumeParams(session_id=session_id)
+            )
+            skills = await _skills_of(reopened, session_id)
+            await reached.wait()
+    finally:
+        await reopened.host.close()
+
+    assert "ask-data" not in skills
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_the_first_turn_after_a_reopen_runs_a_pick_a_cleanup_took(
+    backend_contract_persistent_connection: BackendContractConnection,
+    backend_contract_persistent_session: AppServerSession,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    respx_mock: respx.MockRouter,
+    process_services: ProcessServices,
+) -> None:
+    """Prepare a saved session whose picked version a cleanup removed.
+
+    Do resume it and send a turn at once.
+
+    Assert the turn waits for the download and offers the skill to the model.
+    """
+    _serve_registry_skill(respx_mock, name="ask-data")
+    session_id = await _saved_session_with_a_pick(
+        backend_contract_persistent_connection,
+        backend_contract_persistent_session,
+        backend_contract_mistral_api,
+        backend_contract_mistral_response,
+    )
+    shutil.rmtree(_store.skill_dir("cid", 2))
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("noted")
+    )
+
+    reopened = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await reopened.host.resume_session(session_id)
+        _ = [event async for event in session.act("again")]
+    finally:
+        await reopened.host.close()
+
+    sent = backend_contract_mistral_api.calls.last.request.content.decode()
+    assert "ask-data" in sent, "the first turn ran without the restored pick"
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_a_reopen_tells_the_client_when_a_pick_cannot_be_fetched_again(
+    backend_contract_persistent_connection: BackendContractConnection,
+    backend_contract_persistent_session: AppServerSession,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    respx_mock: respx.MockRouter,
+    process_services: ProcessServices,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepare a saved session whose picked version a cleanup removed, and a
+    registry that keeps failing.
+
+    Do resume it.
+
+    Assert the session warns the client which pick it runs without, tries the
+    download again, then warns once more when it gives up.
+    """
+    monkeypatch.setattr(
+        _adapter_module, "_SKILL_RESTORE_RETRY_DELAYS_SECONDS", (0.0, 0.0)
+    )
+    _serve_registry_skill(respx_mock, name="ask-data")
+    session_id = await _saved_session_with_a_pick(
+        backend_contract_persistent_connection,
+        backend_contract_persistent_session,
+        backend_contract_mistral_api,
+        backend_contract_mistral_response,
+    )
+    shutil.rmtree(_store.skill_dir("cid", 2))
+    respx_mock.routes.clear()
+    registry = respx_mock.get(f"{REGISTRY_SKILLS_URL}/cid").mock(
+        return_value=httpx.Response(503)
+    )
+
+    reopened = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await reopened.host.resume_session(session_id)
+        async with asyncio.timeout(10):
+            warnings = [
+                event.params.warning.message
+                async for event in _skill_warnings(session, until="Pick them again")
+            ]
+    finally:
+        await reopened.host.close()
+
+    assert registry.call_count == 3
+    assert len(warnings) == 2
+    assert all("ask-data" in warning for warning in warnings)
+    assert "until a retry succeeds" in warnings[0]
+
+
+@pytest.mark.one_path
+@pytest.mark.asyncio
+async def test_a_reopen_tells_the_client_when_a_retry_brings_a_pick_back(
+    backend_contract_persistent_connection: BackendContractConnection,
+    backend_contract_persistent_session: AppServerSession,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    respx_mock: respx.MockRouter,
+    process_services: ProcessServices,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prepare a saved session whose picked version a cleanup removed, and a
+    registry that fails once.
+
+    Do resume it.
+
+    Assert the client is warned the pick is missing, then told it is back, and the
+    session offers it.
+    """
+    monkeypatch.setattr(_adapter_module, "_SKILL_RESTORE_RETRY_DELAYS_SECONDS", (0.0,))
+    registry = _serve_registry_skill(respx_mock, name="ask-data")
+    session_id = await _saved_session_with_a_pick(
+        backend_contract_persistent_connection,
+        backend_contract_persistent_session,
+        backend_contract_mistral_api,
+        backend_contract_mistral_response,
+    )
+    shutil.rmtree(_store.skill_dir("cid", 2))
+    served = registry.return_value
+    assert served is not None
+    registry.mock(side_effect=[httpx.Response(503), served])
+
+    reopened = await connect_backend_contract_host(
+        session_options=SessionOptions(),
+        capabilities=ClientCapabilities(),
+        process_services=process_services,
+    )
+    try:
+        session = await reopened.host.resume_session(session_id)
+        async with asyncio.timeout(10):
+            notices = [
+                event.params.warning.message
+                async for event in _skill_warnings(session, until="available again")
+            ]
+        await _restored()
+        skills = await _skills_of(reopened, session_id)
+    finally:
+        await reopened.host.close()
+
+    assert len(notices) == 2
+    assert "until a retry succeeds" in notices[0]
+    assert "ask-data" in notices[1]
+    assert skills.get("ask-data") == "session"
 
 
 @pytest.mark.parametrize(

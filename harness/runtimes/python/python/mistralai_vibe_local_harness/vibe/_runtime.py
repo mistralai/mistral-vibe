@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import json
 import logging
+import re
 import secrets
 import time
 from typing import TYPE_CHECKING, Literal, cast
@@ -33,6 +34,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustCompletionSucceededEvent,
     RustContextCompactedObservation,
     RustContextCompactionFailedObservation,
+    RustContextMessageEvent,
     RustDeterminismContext,
     RustDispatchActionDirective,
     RustEmbeddedResourceContentBlock,
@@ -58,6 +60,8 @@ from mistralai_vibe_local_harness.protocol import (
     RustPendingCompletionAction,
     RustPendingFilesystemAction,
     RustPendingHookCallAction,
+    RustPendingProvidedToolCallAction,
+    RustPendingRuntimeBuiltinToolCallAction,
     RustPluginContextDefinition,
     RustPluginsChange,
     RustProtocolError,
@@ -71,6 +75,7 @@ from mistralai_vibe_local_harness.protocol import (
     RustSettingsChange,
     RustSkillDefinition,
     RustSystemInstructionsChange,
+    RustTextContentBlock,
     RustToolCallAction,
     RustToolFailedEvent,
     RustToolFailureResult,
@@ -150,6 +155,10 @@ from mistralai_vibe_local_harness.vibe._projection import (
     SessionProjector,
     effect_entry_id,
 )
+from mistralai_vibe_local_harness.vibe._recovery_attempts import (
+    count_recovery_attempt,
+    reset_recovery_attempts,
+)
 from mistralai_vibe_local_harness.vibe._runtime_config import (
     CompletionDelta,
     LocalRuntimeAdapterConfig,
@@ -177,6 +186,7 @@ from mistralai_vibe_local_harness.vibe._storage import (
     PreparedProcessStartV1,
     ProjectionStateV1,
     RuntimeActionV1,
+    RuntimeCallbackV1,
     RuntimeStateV3,
     SessionApiFactsV1,
     SessionIdentity,
@@ -224,6 +234,7 @@ _PLUGIN_RECONFIGURE_METHOD = "runtime/plugins/reconfigure"
 _PLUGIN_CONTEXTS_ADAPTER = TypeAdapter(list[RustPluginContextDefinition])
 _STRING_ADAPTER = TypeAdapter(str)
 _SETTINGS_RECONFIGURE_METHOD = "runtime/settings/reconfigure"
+_INSTRUCTIONS_RECONFIGURE_METHOD = "runtime/instructions/reconfigure"
 _EVENT_ADAPTER = TypeAdapter(RustEvent)
 _PROCESS_ACTION_OVERHEAD_BYTES = 256 * 1024
 _PROCESS_LIFETIME_OVERHEAD_BYTES = 128 * 1024
@@ -429,11 +440,15 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         # Replaced and set after every committed Core input; wakes standalone waits.
         self._core_input_committed = asyncio.Event()
         self._restored_actions_resolved = asyncio.Event()
+        self._drove_recovery = False
         self._logged_terminal_processes: set[str] = set()
         self._process_action_reservations: dict[str, tuple[int, int, str | None]] = {}
         self._process_lifetime_reservations: dict[str, int] = {}
         self._process_callback_reservations: dict[str, str] = {}
         self._process_recovery_initialized = False
+        # The processes close() stopped, whose notification then says the
+        # shutdown stopped them, not the model or the user.
+        self._processes_stopped_by_shutdown: frozenset[str] = frozenset()
         self._work_state_callback: WorkStateCallback | None = None
         self._action_applied_sink: ActionAppliedSink | None = None
         self._llm_call_observer: Callable[[RustLLMCallAction], None] | None = None
@@ -457,7 +472,9 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         self._abandoned_actions: set[str] = set()
         self._abandoned_commands: dict[str, str] = {}
         self._live_action_ids: set[str] = set()
-        # Set by the Session before its close cancels the running Turn.
+        # Set by the Session before its close cancels the running Turn. A model
+        # call cancelled from then on stays open, as a crash leaves it, so the
+        # next process to resume the Session sends it again.
         self.closing = False
         self._closed = False
 
@@ -477,8 +494,14 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         process_note_rider: ApprovalNoteRider | None = None,
         facts: FactRecorder | None = None,
         turn_start_response: ResponseFactory | None = None,
+        restored_core: tuple[HarnessSession, tuple[RustSessionTransition, ...]]
+        | None = None,
     ) -> DurableSessionRuntime:
-        core, transitions = stored.restore_core_with_transitions(config)
+        # `restored_core` is what `stored.restore_core_with_transitions(config)`
+        # returned to the caller; the Runtime takes ownership of that Core.
+        core, transitions = restored_core or stored.restore_core_with_transitions(
+            config
+        )
         replayed_config = stored.replayed_config(config)
         try:
             _check_context_moves_to_model(core, replayed_config, config)
@@ -1547,6 +1570,15 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                         transition=transition,
                         started_at=started,
                     )
+                if (turn_id := self.inspection.active_turn_id) is not None:
+                    # Nothing left to drive it on: end it, or every launch
+                    # would list it again.
+                    await self._apply(
+                        RustInterruptEvent(
+                            expected_turn_id=turn_id, reason=_UNDRIVABLE_LEFT_TURN
+                        )
+                    )
+                    self._model_input_resync_required = True
                 await self._settle_restored_idle_locked()
             await self._wait_for_terminal_updates()
         except Exception as exc:
@@ -1560,6 +1592,62 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         )
         return None
 
+    async def _mark_resumed_turn(self, turn_id: str) -> None:
+        """Show where a restart cut the turn, and tell the model on its next
+        request, not the resent one: that call goes out as it was cut.
+        """
+        async with self._lock:
+            self._guard_open()
+            await self._catch_up_projection()
+            update = self._projector.apply_resumed(
+                turn_id, observed_at=time.time_ns() // 1_000_000
+            )
+            await self._record_projection_update(update)
+            await self._apply(
+                RustContextMessageEvent(
+                    content=[RustTextContentBlock(text=_RESUMED_TURN_NOTE)]
+                )
+            )
+
+    async def end_left_turn(
+        self, reason: str, *, expected_turn_id: str | None = None
+    ) -> None:
+        """End, as interrupted, the turn a stopped process left running,
+        without driving anything it left open: no model call is sent again, no
+        tool runs, no callback is asked again. The callbacks it left pending are
+        closed, and the session settles idle.
+
+        With ``expected_turn_id``, a different active turn is left running.
+        """
+        self._terminal_retry_wakeup.set()
+        await self._recover_processes_after_restart()
+        async with self._lock:
+            self._guard_open()
+            await self._catch_up_projection()
+            turn_id = self.inspection.active_turn_id
+            if expected_turn_id is not None and turn_id != expected_turn_id:
+                return
+            if turn_id is not None:
+                stored = await asyncio.to_thread(self._store.load)
+                for callback in stored.runtime_state.callbacks:
+                    if callback.state != "pending":
+                        continue
+                    await asyncio.to_thread(
+                        self._store.resolve_callback,
+                        callback.callback_id,
+                        {"code": "callback_closed", "message": reason},
+                        failed=True,
+                    )
+                await self._apply(
+                    RustInterruptEvent(expected_turn_id=turn_id, reason=reason)
+                )
+                self._model_input_resync_required = True
+            self._replayed_transition = None
+            await self._settle_restored_idle_locked()
+        await self._wait_for_terminal_updates()
+        await self._reconcile_subagent_receipts()
+        self.release_restored_actions()
+
     async def continue_recovery(
         self,
         recovered: RecoveredTurn,
@@ -1572,6 +1660,13 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         anything but a replayed action that settles from its durable intent. A
         caller stops waiting there, before anything that may need a client.
         """
+        if recovered.turn_id is not None:
+            # Before driving anything: the drive is what may kill the process.
+            await asyncio.to_thread(
+                count_recovery_attempt, self._store.session_root, recovered.turn_id
+            )
+            self._drove_recovery = True
+            await self._mark_resumed_turn(recovered.turn_id)
         try:
             terminal = await self._drive(
                 recovered.transition, recovering=True, on_live_work=on_live_work
@@ -2182,6 +2277,40 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             if owner is not None:
                 self._process_callback_reservations[callback_id] = owner
 
+    def pending_user_question(
+        self, action: RustProvidedToolCallAction
+    ) -> JsonObject | None:
+        """The stored question ``action`` asked that no answer has settled yet.
+
+        A Session that stopped before the user answered leaves it pending, so
+        the recovered Turn asks it again under the same callback.
+        """
+        for callback in self.runtime_state.callbacks:
+            routing = callback.routing
+            detail = routing.get("detail")
+            if (
+                callback.kind == "user_input"
+                and callback.state == "pending"
+                and routing.get("turnId") == action.turn_id
+                and isinstance(detail, dict)
+                and detail.get("relatedEntryId") == action.call_id
+            ):
+                return cast(JsonObject, routing)
+        return None
+
+    def pending_approval(
+        self, action: RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction
+    ) -> JsonObject | None:
+        """The stored approval ``action`` asked that no answer has settled yet.
+
+        A Session that stopped before the user answered leaves it pending, so
+        the recovered Turn asks it again under the same callback.
+        """
+        callback = _pending_approval_callback(
+            self.runtime_state.callbacks, action.turn_id, action.call_id
+        )
+        return cast(JsonObject, callback.routing) if callback is not None else None
+
     def resolve_callback(
         self, callback_id: str, result: JsonValue, *, failed: bool = False
     ) -> bool:
@@ -2312,6 +2441,32 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 compact=False,
             )
             await self._accept_settings_config(params)
+
+    async def reconfigure_instructions(self, instructions: str) -> None:
+        """Replace the instructions Core builds its system prompt from; the
+        next request carries the rebuilt prompt.
+        """
+        async with self._lock_after_settling_stranded_turn():
+            self._guard_open()
+            await self._flush_pending_configuration_command()
+            pending = await self._flush_pending_instructions_command()
+            self._post_recovery_system_instructions = None
+            params: dict[str, JsonValue] = {"systemInstructions": instructions}
+            if pending is not None and pending.params == params:
+                return
+            if instructions == self._config.system_instructions:
+                return
+            await self._command_without_actions_locked(
+                client_command_id=self._store.resolve_internal_command_id(
+                    "instructions"
+                ),
+                method=_INSTRUCTIONS_RECONFIGURE_METHOD,
+                params=params,
+                command=_instructions_reconfigure_command(params),
+                response_factory=lambda _transition: {},
+                compact=False,
+            )
+            await self._accept_system_instructions(params)
 
     async def check_settings_fit(self, settings: RustHarnessSettings) -> None:
         """Refuse settings for a model the current context cannot fit.
@@ -2507,6 +2662,16 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             method=_PLUGIN_RECONFIGURE_METHOD,
             command=_plugin_reconfigure_command,
             accept=self._accept_plugin_config,
+        )
+
+    async def _flush_pending_instructions_command(
+        self,
+    ) -> PendingInternalCommand | None:
+        return await self._flush_pending_internal_command(
+            namespace="instructions",
+            method=_INSTRUCTIONS_RECONFIGURE_METHOD,
+            command=_instructions_reconfigure_command,
+            accept=self._accept_system_instructions,
         )
 
     async def _flush_pending_internal_command(
@@ -2816,6 +2981,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             await controller.close()
         manager = self._process_manager
         if manager is not None:
+            self._processes_stopped_by_shutdown = frozenset(
+                process.process_id
+                for process in self.runtime_state.processes
+                if manager.has_live_process(process.process_id)
+            )
             await manager.shutdown()
         try:
             await self._wait_for_terminal_updates()
@@ -2831,6 +3001,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             await self._answer_abandoned_commands_locked()
             self._closed = True
             self._core.close()
+            if self._drove_recovery:
+                # This process survived the recovery it ran.
+                await asyncio.to_thread(
+                    reset_recovery_attempts, self._store.session_root
+                )
             # Wake whoever waits on Core input: nothing commits once closed.
             self._signal_core_input_committed()
 
@@ -2958,6 +3133,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         await self._flush_pending_settings_command()
         await self._flush_pending_capability_command()
         await self._flush_pending_plugin_command()
+        await self._flush_pending_instructions_command()
         capabilities = self._take_deferred_capabilities()
         if capabilities is not None:
             await self._reconfigure_capabilities_locked(
@@ -3049,6 +3225,17 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         await self._reconfigure_configuration_locked(
             self._config.model_copy(update={"system_instructions": instructions})
         )
+
+    async def _accept_system_instructions(self, params: dict[str, JsonValue]) -> None:
+        self._config = self._config.model_copy(
+            update={
+                "system_instructions": _STRING_ADAPTER.validate_python(
+                    params.get("systemInstructions")
+                )
+            }
+        )
+        if not self.inspection.pending_actions:
+            await self._compact_store()
 
     async def _accept_plugin_config(self, params: dict[str, JsonValue]) -> None:
         plugins = _PLUGIN_CONTEXTS_ADAPTER.validate_python(params.get("plugins"))
@@ -3179,10 +3366,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     async def _apply_completion_budget(
         self, transition: RustSessionTransition
     ) -> RustSessionTransition:
-        """Admit each new completion once, before its provider call starts.
+        """Admit each completion once, before its provider call starts.
 
-        A completion with a durable intent is not admitted again: recovery either
-        redelivers its stored result or fails it, and neither starts provider work.
+        A completion with a stored result is not admitted again: recovery
+        redelivers that result without provider work. One left without a result
+        is sent again, so it is admitted like a new one.
         """
         config = self._process_config
         if config is None or config.completion_budget is None:
@@ -3197,7 +3385,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             if not candidates:
                 return current
             stored = await asyncio.to_thread(self._store.load)
-            durable_ids = {item.action_id for item in stored.runtime_state.actions}
+            durable_ids = {
+                item.action_id
+                for item in stored.runtime_state.actions
+                if not _sent_again_on_recovery(item)
+            }
             action = next(
                 (
                     candidate
@@ -3259,7 +3451,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         """Start the transition's actions and return the replayed ones that settle at once.
 
         Each has a durable intent and is not a process or child action, which
-        reconciles by waiting on that work.
+        reconciles by waiting on that work, nor a model call left without a
+        result, which is sent again.
         """
         settling_at_once: set[str] = set()
         async with self._lock:
@@ -3310,8 +3503,9 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 in_flight[action.action_id] = (action, task)
                 if (
                     action_recovering
-                    and action.action_id in durable_actions
+                    and (durable := durable_actions.get(action.action_id)) is not None
                     and _action_kind(action) not in {"process", "child"}
+                    and not _asked_again_on_recovery(durable, stored.runtime_state)
                 ):
                     settling_at_once.add(action.action_id)
         return settling_at_once
@@ -3415,6 +3609,17 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                 # Redelivery performs no provider work in this invocation, so it must
                 # return before result recording can charge the fresh completion budget.
                 return _EVENT_ADAPTER.validate_python(stored_reply(durable.result))
+            if (
+                recovering
+                and durable is not None
+                and _sent_again_on_recovery(durable)
+                and isinstance(action, RustLLMCallAction)
+            ):
+                # This process's model-input cache is empty: Core rebuilds the
+                # whole request.
+                action = await self._resynchronize_completion_action(action.action_id)
+                self._model_input_resync_required = False
+                compaction_action = action if action.purpose == "compaction" else None
             if (
                 durable is None
                 and isinstance(action, RustLLMCallAction)
@@ -3546,6 +3751,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     event = self._process_note_rider(event, action.action_id)
             elif recovering:
                 event = await self._recover(durable, action)
+                await self._settle_unasked_approval(action)
             elif (
                 isinstance(action, RustRuntimeBuiltinToolCallAction)
                 and action.call.name == "self.sleep"
@@ -3571,6 +3777,12 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     failed=False,
                     budget_pricing=None,
                 )
+                raise
+            # A close leaves what recovery carries on open, as a crash does.
+            if self.closing and (
+                self._asked_again_after_restart(action)
+                or durable.recovery_mode in _CARRIED_ON_BY_RECOVERY
+            ):
                 raise
             event = _failed_action_event(action, "Action cancelled")
             await self._record_action_result(
@@ -3711,7 +3923,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
                     {"tool": action.call.name},
                 ),
             )
-        if recovering:
+        # A start still waiting on its approval did nothing yet: it asks again.
+        if recovering and not (
+            durable.process_request_sha256 is None
+            and self.pending_approval(action) is not None
+        ):
             recovered = await self._recover_process_action(durable, action, request)
             if recovered is not None:
                 return recovered
@@ -3719,6 +3935,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             # The adapter gate owns policy here: mode, resolver, approval callback.
             if durable.prepared_process_start is None:
                 denial = await self._process_gate(action)
+                if recovering:
+                    await self._settle_unasked_approval(action)
                 if denial is not None:
                     return denial
         else:
@@ -3727,6 +3945,8 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             mode = config.tool_modes.get(action.call.name, "allow")
             if mode == "ask" and config.bypass_approval:
                 mode = "allow"
+            if recovering:
+                await self._settle_unasked_approval(action)
             if mode != "allow":
                 return process_failed(
                     action,
@@ -4422,7 +4642,11 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
 
     async def _submit_terminal_process(self, process: ManagedProcessV1) -> None:
         await self._start_barrier(process.process_id)
-        notification = build_terminal_notification(process)
+        notification = build_terminal_notification(
+            process,
+            stopped_by_shutdown=process.process_id
+            in self._processes_stopped_by_shutdown,
+        )
         async with self._lock:
             self._guard_open()
             stored = await asyncio.to_thread(self._store.load)
@@ -4503,13 +4727,33 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             )
 
     async def _close_restarted_approval_callbacks(self) -> None:
+        """Close the approvals no Action Core still holds will ask again."""
         async with self._lock:
             self._guard_open()
             stored = await asyncio.to_thread(self._store.load)
+            asked_again = {
+                callback.callback_id
+                for pending_action in self.inspection.pending_actions
+                if isinstance(
+                    pending_action,
+                    RustPendingRuntimeBuiltinToolCallAction
+                    | RustPendingProvidedToolCallAction,
+                )
+                and (
+                    callback := _pending_approval_callback(
+                        stored.runtime_state.callbacks,
+                        self.inspection.active_turn_id,
+                        pending_action.call_id,
+                    )
+                )
+                is not None
+            }
             pending = [
                 callback
                 for callback in stored.runtime_state.callbacks
-                if callback.kind == "approval" and callback.state == "pending"
+                if callback.kind == "approval"
+                and callback.state == "pending"
+                and callback.callback_id not in asked_again
             ]
             for callback in pending:
                 await asyncio.to_thread(
@@ -4828,8 +5072,7 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
             matching = [
                 action_id
                 for call_id, action_id in pending_starts.items()
-                if callback.callback_id == f"approval-{call_id}"
-                or callback.callback_id.startswith(f"approval-{call_id}-")
+                if _names_approval_of(callback.callback_id, call_id)
             ]
             if len(matching) == 1:
                 self._process_callback_reservations[callback.callback_id] = matching[0]
@@ -4884,11 +5127,48 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
         )
         await self._record_projection_update(update)
 
+    async def _settle_unasked_approval(self, action: RustAction) -> None:
+        """Settle the approval a stopped process left open for ``action`` when
+        the gate decided the call on resume without asking it again: its mode
+        or a grant changed meanwhile.
+        """
+        if not isinstance(
+            action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction
+        ):
+            return
+        callback = _pending_approval_callback(
+            self.runtime_state.callbacks, action.turn_id, action.call_id
+        )
+        if callback is None:
+            return
+        await self.resolve_callback_durable(
+            callback.callback_id,
+            {
+                "code": "decided_without_asking",
+                "message": "The approval policy decided the call after a restart",
+            },
+            failed=True,
+        )
+
+    def _asked_again_after_restart(self, action: RustAction) -> bool:
+        return _asked_again_after_restart(action) or (
+            isinstance(
+                action, RustRuntimeBuiltinToolCallAction | RustProvidedToolCallAction
+            )
+            and self.pending_approval(action) is not None
+        )
+
     async def _recover(self, durable: RuntimeActionV1, action: RustAction) -> RustEvent:
         if self._recover_action is not None:
             return await self._recover_action(durable, action)
-        if durable.recovery_mode in {"idempotent_retry", "reconcile", "redeliver"}:
+        if durable.recovery_mode in _CARRIED_ON_BY_RECOVERY:
             return await self._execute_action(action)
+        if self._asked_again_after_restart(action):
+            # A stream cannot be rejoined, but a model call, a question to the
+            # user or a tool still waiting on its approval has had no effect
+            # outside this Session: asking again carries the turn on. A question
+            # or an approval reopens under its stored callback.
+            return await self._execute_held_action(action)
         return _failed_action_event(
             action, "The interrupted effect cannot be reconnected safely"
         )
@@ -5701,17 +5981,28 @@ def _runtime_state_for_replaced_context(
     )
 
 
-def build_terminal_notification(process: ManagedProcessV1) -> RustHarnessNotification:
+def build_terminal_notification(
+    process: ManagedProcessV1, *, stopped_by_shutdown: bool = False
+) -> RustHarnessNotification:
     if process.status == "running":
         raise ValueError("running process cannot produce a terminal notification")
     level, message = {
         "completed": ("info", f"Background process {process.process_id} completed."),
         "failed": ("error", f"Background process {process.process_id} failed."),
-        "stopped": ("info", f"Background process {process.process_id} stopped."),
+        "stopped": (
+            "info",
+            f"Background process {process.process_id} stopped because the App"
+            " Server shut down or restarted. Start it again if you still need it."
+            if stopped_by_shutdown
+            else f"Background process {process.process_id} stopped.",
+        ),
+        # After a crash the process may well still be running.
         "orphaned": (
             "warning",
             "The App Server can no longer manage background process "
-            f"{process.process_id} or confirm whether it is running.",
+            f"{process.process_id} or confirm whether it is running, for example"
+            " after it restarted, and its output is unavailable. If you still need"
+            " it, check whether it is running before you start it again.",
         ),
     }[process.status]
     exit_code = (
@@ -5900,6 +6191,18 @@ def _settings_reconfigure_command(params: dict[str, JsonValue]) -> RustReconfigu
     return RustReconfigureEvent(changes=[RustSettingsChange(value=settings)])
 
 
+def _instructions_reconfigure_command(
+    params: dict[str, JsonValue],
+) -> RustReconfigureEvent:
+    return RustReconfigureEvent(
+        changes=[
+            RustSystemInstructionsChange(
+                value=_STRING_ADAPTER.validate_python(params.get("systemInstructions"))
+            )
+        ]
+    )
+
+
 def _plugin_reconfigure_command(params: dict[str, JsonValue]) -> RustReconfigureEvent:
     plugins = _PLUGIN_CONTEXTS_ADAPTER.validate_python(params.get("plugins"))
     return RustReconfigureEvent(changes=[RustPluginsChange(value=plugins)])
@@ -5985,9 +6288,96 @@ def _action_kind(
     return "tool"
 
 
+def _sent_again_on_recovery(durable: RuntimeActionV1) -> bool:
+    """A model call a stop or a crash left without a result."""
+    return durable.kind == "completion" and durable.state in {"pending", "running"}
+
+
+def _asked_again_on_recovery(
+    durable: RuntimeActionV1, runtime_state: RuntimeStateV3
+) -> bool:
+    """A model call, a question, or a tool waiting on its approval, that a stop
+    or a crash left without a result.
+    """
+    if durable.state not in {"pending", "running"}:
+        return False
+    if _sent_again_on_recovery(durable) or _requests_user_question(durable.request):
+        return True
+    request = durable.request
+    if not isinstance(request, dict):
+        return False
+    call_id = request.get("call_id")
+    return (
+        isinstance(call_id, str)
+        and _pending_approval_callback(
+            runtime_state.callbacks, cast(str | None, request.get("turn_id")), call_id
+        )
+        is not None
+    )
+
+
+def _names_approval_of(callback_id: str, call_id: str) -> bool:
+    """Whether ``callback_id`` is ``approval-<call_id>``, bare or with the
+    random suffix: never the approval of a call ``call_id`` only prefixes.
+    """
+    prefix = f"approval-{call_id}"
+    if callback_id == prefix:
+        return True
+    suffix = callback_id.removeprefix(f"{prefix}-")
+    return suffix != callback_id and _CALLBACK_ID_SUFFIX.fullmatch(suffix) is not None
+
+
+def _pending_approval_callback(
+    callbacks: Sequence[RuntimeCallbackV1], turn_id: str | None, call_id: str
+) -> RuntimeCallbackV1 | None:
+    for callback in callbacks:
+        if (
+            callback.kind == "approval"
+            and callback.state == "pending"
+            and callback.routing.get("turnId") == turn_id
+            and _names_approval_of(callback.callback_id, call_id)
+        ):
+            return callback
+    return None
+
+
+_CARRIED_ON_BY_RECOVERY = frozenset({"idempotent_retry", "reconcile", "redeliver"})
+
+
+def _asked_again_after_restart(action: RustAction) -> bool:
+    return isinstance(action, RustLLMCallAction) or (
+        isinstance(action, RustProvidedToolCallAction)
+        and _is_user_question(action.call.group_name, action.call.tool_name)
+    )
+
+
+def _requests_user_question(request: JsonValue) -> bool:
+    if not isinstance(request, dict) or request.get("type") != "provided_tool_call":
+        return False
+    call = request.get("call")
+    return isinstance(call, dict) and _is_user_question(
+        call.get("group_name"), call.get("tool_name")
+    )
+
+
+def _is_user_question(group_name: object, tool_name: object) -> bool:
+    return group_name == "ui" and tool_name == "ask_user_question"
+
+
+# The random part ``_unique_callback_id`` appends to a callback ID.
+_CALLBACK_ID_SUFFIX = re.compile(r"[0-9a-f]{8}")
+_UNDRIVABLE_LEFT_TURN = "Interrupted: nothing was left to resume after the restart"
+_RESUMED_TURN_NOTE = (
+    "The app restarted while you were working, and this turn was resumed: a"
+    " request or tool cut by the restart may have been sent or run again, or"
+    " left incomplete. Check the current state before repeating actions."
+)
+
+
 def _recovery_mode(action: RustAction) -> RecoveryMode:
     kind = _action_kind(action)
     if kind == "completion":
+        # Kept for older readers, which fail it; ``_recover`` sends it again.
         return "reconnect_or_fail"
     if kind in {"process", "child"}:
         return "reconcile"

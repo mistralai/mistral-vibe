@@ -44,3 +44,14 @@ fn tabs_expand_to_their_stops() {
         ["  a       b", "          c"]
     );
 }
+
+#[test]
+fn a_body_renders_as_markdown_under_the_pane_indent() {
+    let body = Body::Ready("# Deploy\n\nRun **every** check.".to_owned());
+    let lines = text(&body_lines(&body, 40));
+    assert_eq!(lines.first().map(String::as_str), Some("  Deploy"));
+    assert!(
+        lines.contains(&"  Run every check.".to_owned()),
+        "{lines:?}"
+    );
+}

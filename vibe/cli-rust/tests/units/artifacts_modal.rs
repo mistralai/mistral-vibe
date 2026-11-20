@@ -1,4 +1,4 @@
-//! The artifacts modal: number/title/state rows, highlight by id, keys, state colors and session switches.
+//! The PR window: number/title/state rows, highlight by id, keys, state colors and session switches.
 
 use crossterm::event::KeyCode;
 use serde_json::{json, Value};
@@ -6,12 +6,12 @@ use serde_json::{json, Value};
 use vibe_rs::app::{App, Status};
 use vibe_rs::artifacts;
 use vibe_rs::artifacts_modal;
-use vibe_rs::input::{handle_artifacts_modal_key, handle_priority_key};
+use vibe_rs::input::handle_priority_key;
 use vibe_rs::server::PublicSessionArtifact;
 use vibe_rs::ui::pr_row;
 use vibe_rs::ui::theme;
 
-use crate::support::{ctrl, key, render, rows, stub};
+use crate::support::{ctrl, press, render, rows, stub};
 
 const SESSION: &str = "00000000-0000-4000-8000-000000000001";
 const OTHER: &str = "00000000-0000-4000-8000-000000000003";
@@ -49,8 +49,9 @@ fn open_with(list: Vec<PublicSessionArtifact>) -> App {
     app.session.session_id = Some(SESSION.into());
     app.session.cwd = Some("/tmp/project".into());
     app.session.tokens = (0, 600_000);
+    app.artifacts_modal.enabled = true;
     artifacts::apply_list(&mut app, SESSION, list);
-    artifacts_modal::open(&mut app);
+    artifacts_modal::open(&mut app, &stub());
     app
 }
 
@@ -65,50 +66,50 @@ fn row_of(lines: &[String], text: &str) -> usize {
         .unwrap_or_else(|| panic!("{text} not on screen"))
 }
 
-fn press(app: &mut App, code: KeyCode) {
-    handle_artifacts_modal_key(app, key(code));
-}
-
 fn selected_id(app: &App) -> Option<String> {
     artifacts_modal::selected(app).map(|artifact| artifact.id.clone())
 }
 
-#[test]
-fn rows_show_the_number_title_and_state_only() {
+#[tokio::test]
+async fn rows_show_the_number_title_and_state_only() {
     let mut app = open_with(vec![
         pr(1, 10, json!({})),
         pr(2, 11, checks(&["build", "lint"])),
     ]);
     let lines = screen(&mut app, 30);
-    let title = row_of(&lines, "Pull Requests");
+    let title = row_of(&lines, "┌─ Pull Requests 2 ");
     assert_eq!(row_of(&lines, "● #2  Title 2  open"), title + 1);
     assert_eq!(row_of(&lines, "● #1  Title 1  open"), title + 2);
-    assert_eq!(row_of(&lines, "Esc/Ctrl+C cancel"), title + 4);
+    assert_eq!(
+        row_of(&lines, "Esc close"),
+        title + 4,
+        "the composer's height"
+    );
     let shown = |text: &str| lines.iter().any(|line| line.contains(text));
     assert!(!shown("build") && !shown("https://"), "no checks, no URL");
 }
 
-#[test]
-fn an_overflowing_list_shows_half_the_screen() {
+#[tokio::test]
+async fn an_overflowing_list_clips_at_ten_rows_with_a_scrollbar() {
     let list = (1..=30).map(|n| pr(n, 0, json!({}))).collect();
     let mut app = open_with(list);
     let lines = screen(&mut app, 40);
-    let title = row_of(&lines, "Pull Requests");
-    assert_eq!(row_of(&lines, "Esc/Ctrl+C cancel"), title + 22, "20 rows");
+    let title = row_of(&lines, "Pull Requests 30");
+    assert_eq!(row_of(&lines, "Esc close"), title + 11, "10 rows");
 }
 
-#[test]
-fn a_narrow_box_shrinks_the_title_and_keeps_the_state() {
+#[tokio::test]
+async fn a_narrow_box_shrinks_the_title_and_keeps_the_state() {
     let mut app = open_with(vec![pr(1234567, 10, json!({})), pr(2, 11, json!({}))]);
     let lines = rows(&render(32, 30, |f| app.draw(f)));
     let y = row_of(&lines, "● #1234567");
-    assert!(lines[y].contains("Title…"), "{:?}", lines[y]);
+    assert!(lines[y].contains("Title 1…"), "{:?}", lines[y]);
     assert!(lines[y].contains("open"), "{:?}", lines[y]);
     assert!(lines[y].ends_with('│'), "{:?}", lines[y]);
 }
 
-#[test]
-fn a_live_artifact_keeps_the_highlighted_one() {
+#[tokio::test]
+async fn a_live_artifact_keeps_the_highlighted_one() {
     let mut app = open_with(vec![pr(1, 10, json!({})), pr(2, 11, json!({}))]);
     press(&mut app, KeyCode::Down);
     assert_eq!(selected_id(&app).as_deref(), Some("a1"));
@@ -118,8 +119,8 @@ fn a_live_artifact_keeps_the_highlighted_one() {
     assert_eq!(selected_id(&app).as_deref(), Some("a1"));
 }
 
-#[test]
-fn page_and_edge_keys_clamp() {
+#[tokio::test]
+async fn page_and_edge_keys_clamp() {
     let list = (1..=6).map(|n| pr(n, 10 + n as u8, json!({}))).collect();
     let mut app = open_with(list);
     screen(&mut app, 10);
@@ -139,29 +140,29 @@ fn page_and_edge_keys_clamp() {
     assert_eq!(app.artifacts_modal.list.selected(), page);
 }
 
-#[test]
-fn ctrl_c_closes_the_modal_without_arming_quit_or_clearing_the_hidden_draft() {
+#[tokio::test]
+async fn ctrl_c_closes_the_modal_without_arming_quit_or_clearing_the_hidden_draft() {
     let mut app = open_with(vec![pr(1, 10, json!({})), pr(2, 11, json!({}))]);
     app.chat_input.input = "my long unsent draft".into();
     let exit = handle_priority_key(&mut app, &stub(), ctrl('c'));
     assert_eq!(exit, Some(false));
-    assert!(!app.artifacts_modal.open);
+    assert!(!artifacts_modal::is_open(&app));
     assert!(app.quit.active().is_none());
     assert_eq!(app.chat_input.full_text(), "my long unsent draft");
 }
 
-#[test]
-fn ctrl_c_closes_the_modal_over_a_viewed_subagent_without_arming_quit() {
+#[tokio::test]
+async fn ctrl_c_closes_the_modal_over_a_viewed_subagent_without_arming_quit() {
     let mut app = open_with(vec![pr(1, 10, json!({})), pr(2, 11, json!({}))]);
     app.subagents.viewed_subagent_id = Some("child".into());
     let exit = handle_priority_key(&mut app, &stub(), ctrl('c'));
     assert_eq!(exit, Some(false));
-    assert!(!app.artifacts_modal.open);
+    assert!(!artifacts_modal::is_open(&app));
     assert!(app.quit.active().is_none());
 }
 
-#[test]
-fn the_dot_and_state_take_the_lifecycle_color() {
+#[tokio::test]
+async fn the_dot_and_state_take_the_lifecycle_color() {
     let mut app = open_with(vec![
         pr(
             1,
@@ -190,8 +191,8 @@ fn the_dot_and_state_take_the_lifecycle_color() {
     }
 }
 
-#[test]
-fn a_read_for_another_session_is_ignored() {
+#[tokio::test]
+async fn a_read_for_another_session_is_ignored() {
     let mut app = open_with(vec![pr(1, 10, json!({}))]);
     artifacts::apply_list(&mut app, OTHER, vec![pr(2, 11, json!({}))]);
     assert_eq!(app.session.artifacts.len(), 1);
@@ -204,7 +205,7 @@ async fn a_session_switch_drops_the_old_artifacts_and_closes_the_modal() {
     app.set_session_id(OTHER.into());
     // Before any frame: the next draw never shows the old session's list.
     assert!(app.session.artifacts.is_empty());
-    assert!(!app.artifacts_modal.open);
+    assert!(!artifacts_modal::is_open(&app));
     artifacts::follow_session(&mut app, &stub());
     assert_eq!(app.session.artifacts_session.as_deref(), Some(OTHER));
     // The old session's late answer is dropped; the new session's lands.
@@ -214,8 +215,8 @@ async fn a_session_switch_drops_the_old_artifacts_and_closes_the_modal() {
     assert_eq!(app.session.artifacts.len(), 1);
 }
 
-#[test]
-fn a_switch_away_and_back_reads_the_list_again() {
+#[tokio::test]
+async fn a_switch_away_and_back_reads_the_list_again() {
     let mut app = open_with(vec![pr(1, 10, json!({}))]);
     app.session.artifacts_session = Some(SESSION.into());
     app.set_session_id(OTHER.into());
@@ -227,13 +228,13 @@ fn a_switch_away_and_back_reads_the_list_again() {
     );
 }
 
-#[test]
-fn the_same_session_reads_nothing_again() {
+#[tokio::test]
+async fn the_same_session_reads_nothing_again() {
     let mut app = open_with(vec![pr(1, 10, json!({}))]);
     app.session.artifacts_session = Some(SESSION.into());
     artifacts::follow_session(&mut app, &stub());
     assert_eq!(app.session.artifacts.len(), 1);
-    assert!(app.artifacts_modal.open);
+    assert!(artifacts_modal::is_open(&app));
 }
 
 #[test]

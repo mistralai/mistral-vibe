@@ -223,6 +223,7 @@ def send_unified_tool_call_finished(  # noqa: PLR0913
     status: Literal["success", "failure", "skipped"],
     model: str,
     agent_profile_name: str | None,
+    approval_policy: str | None = None,
     nb_files_created: int = 0,
     nb_files_modified: int = 0,
     file_extension: str | None = None,
@@ -231,6 +232,8 @@ def send_unified_tool_call_finished(  # noqa: PLR0913
     approval_type: Literal["always", "never", "ask"] | None = None,
     approval_source: Literal["config", "smart", "user", "bypass", "never"]
     | None = None,
+    error_code: str | None = None,
+    error_reason: str | None = None,
 ) -> None:
     """Record one terminal ordinary (non-subagent) Unified tool call.
 
@@ -247,11 +250,14 @@ def send_unified_tool_call_finished(  # noqa: PLR0913
         "approval_type": approval_type,
         "approval_source": approval_source,
         "agent_profile_name": agent_profile_name,
+        "approval_policy": approval_policy,
         "model": model,
         "nb_files_created": nb_files_created,
         "nb_files_modified": nb_files_modified,
         "file_extension": file_extension,
         "message_id": message_id,
+        "error_code": error_code,
+        "error_reason": error_reason,
     }
     client.send_telemetry_event("vibe.tool_call_finished", payload)
 
@@ -466,6 +472,8 @@ class TelemetryClient:
         nb_post_agent_scoped_hooks: int,
         nb_post_agent_main_hooks: int,
         nb_hooks_by_type: Mapping[str, int] | None = None,
+        started_by_session_id: str | None = None,
+        start_link: Literal["attached", "detached"] | None = None,
     ) -> None:
         lc = self._launch_context
         payload = {
@@ -493,6 +501,9 @@ class TelemetryClient:
             ),
             "config": config_snapshot(self._config_getter()),
         }
+        if start_link is not None:
+            payload["started_by_session_id"] = started_by_session_id
+            payload["start_link"] = start_link
         self.send_telemetry_event("vibe.new_session", payload)
 
     def send_session_closed(self, *, reason: str) -> None:
@@ -509,9 +520,20 @@ class TelemetryClient:
     def send_agent_mode_selected(
         self, *, from_agent: str, to_agent: str, trigger: AgentModeTrigger
     ) -> None:
-        """Record the session moving from one agent mode to another."""
+        """Record the session moving from one agent to another."""
         payload = {"from_agent": from_agent, "to_agent": to_agent, "trigger": trigger}
         self.send_telemetry_event("vibe.agent_mode.selected", payload)
+
+    def send_approval_policy_selected(
+        self, *, from_policy: str, to_policy: str, trigger: AgentModeTrigger
+    ) -> None:
+        """Record the session moving from one approval policy to another."""
+        payload = {
+            "from_policy": from_policy,
+            "to_policy": to_policy,
+            "trigger": trigger,
+        }
+        self.send_telemetry_event("vibe.approval_policy.selected", payload)
 
     def send_tool_approval_resolved(
         self,
@@ -520,6 +542,7 @@ class TelemetryClient:
         decision: str,
         path_scope: str | None,
         agent_profile_name: str | None,
+        approval_policy: str | None,
         wait_ms: int,
         is_subagent: bool,
         has_feedback: bool,
@@ -530,14 +553,16 @@ class TelemetryClient:
         ``vibe.tool_call_finished`` sees only whether the call ran: not how far
         an approval reaches (once, session, permanently, path scope), a turn
         the answer cancelled, or how long the user took. ``has_feedback`` stands
-        for the free-text reason, which is never sent. ``agent_profile_name`` is
-        None for a subagent's prompt, which runs under the subagent's profile.
+        for the free-text reason, which is never sent. ``agent_profile_name`` and
+        ``approval_policy`` are None for a subagent's prompt, which runs under
+        the subagent's profile.
         """
         payload = {
             "tool_name": tool_name,
             "decision": decision,
             "path_scope": path_scope,
             "agent_profile_name": agent_profile_name,
+            "approval_policy": approval_policy,
             "wait_ms": wait_ms,
             "is_subagent": is_subagent,
             "has_feedback": has_feedback,

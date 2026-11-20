@@ -13,5 +13,5 @@ _WHEEL_DOWN = wheel_down(20, 31)
 
 timeline: Timeline = ["/skills\r", "\r", _WHEEL_DOWN * 3]
 
-screen_contains = ("Global", "Remove")
+screen_contains = ("Global", "● Enabled")
 screen_excludes = ("# deploy",)

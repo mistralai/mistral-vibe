@@ -13,6 +13,7 @@ from pydantic.fields import FieldInfo
 import pytest
 import tomli_w
 
+from tests.conftest import build_test_vibe_config
 from vibe.core.config import (
     MissingAPIKeyError,
     ModelConfig,
@@ -101,9 +102,33 @@ provider = "mistral"
     assert config.active_model == "codestral"
     assert config.models["codestral"].alias == "codestral"
     assert "bash" in config.disabled_tools
-    assert config.default_agent == "ask"
+    assert config.default_agent == "default"
+    assert config.default_approval_policy == "ask"
     assert "search" in config.enabled_skills
     assert config.enable_otel is True
+
+
+@pytest.mark.asyncio
+async def test_a_toml_model_without_a_temperature_samples_at_1(tmp_path: Path) -> None:
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text(
+        """\
+[[models]]
+alias = "unrestricted"
+name = "mistral-large-4-unrestricted"
+provider = "mistral"
+"""
+    )
+
+    from vibe.core.config.layers.user import UserConfigLayer
+    from vibe.core.config.orchestrator import ConfigOrchestrator
+
+    layer = UserConfigLayer(path=toml_path)
+    orchestrator = await ConfigOrchestrator[VibeConfigSchema].create(
+        schema=VibeConfigSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+
+    assert orchestrator.config.models["unrestricted"].temperature == 1.0
 
 
 @pytest.mark.asyncio
@@ -223,8 +248,27 @@ def test_active_model_defaults_to_unpinned_sentinel() -> None:
     assert config.active_model == ""
 
 
-def test_default_agent_is_accept_edits() -> None:
-    assert VibeConfigSchema().default_agent == "accept-edits"
+def test_the_defaults_are_the_default_agent_under_accept_edits() -> None:
+    config = VibeConfigSchema()
+
+    assert config.default_agent == "default"
+    assert config.default_approval_policy == "accept-edits"
+
+
+def test_a_default_agent_naming_a_policy_sets_the_default_policy() -> None:
+    config = VibeConfigSchema.model_validate({"default_agent": "auto-approve"})
+
+    assert config.default_agent == "default"
+    assert config.default_approval_policy == "auto-approve"
+
+
+def test_an_explicit_default_policy_wins_over_a_policy_default_agent() -> None:
+    config = VibeConfigSchema.model_validate({
+        "default_agent": "auto-approve",
+        "default_approval_policy": "ask",
+    })
+
+    assert config.default_approval_policy == "ask"
 
 
 def test_file_watcher_for_autocomplete_is_enabled_by_default() -> None:
@@ -233,6 +277,10 @@ def test_file_watcher_for_autocomplete_is_enabled_by_default() -> None:
 
 def test_file_autocomplete_defaults_to_enabled() -> None:
     assert VibeConfigSchema().enable_file_autocomplete is True
+
+
+def test_system_trust_store_is_enabled_by_default() -> None:
+    assert VibeConfigSchema().enable_system_trust_store is True
 
 
 def test_pr_monitoring_is_enabled_by_default() -> None:
@@ -1550,3 +1598,85 @@ async def test_a_non_positive_context_window_is_reported_as_a_validation_error(
             )
 
     assert "max_context_length" in str(exc_info.value)
+
+
+@pytest.mark.parametrize(
+    "layer", ["project-toml", "overrides", "agent-profile", "environment", "growthbook"]
+)
+def test_the_vibebot_ceiling_is_set_only_by_the_users_own_config(layer: str) -> None:
+    """The bot's start, a repo, or a session's overrides can never raise how
+    much a Vibebot-started session may do on this machine (review B1).
+    """
+    layers = VibeConfigSchema.prepare_layers([
+        ("user-toml", {"vibe_bot_max_approval_policy": "smart-approve"}),
+        (layer, {"vibe_bot_max_approval_policy": "auto-approve", "vim_mode": True}),
+    ])
+
+    assert layers == [
+        ("user-toml", {"vibe_bot_max_approval_policy": "smart-approve"}),
+        (layer, {"vim_mode": True}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("user", "admin", "runs"),
+    [
+        ("smart-approve", "ask", "ask"),
+        ("smart-approve", "accept-edits", "accept-edits"),
+        ("ask", "auto-approve", "ask"),
+        (None, "auto-approve", "ask"),
+        ("accept-edits", "smart-approve", "accept-edits"),
+    ],
+)
+def test_an_admin_can_only_lower_the_vibebot_ceiling(
+    user: str | None, admin: str, runs: str
+) -> None:
+    """Gabriel's review: the stricter of the user's ceiling and the admin's wins."""
+    layers = VibeConfigSchema.prepare_layers([
+        ("default", {}),
+        ("user-toml", {"vibe_bot_max_approval_policy": user} if user else {}),
+        ("admin", {"vibe_bot_max_approval_policy": admin}),
+    ])
+
+    merged = [data.get("vibe_bot_max_approval_policy") for _, data in layers]
+    effective = next((v for v in reversed(merged) if v is not None), "ask")
+    assert effective == runs
+
+
+@pytest.mark.parametrize(
+    "layer",
+    [
+        "project-toml",
+        "overrides",
+        "agent-profile",
+        "environment",
+        "growthbook",
+        "admin",
+    ],
+)
+def test_the_vibebot_local_tools_are_exposed_only_by_the_users_own_config(
+    layer: str,
+) -> None:
+    """A repository or a remote layer can never hand the bot a local tool."""
+    entry = {"server": "grafana", "tools": ["query_*"], "approval": "allow"}
+    layers = VibeConfigSchema.prepare_layers([
+        ("user-toml", {"vibe_bot_local_tools": [entry]}),
+        (layer, {"vibe_bot_local_tools": [{"server": "shell"}], "vim_mode": True}),
+    ])
+
+    assert layers == [
+        ("user-toml", {"vibe_bot_local_tools": [entry]}),
+        (layer, {"vim_mode": True}),
+    ]
+
+
+def test_a_vibebot_local_tools_entry_asks_by_default_and_caps_its_result_size() -> None:
+    config = build_test_vibe_config(
+        vibe_bot_local_tools=[{"server": "grafana", "tools": ["query_prometheus"]}]
+    )
+
+    [entry] = config.vibe_bot_local_tools
+    assert entry.approval == "ask"
+    assert config.vibe_bot_local_tool_max_bytes == 8 * 1024
+    with pytest.raises(ValidationError):
+        build_test_vibe_config(vibe_bot_local_tool_max_bytes=64 * 1024 + 1)

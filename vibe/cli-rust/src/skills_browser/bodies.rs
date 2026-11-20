@@ -1,14 +1,13 @@
-//! The body pane under every screen's rows: what it shows, fetched one version at a time, scrolled on its own.
+//! The body pane under a page's or a picker's rows: what it shows, fetched one version at a time, scrolled on its own.
 
 use std::rc::Rc;
 use std::sync::Arc;
 
 use super::labels::NO_SESSION;
-use super::list::{self, Row};
 use super::model::{self, Body, LATEST};
 use super::page::{Page, Property};
 use super::picker;
-use super::pins::{effective_choice, listed, page_pin, scope_pin};
+use super::pins::{effective_choice, page_pin, scope_pin};
 use super::{request, Event, Kind, Screen, State};
 use crate::app::App;
 use crate::commands::spawn_session;
@@ -40,12 +39,11 @@ impl Content {
     }
 }
 
-/// The body under the rows: on which screen, so moving to another starts its body at the top, what, and the description a shared row shows above it.
+/// The body under the rows: on which screen, so moving to another starts its body at the top, and what.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Shown {
     pub screen: Kind,
     pub content: Content,
-    pub intro: Option<String>,
 }
 
 /// The pane's scroll over what it last showed.
@@ -74,6 +72,11 @@ impl BodyPane {
         self.scroll_by(down, self.visible.max(1));
     }
 
+    /// Whether the body is longer than the pane.
+    pub fn overflows(&self) -> bool {
+        self.lines > self.visible
+    }
+
     /// Put line `position` at the top, as far as the body reaches.
     pub fn scroll_to(&mut self, position: usize) {
         self.scroll = position.min(self.lines.saturating_sub(self.visible));
@@ -86,31 +89,23 @@ enum Shows<'a> {
     Version(BodyKey),
 }
 
-/// The screen, what its highlight shows, and the description a shared row shows above it.
-type Resolved<'a> = (Kind, Shows<'a>, Option<String>);
-
-/// The body under the highlight: on the list the skill a row shows, on a page the highlighted scope's pin (else the page's) or the version an install would pin, in a picker the highlighted version.
+/// The body under the highlight: on a page the highlighted scope's pin (else the page's) or the version an install would pin, in a picker the highlighted version; none on the list.
 pub fn shown(state: &State) -> Option<Shown> {
-    let (screen, shows, intro) = resolve(state)?;
+    let (screen, shows) = resolve(state)?;
     let content = match shows {
         Shows::Pin(pin) => Content::of(pin),
         Shows::Version(key) => Content::Version(key),
     };
-    Some(Shown {
-        screen,
-        content,
-        intro,
-    })
+    Some(Shown { screen, content })
 }
 
-/// The shown body with its description: a pin's prompt, or the fetched version as far as it got.
-pub fn view(state: &State) -> Option<(Option<String>, Body)> {
-    let (_, shows, intro) = resolve(state)?;
-    let body = match shows {
+/// The shown body: a pin's prompt, or the fetched version as far as it got.
+pub fn view(state: &State) -> Option<Body> {
+    let body = match resolve(state)?.1 {
         Shows::Pin(pin) => Body::Ready(pin.prompt.clone()),
         Shows::Version(key) => state.bodies.get(&key).cloned().unwrap_or(Body::Loading),
     };
-    Some((intro, body))
+    Some(body)
 }
 
 impl State {
@@ -122,7 +117,7 @@ impl State {
             }
         }
         let lines = Rc::new(match view(self) {
-            Some((intro, body)) => wrap_body(intro.as_deref(), &body, width),
+            Some(body) => wrap_body(&body, width),
             None => Vec::new(),
         });
         self.body_lines = Some((width, Rc::clone(&lines)));
@@ -150,32 +145,14 @@ pub(super) fn loaded(app: &mut App, generation: u64, key: BodyKey, body: Result<
     }
 }
 
-/// Whether the screen keeps a body pane whatever is highlighted: a page and a picker always, the list once any of its tabs has a skill, so Tab never moves the rows.
-pub fn reserved(state: &State) -> bool {
-    state.page.is_some() || list::any_skill(state)
-}
-
-fn resolve(state: &State) -> Option<Resolved<'_>> {
+fn resolve(state: &State) -> Option<(Kind, Shows<'_>)> {
     let screen = state.screen();
-    let (shows, intro) = match screen {
-        Screen::List => list_shows(state)?,
-        Screen::Page(page) => (page_shows(state, page)?, None),
-        Screen::Picker(page, _) => (Shows::Version(picker::previewed(state, page)?), None),
+    let shows = match screen {
+        Screen::List => return None,
+        Screen::Page(page) => page_shows(state, page)?,
+        Screen::Picker(page, _) => Shows::Version(picker::previewed(state, page)?),
     };
-    Some((screen.kind(), shows, intro))
-}
-
-fn list_shows(state: &State) -> Option<(Shows<'_>, Option<String>)> {
-    match list::highlighted(state)? {
-        Row::Installed(name) => Some((Shows::Pin(listed(state, name)?), None)),
-        Row::Catalog(skill_id) => {
-            let entry = state.catalog.entry(skill_id)?;
-            let key = (skill_id.clone(), Some(entry.latest_version));
-            let intro = Some(entry.description.clone()).filter(|text| !text.is_empty());
-            Some((Shows::Version(key), intro))
-        }
-        _ => None,
-    }
+    Some((screen.kind(), shows))
 }
 
 fn page_shows<'a>(state: &'a State, page: &Page) -> Option<Shows<'a>> {

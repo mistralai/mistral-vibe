@@ -56,7 +56,7 @@ pub(super) fn submit_row(app: &App) -> Row {
 }
 
 /// The hint line for the current question; an editable free-text row owns ←→ and the letters.
-pub(super) fn help_row(app: &App) -> Row {
+pub(super) fn help_rows(app: &App, width: u16) -> Vec<Row> {
     let typing = other_typing(app);
     let mut list = Vec::new();
     if app.question_app.questions.len() > 1 && !typing {
@@ -80,5 +80,5 @@ pub(super) fn help_row(app: &App) -> Row {
         true => hints::BACK,
         false => hints::CANCEL,
     });
-    super::hint_line::styled(&list)
+    super::hint_line::styled_rows(&list, width)
 }

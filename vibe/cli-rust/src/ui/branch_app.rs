@@ -12,7 +12,7 @@ use crate::branch_app::resume_command;
 use crate::hints;
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    let paragraph = Paragraph::new(lines(app))
+    let paragraph = Paragraph::new(lines(app, area.width.saturating_sub(4)))
         .style(theme::screen_style())
         .wrap(Wrap { trim: false });
     let height = paragraph.line_count(area.width.saturating_sub(4).max(1)) as u16 + 2;
@@ -31,16 +31,17 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     });
 }
 
-fn lines(app: &App) -> Vec<Line<'static>> {
+fn lines(app: &App, width: u16) -> Vec<Line<'static>> {
     let title = theme::screen_style()
         .fg(theme::primary())
         .add_modifier(Modifier::BOLD);
-    vec![
+    let mut lines = vec![
         Line::styled("Session forked", title),
         Line::default(),
-        Line::from("Copy and paste this command to resume it:"),
+        Line::from("To continue in the forked session, run this command in another terminal:"),
         Line::from(resume_command(&app.branch_app.session_id)),
         Line::default(),
-        super::hint_line::line(&[hints::CLOSE]),
-    ]
+    ];
+    lines.extend(super::hint_line::lines(&[hints::CLOSE], width));
+    lines
 }

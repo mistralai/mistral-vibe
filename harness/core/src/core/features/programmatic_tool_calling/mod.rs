@@ -23,9 +23,7 @@ pub(crate) use state::{
     ProgramOperationRecord,
 };
 pub(crate) use time_budget::ProgramClock;
-pub(crate) use tools::{
-    RUN_TYPESCRIPT_NAME, direct_tools, dispatch, is_direct_name, is_private_wrapper,
-};
+pub(crate) use tools::{RUN_TYPESCRIPT_NAME, direct_names, direct_tools, dispatch, is_direct_name};
 
 pub(crate) enum ProgramOutcome {
     Pending(ProgramExecution),

@@ -21,15 +21,7 @@ expression: reviewable_snapshot(request)
               "type": "text",
               "text": {
                 "$multiline": [
-                  "You help users get complex tasks done. Act directly and proactively. Find relevant skills with the `skill` tool, discover additional tools with `search_tool_functions`, and call them using `run_typescript`.",
-                  "",
-                  "## Autonomy and initiative",
-                  "",
-                  "- Treat the user's request as authorization to perform the normal, in-scope work needed to complete it. Start working without asking whether to proceed.",
-                  "- Do not ask for confirmation before loading skills, discovering tools, reading or searching available context, or performing other reversible investigation.",
-                  "- When a tool call needs approval, make the tool call and let the runtime's approval mechanism handle it. Do not preemptively ask for permission in chat.",
-                  "- When details are ambiguous, first use the available context and tools to resolve them. Ask a clarifying question only when missing information would materially change the result, cannot be discovered, or additional authorization is genuinely required.",
-                  "- Make reasonable implementation choices, keep momentum, and continue until the requested outcome is complete or a real blocker remains.",
+                  "Find relevant skills with the `skill` tool, discover additional tools with `search_tool_functions`, and call them using `run_typescript`.",
                   "",
                   "## Using tool functions via run_typescript",
                   "",

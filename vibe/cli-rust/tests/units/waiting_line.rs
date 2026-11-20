@@ -184,8 +184,8 @@ fn a_session_switch_drops_the_old_background_counts() {
         json!([]),
         json!([process("p", "running")]),
     );
-    assert_eq!(app.session.running_processes, 1);
+    assert_eq!(app.session.background_tasks.len(), 1);
     app.set_session_id("another".into());
-    assert_eq!(app.session.running_processes, 0);
+    assert_eq!(app.session.background_tasks.len(), 0);
     assert_eq!(app.session.wait_target, None);
 }

@@ -111,14 +111,19 @@ fn agent_config_includes_budget_fields_when_set() {
 }
 
 #[test]
-fn agent_config_includes_agent_and_auto_approve() {
+fn agent_config_includes_agent_policy_and_auto_approve() {
     let config = AgentConfig {
-        agent: Some("ask".into()),
+        agent: Some("lean".into()),
+        approval_policy: Some("ask".into()),
         auto_approve: true,
         ..Default::default()
     };
     let json = serde_json::to_value(&config).unwrap();
-    assert_eq!(json.get("agent").and_then(Value::as_str), Some("ask"));
+    assert_eq!(json.get("agent").and_then(Value::as_str), Some("lean"));
+    assert_eq!(
+        json.get("approvalPolicy").and_then(Value::as_str),
+        Some("ask")
+    );
     assert_eq!(json.get("autoApprove").and_then(Value::as_bool), Some(true));
 }
 
@@ -484,6 +489,7 @@ fn headless_options_with_budgets() -> HeadlessOptions {
         model: None,
         thinking: None,
         agent: None,
+        approval_policy: None,
         auto_approve: false,
         enabled_tools: vec![],
         disabled_tools: vec![],

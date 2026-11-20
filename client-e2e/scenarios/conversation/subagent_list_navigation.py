@@ -25,10 +25,11 @@ timeline: Timeline = [
     subagent(_TASK),
     child_session_updated(context_tokens=2_500),
     turn_completed(),
-    "\x1b[B",  # Down — the caret is on the last line: focus the list on Main
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the list on Main
     "\x1b[B",  # Down — highlight the child row
     "\x1b[A",  # Up — back to the Main row
-    "\x1b[A",  # Up — focus returns to the input
-    "\x1b[B",  # Down — focus the list again
+    "\x1b[A",  # Up — the list closes back to the rail
+    "\r",  # Enter — open the list again
     "\r",  # Enter on Main — no view change
 ]

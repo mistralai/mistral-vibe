@@ -68,6 +68,8 @@ pub mod method {
     pub const SESSION_HISTORY_CLEAR: &str = "session/history/clear";
     /// Switch the session's agent.
     pub const SESSION_AGENT_UPDATE: &str = "session/agent/update";
+    /// Switch the session's approval policy.
+    pub const SESSION_APPROVAL_POLICY_UPDATE: &str = "session/approvalPolicy/update";
     /// Whether rewinding to a history entry would restore files on disk.
     pub const SESSION_REWIND_READ: &str = "session/rewind/read";
     /// Truncate the conversation at a user entry, optionally restoring files.
@@ -107,6 +109,7 @@ pub mod method {
     /// Create, replace, edit, pause or resume the session's goal.
     pub const GOAL_SET: &str = "goal/set";
     pub const GOAL_CLEAR: &str = "goal/clear";
+    pub const BACKGROUND_PROCESS_STOP: &str = "session/backgroundProcess/stop";
     pub const IDENTITY_READ: &str = "identity/read";
     pub const ACCOUNT_READ: &str = "account/read";
     /// Redacted active-provider snapshot behind the `/status` section.
@@ -155,6 +158,8 @@ pub mod method {
     pub const SKILLS_REMOVE: &str = "skills/remove";
     /// Turn a skill on or off for every scope it is installed in.
     pub const SKILLS_SET_ENABLED: &str = "skills/setEnabled";
+    /// Delete the folder of a local skill `skills/installed` lists.
+    pub const SKILLS_DELETE_LOCAL: &str = "skills/deleteLocal";
     /// Install or uninstall an `install_required` agent such as `lean`.
     pub const AGENTS_INSTALL: &str = "agents/install";
     pub const AGENTS_UNINSTALL: &str = "agents/uninstall";
@@ -180,6 +185,10 @@ pub mod method {
     pub const STORAGE_USAGE_READ: &str = "storage/usage/read";
     /// Start a storage scan; the result comes as `storage/usage/updated`.
     pub const STORAGE_USAGE_REFRESH: &str = "storage/usage/refresh";
+    /// Remove leftover worktrees and unknown folders; a removal starts a refresh.
+    pub const STORAGE_LEFTOVERS_CLEAN: &str = "storage/leftovers/clean";
+    /// Delete sessions, then the worktrees no session still claims; then a refresh.
+    pub const STORAGE_SESSIONS_DELETE: &str = "storage/sessions/delete";
 }
 
 /// Callback kinds the client advertises at `initialize` and knows how to answer.
@@ -435,6 +444,8 @@ pub struct AgentConfig {
     pub cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_policy: Option<String>,
     #[serde(skip_serializing_if = "skip_default_bool")]
     pub auto_approve: bool,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -665,7 +676,7 @@ pub struct PublicSessionState {
     /// Child (subagent) sessions in creation order.
     #[serde(default)]
     pub child_sessions: Vec<crate::server::PublicChildSession>,
-    /// The session's background processes; only their status is read.
+    /// The session's background processes.
     #[serde(default, deserialize_with = "crate::utils::json::lenient")]
     pub background_processes: Vec<PublicBackgroundProcess>,
 }
@@ -674,6 +685,18 @@ pub struct PublicSessionState {
 #[derive(Debug, Clone, Deserialize)]
 pub struct PublicBackgroundProcess {
     pub status: String,
+    #[serde(rename = "processId")]
+    pub process_id: String,
+    #[serde(default)]
+    pub command: String,
+}
+
+/// Stop one background process; the next session snapshot reports it stopped.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundProcessStopParams {
+    pub session_id: String,
+    pub process_id: String,
 }
 
 /// A provider retry in progress: which turn, why, and the transport detail.

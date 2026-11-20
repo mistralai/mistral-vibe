@@ -56,6 +56,7 @@ def test_build_ssl_context_uses_system_trust_store_when_configured(monkeypatch):
 
     mock_ctx = MagicMock(spec=ssl.SSLContext)
     with (
+        patch("vibe.utils.http.certifi.where", return_value="/certifi.pem"),
         patch(
             "vibe.utils.http.truststore.SSLContext", return_value=mock_ctx
         ) as truststore_context,
@@ -65,6 +66,18 @@ def test_build_ssl_context_uses_system_trust_store_when_configured(monkeypatch):
 
     truststore_context.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
     create_default_context.assert_not_called()
+    mock_ctx.load_verify_locations.assert_called_once_with(cafile="/certifi.pem")
+
+
+def test_build_ssl_context_survives_a_missing_certifi_bundle(caplog):
+    configure_ssl_context(enable_system_trust_store=True)
+
+    mock_ctx = MagicMock(spec=ssl.SSLContext)
+    mock_ctx.load_verify_locations.side_effect = FileNotFoundError
+    with patch("vibe.utils.http.truststore.SSLContext", return_value=mock_ctx):
+        assert build_ssl_context() is mock_ctx
+
+    assert "Failed to load the certifi CA bundle" in caplog.text
 
 
 def test_build_ssl_context_does_not_parse_vibe_config_from_the_environment(monkeypatch):
@@ -114,7 +127,7 @@ def test_build_ssl_context_loads_custom_cert_file_with_system_trust_store(
     with patch("vibe.utils.http.truststore.SSLContext", return_value=mock_ctx):
         build_ssl_context()
 
-    mock_ctx.load_verify_locations.assert_called_once_with(
+    mock_ctx.load_verify_locations.assert_called_with(
         cafile=str(cert_file), capath=None
     )
 

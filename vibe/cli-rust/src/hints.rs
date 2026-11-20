@@ -29,11 +29,14 @@ pub mod key {
     pub const BACKSPACE_CTRL_C: &str = "Backspace/Ctrl+C";
     pub const CTRL_C: &str = "Ctrl+C";
     pub const CTRL_J: &str = "Ctrl+J";
-    pub const CTRL_N: &str = "Ctrl+N";
+    pub const CTRL_X: &str = "Ctrl+X";
     pub const SHIFT_ARROWS: &str = "Shift+↑↓";
     pub const CTRL_R: &str = "Ctrl+R";
     pub const CTRL_S: &str = "Ctrl+S";
     pub const CTRL_BACKSLASH: &str = "Ctrl+\\";
+    pub const PAGE_UP_DOWN: &str = "PgUp/PgDn";
+    /// Switches tabs; Shift+Tab, implicit, switches back.
+    pub const TAB_LEFT_RIGHT: &str = "Tab/←→";
 }
 
 /// Action names: lowercase verbs, shared across screens.
@@ -99,8 +102,6 @@ pub mod action {
     pub const CHANGE: &str = "change";
     pub const PIN: &str = "pin";
     pub const UNPIN: &str = "unpin";
-    pub const SHOW: &str = "show";
-    pub const HIDE: &str = "hide";
     pub const PAUSE: &str = "pause";
     pub const RESUME: &str = "resume";
     pub const CLEAR: &str = "clear";
@@ -113,6 +114,7 @@ pub mod action {
     pub const REVIEW: &str = "review";
     pub const ARCHIVE: &str = "archive";
     pub const UNARCHIVE: &str = "unarchive";
+    pub const CLEAN_UP: &str = "clean up";
     pub const ALL: &str = "all";
     pub const SORT_SIZE: &str = "sort: size";
     pub const SORT_DATE: &str = "sort: date";
@@ -143,4 +145,16 @@ pub fn width(hints: &[Hint]) -> u16 {
         .iter()
         .map(|(text, _)| text.width() as u16)
         .sum()
+}
+
+/// Hints packed into rows of at most `width` columns, breaking only between hints; a hint wider than a row gets a row of its own.
+pub fn rows(hints: &[Hint], width: u16) -> Vec<Vec<Hint>> {
+    let mut rows: Vec<Vec<Hint>> = Vec::new();
+    for &hint in hints {
+        match rows.last_mut() {
+            Some(row) if self::width(row) + 2 + self::width(&[hint]) <= width => row.push(hint),
+            _ => rows.push(vec![hint]),
+        }
+    }
+    rows
 }

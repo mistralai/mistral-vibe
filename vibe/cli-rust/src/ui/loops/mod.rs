@@ -9,7 +9,7 @@ use ratatui::style::Style;
 use ratatui::Frame;
 
 use super::browser_box::{self, SIDE_BY_SIDE};
-use super::theme;
+use super::{hint_line, theme};
 use crate::app::App;
 use crate::hints::{self, action, key, Hint};
 use crate::loops::{rows, FormField};
@@ -26,7 +26,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         app,
         f,
         area,
-        layout.height() + CHROME,
+        layout.height() + CHROME + hint_line::extra(&footer(app), area.width),
         kind,
         |app, f, area| draw_box(app, f, area, layout),
     );
@@ -111,16 +111,11 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, layout: Layout) {
         area.width.saturating_sub(2),
         layout.height(),
     );
-    let footer = match app.loops.form.is_some() {
-        true => {
-            form::draw(app, f, inner(body, 0, layout.rows));
-            form_hints(app)
-        }
-        false => {
-            draw_list_and_details(app, f, area, body, layout);
-            list_hints(app)
-        }
-    };
+    let footer = footer(app);
+    match app.loops.form.is_some() {
+        true => form::draw(app, f, inner(body, 0, layout.rows)),
+        false => draw_list_and_details(app, f, area, body, layout),
+    }
     if let Some(error) = &app.loops.error {
         let row = inner(body, layout.height() - 1, 1);
         let style = Style::default()
@@ -187,6 +182,13 @@ fn inner(body: Rect, from: u16, height: u16) -> Rect {
         body.width.saturating_sub(2),
         height,
     )
+}
+
+fn footer(app: &App) -> Vec<Hint> {
+    match app.loops.form.is_some() {
+        true => form_hints(app),
+        false => list_hints(app),
+    }
 }
 
 fn list_hints(app: &App) -> Vec<Hint> {

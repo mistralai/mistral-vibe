@@ -243,6 +243,13 @@ class HarnessCallbackNotFoundError(HarnessSessionError):
         )
 
 
+class HarnessCallbackRejectedError(HarnessSessionError):
+    def __init__(self, callback_id: str, message: str) -> None:
+        super().__init__(
+            "callback_rejected", message, details={"callback_id": callback_id}
+        )
+
+
 class HarnessCallbackConflictError(HarnessSessionError):
     def __init__(self, callback_id: str) -> None:
         super().__init__(
@@ -295,6 +302,7 @@ __all__ = [
     "HarnessCallbackClosedError",
     "HarnessCallbackConflictError",
     "HarnessCallbackNotFoundError",
+    "HarnessCallbackRejectedError",
     "HarnessChildSessionRequiresParentError",
     "HarnessCommandConflictError",
     "HarnessContextCompactionError",

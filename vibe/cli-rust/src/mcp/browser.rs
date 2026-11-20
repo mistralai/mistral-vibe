@@ -16,6 +16,7 @@ use crossterm::event::MouseEvent;
 pub fn close(app: &mut App) {
     app.mcp.open = false;
     app.mcp.search = crate::search_field::Search::default();
+    app.mcp.tool_search = crate::search_field::Search::default();
     app.mcp.viewing_name = None;
     app.mcp.viewing_kind = None;
 }
@@ -27,6 +28,7 @@ pub fn back(app: &mut App) {
     }
     app.mcp.viewing_name = None;
     app.mcp.viewing_kind = None;
+    app.mcp.tool_search = crate::search_field::Search::default();
     app.mcp.list.reset();
     reconcile_selection(app);
 }
@@ -47,6 +49,7 @@ pub fn select(app: &mut App) {
         _ => return,
     };
     app.mcp.search.focused = false;
+    app.mcp.tool_search = crate::search_field::Search::default();
     app.mcp.viewing_name = Some(row.name);
     app.mcp.viewing_kind = Some(row.kind);
     app.mcp.list.reset();
@@ -104,9 +107,10 @@ pub fn mouse(app: &mut App, event: MouseEvent) {
     let at = (event.column, event.row);
     let click =
         crate::mouse::option_gesture(app, event, RegionId::BottomApp, |app| &mut app.mcp.list);
-    let shown = app.mcp.viewing_name.is_none();
+    let shown = super::detail::searchable(&app.mcp);
     let on_option = app.mcp.list.index_at(at).is_some();
-    if search_field::press(&mut app.mcp.search, &event, shown, on_option) == Press::Field {
+    let field = super::search::field(app);
+    if search_field::press(field, &event, shown, on_option) == Press::Field {
         super::search::focus(app);
         return;
     }

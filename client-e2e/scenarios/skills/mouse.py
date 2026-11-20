@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from e2e.app_server.scenario import Timeline
+from e2e.app_server.scenario import Timeline, advance
 from e2e.app_server.skills import (
     APPLIED,
     METHODS,
@@ -29,10 +29,17 @@ handshake = {
 }
 request_methods = METHODS
 
-_OPEN_DEPLOY = click(10, 26)
-_PICK_PROJECT = click(10, 24)
-_PIN_V1 = click(10, 26)
+_OPEN_DEPLOY = click(10, 27)
+_PICK_PROJECT = click(10, 26)
+_PIN_V1 = click(10, 27)
 
-timeline: Timeline = ["/skills\r", _OPEN_DEPLOY, _PICK_PROJECT, _PIN_V1]
+timeline: Timeline = [
+    "/skills\r",
+    _OPEN_DEPLOY,
+    advance(600),
+    _PICK_PROJECT,
+    advance(600),
+    _PIN_V1,
+]
 
 screen_contains = ("v1  pinned", "(shadowed)")

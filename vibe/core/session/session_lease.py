@@ -10,6 +10,7 @@ import re
 from typing import Any, Self
 
 from vibe.core.utils.file_lock import acquire_file_lock, release_file_lock
+from vibe.utils.platform import PRIVATE_DIRECTORY_MODE
 
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 
@@ -47,7 +48,9 @@ class SessionLease:
             raise RuntimeError("session lease is already acquired")
         if self._path.parents[1].is_symlink() or self._path.parent.is_symlink():
             raise ValueError("session lease path cannot contain a symbolic link")
-        self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._path.parent.mkdir(
+            mode=PRIVATE_DIRECTORY_MODE, parents=True, exist_ok=True
+        )
         with _lease_directory_lock(self._path.parent):
             self._path.touch(mode=0o600, exist_ok=True)
             file = self._path.open("a+b")

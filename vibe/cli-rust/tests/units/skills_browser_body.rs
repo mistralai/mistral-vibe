@@ -1,22 +1,21 @@
-//! `/skills` body pane: kept in place per screen, scrolled apart from the rows by pages, the wheel and its scrollbar.
+//! `/skills` body pane: kept in place per screen, scrolled apart from the rows by pages and the wheel.
 
-use crossterm::event::KeyCode;
-use ratatui::layout::Rect;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde_json::json;
 use vibe_rs::app::App;
-use vibe_rs::mouse;
+use vibe_rs::hints::{action, key};
 use vibe_rs::server::SkillScope;
 use vibe_rs::skills_browser::bodies::{self, BodyPane, Content};
 use vibe_rs::skills_browser::model::Choice;
 use vibe_rs::skills_browser::page::Property;
 use vibe_rs::skills_browser::picker::{self, PickerRow};
-use vibe_rs::skills_browser::{self, Event, Kind, Outcome};
+use vibe_rs::skills_browser::{self, help, Event, Kind, Outcome};
 
 use crate::skills_browser_support::{
     answer, highlight_pick, highlight_row, installed_row, next, open_page, open_page_with, opened,
     page, page_row, picker_row, pin, pins, press, registry, session, shadowed, shared,
 };
-use crate::support::{down, drag, render, rows, stub, up};
+use crate::support::{render, rows, stub};
 
 /// The body pane as a render would leave it: 50 lines, 10 on screen.
 fn rendered(app: &mut App) -> &mut BodyPane {
@@ -32,11 +31,11 @@ fn pages_scroll_the_body_and_leave_the_rows_where_they_are() {
     let mut app = opened(vec![registry("deploy", "global", 2, None)], Some(shared()));
     open_page(&mut app, installed_row("deploy"));
     press(&mut app, &client, KeyCode::End);
-    assert_eq!(page_row(&app), Some(Property::Remove));
+    let last = page_row(&app);
     rendered(&mut app);
     press(&mut app, &client, KeyCode::PageDown);
     assert_eq!(app.skills_browser.pane.scroll, 10);
-    assert_eq!(page_row(&app), Some(Property::Remove), "the rows stay put");
+    assert_eq!(page_row(&app), last, "the rows stay put");
     for _ in 0..5 {
         press(&mut app, &client, KeyCode::PageDown);
     }
@@ -47,6 +46,51 @@ fn pages_scroll_the_body_and_leave_the_rows_where_they_are() {
     assert_eq!(app.skills_browser.pane.scroll, 32);
     skills_browser::scroll_body_to(&mut app, 100);
     assert_eq!(app.skills_browser.pane.scroll, 40);
+}
+
+#[test]
+fn the_list_has_no_body_and_leaves_shift_arrows_to_the_conversation() {
+    let client = stub();
+    let names = ["a", "b"].map(|name| pin(name, "local", "global"));
+    let mut app = opened(names.to_vec(), None);
+    assert_eq!(bodies::shown(&app.skills_browser), None);
+    rendered(&mut app);
+    let footer = help(&app.skills_browser);
+    assert!(!footer.iter().any(|(_, action)| *action == action::SCROLL));
+    let selected = app.skills_browser.list.selected();
+    let shift = KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT);
+    let handled = vibe_rs::input::handle_priority_key(&mut app, &client, shift);
+    assert_eq!(handled, Some(false), "Shift+Down scrolls the conversation");
+    assert_eq!(app.skills_browser.list.selected(), selected);
+}
+
+#[test]
+fn a_page_with_no_row_to_move_to_scrolls_its_body_with_the_arrows() {
+    let client = stub();
+    let mut app = opened(vec![pin("lint", "local", "global")], None);
+    open_page(&mut app, installed_row("lint"));
+    rendered(&mut app);
+    let footer = help(&app.skills_browser);
+    assert!(footer.contains(&(key::NAV, action::SCROLL)));
+    assert!(!footer.contains(&(key::NAV, action::NAVIGATE)));
+    press(&mut app, &client, KeyCode::Down);
+    press(&mut app, &client, KeyCode::Char('j'));
+    assert_eq!(app.skills_browser.pane.scroll, 2);
+    press(&mut app, &client, KeyCode::Up);
+    assert_eq!(app.skills_browser.pane.scroll, 1);
+    press(&mut app, &client, KeyCode::End);
+    assert_eq!(app.skills_browser.pane.scroll, 40);
+    press(&mut app, &client, KeyCode::Home);
+    assert_eq!(app.skills_browser.pane.scroll, 0);
+}
+
+#[test]
+fn a_page_with_rows_to_move_between_scrolls_its_body_by_pages() {
+    let mut app = opened(vec![registry("deploy", "global", 2, None)], Some(shared()));
+    open_page(&mut app, installed_row("deploy"));
+    rendered(&mut app);
+    let footer = help(&app.skills_browser);
+    assert!(footer.contains(&(key::PAGE_UP_DOWN, action::SCROLL)));
 }
 
 #[tokio::test]
@@ -123,7 +167,7 @@ async fn a_change_that_moves_the_picker_highlight_fetches_its_preview() {
     let remaining = vec![registry("deploy", "global", 2, None)];
     let changed = Event::Changed {
         outcome: Outcome::default(),
-        installed: Ok(pins(remaining)),
+        installed: Ok(pins(remaining).into()),
     };
     skills_browser::apply_event(&mut app, &client, changed);
     let (method, params) = next(&mut frames).await;
@@ -159,13 +203,6 @@ fn a_row_showing_the_same_pin_keeps_the_body_where_it_was() {
     press(&mut app, &client, KeyCode::Char('j'));
     assert_eq!(page_row(&app), Some(Property::Scope(SkillScope::Project)));
     rendered(&mut app).scroll = 20;
-    press(&mut app, &client, KeyCode::Char('j'));
-    assert_eq!(page_row(&app), Some(Property::Enabled));
-    assert_eq!(
-        app.skills_browser.pane.scroll, 20,
-        "Enabled shows the project pin too"
-    );
-    press(&mut app, &client, KeyCode::Char('k'));
     press(&mut app, &client, KeyCode::Char('k'));
     assert_eq!(
         app.skills_browser.pane.scroll, 0,
@@ -186,7 +223,7 @@ fn a_picker_keeps_its_pane_whatever_its_highlight_shows() {
     press(&mut app, &client, KeyCode::Enter);
     let pane = |app: &App| {
         let state = &app.skills_browser;
-        (bodies::shown(state).is_some(), bodies::reserved(state))
+        (bodies::shown(state).is_some(), state.page.is_some())
     };
     let latest = PickerRow::Pick(Choice::Alias("latest".to_owned()));
     assert_eq!(picker_row(&app), Some(latest));
@@ -201,31 +238,6 @@ fn a_picker_keeps_its_pane_whatever_its_highlight_shows() {
 }
 
 #[test]
-fn dragging_the_body_scrollbar_scrolls_the_body() {
-    let mut deploy = pin("deploy", "local", "global");
-    let prompt: Vec<String> = (1..=60).map(|n| format!("line {n:02}")).collect();
-    deploy["prompt"] = json!(prompt.join("\n"));
-    let mut app = opened(vec![deploy], None);
-    let screen = rows(&render(100, 40, |frame| app.draw(frame)));
-    let top = screen.iter().position(|row| row.contains("line 01"));
-    let top = top.expect("the body shows its first line") as u16;
-    let tracks = mouse::scrollbar_tracks(&app, Rect::new(0, top, 100, 1));
-    let [track] = tracks[..] else {
-        panic!("one scrollbar beside the body: {tracks:?}");
-    };
-    mouse::route(&mut app, down(track.x, track.y));
-    mouse::route(&mut app, drag(track.x, track.bottom() - 1));
-    mouse::route(&mut app, up(track.x, track.bottom() - 1));
-    let pane = &app.skills_browser.pane;
-    assert!(pane.scroll > 0, "the drag scrolled the body");
-    assert_eq!(
-        pane.scroll,
-        pane.lines - pane.visible,
-        "down to its last line"
-    );
-}
-
-#[test]
 fn a_change_to_the_pin_on_screen_shows_its_new_body() {
     let client = stub();
     let deploy = |prompt: &str| {
@@ -234,16 +246,17 @@ fn a_change_to_the_pin_on_screen_shows_its_new_body() {
         deploy
     };
     let mut app = opened(vec![deploy("# deploy v1")], None);
+    open_page(&mut app, installed_row("deploy"));
     let screen = |app: &mut App| rows(&render(100, 40, |frame| app.draw(frame))).join("\n");
-    assert!(screen(&mut app).contains("# deploy v1"));
+    assert!(screen(&mut app).contains("deploy v1"));
     let changed = Event::Changed {
         outcome: Outcome::default(),
-        installed: Ok(pins(vec![deploy("# deploy v2")])),
+        installed: Ok(pins(vec![deploy("# deploy v2")]).into()),
     };
     skills_browser::apply_event(&mut app, &client, changed);
     let after = screen(&mut app);
     assert!(
-        after.contains("# deploy v2") && !after.contains("# deploy v1"),
+        after.contains("deploy v2") && !after.contains("deploy v1"),
         "the pane wraps the body it shows now"
     );
 }

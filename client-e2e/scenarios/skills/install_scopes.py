@@ -30,5 +30,5 @@ request_methods = METHODS
 
 timeline: Timeline = ["/skills\r", "\t", "\r", "j\r", "jj\r", "j", "\r"]
 
-screen_contains = ("Remove",)
+screen_contains = ("● Enabled", "r remove")
 screen_excludes = ("not in My Skills",)

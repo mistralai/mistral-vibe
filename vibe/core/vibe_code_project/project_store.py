@@ -118,13 +118,6 @@ class VibeProjectsStore:
         ]
         return links, len(links) == len(entries)
 
-    def list_remote_projects(self) -> list[RemoteProjectLink]:
-        return [
-            link
-            for link in self.list_project_links()
-            if isinstance(link, RemoteProjectLink)
-        ]
-
     def _read_raw_document(self) -> dict[str, object]:
         try:
             return self._load_raw_document()

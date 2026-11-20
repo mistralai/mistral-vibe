@@ -10,6 +10,7 @@ import tomli_w
 from tests.conftest import ConfigBuilder, OrchestratorLoader, get_base_config
 from vibe.app_server import _runtime as runtime_module
 from vibe.core.agents.manager import AgentManager
+from vibe.core.agents.models import BUILTIN_APPROVAL_POLICIES
 from vibe.core.agents.registry import apply_profile_overrides
 from vibe.core.config import VibeConfigSchema, build_default_orchestrator
 from vibe.core.config.builder import InvalidConfigError
@@ -55,7 +56,10 @@ def base(orchestrator: ConfigOrchestrator[VibeConfigSchema]) -> dict[str, Any]:
 def _merged_delta(
     orchestrator: ConfigOrchestrator[VibeConfigSchema], base: dict[str, Any], name: str
 ) -> dict[str, list[Any]]:
-    manager = AgentManager(orchestrator, initial_agent=name, allow_subagent=True)
+    policy = name if name in BUILTIN_APPROVAL_POLICIES else "ask"
+    manager = AgentManager(
+        orchestrator, initial_agent=name, allow_subagent=True, initial_policy=policy
+    )
     return _delta(base, manager.config.model_dump(mode="json"))
 
 
@@ -200,8 +204,8 @@ async def test_lean_refuses_to_replace_the_users_shell_timeouts(
 
     manager = AgentManager(orchestrator, initial_agent="ask")
     with pytest.raises(ValueError, match=re.escape(expected)):
-        manager.switch_profile("lean")
-    assert manager.active_profile.name == "ask"
+        manager.switch_agent("lean")
+    assert manager.active_agent.name == "default"
     assert manager.config.tools[shell]["max_timeout_seconds"] == 1800
 
 
@@ -233,7 +237,7 @@ async def test_lean_refuses_a_reload_that_sets_the_users_bash_timeouts(
         ),
     ):
         await orchestrator.reload()
-    assert manager.active_profile.name == "lean"
+    assert manager.active_agent.name == "lean"
     assert float(manager.config.tools["bash"]["max_timeout_seconds"]) == 1200
 
 
@@ -451,3 +455,25 @@ async def test_lean_runs_when_the_project_config_already_sets_its_timeouts(
     # Assert
     bash = manager.config.tools["bash"]
     assert int(bash["default_timeout"]) == int(bash["max_timeout_seconds"]) == 1200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra", "policy"),
+    [({}, "ask"), ({"default_approval_policy": "accept-edits"}, "accept-edits")],
+    ids=["unset", "set"],
+)
+async def test_a_removed_plan_default_agent_yields_to_a_set_default_policy(
+    config_dir: Path, extra: dict[str, Any], policy: str
+) -> None:
+    """*Prepare*: A user config still naming the removed `plan` as its
+    `default_agent`, with and without a `default_approval_policy`.
+    *Do*: Start a session.
+    *Assert*: It runs the set policy, as the warning about `plan` asks; `ask`,
+    plan's replacement, only when none is set.
+    """
+    _write_user_config(config_dir, {"default_agent": "plan", **extra})
+
+    manager = AgentManager(await build_default_orchestrator())
+
+    assert manager.active_policy.name == policy

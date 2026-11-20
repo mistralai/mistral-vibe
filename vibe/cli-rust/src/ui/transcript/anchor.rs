@@ -28,8 +28,13 @@ pub(super) fn resolve(anchor: &ScrollAnchor, document: &Document<'_>) -> Option<
     let loop_header = 2 * u16::from(!value.follows_user);
     let (fired_loop, group) = (value.fired_loop.is_some(), value.group);
     let key = anchor.key.as_deref();
+    let details = key.and_then(|key| {
+        let turn = document.layout.details_of(anchor.index)?;
+        (turn.key == key).then_some(turn)
+    });
     // The header follows the gap row, and a group's first member row sits under the group header.
     let header = match &group {
+        _ if details.is_some() => 1,
         None if fired_loop => loop_header,
         None => 1,
         Some(group) if group.first && key.is_some_and(|key| key != group.key) => 2,
@@ -51,8 +56,10 @@ pub(super) fn resolve(anchor: &ScrollAnchor, document: &Document<'_>) -> Option<
     let Some(key) = key.filter(|_| anchor.reveal) else {
         return Some((scroll, scroll));
     };
+    // An unfolded `Worked for` group reveals all its steps; a tool group, its members.
     let in_block = |index: usize| {
         index == anchor.index
+            || details.is_some_and(|turn| (turn.first..=turn.last).contains(&index))
             || document
                 .transcript
                 .entry(index)

@@ -9,10 +9,9 @@ Use this when the user asks you to create, update, or delete a Vibe skill.
 
 ## Gathering requirements
 
-When creating a new skill, ask the user for the details you are missing. **Ask
-one question at a time and wait for the answer before asking the next.** Never
-send multiple questions in a single message — it is bewildering. Gather, in
-order:
+When creating a new skill, ask the user for every detail you are missing **in a
+single turn**, and ask a follow-up only when an answer opens a new decision.
+Cover:
 
 1. Name — a slug (lowercase, hyphens), e.g. `run-migrations` or
    `format-changelog`.
@@ -20,10 +19,12 @@ order:
    the model sees.
 3. Instructions — what should the skill actually tell the model to do? Steps,
    conventions, commands, gotchas.
+4. Scope — project or global, when it is not obvious.
 
-Skip any question the user has already answered. Once you have all three,
-confirm the scope (project vs global) if it is not obvious, then write the
-skill.
+Skip any question the user has already answered. When only the scope is
+missing and the `ask_user_question` tool is available, ask it there as a
+choice; otherwise ask everything, scope included, in one plain-text message.
+Once every detail is settled, write the skill.
 
 ## What a skill is
 

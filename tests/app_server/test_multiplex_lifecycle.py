@@ -34,6 +34,7 @@ async def test_closed_sessions_release_their_servers_and_background_tasks(
     (config_dir / "config.toml").write_text("""
 active_model = "fake-model"
 include_project_context = false
+enable_connectors = false
 [experiments]
 enable = false
 [telemetry]
@@ -109,12 +110,8 @@ thinking = "off"
                 if frame["message"] is None:
                     assert frame["channelId"] == channel
                     break
-        await asyncio.sleep(0)
-        # One pass can leave cycles that only become collectable after it.
-        for _ in range(3):
-            gc.collect()
         assert not serving.done()
-        assert all(reference() is None for reference in references)
+        assert await _released(references), _still_alive(references)
         assert not any(
             task.get_name() == "vibe-unified-scheduled-loops"
             for task in asyncio.all_tasks()
@@ -122,6 +119,41 @@ thinking = "off"
     finally:
         await client.close()
         await serving
+
+
+async def _released(
+    references: list[weakref.ReferenceType[AppServer]], *, timeout: float = 5.0
+) -> bool:
+    """Whether every server was collected before ``timeout``.
+
+    A closed channel's teardown can take several loop turns under load, so
+    one turn is not enough. Each collection takes three passes: one pass can
+    leave cycles that only become collectable after it.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        for _ in range(3):
+            gc.collect()
+        if all(reference() is None for reference in references):
+            return True
+        if asyncio.get_running_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.05)
+
+
+def _still_alive(references: list[weakref.ReferenceType[AppServer]]) -> str:
+    alive = [server for reference in references if (server := reference())]
+    holders = {
+        type(holder).__name__
+        for server in alive
+        for holder in gc.get_referrers(server)
+        if holder is not alive
+    }
+    tasks = sorted(task.get_name() for task in asyncio.all_tasks())
+    return (
+        f"{len(alive)} of {len(references)} servers still alive, "
+        f"held by {sorted(holders)}; running tasks: {tasks}"
+    )
 
 
 @pytest.mark.asyncio

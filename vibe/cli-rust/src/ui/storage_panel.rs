@@ -10,18 +10,18 @@ use super::{list_cursor, theme};
 use crate::app::App;
 use crate::hints::{self, action, key, Hint};
 use crate::storage_panel::model;
-use crate::storage_panel::{actions, has_suggestion, View};
+use crate::storage_panel::{actions, suggestions, Target, View};
 use crate::utils::now_ms;
 
 /// One drawn line and the option it belongs to, `None` for text.
-struct Line {
-    option: Option<usize>,
-    highlighted: bool,
-    runs: Runs,
+pub(super) struct Line {
+    pub(super) option: Option<usize>,
+    pub(super) highlighted: bool,
+    pub(super) runs: Runs,
 }
 
 impl Line {
-    fn text(runs: Runs) -> Self {
+    pub(super) fn text(runs: Runs) -> Self {
         Self {
             option: None,
             highlighted: false,
@@ -36,7 +36,8 @@ const GUTTER: u16 = 6;
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     let width = area.width.saturating_sub(GUTTER) as usize;
     let (top, list, bottom) = lines(app, width);
-    let chrome = top.len() as u16 + below(&bottom) + 2;
+    let chrome =
+        top.len() as u16 + below(&bottom) + 2 + super::hint_line::extra(&footer(app), area.width);
     let max_list = (area.height * 3 / 5).saturating_sub(chrome).max(3);
     let shown = (list.len() as u16).min(max_list);
     let height = chrome + shown;
@@ -73,9 +74,11 @@ fn draw_box(
         draw_line(f, inner, y, line);
         y += 1;
     }
+    let footer = footer(app);
+    let extra = super::hint_line::height(&footer, inner.width).saturating_sub(1);
     let visible = inner
         .height
-        .saturating_sub(top.len() as u16 + below(bottom));
+        .saturating_sub(top.len() as u16 + below(bottom) + extra);
     let list_area = Rect::new(inner.x, y, inner.width, visible);
     let options: Vec<Option<usize>> = list.iter().map(|line| line.option).collect();
     let scroll = match app.storage.view {
@@ -86,12 +89,12 @@ fn draw_box(
         draw_line(f, inner, y, line);
         y += 1;
     }
-    y = inner.bottom().saturating_sub(below(bottom) - 1);
+    y = inner.bottom().saturating_sub(below(bottom) - 1 + extra);
     for line in bottom {
         draw_line(f, inner, y, line);
         y += 1;
     }
-    super::hint_line::draw_clipped(f, inner.x, inner.bottom() - 1, inner.width, &footer(app));
+    super::hint_line::draw_above(f, inner.x, inner.bottom() - 1, inner.width, &footer);
 }
 
 /// Rows under the list: a blank, the bottom lines and a blank when there are any, the footer.
@@ -147,38 +150,9 @@ fn lines(app: &App, width: usize) -> (Vec<Line>, Vec<Line>, Vec<Line>) {
         }
     }
     if state.view == View::Review {
-        let review = &state.review;
-        let top = vec![
-            Line::text(rows::header(&state.usage, state.refreshing, now).into_iter().take(1).map(|(_, s)| ("Archive inactive sessions".to_owned(), s)).collect()),
-            Line::text(rows::dim("No activity for 30+ days. Worktrees are removed once no other session uses them; history is kept.")),
-            Line::text(Vec::new()),
-        ];
-        let list = review
-            .order
-            .iter()
-            .enumerate()
-            .filter_map(|(index, id)| {
-                let row = all.iter().find(|row| row.session.session_id == *id)?;
-                let highlighted = index == review.list.selected();
-                let runs = rows::review(
-                    row,
-                    review.selected.contains(id),
-                    highlighted,
-                    now,
-                    title_width.saturating_sub(4),
-                );
-                Some(Line {
-                    option: Some(index),
-                    highlighted,
-                    runs,
-                })
-            })
-            .collect();
-        let estimate = model::estimate(snapshot, &review.selected);
-        bottom.insert(
-            0,
-            Line::text(rows::estimate(review.selected.len(), estimate)),
-        );
+        let (top, list, estimate) =
+            super::storage_review::lines(app, snapshot, &all, now, (width, title_width));
+        bottom.insert(0, estimate);
         return (top, list, bottom);
     }
     let mut top = vec![
@@ -190,15 +164,21 @@ fn lines(app: &App, width: usize) -> (Vec<Line>, Vec<Line>, Vec<Line>) {
         top.push(Line::text(rows::low_disk()));
     }
     let selected = state.list.selected();
-    let offset = usize::from(has_suggestion(&state.usage));
+    let kinds = suggestions(app);
+    let offset = kinds.len();
     let mut list = Vec::new();
-    if offset == 1 {
-        let highlighted = selected == 0;
+    for (index, kind) in kinds.into_iter().enumerate() {
+        let highlighted = selected == index;
         list.push(Line {
-            option: Some(0),
+            option: Some(index),
             highlighted,
-            runs: rows::suggestion(snapshot, highlighted),
+            runs: rows::suggestion(snapshot, kind, highlighted),
         });
+    }
+    if let Some(hint) = rows::old_archived(snapshot, current) {
+        list.push(Line::text(hint));
+    }
+    if !list.is_empty() {
         list.push(Line::text(Vec::new()));
     }
     if all.is_empty() {
@@ -212,13 +192,15 @@ fn lines(app: &App, width: usize) -> (Vec<Line>, Vec<Line>, Vec<Line>) {
             runs: rows::session(row, highlighted, now, title_width),
         });
         if highlighted && state.view == View::Details {
-            let mut runs = vec![(" ".repeat(11), Style::default())];
-            runs.extend(rows::details(row));
-            list.push(Line {
-                option: Some(index + offset),
-                highlighted: false,
-                runs,
-            });
+            for details in rows::details(row) {
+                let mut runs = vec![(" ".repeat(11), Style::default())];
+                runs.extend(details);
+                list.push(Line {
+                    option: Some(index + offset),
+                    highlighted: false,
+                    runs,
+                });
+            }
         }
     }
     (top, list, bottom)
@@ -232,28 +214,16 @@ fn footer(app: &App) -> Vec<Hint> {
             false => Vec::new(),
         };
     }
-    if state.confirm.is_some() {
-        return vec![
-            (key::YES_ENTER, action::CONFIRM),
-            (key::NO_ESC, action::CANCEL),
-        ];
+    if let Some(confirm) = &state.confirm {
+        let yes = if confirm.destructive() {
+            "y"
+        } else {
+            key::YES_ENTER
+        };
+        return vec![(yes, action::CONFIRM), (key::NO_ESC, action::CANCEL)];
     }
     match state.view {
-        View::Review => vec![
-            hints::NAVIGATE,
-            (key::SPACE, action::TOGGLE),
-            ("a", action::ALL),
-            (
-                "s",
-                if state.review.by_date {
-                    action::SORT_DATE
-                } else {
-                    action::SORT_SIZE
-                },
-            ),
-            (key::ENTER, action::ARCHIVE),
-            hints::BACK,
-        ],
+        View::Review => super::storage_review::footer(app),
         View::Details => vec![
             ("a", archive_action(app)),
             ("d", action::DELETE),
@@ -263,7 +233,7 @@ fn footer(app: &App) -> Vec<Hint> {
         View::Panel
             if matches!(
                 crate::storage_panel::target(app),
-                Some(crate::storage_panel::Target::Suggestion)
+                Some(Target::Suggestion(_))
             ) =>
         {
             vec![
@@ -287,9 +257,7 @@ fn footer(app: &App) -> Vec<Hint> {
 /// `a` unarchives an archived session, like Desktop's Unarchive.
 fn archive_action(app: &App) -> &'static str {
     match crate::storage_panel::target(app) {
-        Some(crate::storage_panel::Target::Session(row)) if row.session.archived => {
-            action::UNARCHIVE
-        }
+        Some(Target::Session(row)) if row.session.archived => action::UNARCHIVE,
         _ => action::ARCHIVE,
     }
 }

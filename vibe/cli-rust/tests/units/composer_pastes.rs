@@ -1,5 +1,5 @@
 //! Collapsed pastes and image placeholders across composer round trips:
-//! history and queue drafts, cut, line deletion, undo, and rewind.
+//! history and queue drafts, line deletion, undo, and rewind.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use vibe_rs::app::App;
@@ -56,24 +56,6 @@ fn a_draft_keeps_its_collapsed_paste_through_history_recall() {
     assert_eq!(harness.app.chat_input.input, placeholder(&paste));
     assert_eq!(harness.pastes(), [paste.as_str()]);
     assert_eq!(harness.app.chat_input.submitted_text(), paste);
-}
-
-#[test]
-fn cutting_a_placeholder_returns_the_text_it_stands_for() {
-    let mut harness = Harness::new();
-    let paste = long("row");
-    handle_paste(&mut harness.app, paste.clone());
-    harness.app.chat_input.anchor = Some(0);
-
-    let removed = harness
-        .app
-        .chat_input
-        .edit_atomically(None, |input, cursor, anchor| {
-            vibe_rs::chat_input::cut(input, cursor, anchor);
-        });
-
-    assert_eq!(removed, paste);
-    assert!(harness.app.chat_input.input.is_empty());
 }
 
 #[test]
@@ -198,26 +180,6 @@ fn a_recalled_prompt_marks_its_known_image_placeholders() {
     let input = &harness.app.chat_input;
     let spans = input.mentions.spans(&input.input);
     assert_eq!((spans[0].start, spans[0].end), (4, 4 + label.len()));
-}
-
-#[test]
-fn cutting_with_an_empty_selection_takes_the_caret_line() {
-    let mut harness = Harness::new();
-    let (first, second) = (long("aaa"), long("bbb"));
-    handle_paste(&mut harness.app, first.clone());
-    harness.press(KeyCode::Char('j'), KeyModifiers::CONTROL);
-    handle_paste(&mut harness.app, second.clone());
-    let end = placeholder(&first).len();
-    let input = &mut harness.app.chat_input;
-    input.cursor = end;
-    input.anchor = Some(end);
-
-    let removed = input.edit_atomically(input.line_cut_start(), |input, cursor, anchor| {
-        vibe_rs::chat_input::cut(input, cursor, anchor);
-    });
-
-    assert_eq!(removed, format!("{first}\n"));
-    assert_eq!(harness.pastes(), [second.as_str()]);
 }
 
 #[test]

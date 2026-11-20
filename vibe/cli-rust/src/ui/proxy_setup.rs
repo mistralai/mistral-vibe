@@ -17,10 +17,17 @@ fn box_height(app: &App) -> u16 {
     app.proxy_setup.inputs.len() as u16 * 2 + 4
 }
 
+const HINTS: &[crate::hints::Hint] = &[
+    (key::ARROWS, action::NAVIGATE),
+    (key::ENTER, action::SAVE_EXIT),
+    hints::CANCEL,
+];
+
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     app.view.input_area = Rect::default();
     let kind = super::bottom_app::Kind::ProxySetup;
-    super::bottom_app::draw(app, f, area, box_height(app), kind, draw_box);
+    let height = box_height(app) + super::hint_line::extra(HINTS, area.width);
+    super::bottom_app::draw(app, f, area, height, kind, draw_box);
 }
 
 fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
@@ -47,21 +54,12 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
         width as usize,
         heading,
     );
-    if area.height >= 4 {
-        super::hint_line::draw_clipped(
-            f,
-            x,
-            bottom - 1,
-            width,
-            &[
-                (key::ARROWS, action::NAVIGATE),
-                (key::ENTER, action::SAVE_EXIT),
-                hints::CANCEL,
-            ],
-        );
+    let help = super::hint_line::height(HINTS, width);
+    if area.height >= 3 + help {
+        super::hint_line::draw_above(f, x, bottom - 1, width, HINTS);
     }
     let top = area.y + 2;
-    let visible = bottom.saturating_sub(1).saturating_sub(top) as usize;
+    let visible = bottom.saturating_sub(help).saturating_sub(top) as usize;
     draw_rows(app, f, Rect::new(x, top, width, visible as u16), heading);
 }
 

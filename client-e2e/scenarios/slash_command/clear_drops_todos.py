@@ -1,4 +1,4 @@
-"""`/clear` empties the todo list, so the pinned todo row disappears with the conversation."""
+"""`/clear` empties the todo list, so the rail's todo item disappears with the conversation."""
 
 from __future__ import annotations
 
@@ -29,4 +29,4 @@ timeline: Timeline = [
 ]
 
 screen_contains = ("New conversation started.",)
-screen_excludes = ("File the follow-ups",)
+screen_excludes = ("File the follow-ups", "≡ 1/2")

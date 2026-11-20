@@ -10,7 +10,9 @@ use crate::app::App;
 use crate::hints::{self, action};
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
-    let height = (app.resume_picker.sessions.len().max(1) as u16 + 6).min(max_height(area));
+    let extra = super::hint_line::extra(HELP, area.width);
+    let height =
+        (app.resume_picker.sessions.len().max(1) as u16 + 6 + extra).min(max_height(area) + extra);
     let kind = super::bottom_app::Kind::Resume;
     super::bottom_app::draw(app, f, area, height, kind, draw_box);
 }
@@ -35,11 +37,14 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
     );
     let title = Style::default().fg(theme::secondary()).bg(bg);
     let cwd = app.resume_picker.cwd.as_deref().unwrap_or("this folder");
+    let cwd = super::footer_fit::elide_path(cwd, area.width.saturating_sub(10) as usize);
     f.buffer_mut()
         .set_string(area.x + 2, area.y + 1, "local", title);
     f.buffer_mut()
         .set_string(area.x + 8, area.y + 1, cwd, theme::muted_style().bg(bg));
-    let visible = area.height.saturating_sub(6) as usize;
+    let visible = area
+        .height
+        .saturating_sub(6 + super::hint_line::extra(HELP, area.width)) as usize;
     let total = app.resume_picker.sessions.len();
     let list_area = Rect::new(
         area.x + 1,
@@ -150,15 +155,15 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect) {
             scroll as u16,
         );
     }
-    let help = [
-        hints::NAVIGATE,
-        hints::SELECT,
-        ("d", action::DELETE),
-        hints::CANCEL,
-    ];
-    let width = area.width.saturating_sub(4);
-    super::hint_line::draw_clipped(f, area.x + 2, area.y + area.height - 2, width, &help);
+    super::hint_line::draw_footer(f, area, HELP);
 }
+
+const HELP: &[crate::hints::Hint] = &[
+    hints::NAVIGATE,
+    hints::SELECT,
+    ("d", action::DELETE),
+    hints::CANCEL,
+];
 
 fn relative_time(timestamp: u64) -> String {
     let now = crate::utils::now_ms();

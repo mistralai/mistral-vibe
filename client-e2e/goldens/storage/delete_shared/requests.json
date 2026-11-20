@@ -20,22 +20,9 @@
   }
  },
  {
-  "method": "session/delete",
+  "method": "storage/sessions/delete",
   "params": {
-   "sessionId": "5e550000-0000-4000-8000-000000000004"
-  }
- },
- {
-  "method": "session/list",
-  "params": {
-   "includeArchived": true,
-   "limit": 500
-  }
- },
- {
-  "method": "storage/usage/refresh",
-  "params": {
-   "waitForSessionIds": [
+   "sessionIds": [
     "5e550000-0000-4000-8000-000000000004"
    ]
   }

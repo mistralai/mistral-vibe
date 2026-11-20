@@ -54,6 +54,11 @@ merged into its summary refuses the fork until it ends.
 MCP, connector, and plugin changes stay idle-only: the Harness refuses them
 while a turn runs.
 
+`/skills` is side-channel: its reads never touch the turn, and a skill change
+made during a turn is persisted at once and parked until the turn ends, like
+`config/model/write` and the skill folder watch. The answer says `pending`, and
+the running turn keeps the skills it bound at its start.
+
 If one side-channel command is already running, a second one is rejected with a
 warning. Side-channel commands are not queue items and do not appear in the
 queued-message UI.

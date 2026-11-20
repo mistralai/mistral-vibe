@@ -28,4 +28,6 @@ timeline: Timeline = [
         for index in range(1, 9)
     ),
     turn_completed(),
+    "\x18",  # Ctrl+X — focus the rail on its agents item
+    "\r",  # Enter — open the subagent list
 ]

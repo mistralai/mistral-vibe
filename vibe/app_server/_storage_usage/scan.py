@@ -40,6 +40,8 @@ from vibe.app_server._storage_usage.sizes import (
     reads_private_sizes,
 )
 from vibe.app_server.protocol import (
+    StorageLeftoverCleanup,
+    StorageLeftoverFolder,
     StorageOtherKind,
     StorageOtherUsage,
     StorageSessionUsage,
@@ -220,10 +222,12 @@ def scan(request: ScanRequest, budget: Budget | None = None) -> dict[str, Any]:
         session_id: _measure_history(session, progress)
         for session_id, session in layout.sessions.items()
     }
-    other = _measure_other(request, layout, progress)
+    unknown_folders: list[StorageLeftoverFolder] = []
+    other = _measure_other(request, layout, progress, unknown_folders)
     worktree_rows, measures, all_measured = _measure_worktrees(
         request, layout, histories, full, progress
     )
+    starting = {worktree.id for worktree in layout.worktrees if worktree.starting}
     sessions = [
         _session_row(session, histories[session_id])
         for session_id, session in layout.sessions.items()
@@ -242,6 +246,7 @@ def scan(request: ScanRequest, budget: Budget | None = None) -> dict[str, Any]:
         sessions=sorted(sessions, key=lambda row: row.history_bytes, reverse=True),
         worktrees=worktree_rows,
         other=other,
+        leftover_cleanup=_leftover_cleanup(worktree_rows, unknown_folders, starting),
     )
     return {
         "version": CACHE_VERSION,
@@ -281,8 +286,14 @@ def _measure_history(session: SessionFolder, progress: _Progress) -> Measured:
 
 
 def _measure_other(
-    request: ScanRequest, layout: Layout, progress: _Progress
+    request: ScanRequest,
+    layout: Layout,
+    progress: _Progress,
+    folders: list[StorageLeftoverFolder],
 ) -> list[StorageOtherUsage]:
+    """Other Vibe data by kind; each unknown bucket folder measured whole is
+    added to ``folders``.
+    """
     sizes: dict[StorageOtherKind, int] = {}
     paths: dict[StorageOtherKind, Path] = {}
 
@@ -291,13 +302,21 @@ def _measure_other(
         paths.setdefault(kind, path)
 
     budget, seen = progress.budget, progress.seen
+    unknown = {path: item for item, path in layout.unknown_folders.items()}
     for child in layout.orphan_children:
         add("orphan_history", child.parent, measure(child, budget, seen))
     scratchpad = request.home / _SCRATCHPAD
     add("shared_scratchpad", scratchpad, measure(scratchpad, budget, seen))
     for kind, path in layout.worktree_other:
         allocated = kind == "worktree_template"
-        add(kind, path, measure(path, budget, seen, allocated=allocated))
+        measured = measure(path, budget, seen, allocated=allocated)
+        if path in unknown and measured.complete:
+            folders.append(
+                StorageLeftoverFolder(
+                    id=unknown[path], path=str(path), bytes=measured.bytes
+                )
+            )
+        add(kind, path, measured)
     owned = frozenset(
         path
         for session in layout.sessions.values()
@@ -438,7 +457,9 @@ def _session_row(session: SessionFolder, history: Measured) -> StorageSessionUsa
 def _link_sessions(
     sessions: list[StorageSessionUsage], worktrees: list[StorageWorktreeUsage]
 ) -> None:
-    """A session in several claims takes the worktree its folder is in."""
+    """Each session lists every worktree it claims; the one its folder is in,
+    else the first, is its ``worktree_id`` and comes first.
+    """
     rows = {row.session_id: row for row in sessions}
     for worktree in worktrees:
         for session_id in worktree.session_ids:
@@ -446,6 +467,11 @@ def _link_sessions(
             inside = row.cwd is not None and Path(row.cwd).is_relative_to(worktree.path)
             if row.worktree_id is None or inside:
                 row.worktree_id = worktree.id
+            row.worktree_ids.append(worktree.id)
+    for row in sessions:
+        if row.worktree_id is not None:
+            row.worktree_ids.remove(row.worktree_id)
+            row.worktree_ids.insert(0, row.worktree_id)
 
 
 def _totals(
@@ -469,6 +495,33 @@ def _totals(
         leftover_worktrees_bytes=leftover,
         other_vibe_data_bytes=other_bytes,
         total_bytes=active + archived + leftover + other_bytes,
+    )
+
+
+def _leftover_cleanup(
+    worktrees: list[StorageWorktreeUsage],
+    folders: list[StorageLeftoverFolder],
+    starting: set[str],
+) -> StorageLeftoverCleanup:
+    """Managed worktrees no session claims any more, and the unknown folders.
+
+    A folder with a claim but no record, or a ``.git`` but no claim, is not
+    offered: nothing proves it is Vibe's to remove. Nor is a worktree in
+    ``starting``, whose new claim no session joined yet.
+    """
+    unclaimed = [
+        row
+        for row in worktrees
+        if row.managed
+        and row.leftover
+        and not row.session_ids
+        and row.id not in starting
+    ]
+    return StorageLeftoverCleanup(
+        worktree_ids=[row.id for row in unclaimed],
+        unknown_folders=sorted(folders, key=lambda item: item.bytes, reverse=True),
+        reclaimable_bytes=sum(row.bytes or 0 for row in unclaimed)
+        + sum(item.bytes for item in folders),
     )
 
 

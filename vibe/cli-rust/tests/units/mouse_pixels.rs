@@ -1,10 +1,10 @@
-//! SGR-pixels mouse reports: support probe, pixel-to-cell conversion, motion coalescing.
+//! SGR-pixels mouse reports: support replies, pixel-to-cell conversion, motion coalescing.
 
 use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
 
 use vibe_rs::mouse::pixels::{
-    cell_size, cells, is_answered, reported_grid, settle, supports, transition, validated,
-    Coalesce, Grid, ENABLE,
+    cell_size, cells, reported_grid, settle, supports, transition, validated, Coalesce, Grid,
+    ENABLE,
 };
 
 use crate::support::{down, mouse};
@@ -74,14 +74,6 @@ fn cell_reports_pass_through_without_pixel_mode() {
 
     assert_eq!((cell.column, cell.row), (7, 3));
     assert_eq!(row, 3.0);
-}
-
-#[test]
-fn the_probe_waits_for_the_device_attributes_reply() {
-    assert!(!is_answered(b""));
-    assert!(!is_answered(b"\x1b[?1016;1$y"));
-    assert!(is_answered(b"\x1b[?1016;1$y\x1b[?62;22c"));
-    assert!(is_answered(b"\x1b[?1;2c"));
 }
 
 #[test]
@@ -239,64 +231,4 @@ fn an_edge_pixel_report_around_a_switch_stays_a_pixel_report() {
 /// A 0-based SGR-pixels report as crossterm parses it: minus one, wrapping at 0.
 fn pixels(kind: MouseEventKind, x: u16, y: u16) -> MouseEvent {
     mouse(kind, x.wrapping_sub(1), y.wrapping_sub(1))
-}
-
-#[cfg(unix)]
-mod unix {
-    use std::fs::File;
-    use std::io::{Read, Write};
-    use std::os::fd::FromRawFd;
-    use std::thread;
-
-    use vibe_rs::mouse::pixels::{probe_tty, QUERY};
-
-    fn pty() -> (File, File) {
-        let mut master = 0;
-        let mut slave = 0;
-        assert_eq!(
-            unsafe {
-                libc::openpty(
-                    &mut master,
-                    &mut slave,
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                    std::ptr::null_mut(),
-                )
-            },
-            0
-        );
-        unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) }
-    }
-
-    fn probe_with_reply(reply: &'static [u8]) -> Option<(u16, u16)> {
-        let (master, mut slave) = pty();
-        let mut responder = master.try_clone().unwrap();
-        let thread = thread::spawn(move || {
-            let mut query = [0; QUERY.len()];
-            responder.read_exact(&mut query).unwrap();
-            assert_eq!(query, QUERY);
-            responder.write_all(reply).unwrap();
-        });
-        let supported = probe_tty(&mut slave);
-        thread.join().unwrap();
-        supported
-    }
-
-    #[test]
-    fn a_terminal_recognizing_mode_1016_reports_its_cell_size() {
-        assert_eq!(
-            probe_with_reply(b"\x1b[?1016;2$y\x1b[6;36;17t\x1b[?62;22c"),
-            Some((17, 36))
-        );
-    }
-
-    #[test]
-    fn a_terminal_without_a_cell_size_reply_keeps_cell_reports() {
-        assert_eq!(probe_with_reply(b"\x1b[?1016;2$y\x1b[?62;22c"), None);
-    }
-
-    #[test]
-    fn a_terminal_answering_only_device_attributes_keeps_cell_reports() {
-        assert_eq!(probe_with_reply(b"\x1b[?62;22c"), None);
-    }
 }

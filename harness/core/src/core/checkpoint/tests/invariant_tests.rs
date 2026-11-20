@@ -282,9 +282,69 @@ fn restore_rejects_noncanonical_control_messages() {
         "source": "injection"
     }]);
 
-    let checkpoint = decode_checkpoint(&steering.to_string()).unwrap();
-    let error = checkpoint.restore(config()).unwrap_err();
-    assert!(error.contains("visible user messages"), "{error}");
+    let mut earlier_steering = restorable_active_tool_checkpoint();
+    earlier_steering["turn"]["pending_steer"] = steering["turn"]["pending_steer"].take();
+    steering["turn"]
+        .as_object_mut()
+        .unwrap()
+        .remove("pending_steer");
+    steering["pending_input"] = json!([{
+        "type": "steering",
+        "message": earlier_steering["turn"]["pending_steer"][0].clone()
+    }]);
+
+    for (label, value) in [
+        ("pending steering", steering),
+        ("earlier pending steering", earlier_steering),
+    ] {
+        let checkpoint = decode_checkpoint(&value.to_string()).unwrap();
+        let error = checkpoint.restore(config()).unwrap_err();
+        assert!(error.contains("visible user messages"), "{label}: {error}");
+    }
+}
+
+/// *Prepare*: Checkpoints with pending steering while idle and while the pre-agent hook runs.
+/// *Do*: Restore each.
+/// *Assert*: Restore rejects both, because only an active Turn past its pre-agent hook takes steering.
+#[test]
+fn restore_rejects_pending_steering_without_a_steerable_turn() {
+    let steering = json!([{
+        "type": "steering",
+        "message": {
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": "steer" }]
+            },
+            "source": "history"
+        }
+    }]);
+    let mut idle = checkpoint_with_turn(json!({ "type": "idle" }));
+    idle["pending_input"] = steering.clone();
+    let mut pre_agent = checkpoint_with_turn(json!({
+        "type": "active",
+        "turn_id": "turn-1",
+        "iterations": 0,
+        "phase": {
+            "type": "awaiting_hook",
+            "pending": {
+                "hook": "pre_agent_turn",
+                "hook_binding_ids": ["binding-1"],
+                "user_content": [{ "type": "text", "text": "work" }]
+            }
+        },
+        "queued": { "type": "empty" },
+        "model_input_ready": false
+    }));
+    pre_agent["pending_input"] = steering;
+
+    for (label, value) in [("idle", idle), ("pre-agent hook", pre_agent)] {
+        let checkpoint = decode_checkpoint(&value.to_string()).unwrap();
+        let error = checkpoint.restore(config()).unwrap_err();
+        assert!(
+            error.contains("pending steering requires a steerable active turn"),
+            "{label}: {error}"
+        );
+    }
 }
 
 #[test]

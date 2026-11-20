@@ -3,15 +3,19 @@
 pub mod failure;
 mod hint;
 mod idle;
+mod line;
 mod snake;
+mod wrap;
+
+pub(crate) use hint::queue as queue_hints;
 
 use std::time::Duration;
 
 use crate::clock::UiInstant;
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::style::Color;
+use ratatui::text::Span;
 use ratatui::Frame;
 
 use self::snake::Snake;
@@ -150,155 +154,47 @@ impl LoadingAnim {
 }
 
 pub fn draw(app: &App, f: &mut Frame, area: Rect) {
-    // Keep the normal top padding; startup uses the last row to sit against the input.
-    if area.height < 2 {
+    // Keep the normal top padding; startup uses the last rows to sit against the input.
+    // A viewed child shows its own status, never the main session's startup failure.
+    if area.height < 2 || (app.subagents.viewed_child().is_none() && failure::draw(app, f, area)) {
         return;
     }
-    let content_y = if matches!(app.session.status, Status::Starting | Status::Failed) {
-        area.y + area.height - 1
-    } else {
-        area.y + 1
+    let Some(spans) = line::spans(app, area) else {
+        return;
     };
-    let content = Rect {
-        y: content_y,
-        height: 1,
-        ..area
+    let rows = wrap::rows(spans, area.width);
+    let height = (rows.len() as u16).min(area.height - 1);
+    let top = match matches!(app.session.status, Status::Starting | Status::Failed) {
+        true => area.bottom() - height,
+        false => area.y + 1,
     };
-
-    // The main loading row is hidden while a subagent is viewed, which
-    // shows the subagent's own status instead (Running / Waiting for input).
-    if let Some(child) = app.subagents.viewed_child() {
-        if let Some(status) = crate::subagents::subagent_loading_status(child.status) {
-            let anim = &app.view.loading;
-            let color = |pos: usize| Style::default().fg(anim.color_at(pos));
-            f.render_widget(
-                Line::from(vec![
-                    Span::styled(anim.snake.render(), color(0)),
-                    Span::raw(" "),
-                    Span::styled(status.to_owned(), color(1)),
-                ]),
-                content,
-            );
-        }
-        return;
+    for (y, row) in (top..).zip(rows).take(usize::from(height)) {
+        f.render_widget(
+            row,
+            Rect {
+                y,
+                height: 1,
+                ..area
+            },
+        );
     }
+}
 
-    if failure::draw(app, f, area) {
-        return;
-    }
-    // Queue mode's own keys replace every other hint for exactly as long as it lasts.
-    let queue_hints = crate::input::composer_reachable(app)
-        .then(|| crate::message_queue::mode_hints(app))
-        .flatten();
-    let resuming = crate::resume_picker::spinning(app);
-    if !app.view.command_loading
-        && !resuming
-        && !matches!(
-            app.session.status,
-            Status::Starting | Status::Generating { .. }
-        )
-    {
-        if let Some(hints) = queue_hints {
-            let mut spans = Vec::new();
-            hint::push(&mut spans, String::new(), hints);
-            f.render_widget(Line::from(spans), content);
-        } else if let Some(spans) = idle::next_loop(app, content.width) {
-            f.render_widget(Line::from(spans), content);
-        }
-        return;
-    }
-    let anim = &app.view.loading;
-    // An agent that only waits for its background work gets a still, grey line
-    // naming what it waits for. A program's sleep keeps the spinner: a message
-    // waits for the program to end.
-    let waiting = app.session.shell_operation_id.is_none()
-        && app
-            .session
-            .active_turn_id
-            .as_deref()
-            .is_some_and(|turn| app.view.transcript.only_model_waiting(turn));
-    let mut spans: Vec<Span> = match waiting {
-        true => {
-            let label = app.session.wait_target.as_deref().map_or_else(
-                || anim.label.clone(),
-                |target| format!("Waiting for {target}"),
-            );
-            let muted = theme::muted_style();
-            vec![
-                Span::styled(WAITING_GLYPH, muted),
-                Span::raw(" "),
-                Span::styled(format!("{label}… "), muted),
-            ]
-        }
-        false => {
-            let color = |pos: usize| Style::default().fg(anim.color_at(pos));
-            // Snake spinner glyph + gap, then the label one color-cycled span per
-            // character, then the trailing "… ".
-            let label = if resuming {
-                RESUMING_LOADING_STATUS
-            } else {
-                &anim.label
-            };
-            let mut spans = vec![Span::styled(anim.snake.render(), color(0)), Span::raw(" ")];
-            for (i, ch) in label.chars().enumerate() {
-                spans.push(Span::styled(ch.to_string(), color(1 + i)));
-            }
-            spans.push(Span::styled("… ", color(1 + label.chars().count())));
-            spans
-        }
-    };
+/// The rows the loading line takes at `width`, its hints wrapped instead of cut.
+pub fn rows(app: &App, width: u16) -> u16 {
+    let area = Rect::new(0, 0, width, u16::MAX);
+    line::spans(app, area).map_or(1, |spans| wrap::rows(spans, width).len().max(1) as u16)
+}
 
-    // Background slash commands have no timer or controls; manual shell commands do.
-    // Startup keeps queue cancellation available without offering turn interruption.
-    let background =
-        (app.view.command_loading || resuming) && app.session.shell_operation_id.is_none();
-    if background || app.session.status == Status::Starting {
-        let hints = match queue_hints {
-            Some(hints) => hints.to_vec(),
-            None if background => Vec::new(),
-            None => hint::starting(app),
-        };
-        hint::push(&mut spans, String::new(), &hints);
-        f.render_widget(Line::from(spans), content);
-        return;
-    }
-
-    // Status is always `Generating` here (draw returned above otherwise).
-    let elapsed = match (app.session.shell_started_at, app.session.status) {
-        (Some(since), _) => anim.elapsed(since),
-        (None, Status::Generating { since }) => anim.elapsed(since),
-        _ => Duration::default(),
-    };
-    let hints = queue_hints.map_or_else(|| hint::running(app), <[_]>::to_vec);
-    hint::push(
-        &mut spans,
-        format!("{} ", format_elapsed(elapsed.as_secs())),
-        &hints,
-    );
-    // A message reaches an agent that only waits at once: say so after the controls.
-    if waiting && !app.queue.paused && crate::input::composer_reachable(app) {
-        spans.push(Span::styled(
-            // A message reaches the agent at once: sending one steers it.
-            format!(" · send a message to {}", crate::hints::action::STEER),
-            crate::ui::hint_line::action_style(),
-        ));
-    }
-
-    // A callback is waiting for the user to stop typing.
-    if crate::question_app::waiting(app)
-        || (app.approval.active.is_none() && app.approval.has_pending())
-    {
-        spans.push(Span::styled(
-            " typing detected, waiting…",
-            Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC),
-        ));
-    }
-
-    f.render_widget(Line::from(spans), content);
+/// Columns the loading line takes unwrapped, so the rail beside it never clips it; an idle loop line ellipsizes, so it claims none.
+pub fn width(app: &App) -> u16 {
+    let spans = line::spans(app, Rect::new(0, 0, 0, 1)).unwrap_or_default();
+    let width: usize = spans.iter().map(Span::width).sum();
+    u16::try_from(width).unwrap_or(u16::MAX)
 }
 
 /// `Ns`, then `NmNs`, then `NhNmNs`.
-fn format_elapsed(seconds: u64) -> String {
+pub(super) fn format_elapsed(seconds: u64) -> String {
     if seconds < 60 {
         return format!("{seconds}s");
     }

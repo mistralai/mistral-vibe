@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+import os
 from pathlib import Path
+import signal
 
 import pytest
 
@@ -88,6 +92,19 @@ class TestFileStoreApply:
         assert "del.txt" not in fs.files
 
 
+@contextmanager
+def _file_size_limit(limit: int) -> Iterator[None]:
+    resource = pytest.importorskip("resource")
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    previous_handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (limit, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+        signal.signal(signal.SIGXFSZ, previous_handler)
+
+
 class TestDiskFilesystem:
     def test_write_then_read_round_trips_and_creates_parents(
         self, tmp_path: Path
@@ -117,3 +134,46 @@ class TestDiskFilesystem:
         target.write_bytes(b"x")
         fs.remove(str(target))
         assert not target.exists()
+
+    def test_failed_write_keeps_the_previous_content(self, tmp_path: Path) -> None:
+        fs = DiskFilesystem()
+        target = tmp_path / "a.txt"
+        target.write_bytes(b"x = 1\n")
+        with _file_size_limit(16), pytest.raises(OSError):
+            fs.write_bytes(str(target), b"y" * 64)
+        assert target.read_bytes() == b"x = 1\n"
+        assert os.listdir(tmp_path) == ["a.txt"]
+
+    def test_failed_write_of_a_new_file_leaves_nothing(self, tmp_path: Path) -> None:
+        fs = DiskFilesystem()
+        target = tmp_path / "a.txt"
+        with _file_size_limit(16), pytest.raises(OSError):
+            fs.write_bytes(str(target), b"y" * 64)
+        assert os.listdir(tmp_path) == []
+
+    def test_write_replaces_a_file_with_a_maximum_length_name(
+        self, tmp_path: Path
+    ) -> None:
+        fs = DiskFilesystem()
+        target = tmp_path / ("a" * 255)
+        target.write_bytes(b"old")
+        fs.write_bytes(str(target), b"new")
+        assert target.read_bytes() == b"new"
+
+    def test_write_goes_through_a_symlink(self, tmp_path: Path) -> None:
+        fs = DiskFilesystem()
+        real = tmp_path / "real.txt"
+        real.write_bytes(b"old")
+        link = tmp_path / "link.txt"
+        link.symlink_to(real)
+        fs.write_bytes(str(link), b"new")
+        assert link.is_symlink()
+        assert real.read_bytes() == b"new"
+
+    def test_write_keeps_the_existing_mode(self, tmp_path: Path) -> None:
+        fs = DiskFilesystem()
+        target = tmp_path / "run.sh"
+        target.write_bytes(b"old")
+        target.chmod(0o751)
+        fs.write_bytes(str(target), b"new")
+        assert target.stat().st_mode & 0o777 == 0o751

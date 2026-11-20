@@ -173,6 +173,10 @@ pub struct Session {
     pub session_id: Option<String>,
     /// The in-progress turn's id (from `turn/started`), needed to interrupt it.
     pub active_turn_id: Option<String>,
+    /// An interrupt before any answer: once the turn completes, rewind it and refill the input.
+    pub taking_back: bool,
+    /// That take-back's rewind is sent and not answered yet, so the input holds its submissions.
+    pub take_back_sent: bool,
     /// Completion held while a promoted prompt awaits its local enqueue result.
     pub deferred_completion: Option<(String, crate::terminal_notifier::NotificationContext)>,
     /// A manual shell command submitted before startup became ready.
@@ -199,7 +203,7 @@ pub struct Session {
     pub prepared_worktree: Option<crate::worktree::WorktreeInfo>,
     /// Context budget `(current_tokens, max_tokens)`; `(_, 0)` renders as empty.
     pub tokens: (u64, u64),
-    /// The session's PR/MR artifacts, latest first; the footer link opens a modal listing them.
+    /// The session's PR/MR artifacts, latest first; the rail's PR item opens a window listing them.
     pub artifacts: Vec<crate::server::PublicSessionArtifact>,
     /// The session `artifacts` was read for; a switch away re-reads the list.
     pub artifacts_session: Option<String>,
@@ -237,8 +241,8 @@ pub struct Session {
     pub usage_baseline: Option<crate::server::TokenUsage>,
     /// The latest `runtime` value, for views that read it after the event.
     pub runtime: Value,
-    /// How many of the session's background processes run, from its latest state.
-    pub running_processes: usize,
+    /// The session's running background processes, from its latest state.
+    pub background_tasks: Vec<crate::server::PublicBackgroundProcess>,
     /// What a running `wait` waits for, when the subagents and tasks name it.
     pub wait_target: Option<String>,
     /// The session's scheduled loops, soonest first, from its latest state and updates.
@@ -261,6 +265,8 @@ pub struct View {
     pub markdown_cache: ui::markdown::MarkdownCache,
     /// Unfolded entry ids and `tool-group:<first member id>` keys, including a lone call's future group.
     pub expanded: HashSet<String>,
+    /// The `collapse_turn_details` config value: a settled turn's steps fold into a `Worked for` group.
+    pub collapse_turn_details: bool,
     /// The Ctrl+O bulk fold state applied to every group and collapsible
     /// result body at once.
     pub tools_collapsed: bool,
@@ -270,9 +276,10 @@ pub struct View {
     pub entry_hitmap: Vec<(u16, u16, Option<u16>, String)>,
     /// Markdown links painted in the current frame, used for hover and click routing.
     pub link_hitmap: Vec<ui::markdown::Link>,
-    /// Per-frame `(top, bottom, gutter_width)` of every edit-diff view on screen.
-    /// Its gutter is chrome, so selection and copy start after it.
-    pub diff_hitmap: Vec<(u16, u16, u16)>,
+    /// Wide graphemes of the last frame, whose uncovered columns the next frame repaints.
+    pub wide_cells: crate::wide_cells::WideCells,
+    /// Per-frame border and edit-diff gutter columns of bordered entries: chrome, so selection and copy start after them.
+    pub chrome_hitmap: Vec<crate::selection::RowChrome>,
     /// Per-frame `[top, bottom)` screen rows of `/raw` agent messages: no chrome, selected from the first column.
     pub raw_hitmap: Vec<(u16, u16)>,
     /// Markdown table cells from the current layout, in document coordinates.
@@ -294,6 +301,8 @@ pub struct View {
     pub loading_selection_region: Region,
     /// The goal row a drag can select, published by whichever screen paints it.
     pub goal_selection_region: Region,
+    /// The rail window's content a drag can select.
+    pub rail_window_selection_region: Region,
     /// The box content a drag can select while a bottom app replaces the input box.
     pub bottom_app_selection_region: Region,
     /// Bottom-app box `(y, x0, x1)` cells painted as chrome (question option
@@ -331,6 +340,8 @@ pub struct View {
     pub command_loading: bool,
     /// Shared phase for the 100 ms pulse on active reasoning and tool entries.
     pub pulse_frame: usize,
+    /// The wave that crosses a copied selection.
+    pub copy_light: crate::ui::copy_light::CopyLight,
     /// Current phase of the software block cursor's blink (toggled every 0.5s).
     pub cursor_on: bool,
     /// Chat input caret cell painted this frame, where dead-key and IME previews should draw.
@@ -367,11 +378,13 @@ impl Default for View {
             transcript_cache: TranscriptCache::default(),
             markdown_cache: ui::markdown::MarkdownCache::default(),
             expanded: HashSet::new(),
+            collapse_turn_details: false,
             tools_collapsed: true,
             raw: false,
             entry_hitmap: Vec::new(),
             link_hitmap: Vec::new(),
-            diff_hitmap: Vec::new(),
+            wide_cells: Default::default(),
+            chrome_hitmap: Vec::new(),
             raw_hitmap: Vec::new(),
             table_hitmap: Vec::new(),
             banner_cat_area: None,
@@ -382,6 +395,7 @@ impl Default for View {
             footer_tokens_area: Rect::default(),
             loading_selection_region: Region::default(),
             goal_selection_region: Region::default(),
+            rail_window_selection_region: Region::default(),
             bottom_app_selection_region: Region::default(),
             bottom_app_selection_chrome: Vec::new(),
             bottom_app_selection_halves: None,
@@ -399,6 +413,7 @@ impl Default for View {
             loading,
             command_loading: false,
             pulse_frame: 0,
+            copy_light: crate::ui::copy_light::CopyLight::default(),
             cursor_on: true,
             cursor_position: None,
             app_focus: true,
@@ -499,15 +514,19 @@ pub struct ThemePicker {
     pub preview_at: Option<Instant>,
 }
 
-/// Agent modes: the runtime snapshot plus the Shift+Tab switch in flight.
+/// Agents and approval policies: the runtime snapshot plus the Shift+Tab switch in flight.
 #[derive(Default)]
 pub struct Agents {
     /// Every agent from the runtime snapshot, in the server's discovery order.
     pub all: Vec<crate::server::AgentSummary>,
     /// The server's active agent.
     pub active: crate::server::AgentSummary,
+    /// The approval policies Shift+Tab cycles, in the server's order.
+    pub policies: Vec<crate::server::ApprovalPolicySummary>,
+    /// The server's active approval policy.
+    pub active_policy: crate::server::ApprovalPolicySummary,
     /// Session-wide auto-approve (`--yolo` or config), which survives a switch,
-    /// as opposed to the YOLO agent's own.
+    /// as opposed to the YOLO policy's own.
     pub force_bypass_tool_permissions: bool,
     /// Name the last Shift+Tab asked for, painted before the server answers
     /// and re-used as the base of a coalesced press.
@@ -515,7 +534,7 @@ pub struct Agents {
     /// The last target the server refused; the next Shift+Tab cycles from it
     /// so a broken profile does not trap the cycle.
     pub refused: Option<String>,
-    /// Whether a `session/agent/update` is in flight.
+    /// Whether a `session/approvalPolicy/update` is in flight.
     pub switch_active: bool,
     /// Whether `/leanstall` or `/unleanstall` is in flight; input is rejected until it finishes.
     pub installing: bool,
@@ -558,13 +577,11 @@ pub struct ModelPicker {
     pub default_alias: String,
 }
 
-/// The artifacts modal state (a bottom-app): the session's PR/MR links.
+/// The PR window the rail opens: the session's PR/MR links.
 #[derive(Default)]
 pub struct ArtifactsModal {
     /// The config turns PR monitoring on, so `/pr` is offered.
     pub enabled: bool,
-    /// While set the modal replaces the input box: title, link rows, hint.
-    pub open: bool,
     /// Highlighted artifact (latest first) and the viewport; a row has several actions (Enter, `c`, `f`).
     pub list: crate::option_list::OptionList<crate::option_list::MultiAction>,
     /// Option rows from the last render; PageUp/PageDown move by its height.
@@ -691,6 +708,8 @@ pub struct QuestionApp {
 #[derive(Default)]
 pub struct MCPApp {
     pub search: crate::search_field::Search,
+    /// The viewed source's tool search, cleared whenever a source opens.
+    pub tool_search: crate::search_field::Search,
     /// While set the browser replaces the input box: title, option list, hint.
     pub open: bool,
     /// Latest `mcp/read` projection, refreshed by `mcp/refresh` and `mcp/toggle`.
@@ -864,6 +883,10 @@ pub struct App {
     /// The latest written todo list, never seeded from history.
     pub todo_tracker: crate::todo_tracker::TodoTracker,
     pub todo_sidebar: crate::todo_tracker::TodoSidebar,
+    /// The status rail on the loading row and its keyboard focus.
+    pub rail: crate::rail::Rail,
+    /// The background tasks panel the rail's tasks item opens.
+    pub tasks_panel: crate::tasks_panel::TasksPanel,
     /// The session goal, its panels and the resume choice.
     pub goal: crate::goal::State,
     pub rewind: Rewind,
@@ -909,6 +932,8 @@ pub struct App {
     pub suspend_requested: bool,
     /// Ctrl+G requested the external editor; the event loop hands it the terminal.
     pub external_editor_requested: bool,
+    /// A file to open in the external editor as it is, such as a skill's `SKILL.md`.
+    pub external_editor_file: Option<std::path::PathBuf>,
     /// App-server child exited unexpectedly (stdout EOF during steady state).
     pub server_closed: bool,
     /// Sub-agents view state: child sessions, the status list, the viewed child.
@@ -919,11 +944,20 @@ pub struct App {
     pub shown_config_warnings: HashSet<String>,
     /// The startup warnings box, filled until the first turn.
     pub startup_notices: crate::notices::StartupNotices,
+    /// The last key was Ctrl+X over the tmux `mouse off` warning, so `h` now hides it.
+    pub tmux_hint_armed: bool,
     /// The `/debug` console: a right-docked live view of the session logs.
     pub debug_console: crate::debug_console::DebugConsole,
+    /// The popup previewing the file a hovered transcript link points to.
+    pub code_preview: crate::code_preview::CodePreview,
 }
 
 impl App {
+    /// Whether `session_id` is the attached session.
+    pub fn is_session(&self, session_id: &str) -> bool {
+        self.session.session_id.as_deref() == Some(session_id)
+    }
+
     pub fn set_session_id(&mut self, session_id: String) {
         if self.session.session_id.as_deref() != Some(session_id.as_str()) {
             self.session.deferred_completion = None;
@@ -941,10 +975,12 @@ impl App {
             self.session.artifacts_unseen.clear();
             crate::artifacts_modal::close(self);
             // The old session's background work is not the new one's.
-            self.session.running_processes = 0;
+            self.session.background_tasks.clear();
             self.session.wait_target = None;
             self.session.loops.clear();
             crate::loops::close(self);
+            self.session.taking_back = false;
+            self.session.take_back_sent = false;
         }
         // The console's poll task reads the current id on every tick.
         if let Some(session_tx) = &self.debug_console.session_tx {
@@ -1041,6 +1077,7 @@ impl App {
             f.buffer_mut(),
             crate::mouse::MouseTarget::Transcript,
         );
+        self.view.wide_cells.refresh(f.buffer_mut());
     }
 }
 
@@ -1079,6 +1116,9 @@ impl App {
             for id in self.view.transcript.expandable_ids() {
                 expanded.insert(id);
             }
+            if self.view.collapse_turn_details {
+                expanded.extend(self.view.transcript.details_keys());
+            }
         }
         // Every mounted section flips; the viewed child's transcript is only
         // swapped in at render time, so its ids and cache are handled here — in
@@ -1115,6 +1155,9 @@ impl App {
         for value in self.view.transcript.lines() {
             if let Some(group) = value.group.as_ref().filter(|group| group.first) {
                 expanded.insert(group.key.clone());
+            }
+            if self.view.collapse_turn_details {
+                expanded.extend(self.view.transcript.details_key(value.id));
             }
             if value.fired_loop.is_some() || self.view.transcript.is_reasoning(value.id) {
                 expanded.insert(value.id.to_owned());

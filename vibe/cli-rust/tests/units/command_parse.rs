@@ -88,6 +88,7 @@ fn commands_a_turn_never_reads_run_while_busy_and_the_others_wait_for_idle() {
         "/proxy-setup",
         "/branch",
         "/fork",
+        "/skills",
     ] {
         assert!(is_side_channel(command), "{command} runs while busy");
     }
@@ -111,7 +112,14 @@ fn commands_a_turn_never_reads_run_while_busy_and_the_others_wait_for_idle() {
 
 #[test]
 fn side_channel_settings_wait_for_running_jobs() {
-    for command in ["/theme", "/log-level", "/voice", "/proxy-setup", "/branch"] {
+    for command in [
+        "/theme",
+        "/log-level",
+        "/voice",
+        "/proxy-setup",
+        "/branch",
+        "/skills",
+    ] {
         assert!(waits_for_jobs(command), "{command} waits for jobs");
     }
     for command in ["/help", "/exit", "/status"] {

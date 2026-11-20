@@ -9,6 +9,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use crate::app::App;
 use crate::server::{method, Client, TelemetryRecordParams};
 
+pub mod environment;
 pub mod install;
 
 /// Queued events awaiting the event loop. Overflow drops the emission attempt:
@@ -123,12 +124,13 @@ pub fn slash_command_clicked(app: &App, command: &str, entry_point: &str) {
     );
 }
 
-pub fn user_copied_text(app: &App, text: &str) {
-    record(
-        app,
-        event::USER_COPIED_TEXT,
-        bmap(json!({"text_length": text.chars().count()})),
-    );
+/// A copy; `source` names the surface it came from where one is tagged, such as `code_preview`.
+pub fn user_copied_text(app: &App, text: &str, source: Option<&str>) {
+    let mut properties = bmap(json!({"text_length": text.chars().count()}));
+    if let Some(source) = source {
+        properties.insert("source".to_owned(), source.into());
+    }
+    record(app, event::USER_COPIED_TEXT, properties);
 }
 
 pub fn user_cancelled_action(app: &App, action: &str) {
@@ -255,6 +257,10 @@ pub mod event {
     pub const VIM_NORMAL_MODE_ENTERED: &str = "vibe.vim_normal_mode_entered";
     pub const TMUX_MOUSE_HINT_RENDERED: &str = "vibe.tmux_mouse_hint.rendered";
     pub const TMUX_MOUSE_HINT_DISABLED: &str = "vibe.tmux_mouse_hint.disabled";
+    /// The code preview popup was first painted, so the user saw it.
+    pub const CODE_PREVIEW_OPENED: &str = "vibe.code_preview.opened";
+    /// A code preview attempt ended: `success` once seen, `error` on a failed read, else `cancelled`.
+    pub const CODE_PREVIEW_DONE: &str = "vibe.code_preview.done";
     pub const TRUSTED_FOLDER_UPDATED: &str = "vibe.trusted_folder.updated";
     pub const TRANSCRIPTION_START: &str = "vibe.audio.transcription.start";
     pub const TRANSCRIPTION_CANCEL: &str = "vibe.audio.transcription.cancel_recording";

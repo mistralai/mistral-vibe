@@ -5,6 +5,10 @@ Session and sends the commands the Session API defines: Turn start, steer and
 interrupt, callback answers, compaction and model switches. Each reply has the
 shape of the Runtime's own reply, so the adapter reads both paths the same way.
 
+``rename_session`` sends ``catalog/rename`` over any Session API transport. The
+local transport does not serve the catalog, so a local Session is renamed
+through its Host; a Session on another runtime is renamed with this command.
+
 Some commands go to the Runtime directly, because the API cannot carry them:
 
 - a Turn start or steer with Vibe display content or the ``injected`` flag;
@@ -19,7 +23,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import logging
-from typing import Any, assert_never
+from typing import Any, Protocol, assert_never
 
 from mistralai_vibe_local_harness.protocol import RustHarnessConfig
 from mistralai_vibe_local_harness.session_api.app_server.session.models import (
@@ -27,11 +31,15 @@ from mistralai_vibe_local_harness.session_api.app_server.session.models import (
     EmbeddedResourceContentBlock,
     ImageContentBlock,
     ResourceLinkContentBlock,
+    Session,
+    SessionModel,
     TextContentBlock,
 )
 from mistralai_vibe_local_harness.session_api.app_server.session.procedures import (
     CallbackResultParams as ApiCallbackResultParams,
     CallbackResultResponse as ApiCallbackResultResponse,
+    CatalogRenameParams,
+    CatalogRenameResponse,
     ConfigReadParams,
     ConfigReadResponse,
     ConfigWriteParams,
@@ -48,6 +56,7 @@ from mistralai_vibe_local_harness.session_api.app_server.session.procedures impo
     TurnSteerResponse as ApiTurnSteerResponse,
 )
 from mistralai_vibe_local_harness.session_api.app_server.session.transport import (
+    SessionCallbackRejectedError,
     SessionCallbackSettledError,
     SessionIdempotencyConflictError,
     SessionTurnConflictError,
@@ -217,6 +226,16 @@ class SessionApiCommands(SessionCommands):
             ApiCompactResponse,
         )
 
+    async def rename(self, title: str) -> Session:
+        """Rename this Session through ``catalog/rename``; see ``rename_session``.
+
+        The local transport does not serve the catalog and refuses it with
+        ``UnsupportedSessionProcedureError``: rename a local Session through its
+        Host. This serves a transport that does.
+        """
+        await self.ensure_open()
+        return await rename_session(self.transport, self._session.session_id, title)
+
     async def apply_config(
         self, config: SessionConfig, *, allow_reserved_turn: bool = False
     ) -> None:
@@ -320,6 +339,41 @@ class SessionApiCommands(SessionCommands):
         return response.state.active_turn_id
 
 
+class _RequestTransport(Protocol):
+    """The slice of ``SessionTransport`` that ``rename_session`` needs."""
+
+    async def request[ResultT: SessionModel](
+        self, method: str, params: SessionModel, result_type: type[ResultT]
+    ) -> ResultT: ...
+
+
+async def rename_session(
+    transport: _RequestTransport, session_id: str, title: str
+) -> Session:
+    """Give a Session a new title through ``catalog/rename``.
+
+    The title is stripped, and an empty one is refused before any request, as
+    the local Host refuses it. Returns the Session as the catalog now lists it.
+    Errors go through the same mapping as every other command, so a caller
+    handles one set of Runtime errors whatever the command.
+    """
+    normalized = title.strip()
+    if not normalized:
+        raise ValueError("Session title cannot be empty.")
+    async with _runtime_errors(_no_active_turn):
+        response = await transport.request(
+            "app_server/catalog/rename",
+            CatalogRenameParams(session_id=session_id, title=normalized),
+            CatalogRenameResponse,
+        )
+    return response.session
+
+
+async def _no_active_turn() -> str | None:
+    """A catalog command names no Turn, so a Turn conflict names none either."""
+    return None
+
+
 def _is_model_switch(
     core: RustHarnessConfig | None,
     local: LocalRuntimeAdapterConfig | None,
@@ -400,7 +454,7 @@ async def _runtime_errors(
         raise HarnessStaleTurnError(await active_turn_id()) from exc
     except SessionIdempotencyConflictError as exc:
         raise HarnessTurnQueueIdempotencyConflictError(exc.idempotency_key) from exc
-    except SessionCallbackSettledError as exc:
+    except (SessionCallbackSettledError, SessionCallbackRejectedError) as exc:
         if isinstance(exc.__cause__, HarnessSessionError):
             raise exc.__cause__ from exc
         raise
@@ -445,4 +499,4 @@ def _api_block(block: VibeContentBlock) -> ContentBlock:
             assert_never(block.resource)
 
 
-__all__ = ["SessionApiCommands", "api_blocks"]
+__all__ = ["SessionApiCommands", "api_blocks", "rename_session"]

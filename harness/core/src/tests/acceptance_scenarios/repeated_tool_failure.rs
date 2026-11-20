@@ -350,62 +350,143 @@ fn pending_notification_defers_the_repeated_failure_stop() {
     );
 }
 
+/// Has the model call `read_file` with `arguments` once per call ID in one reply, and returns the
+/// tool Actions, which run in parallel.
+fn call_read_file_in_parallel(
+    runtime: &mut SynchronousRuntime,
+    turn_id: &str,
+    completion: &Value,
+    call_ids: &[&str],
+    arguments: &Value,
+) -> Vec<Value> {
+    let calls = call_ids
+        .iter()
+        .map(|call_id| tool_call(call_id, "read_file", arguments.clone()))
+        .collect::<Vec<_>>();
+    let runtime_tools = call_ids
+        .iter()
+        .map(|_| runtime_tool("file_system.read_file", arguments.clone()))
+        .collect::<Vec<_>>();
+    runtime
+        .complete_with_tool_calls(turn_id, completion, &calls, runtime_tools)
+        .actions()
+}
+
+/// Fails each tool but the last one while its siblings still run, and returns the last one.
+fn fail_all_but_the_last(
+    runtime: &mut SynchronousRuntime,
+    turn_id: &str,
+    mut tools: Vec<Value>,
+    message: &str,
+) -> Value {
+    let last = tools.pop().expect("a reply with tool calls");
+    for (index, tool) in tools.iter().enumerate() {
+        let failure = file_read_failure(tool, message);
+        let mut expected = running(turn_id);
+        for sibling in tools[index + 1..].iter().chain([&last]) {
+            expected = expected.keep(sibling);
+        }
+        runtime.apply(
+            failure.clone(),
+            expected.observe_completed_tool_result(tool, &failure),
+        );
+    }
+    last
+}
+
 ///
 /// *Prepare*: Nothing has failed yet.
-/// *Do*: The model calls `read_file` three times in one reply, with the same arguments, and
-/// every call fails the same way. It then does that twice more.
-/// *Assert*: Each reply counts as one attempt, so Core asks the model again after the first two
-/// replies and completes the turn with `repeated_tool_failure` after the third.
+/// *Do*: The model calls `read_file` four times in one reply, one more than the limit, with the
+/// same arguments, and every call fails the same way.
+/// *Assert*: Each call counts. Core runs the whole reply, records all four results, and then
+/// completes the turn with `repeated_tool_failure` instead of asking the model again.
 ///
 #[test]
-fn identical_parallel_failures_count_once_per_reply() {
+fn identical_parallel_failures_in_one_reply_count_each_call() {
     // Prepare
     let turn_id = "turn-parallel-duplicates";
     let mut runtime = SynchronousRuntime::new(limited_config());
     let arguments = json!({"path": "notes.txt"});
-    let mut completion = runtime.start_turn(turn_id, "read the notes");
+    let completion = runtime.start_turn(turn_id, "read the notes four times");
 
-    for reply in 1..=u64::from(LIMIT) {
-        // Do
-        let calls = ["a", "b", "c"].map(|suffix| {
-            tool_call(
-                &format!("call-{reply}-{suffix}"),
-                "read_file",
-                arguments.clone(),
-            )
-        });
-        let tools = runtime
-            .complete_with_tool_calls(
-                turn_id,
-                &completion,
-                &calls,
-                [(); 3].map(|()| runtime_tool("file_system.read_file", arguments.clone())),
-            )
-            .actions();
-        let [first, second, third]: [Value; 3] = tools.try_into().expect("three tools are running");
-        let first_failure = file_read_failure(&first, READ_ERROR);
-        runtime.apply(
-            first_failure.clone(),
-            running(turn_id)
-                .keep(&second)
-                .keep(&third)
-                .observe_completed_tool_result(&first, &first_failure),
-        );
-        let second_failure = file_read_failure(&second, READ_ERROR);
-        runtime.apply(
-            second_failure.clone(),
-            running(turn_id)
-                .keep(&third)
-                .observe_completed_tool_result(&second, &second_failure),
-        );
+    // Do
+    let tools = call_read_file_in_parallel(
+        &mut runtime,
+        turn_id,
+        &completion,
+        &["call-1", "call-2", "call-3", "call-4"],
+        &arguments,
+    );
+    let last = fail_all_but_the_last(&mut runtime, turn_id, tools, READ_ERROR);
 
-        // Assert
-        if reply < u64::from(LIMIT) {
-            completion = fail_and_continue(&mut runtime, turn_id, &third, READ_ERROR, reply);
-        } else {
-            fail_and_stop(&mut runtime, turn_id, &third, READ_ERROR);
-        }
-    }
+    // Assert
+    fail_and_stop(&mut runtime, turn_id, &last, READ_ERROR);
+}
+
+///
+/// *Prepare*: The model has called `read_file` twice in one reply, with the same arguments, and
+/// both calls failed the same way.
+/// *Do*: The model makes the same call once more in its next reply, and it fails the same way.
+/// *Assert*: Core asks the model again after the first reply, because two failures are under the
+/// limit, and completes the turn after the third failure, which comes in the second reply.
+///
+#[test]
+fn identical_failures_count_each_call_across_replies() {
+    // Prepare
+    let turn_id = "turn-parallel-then-single";
+    let mut runtime = SynchronousRuntime::new(limited_config());
+    let arguments = json!({"path": "notes.txt"});
+    let completion = runtime.start_turn(turn_id, "read the notes");
+    let tools = call_read_file_in_parallel(
+        &mut runtime,
+        turn_id,
+        &completion,
+        &["call-1", "call-2"],
+        &arguments,
+    );
+    let last = fail_all_but_the_last(&mut runtime, turn_id, tools, READ_ERROR);
+    let completion = fail_and_continue(&mut runtime, turn_id, &last, READ_ERROR, 1);
+
+    // Do
+    let tool = call_read_file(&mut runtime, turn_id, &completion, "call-3", arguments);
+
+    // Assert
+    fail_and_stop(&mut runtime, turn_id, &tool, READ_ERROR);
+}
+
+///
+/// *Prepare*: The same `read_file` call has failed the same way twice.
+/// *Do*: The model calls it twice more in one reply. The first call succeeds and the second fails
+/// the same way as before.
+/// *Assert*: The success between the failures restarts the count, so Core asks the model again.
+///
+#[test]
+fn a_parallel_success_restarts_the_failure_count() {
+    // Prepare
+    let turn_id = "turn-parallel-success";
+    let mut runtime = SynchronousRuntime::new(limited_config());
+    let arguments = json!({"path": "notes.txt"});
+    let completion = fail_one_short_of_the_limit(&mut runtime, turn_id, &arguments);
+
+    // Do
+    let tools = call_read_file_in_parallel(
+        &mut runtime,
+        turn_id,
+        &completion,
+        &["call-3", "call-4"],
+        &arguments,
+    );
+    let [succeeding, failing]: [Value; 2] = tools.try_into().expect("two tools are running");
+    let success = text_tool_success(&succeeding, "the notes");
+    runtime.apply(
+        success.clone(),
+        running(turn_id)
+            .keep(&failing)
+            .observe_completed_tool_result(&succeeding, &success),
+    );
+
+    // Assert
+    fail_and_continue(&mut runtime, turn_id, &failing, READ_ERROR, 3);
 }
 
 ///

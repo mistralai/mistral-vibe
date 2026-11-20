@@ -72,6 +72,7 @@ from vibe.app_server.protocol import (
     CallbackResultError,
     CallbackResultParams,
     SessionOptions,
+    SessionReadParams,
     TurnStartParams,
 )
 
@@ -802,6 +803,79 @@ async def test_open_callbacks_read_without_a_stream_come_from_a_read_of_the_root
     # Assert
     assert listed.callback_id == opened["callbackId"]
     assert isinstance(listed.detail, ApprovalCallbackDetail)
+
+
+@pytest.mark.asyncio
+async def test_a_read_gives_an_open_approval_the_time_its_live_event_gave_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """*Prepare*: A real adapter on the Session API path, a Turn that waits on
+        its model, and an approval the Turn opens later than it started.
+    *Do*: Read the Session, as a client resyncing does.
+    *Assert*: The read's open approval has the times the live event gave it,
+        not the Turn's start, so a resync holds what the stream built.
+    """
+    # Prepare
+    release = asyncio.Event()
+
+    async def execute_completion(
+        action: Any, _messages: Any, _tools: Any, _config: Any, **_kwargs: Any
+    ) -> RustCompletionSucceededEvent:
+        await release.wait()
+        return _completion(action, text="done")
+
+    monkeypatch.setattr(_local_actions, "execute_completion", execute_completion)
+    async with (
+        api_adapter(tmp_path, process_services=process_services) as harness,
+        forwarding(harness) as forwarded,
+    ):
+        adapter = harness.adapter
+        await adapter.start_turn(
+            TurnStartParams(
+                session_id=adapter.session_id, message=[TextContentBlock(text="Go")]
+            )
+        )
+        session = adapter._session
+        turn_id = session.active_turn_id
+        assert turn_id is not None
+        await asyncio.sleep(0.05)
+        approval = asyncio.create_task(
+            session._request_approval(
+                RustRuntimeBuiltinToolCallAction(
+                    action_id="approval-action",
+                    turn_id=turn_id,
+                    call_id="approval-call",
+                    call=RustRuntimeBuiltinToolCall(
+                        name="file_system.bash", arguments={"command": COMMAND}
+                    ),
+                )
+            )
+        )
+        await until(
+            lambda: any(isinstance(item.event, CallbackRequested) for item in forwarded)
+        )
+        [delivered] = [
+            item.event.callback
+            for item in forwarded
+            if isinstance(item.event, CallbackRequested)
+        ]
+
+        # Do
+        try:
+            read = await adapter.read(SessionReadParams(session_id=adapter.session_id))
+        finally:
+            approval.cancel()
+            release.set()
+
+    # Assert
+    [read_approval] = read.state.active_callbacks
+    turn = read.state.latest_turn
+    assert turn is not None
+    assert delivered.created_at > turn.started_at
+    assert (read_approval.created_at, read_approval.updated_at) == (
+        delivered.created_at,
+        delivered.updated_at,
+    )
 
 
 @pytest.mark.asyncio

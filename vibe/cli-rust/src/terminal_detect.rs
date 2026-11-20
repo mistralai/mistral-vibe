@@ -28,6 +28,12 @@ pub fn detect() -> &'static str {
     detect_from(&Env)
 }
 
+/// Whether the host terminal is Rex, which has no `TerminalEmulator` wire value.
+pub fn is_rex() -> bool {
+    Env.get("TERM_PROGRAM")
+        .is_some_and(|term| term.eq_ignore_ascii_case("rex"))
+}
+
 /// `detect` over any environment source.
 pub fn detect_from(env: &dyn EnvSource) -> &'static str {
     let term_program = env.get("TERM_PROGRAM").unwrap_or_default().to_lowercase();
@@ -87,6 +93,18 @@ pub fn from_env_markers(env: &dyn EnvSource) -> Option<&'static str> {
     None
 }
 
+/// The multiplexer the process runs in: `tmux`, `screen` or `zellij`.
+pub fn multiplexer(env: &dyn EnvSource) -> Option<&'static str> {
+    [("TMUX", "tmux"), ("STY", "screen"), ("ZELLIJ", "zellij")]
+        .into_iter()
+        .find_map(|(name, multiplexer)| env.present(name).then_some(multiplexer))
+}
+
+/// An SSH session, where the native clipboard is the remote host's.
+pub fn is_ssh(env: &dyn EnvSource) -> bool {
+    env.get("SSH_CONNECTION").is_some() || env.get("SSH_TTY").is_some()
+}
+
 /// VS Code-env paths mention Cursor when it hosts the terminal.
 fn is_cursor(env: &dyn EnvSource) -> bool {
     [
@@ -111,7 +129,8 @@ pub trait EnvSource {
     }
 }
 
-struct Env;
+/// The process environment.
+pub struct Env;
 
 impl EnvSource for Env {
     fn get(&self, name: &str) -> Option<String> {

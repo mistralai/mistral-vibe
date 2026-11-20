@@ -9,7 +9,7 @@ use super::super::super::markdown::{self, LinkedLines};
 use super::super::super::{pulse, theme};
 use crate::selection::{fold, Fold};
 use crate::server::CheckpointEntry;
-use crate::transcript::grouping::{compaction_failed, paints_compaction};
+use crate::transcript::grouping::{compaction_failed, paints_compaction, paints_resumed};
 use crate::utils::clean;
 
 /// Columns the `✓`/`⚠`/`✕` marker and its pad take before the text.
@@ -80,8 +80,9 @@ pub(super) fn push_command_error(lines: &mut LinkedLines, text: &str, width: u16
     }
 }
 
-/// A client checkpoint settles as a status message; a server compaction paints
-/// as a compact status row; other server checkpoints paint nothing.
+/// A client checkpoint and a resumed turn settle as a status message; a server
+/// compaction paints as a compact status row; other server checkpoints paint
+/// nothing.
 pub(super) fn push_checkpoint(
     lines: &mut LinkedLines,
     checkpoint: &CheckpointEntry,
@@ -90,7 +91,7 @@ pub(super) fn push_checkpoint(
     pulse_frame: usize,
 ) {
     let message = checkpoint.message.as_deref().unwrap_or(&checkpoint.kind);
-    if local {
+    if local || paints_resumed(checkpoint) {
         push_settled(lines, message);
     } else if paints_compaction(checkpoint) {
         let failed = compaction_failed(checkpoint);

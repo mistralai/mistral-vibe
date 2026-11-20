@@ -48,10 +48,11 @@ fn lines(app: &App, width: u16) -> Vec<Line<'static>> {
         });
     }
     lines.push(Line::default());
-    lines.push(super::hint_line::line(&[
+    let help = [
         hints::NAVIGATE,
         (key::SPACE_ENTER, action::TOGGLE),
         (key::ESC, action::EXIT),
-    ]));
+    ];
+    lines.extend(super::hint_line::lines(&help, width));
     lines
 }

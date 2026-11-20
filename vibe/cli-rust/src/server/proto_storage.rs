@@ -67,6 +67,12 @@ pub struct StorageSnapshot {
     pub worktrees: Vec<StorageWorktree>,
     #[serde(deserialize_with = "null_default")]
     pub archive_suggestion: StorageSuggestion,
+    /// Archived sessions idle 30+ days; absent from an older server.
+    #[serde(deserialize_with = "null_default")]
+    pub delete_suggestion: StorageSuggestion,
+    /// What `storage/leftovers/clean` would remove; absent from an older server.
+    #[serde(deserialize_with = "null_default")]
+    pub leftover_cleanup: StorageLeftoverCleanup,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -91,6 +97,14 @@ pub struct StorageSession {
     pub last_activity_at: u64,
     pub history_bytes: u64,
     pub worktree_id: Option<String>,
+    /// Every worktree the session claims, `worktree_id` first; empty from an older server.
+    #[serde(deserialize_with = "lenient")]
+    pub worktree_ids: Vec<String>,
+    /// What deleting this session alone frees: its history and the worktrees only it claims; `None`
+    /// when unknown (an older server or cache).
+    pub delete_bytes: Option<u64>,
+    /// A worktree `delete_bytes` counts is not measured yet.
+    pub delete_bytes_at_least: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -110,9 +124,84 @@ pub struct StorageWorktree {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct StorageSuggestion {
+    /// Idle this many days or more, as the server decides.
+    pub inactive_days: u64,
     #[serde(deserialize_with = "lenient")]
     pub session_ids: Vec<String>,
     pub reclaimable_bytes: u64,
+    /// A worktree it would free is not measured yet.
+    pub reclaimable_at_least: bool,
+}
+
+/// Unclaimed managed worktrees (sized in `StorageSnapshot::worktrees`) and unknown folders of the worktree buckets.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageLeftoverCleanup {
+    #[serde(deserialize_with = "lenient")]
+    pub worktree_ids: Vec<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub unknown_folders: Vec<StorageLeftoverFolder>,
+    pub reclaimable_bytes: u64,
+}
+
+/// A folder in a worktree bucket with no claim and no `.git`: maybe the user's own.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageLeftoverFolder {
+    pub id: String,
+    pub path: String,
+    pub bytes: u64,
+}
+
+/// `storage/leftovers/clean` params: the server checks each item again.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageLeftoversCleanParams {
+    pub worktree_ids: Vec<String>,
+    pub folder_ids: Vec<String>,
+}
+
+/// `storage/leftovers/clean` answer: the ids removed, and the ones kept with their reason.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageLeftoversCleanResponse {
+    #[serde(deserialize_with = "lenient")]
+    pub removed: Vec<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub kept: Vec<StorageLeftoverKept>,
+}
+
+/// `storage/sessions/delete` params: the server deletes each session, then the worktrees no session claims.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageSessionsDeleteParams {
+    pub session_ids: Vec<String>,
+}
+
+/// `storage/sessions/delete` answer: sessions and worktrees removed or kept, and the space freed.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageSessionsDeleteResponse {
+    #[serde(deserialize_with = "lenient")]
+    pub removed: Vec<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub kept: Vec<StorageLeftoverKept>,
+    #[serde(deserialize_with = "lenient")]
+    pub removed_worktree_ids: Vec<String>,
+    #[serde(deserialize_with = "lenient")]
+    pub kept_worktrees: Vec<StorageLeftoverKept>,
+    pub freed_bytes: u64,
+    /// A removed worktree was not measured yet: `freed_bytes` is a floor.
+    pub freed_bytes_at_least: bool,
+}
+
+/// A kept item and why; a session's `reason` is `in_use`, `not_found` or `error`, a folder's also
+/// `claimed`, `kept_dirty`, `unsafe` or `too_large_to_check`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct StorageLeftoverKept {
+    pub id: String,
+    pub reason: String,
 }
 
 /// `storage/usage/refresh` params; absent fields keep the server defaults.

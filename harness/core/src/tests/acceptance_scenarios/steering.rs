@@ -577,11 +577,13 @@ fn interrupting_a_running_tool_keeps_its_steering_after_the_interrupted_tool_mes
     );
 }
 
-/// *Prepare*: A V1 checkpoint has steering and a notification without an admission position.
-/// *Do*: Restore that earlier shape and finish the retained model completion.
-/// *Assert*: Earlier checkpoints retain their all-steering-before-notifications interpretation.
+/// *Prepare*: A notification then a steering message arrive during a completion; the checkpoint is rewritten
+/// to the earlier V1 layout, which keeps steering on the active Turn and pending notifications beside the
+/// delivered identities, each with the number of steering messages admitted before it.
+/// *Do*: Restore that earlier layout and finish the retained model completion.
+/// *Assert*: The restored queue keeps admission order: the notification comes before the steering.
 #[test]
-fn earlier_checkpoint_without_notification_positions_preserves_its_input_order() {
+fn earlier_checkpoint_layout_restores_admission_order() {
     // Prepare
     let turn_id = "earlier-input-order";
     let mut runtime = SynchronousRuntime::new(config());
@@ -590,9 +592,25 @@ fn earlier_checkpoint_without_notification_positions_preserves_its_input_order()
     runtime.receive_notification(turn_id, &notice, &[&original]);
     runtime.receive_steering(turn_id, "correction", &[&original]);
     let mut checkpoint = runtime.checkpoint_value();
-    for entry in checkpoint["notifications"].as_array_mut().unwrap() {
-        entry.as_object_mut().unwrap().remove("preceding_steers");
+    let pending_input = checkpoint
+        .as_object_mut()
+        .unwrap()
+        .remove("pending_input")
+        .unwrap();
+    let mut pending_steer = Vec::new();
+    let mut pending_notifications = Vec::new();
+    for entry in pending_input.as_array().unwrap() {
+        match entry["type"].as_str().unwrap() {
+            "steering" => pending_steer.push(entry["message"].clone()),
+            _ => pending_notifications.push(json!({
+                "type": "pending",
+                "notification": entry["notification"].clone(),
+                "preceding_steers": pending_steer.len(),
+            })),
+        }
     }
+    checkpoint["turn"]["pending_steer"] = Value::Array(pending_steer);
+    checkpoint["notifications"] = Value::Array(pending_notifications);
 
     // Do
     runtime.restore_checkpoint_value(checkpoint, config());
@@ -606,11 +624,11 @@ fn earlier_checkpoint_without_notification_positions_preserves_its_input_order()
                     &original,
                     "initial answer",
                 ))
-                .observe(turn_steered(turn_id, "correction"))
                 .observe(notification_delivered(
                     turn_id,
                     observed_notification(&notice),
-                )),
+                ))
+                .observe(turn_steered(turn_id, "correction")),
         )
         .only_action();
 
@@ -622,8 +640,8 @@ fn earlier_checkpoint_without_notification_positions_preserves_its_input_order()
             model_system(),
             model_user_text("start"),
             model_assistant_text("initial answer"),
-            model_user_text("correction"),
             model_notifications(&[&notice]),
+            model_user_text("correction"),
         ],
     );
 }

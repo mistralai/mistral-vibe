@@ -12,7 +12,8 @@ use vibe_rs::commands::{submission, CommandEvent};
 use vibe_rs::config;
 use vibe_rs::server::request_error::describe;
 use vibe_rs::server::{
-    AgentSummary, AgentType, AgentsListResponse, Client, RequestFailure, RpcError,
+    AgentSummary, AgentType, AgentsListResponse, ApprovalPolicySummary, Client, RequestFailure,
+    RpcError,
 };
 
 use crate::support::{messages, stub};
@@ -45,6 +46,14 @@ fn agents_list_response_reads_the_active_agent_and_the_list() {
         }
     );
     assert_eq!(response.agents, vec![agent("default"), agent("lean")]);
+}
+
+fn policy(name: &str) -> ApprovalPolicySummary {
+    ApprovalPolicySummary {
+        name: name.to_owned(),
+        display_name: name.to_owned(),
+        ..ApprovalPolicySummary::default()
+    }
 }
 
 fn app_with(agents: &[&str]) -> App {
@@ -201,8 +210,9 @@ fn an_answer_replaces_the_agents_and_reports_its_direction() {
     ] {
         let mut app = app_with(&["default"]);
         let response = AgentsListResponse {
-            active: agent("ask"),
-            agents: vec![agent("ask"), agent("lean")],
+            active: agent("lean"),
+            agents: vec![agent("default"), agent("lean")],
+            ..AgentsListResponse::default()
         };
         leanstall::apply_event(
             &mut app,
@@ -233,20 +243,25 @@ fn a_failure_shows_the_bare_server_message_and_keeps_the_agents() {
 }
 
 #[test]
-fn a_refused_switch_is_dropped_only_when_the_install_moves_the_running_agent() {
-    for (active, refused) in [("default", Some("lean")), ("lean", None)] {
+fn a_refused_switch_is_dropped_only_when_the_install_moves_the_running_policy() {
+    for (active, refused) in [("ask", Some("auto-approve")), ("accept-edits", None)] {
         let mut app = app_with(&["default", "lean"]);
-        app.agents.refused = Some("lean".to_owned());
+        app.agents.active_policy = policy("ask");
+        app.agents.refused = Some("auto-approve".to_owned());
         leanstall::apply_event(
             &mut app,
             Event {
                 installed: true,
                 result: Ok(AgentsListResponse {
-                    active: agent(active),
+                    active: agent("default"),
                     agents: vec![agent("default"), agent("lean")],
+                    active_approval_policy: Some(policy(active)),
+                    approval_policies: Some(vec![policy("ask"), policy("accept-edits")]),
                 }),
             },
         );
         assert_eq!(app.agents.refused.as_deref(), refused, "{active} runs");
+        assert_eq!(app.agents.active_policy.name, active);
+        assert_eq!(app.agents.policies.len(), 2);
     }
 }

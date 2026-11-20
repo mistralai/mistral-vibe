@@ -1982,7 +1982,7 @@ def test_resolve_marks_no_auth_connector_as_needing_a_connection() -> None:
 
     connector = catalog.connectors[0]
     assert connector.auth_action == "no_auth_connect"
-    assert connector_catalog._connector_readiness(connector) == "needs_connect"
+    assert connector_catalog.connector_readiness(connector) == "needs_connect"
 
 
 async def _connect_fixture(

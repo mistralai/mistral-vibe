@@ -13,15 +13,17 @@ fn done_reads_the_rewind_response() {
         "state": state("new-session"),
     });
     let Event::Done {
+        entry_id,
         message,
         restore_errors,
         old_session_id,
         inplace,
         state,
-    } = done(result, "old-session".into(), false)
+    } = done(result, "entry".into(), "old-session".into(), false)
     else {
         panic!("expected a done event");
     };
+    assert_eq!(entry_id, "entry");
     assert_eq!(message, "hello");
     assert_eq!(restore_errors, ["Failed to restore file: a.py"]);
     assert_eq!(old_session_id, "old-session");
@@ -32,5 +34,8 @@ fn done_reads_the_rewind_response() {
 #[test]
 fn done_fails_without_state() {
     let result = serde_json::json!({"message": "hello"});
-    assert!(matches!(done(result, "old".into(), true), Event::Failed(_)));
+    assert!(matches!(
+        done(result, "entry".into(), "old".into(), true),
+        Event::Failed(_)
+    ));
 }

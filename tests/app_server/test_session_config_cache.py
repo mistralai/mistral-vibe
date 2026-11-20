@@ -168,14 +168,14 @@ async def test_a_new_org_config_the_process_holds_rebuilds(
     options = SessionOptions(cwd=str(tmp_path))
     before = await process.build_unified_read_context(options)
 
-    org_server.serve('default_agent = "ask"\n')
+    org_server.serve('default_approval_policy = "ask"\n')
     await process_services.org_config.refresh(
         OrgConfigService.key_for_config(before.config)
     )
     after = await process.build_unified_read_context(options)
 
-    assert before.config.default_agent != "ask"
-    assert after.config.default_agent == "ask"
+    assert before.config.default_approval_policy != "ask"
+    assert after.config.default_approval_policy == "ask"
 
 
 @pytest.mark.asyncio

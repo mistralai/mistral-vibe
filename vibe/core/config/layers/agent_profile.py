@@ -28,6 +28,8 @@ PROTECTED_FIELDS = frozenset({
 })
 
 
+APPROVAL_POLICY_LAYER = "approval-policy"
+
 _SHELL_TIMEOUT_KEYS = ("default_timeout", "max_timeout_seconds")
 _LAYER_DESCRIPTIONS = {
     "user-toml": "your config.toml",

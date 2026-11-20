@@ -12,7 +12,7 @@ use vibe_rs::server::{Client, PluginCatalogState};
 
 use crate::support::{ctrl, key, mouse, stub};
 
-fn entry(name: &str, digest: &str) -> Value {
+pub fn entry(name: &str, digest: &str) -> Value {
     json!({
         "name": name,
         "version": "1.0.0",
@@ -24,7 +24,7 @@ fn entry(name: &str, digest: &str) -> Value {
     })
 }
 
-fn catalog(value: Value) -> PluginCatalogState {
+pub fn catalog(value: Value) -> PluginCatalogState {
     serde_json::from_value(value).unwrap()
 }
 
@@ -60,42 +60,6 @@ fn reload_report_lists_added_removed_and_repinned_plugins_by_name() {
     assert_eq!(
         text::reload_report(&text::changes(&after, &after), &after),
         text::NOTHING_CHANGED
-    );
-}
-
-#[test]
-fn detail_lines_group_components_and_flag_unknown_facts() {
-    let mut value = entry("devtools", "0123456789abcdef");
-    value["description"] = json!("Developer helpers");
-    value["installedRoot"] = Value::Null;
-    value["scope"] = Value::Null;
-    value["components"] = json!([
-        {"kind": "skill", "name": "lint"},
-        {"kind": "tool", "name": "run", "status": "stale"},
-        {"kind": "skill", "name": "fmt"},
-    ]);
-    let state = catalog(json!({"plugins": [value]}));
-    assert_eq!(
-        text::detail_lines(&state.plugins[0]),
-        [
-            "  Author: —",
-            "  Version: 1.0.0",
-            "",
-            "  Developer helpers",
-            "",
-            "  Location: (uninstalled since pin)",
-            "  Scope: —",
-            "  Format: agent_plugins_1_0",
-            "  Pinned: 01234567",
-            "",
-            "  Components:",
-            "  ● Skills: lint, fmt",
-            "  ● Tools: run (stale)",
-        ]
-    );
-    assert_eq!(
-        text::entry_facts(&state.plugins[0]),
-        "— · agent_plugins_1_0 · 01234567"
     );
 }
 

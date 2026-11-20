@@ -1,18 +1,18 @@
-//! A skill's page: its scope rows, its switch, and Remove or Install.
+//! A skill's page: its status and file over its scope rows, and Install before it is added.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::changes;
 use super::labels;
-use super::list::{self, navigate, switch, Row};
+use super::list::{self, navigate, Row};
 use super::model::{Choice, Install, Subject, LATEST};
 use super::picker::{self, Picker};
-use super::pins::{self, listed, of_skill, page_pin, scope_choice, start_scope};
+use super::pins::{self, listed, of_skill, scope_choice, start_scope};
 use super::{loading, request, Event, Opening, State};
 use crate::app::{App, Severity};
 use crate::commands::spawn_session;
-use crate::hints::{self, action, key, Hint};
+use crate::hints::{action, key, Hint};
 use crate::option_list::{OptionList, SingleAction};
 use crate::server::{Client, SkillScope, SkillVersion};
 
@@ -44,8 +44,6 @@ impl Page {
 pub enum Property {
     /// What one scope pins; Enter opens its version picker.
     Scope(SkillScope),
-    Enabled,
-    Remove,
     Install,
 }
 
@@ -147,7 +145,7 @@ pub(super) fn loaded(app: &mut App, row: Row, versions: Result<Vec<SkillVersion>
 
 fn show(state: &mut State, opened: Opened, versions: Vec<SkillVersion>) {
     state.search.focused = false;
-    state.removing = None;
+    state.confirm = None;
     state.opening = None;
     let mut page = Page {
         subject: opened.subject,
@@ -163,22 +161,14 @@ fn show(state: &mut State, opened: Opened, versions: Vec<SkillVersion>) {
     state.page = Some(page);
 }
 
-/// A shared skill's scopes, Enabled unless locked, then Remove or Install.
+/// A shared skill's scopes, then Install until it is added; a local or plugin skill has none.
 pub fn rows(state: &State, page: &Page) -> Vec<Property> {
     let mut rows: Vec<Property> = Vec::new();
     if page.subject.skill_id().is_some() {
         rows.extend(pins::page_scopes(state, page).map(Property::Scope));
     }
-    if pins::in_use(state, page) && page_pin(state, page).is_some_and(|pin| !pin.locked) {
-        rows.push(Property::Enabled);
-    }
-    match &page.subject {
-        Subject::Registry {
-            install: Install::Done,
-            ..
-        } => rows.push(Property::Remove),
-        Subject::Registry { .. } => rows.push(Property::Install),
-        Subject::Plain { .. } => {}
+    if !page.subject.installed() {
+        rows.push(Property::Install);
     }
     rows
 }
@@ -189,6 +179,15 @@ pub fn selectable(state: &State, page: &Page) -> Vec<bool> {
         .iter()
         .map(|row| free(state, page, *row))
         .collect()
+}
+
+/// Whether the page has more than one row to move the highlight between; with fewer, the arrows scroll the body.
+pub fn movable(state: &State, page: &Page) -> bool {
+    selectable(state, page)
+        .into_iter()
+        .filter(|free| *free)
+        .count()
+        > 1
 }
 
 /// Whether a row takes the highlight: a scope another skill of the name holds only says so.
@@ -204,7 +203,7 @@ fn landing(selectable: &[bool], wanted: usize) -> usize {
     }
 }
 
-/// New pins under the page: its rows again, the highlight on the row it was on, else where it was.
+/// New pins under the page: its description and rows again, the highlight on the row it was on, else where it was.
 pub(super) fn refresh(state: &mut State) {
     let Some(page) = state.page.as_ref() else {
         return;
@@ -215,44 +214,36 @@ pub(super) fn refresh(state: &mut State) {
         .as_ref()
         .map(|open| picker::rows(state, page, open.scope));
     let takes: Vec<bool> = rows.iter().map(|row| free(state, page, *row)).collect();
+    let description = pins::page_pin(state, page).map(|pin| pin.description.clone());
     let Some(page) = state.page.as_mut() else {
         return;
     };
+    if let Some(description) = description {
+        page.description = description;
+    }
     let selected = page.list.selected();
     let kept = page.rows.get(selected).copied();
     page.rows = rows;
     let index = kept.and_then(|kept| page.rows.iter().position(|row| *row == kept));
-    let near = selected.min(page.rows.len().saturating_sub(1));
+    let near = match kept {
+        Some(Property::Install) => 0,
+        _ => selected.min(page.rows.len().saturating_sub(1)),
+    };
     page.list.highlight(landing(&takes, index.unwrap_or(near)));
     if let (Some(open), Some(rows)) = (page.picker.as_mut(), picker_rows) {
         picker::refresh(open, rows);
     }
 }
 
-/// Enter or a click on a row; Remove asks for a second press, like `/resume`'s delete.
-pub(super) fn activate(app: &mut App, client: &Arc<Client>, index: usize, armed: Option<String>) {
+/// Enter or a click on a row: a scope opens its picker, Install adds the skill.
+pub(super) fn activate(app: &mut App, client: &Arc<Client>, index: usize) {
     let Some(page) = app.skills_browser.page.as_ref() else {
         return;
     };
-    let Some(property) = page.rows.get(index).copied() else {
-        return;
-    };
-    let name = page.subject.name().to_owned();
-    match property {
-        Property::Scope(scope) => picker::open(app, scope),
-        Property::Enabled => {
-            let pin = page_pin(&app.skills_browser, page).cloned();
-            if let Some(pin) = pin {
-                changes::toggle(app, client, &pin);
-            }
-        }
-        Property::Remove if armed.as_deref() == Some(&name) => {
-            if let Some(skill_id) = page.subject.skill_id().map(str::to_owned) {
-                changes::remove_everywhere(app, client, &name, &skill_id);
-            }
-        }
-        Property::Remove => app.skills_browser.removing = Some(name),
-        Property::Install => changes::install(app, client),
+    match page.rows.get(index).copied() {
+        Some(Property::Scope(scope)) => picker::open(app, scope),
+        Some(Property::Install) => changes::install(app, client),
+        None => {}
     }
 }
 
@@ -276,25 +267,23 @@ pub(super) fn back(app: &mut App) {
     }
 }
 
+/// The page's moves and what Enter does on its highlighted row; the skill's own keys follow in `files::pin_hints`.
 pub(super) fn help(state: &State, page: &Page) -> Vec<Hint> {
-    let mut hints = navigate(!page.rows.is_empty());
+    let mut hints = navigate(movable(state, page));
     hints.extend(
         page.rows
             .get(page.list.selected())
-            .and_then(|row| verb(state, page, *row)),
+            .map(|row| verb(state, page, *row)),
     );
-    hints.push(hints::BACK);
     hints
 }
 
-fn verb(state: &State, page: &Page, property: Property) -> Option<Hint> {
-    Some(match property {
+fn verb(state: &State, page: &Page, property: Property) -> Hint {
+    match property {
         Property::Scope(scope) if scope_choice(state, page, scope).is_some() => {
             (key::ENTER, action::CHANGE)
         }
         Property::Scope(_) => (key::ENTER, action::PIN),
-        Property::Enabled => (key::SPACE_ENTER, switch(page_pin(state, page)?.enabled)),
-        Property::Remove => (key::ENTER, action::REMOVE),
         Property::Install => (key::ENTER, action::ADD),
-    })
+    }
 }

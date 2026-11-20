@@ -109,7 +109,7 @@ class SessionTelemetry:
             message_id=message_id,
         )
 
-    def record_tool_call_finished(
+    def record_tool_call_finished(  # noqa: PLR0913
         self,
         *,
         tool_name: str,
@@ -118,11 +118,14 @@ class SessionTelemetry:
         nb_files_created: int,
         nb_files_modified: int,
         file_extension: str | None,
+        approval_policy: str | None = None,
         message_id: str | None = None,
         decision: Literal["execute", "skip"] | None = None,
         approval_type: Literal["always", "never", "ask"] | None = None,
         approval_source: Literal["config", "smart", "user", "bypass", "never"]
         | None = None,
+        error_code: str | None = None,
+        error_reason: str | None = None,
     ) -> None:
         send_unified_tool_call_finished(
             self._client,
@@ -130,6 +133,7 @@ class SessionTelemetry:
             status=status,
             model=self._model,
             agent_profile_name=agent_profile_name,
+            approval_policy=approval_policy,
             nb_files_created=nb_files_created,
             nb_files_modified=nb_files_modified,
             file_extension=file_extension,
@@ -137,6 +141,8 @@ class SessionTelemetry:
             decision=decision,
             approval_type=approval_type,
             approval_source=approval_source,
+            error_code=error_code,
+            error_reason=error_reason,
         )
 
     def record_subagent_tool_call_finished(

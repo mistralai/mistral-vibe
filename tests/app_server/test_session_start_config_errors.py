@@ -252,7 +252,7 @@ async def test_starting_an_agent_that_cannot_start_is_an_invalid_request(
 
 
 @pytest.mark.asyncio
-async def test_starting_an_unavailable_agent_is_an_invalid_request(
+async def test_starting_an_unavailable_policy_is_an_invalid_request(
     write_config: Callable[..., None], client: AppServerClient
 ) -> None:
     # Prepare
@@ -262,15 +262,17 @@ async def test_starting_an_unavailable_agent_is_an_invalid_request(
     with pytest.raises(AppServerResponseError) as exc_info:
         await client.request(
             "session/start",
-            SessionStartParams(agent_config=AgentConfig(agent="auto-approve")),
+            SessionStartParams(
+                agent_config=AgentConfig(approval_policy="auto-approve")
+            ),
         )
 
     # Assert
     error = exc_info.value.error
     assert error.code is ProtocolErrorCode.INVALID_PARAMS
     assert error.message == (
-        "Agent 'auto-approve' is unavailable: the auto-approve mode is disabled"
-        " ('enable_auto_approve' is false)."
+        "Approval policy 'auto-approve' is unavailable: the auto-approve mode is"
+        " disabled ('enable_auto_approve' is false)."
     )
 
 
@@ -295,13 +297,16 @@ async def test_a_default_agent_that_cannot_start_is_a_configuration_error(
 
 
 @pytest.mark.asyncio
-async def test_a_disabled_default_agent_is_named_once(
+async def test_a_disabled_default_policy_is_named_once(
     write_config: Callable[..., None], client: AppServerClient
 ) -> None:
     # Prepare
     write_config(
         "",
-        top_level='default_agent = "accept-edits"\ndisabled_agents = ["accept-edits"]\n',
+        top_level=(
+            'default_approval_policy = "accept-edits"\n'
+            'disabled_agents = ["accept-edits"]\n'
+        ),
     )
 
     # Do
@@ -310,7 +315,7 @@ async def test_a_disabled_default_agent_is_named_once(
 
     # Assert
     assert exc_info.value.error.message == (
-        "Cannot load the Vibe config. default_agent 'accept-edits' is in"
+        "Cannot load the Vibe config. default_approval_policy 'accept-edits' is in"
         " 'disabled_agents' ['accept-edits']. Remove 'accept-edits' from"
-        " 'disabled_agents', or set 'default_agent' to an enabled agent."
+        " 'disabled_agents', or set 'default_approval_policy' to an enabled policy."
     )

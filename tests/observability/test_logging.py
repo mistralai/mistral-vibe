@@ -324,6 +324,18 @@ class TestInitFileLogging:
         assert isinstance(handler, RotatingFileHandler)
         assert handler.maxBytes == 5242880
 
+    def test_unopenable_log_file_leaves_file_logging_off(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        # The app server must keep serving: Desktop otherwise respawns it.
+        test_logger = logging.getLogger("test_unopenable_log_file")
+        initial_handler_count = len(test_logger.handlers)
+
+        init_file_logging(tmp_path, target_logger=test_logger)
+
+        assert len(test_logger.handlers) == initial_handler_count
+        assert "file logging is off" in capsys.readouterr().err
+
     def test_repeated_initialization_does_not_duplicate_handler(
         self, log_file: Path
     ) -> None:

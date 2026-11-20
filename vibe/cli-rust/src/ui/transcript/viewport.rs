@@ -8,10 +8,14 @@ use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::{buffer::Buffer, Frame};
 
 use super::{entry, paint, table_cells};
-use crate::selection::{TableCellHit, TableCellKey};
+
+mod hits;
+
+use crate::selection::{RowChrome, TableCellHit, TableCellKey};
 use crate::transcript::Transcript;
 use crate::ui::markdown;
 use crate::utils::transcript_cache::{QueueSpacer, TranscriptLayout};
+pub(super) use hits::push_chrome;
 
 pub(super) fn document_height(
     banner: &[Line<'static>],
@@ -27,7 +31,8 @@ pub(super) fn document_height(
 pub(super) struct Hitmaps<'a> {
     pub entries: &'a mut Vec<(u16, u16, Option<u16>, String)>,
     pub links: &'a mut Vec<markdown::Link>,
-    pub diffs: &'a mut Vec<(u16, u16, u16)>,
+    /// Border and edit-diff gutter columns of each painted entry's rows.
+    pub chrome: &'a mut Vec<RowChrome>,
     /// `[top, bottom)` screen rows of `/raw` agent messages.
     pub raws: &'a mut Vec<(u16, u16)>,
     pub tables: &'a mut Vec<TableCellHit>,
@@ -51,6 +56,7 @@ pub(super) struct Viewport<'a> {
     pub selected: Option<&'a str>,
     pub selected_table: Option<&'a (TableCellKey, usize)>,
     pub paused: bool,
+    pub queue_hints: &'static [crate::hints::Hint],
     /// `/raw`: agent messages show their Markdown source.
     pub raw: bool,
     pub rewind: Option<&'a str>,
@@ -68,7 +74,7 @@ pub(super) fn render(
     let Hitmaps {
         entries: hitmap,
         links,
-        diffs,
+        chrome,
         raws,
         tables,
         rows,
@@ -86,6 +92,7 @@ pub(super) fn render(
         selected,
         selected_table,
         paused,
+        queue_hints,
         raw,
         rewind,
     } = viewport;
@@ -121,7 +128,10 @@ pub(super) fn render(
     let first = layout
         .entries
         .partition_point(|entry| entry.top.saturating_add(entry.height) <= hidden_height);
-    for positioned in &layout.entries[first..] {
+    for positioned in layout.entries[first..]
+        .iter()
+        .filter(|entry| entry.height > 0)
+    {
         let entry_y = top + i32::from(spacer.offset(positioned.top));
         if entry_y >= viewport_bottom {
             break;
@@ -129,24 +139,19 @@ pub(super) fn render(
         let Some(value) = transcript.entry(positioned.index) else {
             continue;
         };
-        let entry_expanded = expanded.contains(value.id);
-        let group_expanded = value
-            .group
-            .as_ref()
-            .is_some_and(|group| expanded.contains(&group.key));
-        let content_visible = value.group.is_none() || group_expanded;
+        let details = layout.details_of(positioned.index);
+        let expansion = entry::ExpansionView::of(expanded, &value, details, raw);
+        let (entry_expanded, content_visible) =
+            (expansion.entry, expansion.content_visible(&value));
         let rendered = entry::render(
             &value,
             width,
-            entry::ExpansionView {
-                entry: entry_expanded,
-                group: group_expanded,
-                raw,
-            },
+            expansion,
             pulse_frame,
             entry::QueueView {
                 selected: selected == Some(value.id),
                 paused,
+                hints: queue_hints,
             },
             rewind == Some(value.id),
             Some(markdown_cache),
@@ -155,6 +160,7 @@ pub(super) fn render(
             let painted = (rendered.lines(), rendered.folds());
             super::document::hang_cells(hangs, area, entry_y, painted, positioned.prewrapped);
         }
+        let bounds = viewport_top..viewport_bottom;
         let document_y = (entry_y - document_top) as u16;
         if content_visible {
             tables.extend(table_cells::collect(
@@ -171,18 +177,15 @@ pub(super) fn render(
         let visible_bottom = (entry_y + positioned.height as i32).min(viewport_bottom);
         if visible_bottom > visible_top {
             rows.push((positioned.index, entry_y - viewport_top, positioned.height));
-            let content_top = if let Some(group) = value.group.as_ref().filter(|group| group.first)
-            {
-                let header_top = (entry_y + 1).max(viewport_top);
-                let header_bottom = (entry_y + 2).min(viewport_bottom);
-                if header_bottom > header_top {
-                    let key = group.key.clone();
-                    hitmap.push((header_top as u16, header_bottom as u16, None, key));
-                }
-                entry_y + 2
-            } else {
-                entry_y
-            };
+            let details_header = details.filter(|group| group.first == positioned.index);
+            let entry_y =
+                hits::push_header(hitmap, entry_y, &bounds, details_header.map(|g| &g.key));
+            let rail_top = entry_y.max(viewport_top);
+            // A folded `Worked for` group paints none of its steps, tool group headers included.
+            let shown = expansion.details.is_none_or(|step| step.expanded);
+            let group_header = (value.group.as_ref()).filter(|group| group.first && shown);
+            let content_top =
+                hits::push_header(hitmap, entry_y, &bounds, group_header.map(|g| &g.key));
             let header = content_top + i32::from(rendered.header_offset(value.group.is_some()));
             let header = (viewport_top..viewport_bottom)
                 .contains(&header)
@@ -195,13 +198,14 @@ pub(super) fn render(
                     header,
                     value.id.to_owned(),
                 ));
-                if let Some(gutter) = entry::diff_gutter(&value, entry_expanded) {
-                    diffs.push((content_top as u16, visible_bottom as u16, gutter));
-                }
                 if entry::is_raw(&value, raw) {
                     raws.push((content_top as u16, visible_bottom as u16));
                 }
             }
+            let railed = expansion.details.is_some_and(|step| step.expanded);
+            let own = content_visible.then(|| entry::chrome(&value, entry_expanded));
+            let rows = (rail_top, content_top, visible_bottom);
+            hits::push_chrome(chrome, rows, railed, own.unwrap_or_default());
         }
         paint::entry(
             frame,

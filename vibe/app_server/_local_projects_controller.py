@@ -140,7 +140,7 @@ def link_local_project(
     name: str,
     owner: CloudOwner | None,
 ) -> LocalProject:
-    # Imported first: a folder linked with the flag off but not listed since must still refuse another project.
+    # Imported first: a folder linked before local projects but not listed since must still refuse another project.
     _import_project_links(store)
     return store.link_cloud(
         root_path=root, cloud_project_id=cloud_project_id, name=name, owner=owner
@@ -165,7 +165,7 @@ def _remove_local_project(store: LocalProjectStore, project_id: str) -> None:
 
 
 def _import_project_links(store: LocalProjectStore) -> None:
-    # Runs on every list and link so links made with the local projects flag off count too.
+    # Runs on every list and link so links saved before local projects count too.
     # Best effort: a failed purge or import must not hide the projects already stored.
     links_store = VibeProjectsStore()
     try:

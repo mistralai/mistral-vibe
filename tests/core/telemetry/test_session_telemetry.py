@@ -64,6 +64,7 @@ def test_record_tool_call_finished_carries_decision_and_approval_type(
         tool_name="write_file",
         status="success",
         agent_profile_name="default",
+        approval_policy="smart-approve",
         nb_files_created=1,
         nb_files_modified=0,
         file_extension=".py",
@@ -77,6 +78,8 @@ def test_record_tool_call_finished_carries_decision_and_approval_type(
     ]
     assert len(events) == 1
     props = events[0]["properties"]
+    assert props["agent_profile_name"] == "default"
+    assert props["approval_policy"] == "smart-approve"
     assert props["decision"] == "execute"
     assert props["approval_type"] == "ask"
     assert props["approval_source"] == "user"

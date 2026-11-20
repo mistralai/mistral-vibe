@@ -45,7 +45,7 @@ from vibe.app_server.protocol import (
     SkillsImportParams,
     SkillsSetEnabledParams,
 )
-from vibe.core.agents.models import BuiltinAgentName
+from vibe.core.agents.models import ApprovalPolicyName
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.skills.manager import SkillManager
 from vibe.core.skills.models import (
@@ -358,7 +358,7 @@ async def test_a_sandboxed_session_fetches_a_missing_pin_and_copies_it_in(
 
 
 @pytest.mark.asyncio
-async def test_an_agent_switch_copies_the_version_a_pin_now_loads_into_the_sandbox(
+async def test_a_policy_switch_copies_the_version_a_pin_now_loads_into_the_sandbox(
     project: Path, sandbox_tmp: Path, config_dir: Path, respx_mock: respx.MockRouter
 ) -> None:
     _without_registry_sync(respx_mock)
@@ -370,7 +370,7 @@ async def test_an_agent_switch_copies_the_version_a_pin_now_loads_into_the_sandb
 
     try:
         await store_deploy(2)
-        await session.resources.agents.switch(BuiltinAgentName.ASK)
+        await session.resources.agents.switch_policy(ApprovalPolicyName.ASK)
         running = session.resources.runtime.skills
     finally:
         await session.close()
@@ -396,7 +396,7 @@ async def test_a_pin_its_sandbox_cannot_copy_is_reported_by_the_next_derivation(
         await store_deploy(1)
         large = _store.skill_dir("cid", 1) / "data.bin"
         large.write_bytes(b"x" * (257 * 1024))
-        await session.resources.agents.switch(BuiltinAgentName.ASK)
+        await session.resources.agents.switch_policy(ApprovalPolicyName.ASK)
         issues = session.resources.runtime.issues
     finally:
         await session.close()

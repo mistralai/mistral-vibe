@@ -481,6 +481,32 @@ MCPServer = Annotated[
 ]
 
 
+class VibeBotLocalToolsEntry(BaseModel):
+    server: str = Field(
+        min_length=1, description="The name of an MCP server in your own config."
+    )
+    tools: list[str] = Field(
+        default_factory=lambda: ["*"],
+        description="Tool names or globs the bot may call. Default: every tool.",
+    )
+    approval: Literal["allow", "ask"] = Field(
+        default="ask",
+        description=(
+            "allow runs a call without asking when the approval ceiling allows "
+            "it (under smart-approve: only tools read-only as the server declares "
+            "it); ask always waits for you."
+        ),
+    )
+
+    @field_validator("server", mode="after")
+    @classmethod
+    def normalize_server(cls, v: str) -> str:
+        normalized = normalize_mcp_server_name(v)
+        if not normalized:
+            raise ValueError("MCP server name must contain letters or numbers")
+        return normalized
+
+
 class ConnectorConfig(BaseModel):
     name: str = Field(description="Normalized connector alias to match against.")
     disabled: bool = Field(
@@ -533,7 +559,7 @@ class ModelConfig(BaseModel):
     provider: str
     alias: str
     display_name: str | None = None
-    temperature: float = 0.2
+    temperature: float = 1.0
     # Request settings read by the Unified Harness runtime only; the legacy
     # agent loop does not send them.
     # Nucleus sampling; None leaves it to the provider's default.

@@ -152,14 +152,17 @@ def _catalog(**pins: str) -> PluginCatalogState:
 class PluginClient(FakeClient):
     """Answer each ``plugin_catalog/read`` from the next catalogue in line."""
 
-    def __init__(self, *catalogs: PluginCatalogState) -> None:
+    def __init__(self, *catalogs: PluginCatalogState, deferred: bool = False) -> None:
         super().__init__()
         self._catalogs = list(catalogs)
+        self._deferred = deferred
 
     async def request(self, method: str, params: ProtocolModel) -> dict[str, Any]:
         self.requests.append((method, params))
         if method == "plugin/reload":
-            return PluginReloadResponse().model_dump(mode="json", by_alias=True)
+            return PluginReloadResponse(
+                deferred=True if self._deferred else None
+            ).model_dump(mode="json", by_alias=True)
         if method != "plugin_catalog/read":
             raise AssertionError(f"Unexpected method: {method}")
         return PluginCatalogReadResponse(plugins=self._catalogs.pop(0)).model_dump(
@@ -214,6 +217,21 @@ async def test_plugin_reload_that_moves_nothing_reports_no_changes() -> None:
     diff = await resource.reload()
 
     assert diff is not None and diff.changes == ()
+    assert diff.deferred is False
+
+
+@pytest.mark.asyncio
+async def test_plugin_reload_during_a_turn_says_it_is_deferred() -> None:
+    pinned = _catalog(productivity="0bbb23a0")
+    client = PluginClient(pinned, deferred=True)
+
+    diff = await _plugin_resource(client).reload()
+
+    assert diff is not None and diff.deferred is True and diff.changes == ()
+    assert [method for method, _params in client.requests] == [
+        "plugin_catalog/read",
+        "plugin/reload",
+    ]
 
 
 @pytest.mark.asyncio

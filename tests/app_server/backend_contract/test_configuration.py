@@ -17,6 +17,7 @@ import tomli_w
 
 from tests.app_server.backend_contract.conftest import connect_backend_contract_host
 from vibe.app_server._process_services import ProcessServices
+from vibe.app_server._unified_harness_backend_adapter import saved_selection
 from vibe.app_server.events import ServerWarning, TurnCompleted
 from vibe.app_server.models import FileImageSource, ImageAttachment
 from vibe.app_server.protocol import (
@@ -43,7 +44,7 @@ async def test_session_configuration_updates_and_reloads_through_the_backend(
         max_turns=4, max_tokens=1024
     )
     await backend_contract_session.resources.config.update({"theme": "nord"})
-    active_agent = await backend_contract_session.resources.agents.switch(
+    active_policy = await backend_contract_session.resources.agents.switch_policy(
         "auto-approve"
     )
     stripped_history_images = await backend_contract_session.resources.config.reload(
@@ -51,7 +52,7 @@ async def test_session_configuration_updates_and_reloads_through_the_backend(
     )
 
     assert backend_contract_session.resources.config.current.theme == "nord"
-    assert active_agent.name == "auto-approve"
+    assert active_policy.name == "auto-approve"
     assert stripped_history_images == 0
 
 
@@ -306,7 +307,8 @@ async def test_a_queued_turn_pins_the_model_a_resume_restores(
     """*Prepare*: A session whose user moves the default to another model.
     *Do*: Send the prompt through the queue, as the CLI does, then move the
     default back and resume the session.
-    *Assert*: The queued turn pinned its model and agent, and the resumed
+    *Assert*: The queued turn pinned its model, agent and approval policy, and
+    the resumed
     session runs that model rather than the current default.
     """
     config_file = config_dir / "config.toml"
@@ -336,7 +338,11 @@ async def test_a_queued_turn_pins_the_model_a_resume_restores(
             {"active_model": "alternate"}, target_layer="user-toml", reload_runtime=True
         )
         assert session.resources.config.current.active_model.alias == "alternate"
-        agent = session.resources.agents.active.name
+        selection = (
+            session.resources.agents.active.name,
+            session.resources.agents.active_policy.name,
+        )
+        policies = [policy.name for policy in session.resources.agents.policies]
         await session.enqueue("pin this model")
         await asyncio.wait_for(_next_turn_completed(session), timeout=5)
         session_id = session.session_id
@@ -344,7 +350,7 @@ async def test_a_queued_turn_pins_the_model_a_resume_restores(
         await session.close()
 
     assert _stored_active_model(session_root, session_id) == "alternate"
-    assert _stored_agent_name(session_root, session_id) == agent
+    assert _stored_selection(session_root, session_id, policies) == selection
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
     config["active_model"] = default_model
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
@@ -775,14 +781,17 @@ def _stored_active_model(session_root: Path, session_id: str) -> str | None:
     )
 
 
-def _stored_agent_name(session_root: Path, session_id: str) -> str | None:
+def _stored_selection(
+    session_root: Path, session_id: str, policies: list[str]
+) -> tuple[str | None, str | None]:
     from mistralai_vibe_local_harness.vibe._storage import UnifiedSessionStore
 
-    return (
+    metadata = (
         UnifiedSessionStore(session_root, session_id)
         .load()
-        .runtime_state.session_metadata.agent_name
+        .runtime_state.session_metadata
     )
+    return saved_selection(metadata.agent_name, metadata.approval_policy, policies)
 
 
 def _session_model_is_persisted(session_root: Path, session_id: str) -> bool:
@@ -796,7 +805,7 @@ def _session_model_is_persisted(session_root: Path, session_id: str) -> bool:
 async def test_runtime_mutations_leave_the_connection_usable_with_the_updated_runtime(
     backend_contract_session: AppServerSession,
 ) -> None:
-    active_agent = await backend_contract_session.resources.agents.switch(
+    active_policy = await backend_contract_session.resources.agents.switch_policy(
         "auto-approve"
     )
     await backend_contract_session.resources.config.update(
@@ -806,8 +815,10 @@ async def test_runtime_mutations_leave_the_connection_usable_with_the_updated_ru
         "The runtime update is complete", as_message=True, client_message_id="runtime-1"
     )
 
-    assert active_agent.name == "auto-approve"
-    assert backend_contract_session.resources.agents.active.name == "auto-approve"
+    assert active_policy.name == "auto-approve"
+    assert (
+        backend_contract_session.resources.agents.active_policy.name == "auto-approve"
+    )
     assert not backend_contract_session.resources.runtime.has_tool("grep")
     assert injected[0].entry.id == "runtime-1"
 

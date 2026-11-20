@@ -1,6 +1,8 @@
 //! Rewind mode: pick an earlier user message, then rewind the session to it.
 
+mod done;
 mod request;
+mod unanswered;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,10 +14,11 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::app::{App, Severity, Status};
 use crate::collapsed_pastes::Collapsed;
 use crate::commands::submission::new_message_id;
-use crate::input_modes::ClassifiedInput;
 use crate::server::{Client, PublicSessionState};
 use crate::transcript::local;
+use done::apply_done;
 use request::{confirm, select};
+pub use unanswered::{give_up_take_back, take_back_on_interrupt, turn_settled};
 
 /// Window in which a second Escape clears the input or enters rewind mode.
 pub const DOUBLE_ESC_DELAY: Duration = Duration::from_millis(500);
@@ -44,6 +47,7 @@ pub enum Event {
     },
     /// `session/rewind` answered: the session now starts before the message.
     Done {
+        entry_id: String,
         message: String,
         restore_errors: Vec<String>,
         old_session_id: String,
@@ -70,7 +74,8 @@ pub fn start(app: &mut App, client: &Arc<Client>) {
 /// Move the highlight to the previous user message, entering rewind mode when
 /// none is highlighted yet.
 pub fn prev(app: &mut App, client: &Arc<Client>) {
-    if matches!(app.session.status, Status::Generating { .. }) {
+    // An interrupt taking its prompt back already rewinds; a second Escape must not open the panel.
+    if matches!(app.session.status, Status::Generating { .. }) || app.session.taking_back {
         return;
     }
     let messages = app.view.transcript.user_messages();
@@ -199,7 +204,10 @@ pub fn apply_event(app: &mut App, event: Event) {
             reset_to_action(app);
             app.view.scroll_to_entry = Some(entry_index);
         }
+        // The user left the session meanwhile: its rewind must not pull it back.
+        Event::Done { old_session_id, .. } if !app.is_session(&old_session_id) => {}
         Event::Done {
+            entry_id,
             message,
             restore_errors,
             old_session_id,
@@ -207,6 +215,7 @@ pub fn apply_event(app: &mut App, event: Event) {
             state,
         } => apply_done(
             app,
+            &entry_id,
             message,
             restore_errors,
             old_session_id,
@@ -214,80 +223,13 @@ pub fn apply_event(app: &mut App, event: Event) {
             *state,
         ),
         Event::Failed(message) => {
+            unanswered::take_back_failed(app);
             crate::notices::inline(app, Severity::Error, &message);
             if app.rewind.entry_id.is_none() {
                 quit(app);
             }
         }
     }
-}
-
-fn apply_done(
-    app: &mut App,
-    message: String,
-    restore_errors: Vec<String>,
-    old_session_id: String,
-    inplace: bool,
-    state: PublicSessionState,
-) {
-    // Read before the transcript is rebuilt: the rewound message's collapsed
-    // pastes and attached images.
-    let rewound = app
-        .rewind
-        .entry_id
-        .as_deref()
-        .and_then(|id| app.view.transcript.entry_raw(id));
-    let display = rewound
-        .and_then(|raw| raw.get("userDisplayContent"))
-        .cloned();
-    let images = rewound
-        .map(crate::inline_images::attachments)
-        .unwrap_or_default();
-    quit(app);
-    let new_session_id = state.session.id.clone();
-    app.set_session_id(new_session_id.clone());
-    app.session.active_turn_id = None;
-    // Drop the queued prompts and rebuild every row from the returned
-    // history, so no client-owned entry survives the rewind.
-    app.view.transcript.clear();
-    // Either rewind mode leaves the harness session without its todo list.
-    app.todo_tracker.clear();
-    crate::goal::adopt(app, state.session.goal.clone(), false);
-    app.queue.clear();
-    app.view.expanded.clear();
-    app.view.transcript.load_snapshot(&state);
-    crate::worktree::adopt_state(app, &state);
-    crate::background_work::adopt_state(app, &state);
-    crate::loops::adopt_state(app, &state);
-    app.expand_rebuilt_tools();
-    if !inplace {
-        local::add_rewind_fork(
-            &mut app.view.transcript,
-            &new_message_id(),
-            &old_session_id,
-            &new_session_id,
-        );
-    }
-    // After the rebuild, which would otherwise drop them.
-    for error in restore_errors {
-        crate::notices::refused(app, &error);
-    }
-    // The rewound message goes back into the composer, caret at the end, ready to be edited.
-    // A skill invocation reloads in `/` mode as typed; any other message is a prompt.
-    match crate::input_modes::classify(&message, &app.completion.skills) {
-        ClassifiedInput::Skill { .. } => app.chat_input.load_full_text(message.clone()),
-        _ => app.chat_input.load_prompt_text(message.clone()),
-    }
-    crate::long_paste::restore(app, display.as_ref());
-    crate::inline_images::restore_placeholders(app, &message, &images);
-    app.chat_input.cursor = app.chat_input.input.len();
-    crate::completion_manager::input_changed(app);
-    // A trailing `@file` or `/skill` mention stays closed until the next edit, like a recall.
-    if crate::completion_manager::active_is_mention(app) {
-        crate::completion_manager::reset_for_recall(app);
-    }
-    app.view.scroll = 0;
-    app.view.scroll_target = 0;
 }
 
 #[cfg(test)]

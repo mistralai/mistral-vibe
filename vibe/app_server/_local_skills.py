@@ -7,7 +7,7 @@ its frontmatter, which is what ``disabled_skills`` lists. A read returns a
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
@@ -28,7 +28,7 @@ from vibe.core.config.harness_files._paths import (
 )
 from vibe.core.skills.models import SkillMetadata
 from vibe.core.skills.parser import SkillParseError, parse_skill_markdown
-from vibe.utils.io import read_safe
+from vibe.utils.io import ATOMIC_WRITE_TEMP, atomic_write_bytes, read_safe
 from vibe.utils.paths import resolves_within
 
 if TYPE_CHECKING:
@@ -290,14 +290,34 @@ def _restore(skill_dir: Path, before: Mapping[str, bytes | None]) -> None:
                     _remove_empty_parents(target, stop=skill_dir)
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                _atomic_write_bytes(target, content)
+                atomic_write_bytes(target, content)
         except OSError:
             continue
 
 
 def delete_local_skill(folder: str, project_root: Path | None) -> None:
-    with _WRITE_LOCK, _os_errors():
-        skill_dir = _existing_skill_dir(folder, project_root)
+    with _os_errors():
+        delete_skill_folder(_existing_skill_dir(folder, project_root) / ENTRY_FILE)
+
+
+def listed_skill_folder(skill_file: Path, roots: Iterable[Path]) -> Path | None:
+    """The folder of ``skill_file`` when it sits directly under one of ``roots``.
+
+    A listed path keeps the folder unresolved, so a linked skill folder names
+    the link, which is what a delete must remove.
+    """
+    folder = skill_file.parent
+    if skill_file.name != ENTRY_FILE or folder.name in {"", ".", ".."}:
+        return None
+    if folder.parent.resolve() not in {root.resolve() for root in roots}:
+        return None
+    return folder
+
+
+def delete_skill_folder(skill_file: Path) -> None:
+    """Delete the folder holding ``skill_file``; a linked folder loses only its link."""
+    skill_dir = skill_file.parent
+    with _WRITE_LOCK:
         if skill_dir.is_symlink():
             skill_dir.unlink()
         elif skill_dir.is_junction():
@@ -393,13 +413,17 @@ def _asset_path(raw: str) -> str:
     return clean
 
 
+def _is_leftover_file(name: str) -> bool:
+    return bool(_LEFTOVER.fullmatch(name) or ATOMIC_WRITE_TEMP.fullmatch(name))
+
+
 def _iter_files(skill_dir: Path) -> Iterator[tuple[str, Path]]:
     for root, dirs, files in os.walk(skill_dir, followlinks=False):
         dirs[:] = sorted(d for d in dirs if not d.startswith("."))
         for file_name in sorted(files):
             full = Path(root) / file_name
             relative = full.relative_to(skill_dir).as_posix()
-            if relative == ENTRY_FILE or _LEFTOVER.fullmatch(file_name):
+            if relative == ENTRY_FILE or _is_leftover_file(file_name):
                 continue
             yield relative, full
 
@@ -441,23 +465,7 @@ def _render_entry(frontmatter: Mapping[str, Any], body: str) -> str:
 
 
 def _atomic_write(target: Path, content: str) -> None:
-    _atomic_write_bytes(target, content.encode("utf-8"))
-
-
-def _atomic_write_bytes(target: Path, content: bytes) -> None:
-    # Created like any new file (0o666 less the umask), unlike mkstemp's 0o600:
-    # a repo skill other users and harnesses read must stay readable.
-    tmp = target.parent / f".{target.name}.{secrets.token_hex(8)}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(content)
-        if target.exists():
-            shutil.copymode(target, tmp)
-        os.replace(tmp, target)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    atomic_write_bytes(target, content.encode("utf-8"))
 
 
 def _remove_empty_parents(path: Path, *, stop: Path) -> None:

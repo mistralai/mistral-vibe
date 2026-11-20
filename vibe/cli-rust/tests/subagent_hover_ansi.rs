@@ -29,6 +29,11 @@ fn a_hovered_subagent_row_keeps_its_text_visible() {
         ..Default::default()
     });
     subagents::refresh(&mut app);
+    vibe_rs::rail::open(
+        &mut app,
+        &std::sync::Arc::new(vibe_rs::server::Client::stub()),
+        vibe_rs::rail::Item::Agents,
+    );
     redraw(&mut app);
     let row = app
         .subagents

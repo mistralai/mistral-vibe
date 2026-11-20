@@ -38,9 +38,14 @@ _STEP_TIMEOUT_S = 10
 # run can starve it like the cold start; not exiting at all is a bug.
 _EXIT_TIMEOUT_S = 20
 _REAP_TIMEOUT_S = 5
-# The longest test: initialize, two more steps, then the exit and the reap.
+# The longest test: initialize, two more steps, then the exit, the stack dump
+# of a process that did not exit, and the reap.
 _TEST_TIMEOUT_S = (
-    _INITIALIZE_TIMEOUT_S + 2 * _STEP_TIMEOUT_S + _EXIT_TIMEOUT_S + _REAP_TIMEOUT_S + 5
+    _INITIALIZE_TIMEOUT_S
+    + 2 * _STEP_TIMEOUT_S
+    + _EXIT_TIMEOUT_S
+    + 2 * _REAP_TIMEOUT_S
+    + 5
 )
 _STDERR_FILE_NAME = "vibe-acp.stderr"
 
@@ -186,24 +191,52 @@ async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
         await asyncio.wait_for(proc.wait(), timeout=_REAP_TIMEOUT_S)
 
 
-async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+async def _terminate_process(
+    proc: asyncio.subprocess.Process, stderr_path: Path
+) -> None:
     if proc.returncode is None:
         with contextlib.suppress(ProcessLookupError):
             proc.terminate()
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(proc.wait(), timeout=_EXIT_TIMEOUT_S)
     exited = proc.returncode is not None
+    if not exited:
+        await _dump_stacks(proc)
     await _kill_process_tree(proc)
     assert exited, (
         f"vibe-acp did not exit within {_EXIT_TIMEOUT_S} s of SIGTERM "
-        f"(return code after SIGKILL: {proc.returncode}; its stderr is in "
-        f"{_STDERR_FILE_NAME} under the test's tmp_path)"
+        f"(return code after SIGKILL: {proc.returncode}). The end of its "
+        f"stderr, with the stack of every thread when it hung:\n"
+        f"{_tail(stderr_path)}"
     )
+
+
+async def _dump_stacks(proc: asyncio.subprocess.Process) -> None:
+    """Ask a hung vibe-acp for the stack of each thread (``faulthandler``)."""
+    if os.name != "posix":
+        return
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(proc.pid, signal.SIGABRT)
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(proc.wait(), timeout=_REAP_TIMEOUT_S)
+
+
+def _tail(path: Path, max_chars: int = 8_000) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")[-max_chars:]
+    except OSError as exc:
+        return f"<unreadable: {exc}>"
+
+
+def _stderr_path(vibe_home_dir: Path) -> Path:
+    return vibe_home_dir.parent / _STDERR_FILE_NAME
 
 
 def _build_env(vibe_home_dir: Path, *, include_api_key: bool) -> dict[str, str]:
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    # A hung process prints every thread's stack on SIGABRT.
+    env["PYTHONFAULTHANDLER"] = "1"
     env["VIBE_HOME"] = str(vibe_home_dir)
     env["VIBE_TEST_DISABLE_KEYRING"] = "1"
 
@@ -242,9 +275,7 @@ async def _connect_and_initialize(
     delegated_browser_auth: bool = False,
 ) -> tuple[asyncio.subprocess.Process, Any, Any]:
     env = _build_env(vibe_home_dir, include_api_key=include_api_key)
-    proc = await _spawn_vibe_acp(
-        env, stderr_path=vibe_home_dir.parent / _STDERR_FILE_NAME
-    )
+    proc = await _spawn_vibe_acp(env, stderr_path=_stderr_path(vibe_home_dir))
 
     try:
         assert proc.stdin is not None
@@ -296,7 +327,7 @@ async def test_vibe_acp_initialize_and_new_session(vibe_home_dir: Path) -> None:
 
         assert session.session_id
     finally:
-        await _terminate_process(proc)
+        await _terminate_process(proc, _stderr_path(vibe_home_dir))
 
 
 @pytest.mark.asyncio
@@ -312,7 +343,7 @@ async def test_vibe_acp_bootstraps_default_files(vibe_home_dir: Path) -> None:
             timeout=_STEP_TIMEOUT_S,
         )
     finally:
-        await _terminate_process(proc)
+        await _terminate_process(proc, _stderr_path(vibe_home_dir))
     assert (vibe_home_dir / "config.toml").is_file()
     assert (vibe_home_dir / "vibehistory").is_file()
 
@@ -332,7 +363,7 @@ async def test_vibe_acp_initialize_exposes_browser_auth(vibe_home_dir: Path) -> 
         assert auth_method.name == BROWSER_AUTH_NAME
         assert auth_method.description == BROWSER_AUTH_DESCRIPTION
     finally:
-        await _terminate_process(proc)
+        await _terminate_process(proc, _stderr_path(vibe_home_dir))
 
 
 @pytest.mark.asyncio
@@ -358,7 +389,7 @@ async def test_vibe_acp_initialize_exposes_delegated_browser_auth_when_supported
         assert delegated_browser_auth_method.name == BROWSER_AUTH_NAME
         assert delegated_browser_auth_method.description == BROWSER_AUTH_DESCRIPTION
     finally:
-        await _terminate_process(proc)
+        await _terminate_process(proc, _stderr_path(vibe_home_dir))
 
 
 @pytest.mark.asyncio
@@ -389,7 +420,7 @@ async def test_vibe_acp_initialize_exposes_terminal_auth_when_supported(
         assert terminal_auth["args"]
         assert terminal_auth["args"][-1:] == ["--setup"]
     finally:
-        await _terminate_process(proc)
+        await _terminate_process(proc, _stderr_path(vibe_home_dir))
 
 
 @pytest.mark.asyncio
@@ -418,7 +449,7 @@ async def test_vibe_acp_survives_broken_config(vibe_home_dir: Path) -> None:
         )
         assert session.session_id
     finally:
-        await _terminate_process(proc)
+        await _terminate_process(proc, _stderr_path(vibe_home_dir))
 
 
 def test_acp_agent_import_does_not_load_gitpython() -> None:
@@ -453,4 +484,4 @@ async def test_vibe_acp_new_session_fails_without_api_key(vibe_home_dir: Path) -
                 timeout=_STEP_TIMEOUT_S,
             )
     finally:
-        await _terminate_process(proc)
+        await _terminate_process(proc, _stderr_path(vibe_home_dir))

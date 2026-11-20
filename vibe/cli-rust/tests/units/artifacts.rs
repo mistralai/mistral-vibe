@@ -115,13 +115,13 @@ fn apply_list_keeps_every_artifact_latest_first() {
 }
 
 #[test]
-fn count_label_names_the_providers_and_the_total() {
+fn kinds_names_the_providers() {
     let prs = vec![github("a1", 1, T1), github("a2", 2, T2)];
-    assert_eq!(artifacts::count_label(&prs), "PRs (2)");
+    assert_eq!(artifacts::kinds(&prs), "PRs");
     let mrs = vec![gitlab("a3", 7, T1), gitlab("a4", 8, T2)];
-    assert_eq!(artifacts::count_label(&mrs), "MRs (2)");
+    assert_eq!(artifacts::kinds(&mrs), "MRs");
     let mixed = vec![github("a1", 1, T1), gitlab("a3", 7, T2)];
-    assert_eq!(artifacts::count_label(&mixed), "PRs/MRs (2)");
+    assert_eq!(artifacts::kinds(&mixed), "PRs/MRs");
 }
 
 #[test]
@@ -138,17 +138,18 @@ fn modal_title_names_the_providers_present() {
     assert_eq!(artifacts::modal_title(&[]), "Artifacts");
 }
 
-#[test]
-fn the_modal_opens_on_the_latest_and_navigates_wrapping() {
+#[tokio::test]
+async fn the_modal_opens_on_the_latest_and_navigates_wrapping() {
     let mut app = App::default();
     app.session.session_id = Some(SESSION.into());
+    app.artifacts_modal.enabled = true;
     artifacts::apply_list(
         &mut app,
         SESSION,
         vec![github("a1", 1, T1), github("a2", 2, T2)],
     );
-    artifacts_modal::open(&mut app);
-    assert!(app.artifacts_modal.open);
+    artifacts_modal::open(&mut app, &crate::support::stub());
+    assert!(artifacts_modal::is_open(&app));
     let selected = artifacts_modal::selected(&app).expect("selected");
     assert_eq!(artifacts::label(selected), "PR #2");
     artifacts_modal::navigate(&mut app, true);
@@ -159,7 +160,7 @@ fn the_modal_opens_on_the_latest_and_navigates_wrapping() {
     let selected = artifacts_modal::selected(&app).expect("selected");
     assert_eq!(artifacts::label(selected), "PR #2");
     artifacts_modal::close(&mut app);
-    assert!(!app.artifacts_modal.open);
+    assert!(!artifacts_modal::is_open(&app));
 }
 
 // --- Phase 4: synced status and CI checks ---

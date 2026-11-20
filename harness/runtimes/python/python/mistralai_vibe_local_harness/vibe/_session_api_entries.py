@@ -157,6 +157,21 @@ ENTRY_BUILDERS: dict[str, Callable[[JsonObject, dict[str, Any]], HistoryEntry]] 
 """The builder of each public entry type that becomes one Session API entry."""
 
 
+def history_position_ids(raw: JsonObject) -> tuple[str, ...]:
+    """The Session API positions one public entry takes, in order.
+
+    A tool record (``effect``) takes two, its call then its result; an entry
+    of a type the API does not show takes none.
+    """
+    entry_id = raw.get("id")
+    if not isinstance(entry_id, str):
+        return ()
+    entry_type = raw.get("type")
+    if entry_type == "effect":
+        return (entry_id + TOOL_CALL_SUFFIX, entry_id + TOOL_RESULT_SUFFIX)
+    return (entry_id,) if entry_type in ENTRY_BUILDERS else ()
+
+
 def _tool_entries(
     raw: JsonObject,
     entry_id: str,

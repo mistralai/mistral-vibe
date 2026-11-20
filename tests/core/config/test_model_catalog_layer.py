@@ -231,7 +231,7 @@ async def test_the_configs_thinking_levels_win_over_the_catalogs(
 async def test_null_temperature_keeps_the_field_default() -> None:
     config = await _config(_catalog(_entry(_GLM, parameters={"temperature": None})))
 
-    assert config.models[_GLM].temperature == 0.2
+    assert config.models[_GLM].temperature == 1.0
 
 
 _LARGE = "mistral-large-4-0"
@@ -430,7 +430,7 @@ async def test_null_values_take_the_field_defaults_over_a_built_in_model() -> No
 
     model = config.models[builtin.alias]
     assert model.name == builtin.alias
-    assert model.temperature == 0.2
+    assert model.temperature == 1.0
     assert model.thinking_levels == list(DEFAULT_THINKING_LEVELS)
     assert model.thinking == "off"
     assert model.max_context_length is None

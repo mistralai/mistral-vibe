@@ -72,7 +72,7 @@ pub(super) fn build(
     rows.extend(repo_line(trust, content_width));
     rows.push(options_row(trust));
     rows.push(Row::default());
-    rows.push(help_row());
+    rows.extend(help_rows(content_width as u16));
     rows.push(Row::default());
     let save_info = format!("Setting will be saved in: {}", details.settings_path);
     rows.extend(block(
@@ -182,10 +182,12 @@ fn options_row(trust: &TrustFolders) -> Row {
     Row::widgets(row)
 }
 
-fn help_row() -> Row {
-    Row::text(super::hint_line::styled(&[
+fn help_rows(width: u16) -> Vec<Row> {
+    let help = [
         (key::NAV, action::SCROLL),
         (key::LEFT_RIGHT, action::NAVIGATE),
         hints::SELECT,
-    ]))
+    ];
+    let rows = super::hint_line::styled_rows(&help, width);
+    rows.into_iter().map(Row::text).collect()
 }

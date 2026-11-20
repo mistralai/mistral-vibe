@@ -1,13 +1,15 @@
-//! `/skills` tabs: My Skills and Shared, switched with Tab or a press on one, in a box that keeps its height.
+//! `/skills` tabs: My Skills and Shared, switched with Tab, Shift+Tab, ←→ or a press on one, in a box that keeps its height.
 
 use crossterm::event::{KeyCode, MouseButton, MouseEventKind};
 use ratatui::layout::Rect;
 use serde_json::{json, Value};
 use vibe_rs::app::App;
+use vibe_rs::focus::tab_navigates;
 use vibe_rs::server::SkillCatalog;
 use vibe_rs::skills_browser::list::Row;
 use vibe_rs::skills_browser::{self, Tab};
 
+use crate::skills_browser_support;
 use crate::skills_browser_support::{
     catalog, catalog_row, highlight, highlighted, installed_row, open_page, opened, press,
     registry, shared,
@@ -19,15 +21,58 @@ fn tab_switches_tabs_each_from_its_first_row() {
     let client = stub();
     let mut app = opened(vec![registry("deploy", "global", 2, None)], Some(shared()));
     assert_eq!(app.skills_browser.tab, Tab::Mine);
-    press(&mut app, &client, KeyCode::Char('d'));
-    assert!(app.skills_browser.removing.is_some());
     press(&mut app, &client, KeyCode::Tab);
     assert_eq!(app.skills_browser.tab, Tab::Shared);
     assert_eq!(highlighted(&app), Some(catalog_row("id-alpha")));
-    assert!(app.skills_browser.removing.is_none(), "switching disarms");
     press(&mut app, &client, KeyCode::Tab);
     assert_eq!(app.skills_browser.tab, Tab::Mine);
     assert_eq!(highlighted(&app), Some(installed_row("deploy")));
+}
+
+#[test]
+fn shift_tab_and_the_arrows_switch_tabs_but_the_search_field_keeps_its_arrows() {
+    let client = stub();
+    let mut app = opened(vec![registry("deploy", "global", 2, None)], Some(shared()));
+    for code in [KeyCode::BackTab, KeyCode::Right, KeyCode::Left] {
+        let before = app.skills_browser.tab;
+        press(&mut app, &client, code);
+        assert_ne!(app.skills_browser.tab, before, "{code:?} switches tabs");
+    }
+    press(&mut app, &client, KeyCode::Char('/'));
+    press(&mut app, &client, KeyCode::Right);
+    assert_eq!(
+        app.skills_browser.tab,
+        Tab::Shared,
+        "the field takes the arrow"
+    );
+}
+
+#[test]
+fn shift_tab_switches_skills_tabs_instead_of_cycling_agents() {
+    let mut app = opened(vec![registry("deploy", "global", 2, None)], Some(shared()));
+    assert!(tab_navigates(&app));
+    assert!(!crate::support::press(&mut app, KeyCode::BackTab));
+    assert_eq!(app.agents.desired, None, "no agent switch was asked for");
+    open_page(&mut app, installed_row("deploy"));
+    assert!(!tab_navigates(&app), "a page has no tabs");
+    let mut local = opened(vec![registry("deploy", "global", 2, None)], None);
+    assert!(
+        !tab_navigates(&local),
+        "without registry skills there are no tabs"
+    );
+    local.skills_browser.open = false;
+    assert!(!tab_navigates(&local));
+}
+
+#[test]
+fn shift_tab_moves_through_the_delete_confirmation_instead_of_cycling_agents() {
+    let mut file = skills_browser_support::pin("lint", "local", "project");
+    file["path"] = json!("/repo/.vibe/skills/lint/SKILL.md");
+    let mut app = opened(vec![file], None);
+    assert!(!tab_navigates(&app));
+    press(&mut app, &stub(), KeyCode::Char('x'));
+    assert!(app.skills_browser.confirm.is_some());
+    assert!(tab_navigates(&app));
 }
 
 #[test]
@@ -42,12 +87,10 @@ fn back_from_a_shared_skills_page_lands_on_the_shared_tab() {
 }
 
 #[test]
-fn a_press_on_a_tab_opens_it_and_disarms_a_removal() {
+fn a_press_on_a_tab_opens_it() {
     let client = stub();
     let mut app = opened(vec![registry("deploy", "global", 2, None)], Some(shared()));
     highlight(&mut app, &installed_row("deploy"));
-    press(&mut app, &client, KeyCode::Char('d'));
-    assert!(app.skills_browser.removing.is_some());
     app.skills_browser.tab_areas = vec![
         (Tab::Mine, Rect::new(10, 3, 11, 1)),
         (Tab::Shared, Rect::new(22, 3, 8, 1)),
@@ -57,7 +100,6 @@ fn a_press_on_a_tab_opens_it_and_disarms_a_removal() {
     assert_eq!(app.skills_browser.tab, Tab::Shared);
     assert!(app.skills_browser.rows().contains(&catalog_row("id-alpha")));
     assert!(!app.skills_browser.rows().contains(&Row::InstalledColumns));
-    assert!(app.skills_browser.removing.is_none());
 }
 
 /// Twelve shared skills, more than half the box's rows on a 40-row screen.
@@ -67,30 +109,38 @@ fn twelve_shared() -> SkillCatalog {
     catalog(json!({"skills": skills, "loaded": true}))
 }
 
+/// The row of the box's top border on a 120x40 screen.
+fn box_top(app: &mut App) -> usize {
+    let screen = rows(&render(120, 40, |frame| app.draw(frame)));
+    let at = screen.iter().position(|row| row.contains("│ Skills "));
+    at.expect("the box is drawn") - 1
+}
+
 #[test]
-fn tab_never_moves_the_box_or_its_tabs_under_or_beside_the_body() {
-    for width in [120, 160] {
-        let client = stub();
-        let mut app = opened(Vec::new(), Some(twelve_shared()));
-        let title = |app: &mut App| {
-            let screen = rows(&render(width, 40, |frame| app.draw(frame)));
-            let at = screen.iter().position(|row| row.contains("│ Skills "));
-            let at = at.expect("the box is drawn");
-            (at, screen[at].trim_end_matches([' ', '│']).to_owned())
-        };
-        let (mine_at, mine) = title(&mut app);
-        assert!(mine.ends_with("Skills  [My Skills]   Shared"), "{mine}");
-        press(&mut app, &client, KeyCode::Tab);
-        let (shared_at, shared_title) = title(&mut app);
-        assert_eq!(
-            shared_at, mine_at,
-            "an empty tab keeps the room the other needs at {width} columns"
-        );
-        assert!(
-            shared_title.ends_with("Skills   My Skills   [Shared]"),
-            "{shared_title}"
-        );
+fn the_box_keeps_the_height_it_opened_with_through_the_catalog_tabs_and_search() {
+    let client = stub();
+    let mut app = opened(vec![registry("deploy", "global", 2, None)], None);
+    skills_browser_support::registry_on(&mut app);
+    app.skills_browser.registry = true;
+    let opened_at = box_top(&mut app);
+    let generation = app.skills_browser.generation;
+    let event = skills_browser::Event::Catalog {
+        generation,
+        catalog: twelve_shared(),
+    };
+    skills_browser::apply_event(&mut app, &client, event);
+    assert_eq!(box_top(&mut app), opened_at, "a late catalog");
+    press(&mut app, &client, KeyCode::Tab);
+    assert_eq!(box_top(&mut app), opened_at, "the longer tab");
+    press(&mut app, &client, KeyCode::Char('/'));
+    for ch in "zzz".chars() {
+        press(&mut app, &client, KeyCode::Char(ch));
     }
+    assert_eq!(
+        box_top(&mut app),
+        opened_at,
+        "a search that matches nothing"
+    );
 }
 
 #[test]
@@ -117,7 +167,7 @@ fn a_title_row_too_narrow_for_both_tabs_shows_the_open_one() {
         row.trim_end_matches([' ', '│']).to_owned()
     };
     let mine = title(&mut app);
-    assert!(mine.ends_with("Skills  [My Skills]"), "{mine}");
+    assert!(mine.ends_with("Skills   My Skills 0"), "{mine}");
     assert_eq!(
         app.skills_browser.tab_areas.len(),
         1,
@@ -125,7 +175,8 @@ fn a_title_row_too_narrow_for_both_tabs_shows_the_open_one() {
     );
     press(&mut app, &client, KeyCode::Tab);
     let shared_title = title(&mut app);
-    assert!(shared_title.ends_with("Skills  [Shared]"), "{shared_title}");
+    let shared_title = shared_title.trim_end();
+    assert!(shared_title.contains("Skills   Shared "), "{shared_title}");
 }
 
 #[test]

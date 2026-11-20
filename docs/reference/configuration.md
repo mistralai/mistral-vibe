@@ -43,18 +43,34 @@ The effective order is:
    `.vibe/config.toml`) when the `"project"` source is enabled;
 5. `VIBE_*` environment values;
 6. session/runtime overrides;
-7. the active agent profile layer (`AgentProfileLayer`); and
-8. the enforced admin layer (`AdminConfigLayer`), which shadows every layer
+7. the active agent layer (`AgentProfileLayer`, named `agent-profile`);
+8. the active approval policy layer (an `AgentProfileLayer` named
+   `approval-policy`); and
+9. the enforced admin layer (`AdminConfigLayer`), which shadows every layer
    below it.
 
 `AgentProfileLayer` ships as a statically installed empty slot positioned just
-below the admin layer. `AgentManager` owns its contents: it fills the slot for
-the initial agent and, on a profile switch, replaces the layer in place with
-the new overrides, then rebuilds the orchestrator synchronously (`rebuild`, a
-`run_sync` bridge over `build`). Because the slot is replaced in place its
-priority is fixed by the stack definition, so the admin layer always outranks
-a profile. The effective config is the single merged result; there is no
-separate profile-free "base" config.
+below the admin layer. `AgentManager` owns it and the approval policy layer it
+inserts right above it: it fills both for the initial agent and policy and, on
+a switch of either, replaces both in place, then rebuilds the orchestrator once
+(`rebuild`, a `run_sync` bridge over `build`). The policy outranks the agent,
+except that a policy never loosens a tool permission the agent itself set to
+`ask` or `never`. What runs without asking belongs to the policy alone: an
+agent file keeps only the keys an agent may set (instructions, model keys,
+tools and skills lists, system prompt, shell timeouts, a narrowing `ask` or
+`never` permission); `AgentRegistry` drops every other key and reports each one
+(`agent.setting_ignored`), and an agent never selects a policy. A policy
+override (a file named after a built-in policy) is read from user and org
+agent directories only; a project's is ignored
+(`approval_policy.project_override_ignored`). A policy that bypasses permissions (`auto-approve`)
+skips every `ask`, so it disables the tools the agent set to `never` instead. The admin layer outranks both. The effective config is
+the single merged result; there is no separate profile-free "base" config.
+
+`default_agent` names the agent and `default_approval_policy` the policy. A
+layer whose `default_agent` names a built-in approval policy, as configs
+written before the two were split do, is read as that layer's
+`default_approval_policy` before the merge (`VibeConfigSchema.prepare_layers`),
+so the policy keeps that layer's precedence and origin.
 
 The user and project TOML layers are installed together so a trusted project
 config inherits unspecified values from the user config; per-field merge
@@ -307,10 +323,19 @@ change when idle or at its next turn boundary, and announces it with
 A connection that calls `config/subscribe` receives `config/changed` (no
 params) when the config a session opened now would run may have changed: the
 process's held org admin config changed (refreshed every 10 minutes, or
-adopted from another process), or a session-less settings update landed. The
-client re-reads what it shows. It is opt-in, so clients that reject unknown
-notifications are unaffected. An attached session keeps reporting its own
-config with `runtime/updated`.
+adopted from another process), its model catalog changed (a plan upgrade can
+unlock models), or a session-less settings update landed. The client re-reads
+what it shows. It is opt-in, so clients that reject unknown notifications are
+unaffected. An attached session keeps reporting its own config with
+`runtime/updated`.
+
+Each process holds its own model catalog. A `config/read` refreshes an old
+one in the background, and announces a changed catalog with `config/changed`.
+To a model picker showing a model the plan does not include, or a session
+running one, a catalog is old after 30 seconds, so a client re-reading the
+models as the user returns from upgrading their plan sees them unlocked. A
+session on a runnable model refreshes it every 10 minutes. A turn on a locked model waits up to 2 seconds
+for that refresh before it is refused.
 
 ## Client-local application
 

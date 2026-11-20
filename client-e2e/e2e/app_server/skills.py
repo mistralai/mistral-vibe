@@ -14,6 +14,7 @@ METHODS = frozenset({
     "skills/import",
     "skills/remove",
     "skills/setEnabled",
+    "skills/deleteLocal",
 })
 
 APPLIED = {"status": "applied"}
@@ -43,6 +44,7 @@ def skill(
 ) -> dict[str, Any]:
     """One installed pin; a `version` gives it a registry ref, and `active=False` shadows it."""
     return {
+        "path": None,
         "name": name,
         "description": description,
         "prompt": f"# {name}\n\nUse {name} when the task calls for it."
@@ -60,14 +62,21 @@ def skill(
     }
 
 
+def at_file(pin: Mapping[str, Any], path: str) -> dict[str, Any]:
+    """`pin` read from the `SKILL.md` at `path`, as a local skill is."""
+    return {**pin, "path": path}
+
+
 def of_skill(pin: Mapping[str, Any], skill_id: str) -> dict[str, Any]:
     """`pin` as a pin of the shared skill `skill_id`, as when two names pin one stored version."""
     return {**pin, "registry": {**pin["registry"], "skillId": skill_id}}
 
 
-def installed(skills: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """A `skills/installed` answer."""
-    return {"skills": list(skills)}
+def installed(
+    skills: Sequence[Mapping[str, Any]], issues: Sequence[Mapping[str, str]] = ()
+) -> dict[str, Any]:
+    """A `skills/installed` answer, with the skills that failed to load."""
+    return {"skills": list(skills), "issues": list(issues)}
 
 
 def entry(
@@ -122,7 +131,7 @@ def detail(body: str) -> dict[str, Any]:
 def long_body_handshake() -> dict[str, Any]:
     """A registry pin whose body is longer than any pane, with what its page reads."""
     steps = [f"Step {step}: check the release gate." for step in range(1, 61)]
-    body = "\n".join(["# deploy", "", *steps])
+    body = "\n\n".join(["# deploy", *steps])
     return {
         **registry_on(),
         "skills/installed": installed([

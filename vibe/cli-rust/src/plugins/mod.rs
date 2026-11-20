@@ -57,6 +57,8 @@ impl State {
 pub enum Event {
     Read(Result<Option<PluginCatalogState>, String>),
     Reloaded(Result<Diff, String>),
+    /// A turn is running: the server reloads when it ends.
+    ReloadDeferred,
 }
 
 /// `/plugins`: read the catalogue, then open the browser on it.
@@ -72,7 +74,7 @@ pub fn reload(app: &mut App, client: &Arc<Client>) {
         return;
     }
     app.plugins.reloading = request::spawn(app, client, |client, session_id| async move {
-        Event::Reloaded(request::reload_diff(&client, &session_id).await)
+        request::reload(&client, &session_id).await
     });
 }
 
@@ -86,6 +88,10 @@ pub fn apply_event(app: &mut App, event: Event) {
         }
         Event::Read(Ok(Some(catalog))) => open(app, catalog),
         Event::Read(Err(error)) => add_error(app, &format!("Failed to read plugins: {error}")),
+        Event::ReloadDeferred => {
+            app.plugins.reloading = false;
+            add_status(app, text::DEFERRED);
+        }
         Event::Reloaded(result) => {
             app.plugins.reloading = false;
             match result {
@@ -164,7 +170,7 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     }
 }
 
-fn close(app: &mut App) {
+pub fn close(app: &mut App) {
     app.plugins = fresh(app);
 }
 

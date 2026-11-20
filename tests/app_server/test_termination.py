@@ -12,6 +12,7 @@ from typing import Any, cast
 
 import pytest
 
+from tests.stubs.thread_signals import sigterm_another_thread_once_the_loop_waits
 from vibe.app_server import _termination, stdio
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._process_services import ProcessServices
@@ -272,6 +273,24 @@ async def test_sigterm_ends_the_input_then_exits_once_serving_has_wound_down() -
 
 @posix_only
 @pytest.mark.asyncio
+async def test_sigterm_delivered_to_another_thread_still_ends_the_input() -> None:
+    _, transport = memory_transport_pair()
+    exits: list[int] = []
+    woken_by_fallback: list[bool] = []
+
+    with ending_on_sigterm(transport, exit_process=exits.append) as ending:
+        asyncio.get_running_loop().call_later(5, woken_by_fallback.append, True)
+        sender = sigterm_another_thread_once_the_loop_waits()
+        async for _ in ending.messages():
+            pass
+        sender.join()
+
+    assert woken_by_fallback == []
+    assert exits == [TERMINATED_EXIT_CODE]
+
+
+@posix_only
+@pytest.mark.asyncio
 async def test_a_shutdown_stuck_past_the_deadline_exits_anyway() -> None:
     _, transport = memory_transport_pair()
     exited = threading.Event()
@@ -284,6 +303,67 @@ async def test_a_shutdown_stuck_past_the_deadline_exits_anyway() -> None:
         os.kill(os.getpid(), signal.SIGTERM)
         # A shutdown that never ends.
         await _wait_for(exited.is_set)
+
+
+def _handle_with_a_second_signal_at(point: int, handler: Any) -> bool:
+    """Run ``handler`` as for a SIGTERM, handling another one at its
+    ``point``-th line, as Python does when it lands mid-handler. False once
+    ``point`` is past the handler's last line. What the handlers raise lands in
+    whatever the main thread was running, as a signal's does, and is dropped.
+    """
+    lines = 0
+    nested = False
+
+    def trace(_frame: object, event: str, _arg: object) -> Any:
+        nonlocal lines, nested
+        if event == "line" and not nested:
+            if lines == point:
+                nested = True
+                handler(signal.SIGTERM, None)
+            lines += 1
+        return trace
+
+    previous = sys.gettrace()
+    sys.settrace(trace)
+    try:
+        handler(signal.SIGTERM, None)
+    except Exception:
+        pass
+    finally:
+        sys.settrace(previous)
+    return nested
+
+
+@posix_only
+@pytest.mark.asyncio
+async def test_a_sigterm_landing_while_the_first_is_handled_still_ends_and_exits() -> (
+    None
+):
+    """As a process-group kill does under uv, which forwards its own SIGTERM."""
+
+    async def nest_at(point: int) -> bool:
+        _, transport = memory_transport_pair()
+        exited = threading.Event()
+        steps: list[str] = []
+        # Its shutdown failing is swallowed once SIGTERM came: hence the steps.
+        with ending_on_sigterm(
+            transport, deadline_s=0.05, exit_process=lambda _code: exited.set()
+        ) as ending:
+            nested = _handle_with_a_second_signal_at(
+                point, signal.getsignal(signal.SIGTERM)
+            )
+            async with asyncio.timeout(2):
+                async for _ in ending.messages():
+                    pass
+            steps.append("input ended")
+            await _wait_for(exited.is_set, timeout=2)
+            steps.append("deadline passed")
+        assert steps == ["input ended", "deadline passed"], point
+        return nested
+
+    point = 0
+    while await nest_at(point):
+        point += 1
 
 
 @posix_only

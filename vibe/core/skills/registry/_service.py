@@ -28,7 +28,7 @@ from vibe.core.skills.registry import (
     _store,
 )
 from vibe.core.skills.registry._client import RegistrySkillsClient, RegistrySkillsError
-from vibe.core.skills.registry._manifest import SkillManifest
+from vibe.core.skills.registry._manifest import ManifestReadError, SkillManifest
 from vibe.core.skills.registry.models import RegistrySkillItem, SkillVersionInfo
 from vibe.observability.logging import logger
 from vibe.utils.paths import resolves_within
@@ -370,7 +370,13 @@ async def _materialize_missing(
                 logger.warning("Failed to fetch skill '%s': %s", name, exc.reason)
                 counts.missed(exc)
                 return
-        if await _store.materialize(item, name) is None:
+        try:
+            stored = await _store.materialize(item, name)
+        except OSError:
+            logger.warning("Failed to store skill '%s'", name, exc_info=True)
+            counts.failed += 1
+            return
+        if stored is None:
             counts.skipped += 1
             return
         counts.written += 1
@@ -485,7 +491,7 @@ async def import_skill(
     pin = _pin_for(version, alias)
     item, name = await _fetch(config, skill_id, pin, credentials)
     path = _manifest_path_for_scope(scope, roots)
-    manifest = await _manifest.load(path)
+    manifest = await _writable_manifest(path)
     if any(
         pinned.name == name and pinned.skill_id != skill_id
         for pinned in manifest.skills
@@ -534,29 +540,30 @@ async def restore_session_skills(
     pins: Sequence[ManifestEntry],
     *,
     credentials: PlatformCredentialFactory | None = None,
-) -> None:
+) -> list[str]:
     """Fetch again the picked versions a store cleanup took, so a reopened session
-    runs what it picked. One that cannot be fetched is logged and left out.
+    runs what it picked. Returns the names of those still missing.
     """
-    for pin in pins:
-        if not isinstance(pin.version, int) or not _store.is_safe_skill_id(
-            pin.skill_id
-        ):
-            continue
-        if await _store.is_materialized(pin.skill_id, pin.version):
-            continue
-        try:
-            await import_session_skill(
-                config, pin.skill_id, version=pin.version, credentials=credentials
-            )
-        except RegistrySkillsError as exc:
-            logger.warning(
-                "Could not restore the session's skill %s (%s@%d): %s",
-                pin.name,
-                pin.skill_id,
-                pin.version,
-                exc.reason,
-            )
+    targets = [
+        (pin.skill_id, pin.version, pin.name)
+        for pin in pins
+        if isinstance(pin.version, int)
+        and _store.is_safe_skill_id(pin.skill_id)
+        and not await _store.is_materialized(pin.skill_id, pin.version)
+    ]
+    if not targets:
+        return []
+    endpoint = await asyncio.to_thread(_resolve_endpoint, config, credentials)
+    if endpoint is None:
+        logger.warning("Could not restore the session's skills: no Mistral credential")
+        return [name for _, _, name in targets]
+    async with RegistrySkillsClient(endpoint.api_base, endpoint.credentials) as client:
+        await _materialize_missing(client, targets, _Counts())
+    return [
+        name
+        for skill_id, version, name in targets
+        if not await _store.is_materialized(skill_id, version)
+    ]
 
 
 def _pin_for(version: int | None, alias: str | None) -> int | str:
@@ -601,6 +608,17 @@ async def _store_fetched(
         raise RegistrySkillsError(f"skill {skill_id} has an empty body")
     if isinstance(pin, str) and pin != REGISTRY_LATEST_ALIAS:
         await asyncio.to_thread(_resolved.record, {(skill_id, pin): item.version})
+
+
+async def _writable_manifest(path: Path) -> SkillManifest:
+    try:
+        return await _manifest.read(path)
+    except ManifestReadError as exc:
+        raise RegistrySkillsError(_unwritable(exc)) from exc
+
+
+def _unwritable(exc: ManifestReadError) -> str:
+    return f"{exc}. Fix or delete the file; it was left unchanged"
 
 
 def _manifest_path_for_scope(
@@ -913,7 +931,10 @@ def remove_skill(
         paths = [_manifest.global_manifest_path()]
     removed = False
     for path in paths:
-        manifest = _manifest.load_sync(path)
+        try:
+            manifest = _manifest.read_sync(path)
+        except ManifestReadError as exc:
+            raise RegistrySkillsError(_unwritable(exc)) from exc
         if manifest.remove(name):
             _manifest.save_sync(path, manifest)
             removed = True

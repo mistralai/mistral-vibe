@@ -45,6 +45,8 @@ fn selected_owner(
         RegionId::Loading => &mut app.view.loading_selection_region,
         RegionId::Goal => &mut app.view.goal_selection_region,
         RegionId::BottomApp => &mut app.view.bottom_app_selection_region,
+        RegionId::RailWindow => &mut app.view.rail_window_selection_region,
+        RegionId::CodePreview => &mut app.code_preview.selection,
     };
     region.area = chat;
     region.end_exclusive = end_exclusive;
@@ -124,14 +126,14 @@ fn drag_over_an_indented_tool_header_skips_its_chrome() {
     assert_eq!(selected("    ⏵ Read file", 0, 14), vec![(0, 6, 14)]);
 }
 
-#[test]
-fn grouped_diff_selection_skips_nested_borders_and_line_number_gutter() {
+/// The whole of a transcript `row` painted by an entry with `(border, gutter)` chrome columns.
+fn selected_in_entry(row: &str, (border, gutter): (u16, u16)) -> Vec<(u16, u16, u16)> {
     let chat = Rect::new(0, 0, 24, 1);
     let mut buf = Buffer::empty(chat);
-    buf.set_string(0, 0, "  ⎢   ⎢    4 + BETA", Style::default());
+    buf.set_string(0, 0, row, Style::default());
     let mut app = App::default();
     app.view.selection_region.area = chat;
-    app.view.diff_hitmap.push((0, 1, 7));
+    app.view.chrome_hitmap.push((0, 1, 0, border, gutter));
     app.selection.region = Some(Selection {
         owner: RegionId::Main,
         anchor: (0, 0),
@@ -143,7 +145,31 @@ fn grouped_diff_selection_skips_nested_borders_and_line_number_gutter() {
         text: String::new(),
     });
 
-    assert_eq!(region::spans(&app, &buf, chat), vec![(0, 15, 18)]);
+    region::spans(&app, &buf, chat)
+}
+
+#[test]
+fn grouped_diff_selection_skips_nested_borders_and_line_number_gutter() {
+    assert_eq!(
+        selected_in_entry("│ │    4 + BETA", (4, 7)),
+        vec![(0, 11, 14)]
+    );
+}
+
+#[test]
+fn a_border_glyph_past_the_entry_border_is_content() {
+    assert_eq!(selected_in_entry("│ │ │ x", (4, 0)), vec![(0, 4, 6)]);
+    assert_eq!(selected_in_entry("│ x", (0, 0)), vec![(0, 0, 2)]);
+}
+
+#[test]
+fn an_inset_notice_border_is_chrome() {
+    assert_eq!(selected_in_entry("  └ msg", (4, 0)), vec![(0, 4, 6)]);
+}
+
+#[test]
+fn an_edit_header_keeps_its_text_from_the_diff_gutter() {
+    assert_eq!(selected_in_entry("⏵ Edited a.rs", (2, 7)), vec![(0, 2, 12)]);
 }
 
 #[test]

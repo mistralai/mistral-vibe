@@ -31,7 +31,7 @@ pub(crate) use crate::core::features::file_system::BashTimeoutSettings;
 pub(crate) use crate::core::features::large_output::Policy as LargeOutputPolicy;
 pub(crate) use crate::core::features::notifications::{
     AsyncToolNotificationStatus, Notification, NotificationLevel, NotificationSource,
-    NotificationState, ProcessTerminalStatus, SubagentNotificationStatus,
+    ProcessTerminalStatus, SubagentNotificationStatus,
 };
 pub(crate) use crate::core::features::programmatic_tool_calling::Settings as ProgrammaticToolSettings;
 pub(crate) use crate::core::features::programmatic_tool_calling::{
@@ -293,6 +293,7 @@ pub(crate) fn config() -> HarnessConfig {
                 },
                 model_facts: test_model_facts(),
                 compaction_model_input_modalities: None,
+                instructions: Default::default(),
             },
             tools: ToolSettings {
                 max_wait_ms: 3_600_000,

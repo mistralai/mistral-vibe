@@ -24,6 +24,8 @@ FIXTURE_PATH = E2E_DIR / "fixtures" / "fixture.json"
 WHATS_NEW_FIXTURE = E2E_DIR / "fixtures" / "whats_new"
 # Eight frozen releases: enough to cap the startup banner and scroll `/release-notes`.
 WHATS_NEW_HISTORY_FIXTURE = E2E_DIR / "fixtures" / "whats_new_history"
+# One release whose notes end with a link, set apart in a list of its own.
+WHATS_NEW_LINK_FIXTURE = E2E_DIR / "fixtures" / "whats_new_link"
 # The client's working directory: a small tree, so startup indexing stays cheap.
 WORKSPACE_DIR = E2E_DIR / "fixtures" / "workspace"
 CLIENT_BIN = VIBE_DIR / "vibe" / "cli-rust" / "target" / "release" / "vibe-rs"

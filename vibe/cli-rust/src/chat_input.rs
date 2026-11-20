@@ -155,17 +155,6 @@ fn delete_lines(
     (!deleted.is_empty()).then_some(deleted)
 }
 
-/// Cut the selected text, or the current line when the selection is empty.
-pub fn cut(input: &mut String, cursor: &mut usize, anchor: &mut Option<usize>) -> Option<String> {
-    normalize_positions(input, cursor, anchor);
-    if let Some((lo, hi)) = selection_range(input, *cursor, *anchor) {
-        let deleted = input[lo..hi].to_owned();
-        delete_selection(input, cursor, anchor);
-        return Some(deleted);
-    }
-    delete_lines(input, cursor, anchor)
-}
-
 /// Begin (or keep) a selection anchored at the caret before a Shift-move.
 fn anchor_selection(cursor: usize, anchor: &mut Option<usize>) {
     if anchor.is_none() {

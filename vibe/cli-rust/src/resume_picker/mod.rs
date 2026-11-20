@@ -16,7 +16,6 @@ use crate::session_exit;
 
 pub use notice::rebase;
 pub(crate) use notice::{frozen, load_history, spinning};
-pub(crate) use request::delete_session;
 pub use request::{held, lease_locked};
 
 /// One `session/list` item (app-server `PublicSession`).
@@ -143,6 +142,16 @@ fn apply_lease_snapshot(app: &mut App, mut snapshot: std::collections::HashSet<S
     picker.locked = snapshot;
 }
 
+/// Close the picker as Esc does, a resume in flight included; false while a delete is in flight.
+pub fn close(app: &mut App) -> bool {
+    if app.resume_picker.deleting.is_some() {
+        return false;
+    }
+    notice::close(app);
+    drop_initial_prompt(app);
+    true
+}
+
 pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     // A delete in flight owns the picker.
     if app.resume_picker.deleting.is_some() {
@@ -158,8 +167,7 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
     match key.code {
         KeyCode::Esc if app.resume_picker.delete_confirm.take().is_some() => {}
         KeyCode::Esc => {
-            notice::close(app);
-            drop_initial_prompt(app);
+            close(app);
         }
         KeyCode::Up => navigate(app, client, false),
         KeyCode::Down => navigate(app, client, true),

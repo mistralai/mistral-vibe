@@ -72,6 +72,7 @@ impl RunSpec {
             model: None,
             thinking: None,
             agent: params.agent,
+            approval_policy: params.approval_policy,
             auto_approve: params.auto_approve,
             enabled_tools: params.enabled_tools.unwrap_or_default(),
             disabled_tools: params.disabled_tools.unwrap_or_default(),

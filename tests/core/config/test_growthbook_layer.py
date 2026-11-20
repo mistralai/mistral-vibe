@@ -1179,6 +1179,7 @@ async def test_routing_accepts_json_string_variant() -> None:
 
 
 _SESSION_API_ENV = "VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API"
+_RETIRED_SESSION_API_FLAG = "vibe_cli_local_runtime_session_api_migration"
 
 
 async def _session_api_switch(
@@ -1191,7 +1192,7 @@ async def _session_api_switch(
     orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
     if flag is not None:
-        layer.set_variants({ExperimentName.LOCAL_RUNTIME_SESSION_API.value: flag})
+        layer.set_variants({_RETIRED_SESSION_API_FLAG: flag})
     await orchestrator.reload()
     return orchestrator.config.experimental_local_runtime_session_api
 
@@ -1200,25 +1201,25 @@ async def _session_api_switch(
 @pytest.mark.parametrize(
     ("flag", "env", "expected"),
     [
-        (None, None, False),
-        (True, None, True),
-        ("on", None, True),
-        (False, None, False),
+        (None, None, True),
+        (False, None, True),
+        ("off", None, True),
+        (None, "false", False),
         (True, "false", False),
-        (False, "true", True),
         (None, "true", True),
     ],
 )
-async def test_the_session_api_switch_follows_its_flag_unless_the_environment_sets_it(
+async def test_the_session_api_switch_is_on_unless_the_environment_turns_it_off(
     monkeypatch: pytest.MonkeyPatch,
     flag: object | None,
     env: str | None,
     expected: bool,
 ) -> None:
-    """*Prepare*: The migration flag and its environment variable, each set or not.
+    """*Prepare*: The retired migration flag and the environment variable, each
+        set or not.
     *Do*: Resolve the configuration.
-    *Assert*: The switch is off by default, follows the flag, and follows the
-        environment variable whenever it is set.
+    *Assert*: The switch is on by default, ignores the retired flag, and
+        follows the environment variable whenever it is set.
     """
     # Do
     switch = await _session_api_switch(monkeypatch, flag=flag, env=env)

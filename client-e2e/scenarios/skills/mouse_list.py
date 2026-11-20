@@ -16,10 +16,10 @@ handshake = {
 }
 request_methods = METHODS
 
-_HIGHLIGHT_DEPLOY = click(10, 26)
-_FOCUS_SEARCH = click(10, 22)
+_HIGHLIGHT_LINT = click(10, 28)
+_FOCUS_SEARCH = click(10, 21)
 
-timeline: Timeline = ["/skills\r", _HIGHLIGHT_DEPLOY, _FOCUS_SEARCH]
+timeline: Timeline = ["/skills\r", _HIGHLIGHT_LINT, _FOCUS_SEARCH]
 
 screen_contains = ("leave search",)
 screen_excludes = ("Esc back",)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from e2e.app_server.config import COLUMNS
 from e2e.app_server.events import assistant_msg, turn_completed, turn_started, user_msg
 from e2e.app_server.scenario import Timeline, take_snapshot
 
@@ -35,3 +36,6 @@ timeline: Timeline = [
 
 # The input-only frames are intentionally busy; compare the settled turn
 # frames and the final manual scroll instead.
+
+# The final thumb spans rows 21-30: a lower block, full blocks, then a native upper eighth (the harness pins Ghostty).
+screen_rows = {21: "▇".rjust(COLUMNS), 30: "  b21".ljust(COLUMNS - 1) + "🮄"}

@@ -9,15 +9,21 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from vibe.core.agents._migration import migrate_agent_profile_files
-from vibe.core.agents.models import BUILTIN_AGENTS, AgentProfile
+from vibe.core.agents.models import (
+    BUILTIN_AGENTS,
+    BUILTIN_APPROVAL_POLICIES,
+    AgentProfile,
+)
 from vibe.core.config._setting_keys import UnusedConfigKeysError
 from vibe.core.config.builder import InvalidConfigError
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.layer import ConfigLayer, RawConfig
 from vibe.core.config.layers.agent_profile import (
+    APPROVAL_POLICY_LAYER,
     AgentProfileLayer,
     refuse_profile_shell_timeouts,
 )
+from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import dedup_paths
 from vibe.observability.logging import logger
@@ -95,6 +101,182 @@ def _restore_profile_layer(
         orchestrator.replace_or_append_layer(AgentProfileLayer.NAME, previous)
 
 
+def apply_session_layers(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    agent: AgentProfile,
+    policy: AgentProfile,
+) -> None:
+    """Install the session's agent and approval policy, then rebuild once.
+
+    A refused rebuild puts both previous layers back. Off the event loop only;
+    code on it uses ``apply_session_layers_async``.
+    """
+    previous = _install_session_layers(orchestrator, agent, policy)
+    try:
+        orchestrator.rebuild()
+    except Exception:
+        _restore_session_layers(orchestrator, previous)
+        raise
+
+
+async def apply_session_layers_async(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    agent: AgentProfile,
+    policy: AgentProfile,
+) -> None:
+    previous = _install_session_layers(orchestrator, agent, policy)
+    try:
+        await orchestrator.arebuild()
+    except BaseException:
+        _restore_session_layers(orchestrator, previous)
+        raise
+
+
+type _PreviousLayers = tuple[tuple[str, ConfigLayer[RawConfig] | None], ...]
+
+
+def _install_session_layers(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema],
+    agent: AgentProfile,
+    policy: AgentProfile,
+) -> _PreviousLayers:
+    agent_overrides, policy_overrides = session_layer_overrides(agent, policy)
+    previous = (
+        (AgentProfileLayer.NAME, _layer_named(orchestrator, AgentProfileLayer.NAME)),
+        (APPROVAL_POLICY_LAYER, _layer_named(orchestrator, APPROVAL_POLICY_LAYER)),
+    )
+    orchestrator.replace_or_append_layer(
+        AgentProfileLayer.NAME,
+        AgentProfileLayer(data=agent_overrides, profile_name=agent.name),
+    )
+    policy_layer = AgentProfileLayer(data=policy_overrides, name=APPROVAL_POLICY_LAYER)
+    if previous[1][1] is not None:
+        orchestrator.replace_or_append_layer(APPROVAL_POLICY_LAYER, policy_layer)
+    else:
+        # Right above the agent's, so the org's layer still outranks it.
+        index = next(
+            i
+            for i, layer in enumerate(orchestrator.layers)
+            if layer.name == AgentProfileLayer.NAME
+        )
+        orchestrator.insert_layer(policy_layer, index + 1)
+    return previous
+
+
+def _restore_session_layers(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], previous: _PreviousLayers
+) -> None:
+    for name, layer in reversed(previous):
+        index = next(
+            (
+                i
+                for i, existing in enumerate(orchestrator.layers)
+                if existing.name == name
+            ),
+            None,
+        )
+        if layer is not None:
+            orchestrator.replace_or_append_layer(name, layer)
+        elif index is not None:
+            orchestrator.remove_layer(index)
+
+
+def _layer_named(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], name: str
+) -> ConfigLayer[RawConfig] | None:
+    return next((layer for layer in orchestrator.layers if layer.name == name), None)
+
+
+_PERMISSION_STRICTNESS = {"never": 0, "ask": 1, "always": 2}
+_NARROWING_PERMISSIONS = frozenset({"never", "ask"})
+
+
+def agent_refused_tools(agent: AgentProfile) -> set[str]:
+    """The tools ``agent`` sets to ``permission = "never"``."""
+    tools = agent.overrides.get("tools")
+    if not isinstance(tools, dict):
+        return set()
+    return {
+        name
+        for name, settings in tools.items()
+        if isinstance(settings, dict) and settings.get("permission") == "never"
+    }
+
+
+def session_layer_overrides(
+    agent: AgentProfile, policy: AgentProfile
+) -> tuple[dict[str, object], dict[str, object]]:
+    """The agent's and the policy's layers.
+
+    What runs without asking belongs to the policy alone, so the agent's own
+    bypass and its ``permission = "always"`` grants are dropped; an agent may
+    only narrow, to ``ask`` or ``never``. A policy never loosens a tool
+    permission the agent narrowed, and a bypassing policy, which skips every
+    permission, disables the tools the agent set to ``never``.
+    """
+    agent_overrides = {
+        key: value
+        for key, value in agent.overrides.items()
+        if key != "bypass_tool_permissions"
+    }
+    agent_tools = agent.overrides.get("tools")
+    policy_overrides = dict(policy.overrides)
+    if policy_overrides.get("bypass_tool_permissions") is True:
+        if refused := sorted(agent_refused_tools(agent)):
+            policy_overrides["disabled_tools"] = [
+                *policy_overrides.get("disabled_tools", []),
+                *refused,
+            ]
+    if isinstance(agent_tools, dict):
+        agent_tools = {
+            name: (
+                {k: v for k, v in settings.items() if k != "permission"}
+                if isinstance(settings, dict)
+                and settings.get("permission") not in _NARROWING_PERMISSIONS
+                else settings
+            )
+            for name, settings in agent_tools.items()
+        }
+        agent_overrides["tools"] = agent_tools
+    policy_tools = policy.overrides.get("tools")
+    if not isinstance(agent_tools, dict) or not isinstance(policy_tools, dict):
+        return agent_overrides, policy_overrides
+    tools: dict[str, object] = {}
+    for name, settings in policy_tools.items():
+        own = agent_tools.get(name)
+        own_permission = own.get("permission") if isinstance(own, dict) else None
+        wanted = settings.get("permission") if isinstance(settings, dict) else None
+        if (
+            isinstance(settings, dict)
+            and isinstance(own_permission, str)
+            and isinstance(wanted, str)
+            and _PERMISSION_STRICTNESS.get(own_permission, 2)
+            < _PERMISSION_STRICTNESS.get(wanted, 2)
+        ):
+            settings = {k: v for k, v in settings.items() if k != "permission"}
+        tools[name] = settings
+    return agent_overrides, {**policy_overrides, "tools": tools}
+
+
+AGENT_SETTING_IGNORED = "agent.setting_ignored"
+PROJECT_POLICY_OVERRIDE_IGNORED = "approval_policy.project_override_ignored"
+
+
+@dataclass(frozen=True, slots=True)
+class AgentFileIssue:
+    """An agent file discovery kept only in part, or ignored, and why.
+
+    ``code`` is machine-readable; ``key`` is the dotted setting an agent may
+    not set, for ``agent.setting_ignored``.
+    """
+
+    code: str
+    name: str
+    path: Path
+    message: str
+    key: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class AgentLoadFailure:
     """An agent file discovery dropped, and why."""
@@ -142,6 +324,8 @@ class AgentRegistry:
         self.search_paths = self._compute_search_paths()
         self._migrate()
         self.failures: tuple[AgentLoadFailure, ...] = ()
+        self.issues: tuple[AgentFileIssue, ...] = ()
+        self.policies: dict[str, AgentProfile] = dict(BUILTIN_APPROVAL_POLICIES)
         self.discovered = self._discover()
 
     def _compute_search_paths(self) -> list[Path]:
@@ -161,6 +345,8 @@ class AgentRegistry:
     def _discover(self) -> dict[str, AgentProfile]:
         agents: dict[str, AgentProfile] = dict(BUILTIN_AGENTS)
         failures: list[AgentLoadFailure] = []
+        issues: list[AgentFileIssue] = []
+        project_dirs = self._project_scoped_dirs()
         candidate: ConfigOrchestrator[VibeConfigSchema] | None = None
 
         for base in self.search_paths:
@@ -172,6 +358,40 @@ class AgentRegistry:
                 if candidate is None:
                     candidate = self._orchestrator.copy()
                 agent = self._try_load(agent_file, candidate, failures, agents)
+                if agent is not None and agent.name in BUILTIN_APPROVAL_POLICIES:
+                    if base.resolve() in project_dirs:
+                        # What runs without asking is the user's or the org's
+                        # call, never a repository's.
+                        issues.append(
+                            AgentFileIssue(
+                                code=PROJECT_POLICY_OVERRIDE_IGNORED,
+                                name=agent.name,
+                                path=agent_file,
+                                message=(
+                                    f"A project cannot redefine the approval policy "
+                                    f"'{agent.name}'; this file is ignored. Move it "
+                                    "to ~/.vibe/agents/ to override the policy."
+                                ),
+                            )
+                        )
+                        continue
+                    self._override_policy(agent, agent_file)
+                    continue
+                if agent is not None:
+                    issues.extend(
+                        AgentFileIssue(
+                            code=AGENT_SETTING_IGNORED,
+                            name=agent.name,
+                            path=agent_file,
+                            key=key,
+                            message=(
+                                f"Agent '{agent.name}' sets '{key}', which an agent "
+                                "may not set; it is ignored. What runs without "
+                                "asking is the approval policy's."
+                            ),
+                        )
+                        for key in agent.ignored_settings
+                    )
                 if agent is not None:
                     if agent.name in BUILTIN_AGENTS and agent.config_error is not None:
                         # A broken override of a builtin mode keeps the builtin,
@@ -197,7 +417,41 @@ class AgentRegistry:
                     agents[agent.name] = agent
 
         self.failures = tuple(failures)
+        self.issues = tuple(issues)
         return agents
+
+    def _project_scoped_dirs(self) -> set[Path]:
+        """The agent directories a repository supplies: its `.vibe/agents`, and
+        the `agent_paths` its own `.vibe/config.toml` adds.
+        """
+        dirs = {path.resolve() for path in self._harness_files.project_agents_dirs}
+        project = _layer_named(self._orchestrator, ProjectConfigLayer.NAME)
+        data = project.cached_data if project is not None else None
+        paths = getattr(data, "agent_paths", None)
+        if isinstance(paths, list):
+            dirs.update(
+                Path(path).expanduser().resolve()
+                for path in paths
+                if isinstance(path, str | Path)
+            )
+        return dirs
+
+    def _override_policy(self, policy: AgentProfile, path: Path) -> None:
+        current = self.policies[policy.name]
+        if current is not BUILTIN_APPROVAL_POLICIES[policy.name]:
+            logger.debug("Skipping duplicate policy '%s' at %s", policy.name, path)
+            return
+        if policy.config_error is not None:
+            # A broken override keeps the builtin, so the session still starts.
+            logger.warning(
+                "Ignoring the override of approval policy '%s' at %s: %s",
+                policy.name,
+                path,
+                policy.config_error,
+            )
+            return
+        logger.info("Custom file overrides approval policy '%s'", policy.name)
+        self.policies[policy.name] = policy
 
     def _try_load(
         self,

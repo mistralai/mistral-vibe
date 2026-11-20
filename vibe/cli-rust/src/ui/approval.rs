@@ -129,7 +129,8 @@ fn rows(app: &mut App, width: u16, max_rows: u16) -> ApprovalRows {
         )
     };
     let title_style = theme::text(theme::warning()).add_modifier(Modifier::BOLD);
-    let reserved = OPTIONS.len() + 3;
+    let help = super::hint_line::lines(HELP, width);
+    let reserved = OPTIONS.len() + 2 + help.len();
     let title_limit = (max_rows as usize).saturating_sub(reserved);
     let title =
         crate::utils::text::ellipsize(&title, usize::from(width).saturating_mul(title_limit));
@@ -184,7 +185,7 @@ fn rows(app: &mut App, width: u16, max_rows: u16) -> ApprovalRows {
     let options_start = title_rows.len() as u16;
     title_rows.extend(option_rows(app.approval.list.selected(), width));
     title_rows.push(Line::default());
-    title_rows.push(help());
+    title_rows.extend(help);
     ApprovalRows {
         lines: title_rows,
         detail_start,
@@ -211,6 +212,4 @@ fn option_rows(selected: usize, width: u16) -> impl Iterator<Item = Line<'static
     })
 }
 
-fn help() -> Line<'static> {
-    super::hint_line::line(&[hints::NAVIGATE, hints::SELECT, (key::ESC, action::REJECT)])
-}
+const HELP: &[hints::Hint] = &[hints::NAVIGATE, hints::SELECT, (key::ESC, action::REJECT)];

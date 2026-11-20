@@ -6,7 +6,8 @@ from typing import cast
 
 import pytest
 
-from vibe.app_server._dispatch import RequestFailure
+from vibe.app_server import server as server_module
+from vibe.app_server._dispatch import DispatchResult, RequestFailure
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._session_backend_port import (
@@ -22,6 +23,7 @@ from vibe.app_server.models import IdleSessionStatus, PublicSession, PublicSessi
 from vibe.app_server.protocol import (
     EmptyResponse,
     ProtocolErrorCode,
+    ServerRequest,
     SessionMarkAsSeenParams,
     SessionReadResponse,
 )
@@ -51,6 +53,7 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "steer_turn",
         "subscribe",
         "switch_agent",
+        "switch_approval_policy",
         "uninstall_agent",
         "update_settings",
         "write_config",
@@ -65,6 +68,7 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "config/model/write",
         "config/write",
         "session/agent/update",
+        "session/approvalPolicy/update",
         "session/compact",
         "session/context/inject",
         "session/settings/update",
@@ -394,3 +398,66 @@ def _accept_session_backend_host(backend: SessionBackendHost) -> None:
 
 def _protocol_members(protocol: type[object]) -> set[str]:
     return {name for name in protocol.__dict__ if not name.startswith("_")}
+
+
+@pytest.mark.parametrize("stream", ["delivers", "is_stuck"])
+@pytest.mark.asyncio
+async def test_resume_sends_open_callbacks_after_the_held_turn_announcement(
+    stream: str, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """*Prepare*: A resumed root holding its turn announcement for its event
+        stream, which either delivers it or never does.
+    *Do*: Finish the `session/resume` request.
+    *Assert*: Open callbacks go out once the announcement was delivered; a stuck
+        stream delays them only until the timeout, then they go out anyway.
+    """
+    # Prepare
+    order: list[str] = []
+    held = asyncio.Event()
+
+    class ResumedRoot:
+        session_id = "session-1"
+
+        async def wait_for_held_events(self) -> None:
+            await held.wait()
+            order.append("announced")
+
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
+    )
+    server._root = cast(SessionBackend, ResumedRoot())
+
+    async def redeliver(_attach_method: str) -> None:
+        order.append("callbacks")
+
+    monkeypatch.setattr(server, "_redeliver_open_callbacks", redeliver)
+    monkeypatch.setattr(
+        server_module, "_RUNNING_TURN_ANNOUNCEMENT_TIMEOUT_SECONDS", 0.05
+    )
+    request = ServerRequest(
+        id=1, method="session/resume", params={"sessionId": "session-1"}
+    )
+
+    # Do
+    finishing = asyncio.create_task(
+        server._after_response(
+            request, DispatchResult(EmptyResponse(), session_attached=True)
+        )
+    )
+    if stream == "delivers":
+        held.set()
+    await asyncio.wait_for(finishing, timeout=1)
+
+    # Assert
+    expected = ["announced", "callbacks"] if stream == "delivers" else ["callbacks"]
+    assert order == expected

@@ -1,5 +1,4 @@
-//! Bottom bar: cwd (with a copy icon once shortened) and PR/MR link on the left; usage and context gauges on the right.
-//! The PR/MR link (one active artifact, or a count) opens the artifacts modal.
+//! Bottom bar: cwd (with a copy icon once shortened) on the left; usage and context gauges on the right.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -8,8 +7,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::bottom_bar_parts::{link_input, spans};
-use super::footer_fit::{self, Tone, COPY_ICON, GAP, GAUGE_SEP};
+use super::bottom_bar_parts::spans;
+use super::footer_fit::{self, Tone, COPY_ICON, GAUGE_SEP};
 use super::theme;
 use crate::app::App;
 use crate::selection::{cells, Granularity};
@@ -19,8 +18,6 @@ use unicode_width::UnicodeWidthStr;
 /// What a click on a painted bar link does.
 #[derive(Clone)]
 pub enum BarLinkAction {
-    /// Open the artifacts modal.
-    ListArtifacts,
     /// Copy the whole working directory.
     CopyPath(String),
 }
@@ -32,6 +29,14 @@ pub struct BarLink {
 }
 
 pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
+    let below = Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    );
+    super::reverse_search::draw_hints(app, f, below);
+    let area = Rect { height: 1, ..area };
     crate::mouse::register_region(app, area, crate::mouse::MouseTarget::BottomBar);
     let cwd = crate::replay::footer_cwd(
         app.session
@@ -55,15 +60,13 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         ])
     });
     // The history search line takes the quit hint's slot.
-    let quit = quit.or_else(|| super::reverse_search::line(app));
-    let link = link_input(app);
+    let quit = quit.or_else(|| super::reverse_search::line(app, area.width));
     let path = app.session.cwd.clone().map(crate::replay::footer_cwd);
     let fitted = footer_fit::fit(footer_fit::Inputs {
         width: area.width as usize,
         cwd: &cwd,
         copy_icon: path.is_some(),
         quit: quit.as_ref().map(Line::width),
-        link,
         tokens: app.session.tokens,
         usage: crate::usage_gauge::footer_usage(app),
     });
@@ -78,14 +81,6 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         let start = left.len();
         left.extend(spans(vec![(COPY_ICON.to_owned(), Tone::Text)]));
         links.push((start, left.len(), BarLinkAction::CopyPath(path)));
-    }
-    if !fitted.link.is_empty() {
-        if !left.is_empty() {
-            left.push(Span::raw(GAP));
-        }
-        let start = left.len();
-        left.extend(spans(fitted.link));
-        links.push((start, left.len(), BarLinkAction::ListArtifacts));
     }
     let mut right = Vec::new();
     let context_width = fitted
@@ -114,6 +109,8 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         .map(|(from, to, action)| {
             let x = area.x + left.spans[..from].iter().map(Span::width).sum::<usize>() as u16;
             let width = left.spans[from..to].iter().map(Span::width).sum::<usize>() as u16;
+            // Many fonts draw the copy icon over the blank cell after it, so that cell clicks too.
+            let width = width + u16::from(matches!(action, BarLinkAction::CopyPath(_)));
             BarLink {
                 area: Rect {
                     x,
@@ -154,11 +151,6 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     if app.view.mouse_position.is_some_and(|at| tokens_at(app, at)) {
         super::list_hover::paint_button(f.buffer_mut(), app.view.footer_tokens_area);
     }
-    // The copy icon keeps its look under the pointer; only the hand says it is clickable.
-    let hovered = app.view.mouse_position.and_then(|at| link_at(app, at));
-    if let Some(link) = hovered.filter(|link| !matches!(link.action, BarLinkAction::CopyPath(_))) {
-        super::list_hover::paint_button(f.buffer_mut(), link.area);
-    }
     super::reverse_search::draw_caret(app, f, area);
     paint_selection(app, f, area);
 }
@@ -166,7 +158,9 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
 /// Whether `at` is on the footer's context gauge; a click there toggles `/context`, a side-channel read that also runs while a turn generates.
 pub fn tokens_at(app: &App, at: (u16, u16)) -> bool {
     use crate::focus::Focus;
-    matches!(app.focus(), Focus::Composer | Focus::ContextApp)
+    // A rail window is no picker: the gauge stays clickable over it.
+    let focus = app.focus();
+    (focus.is_rail_surface() || matches!(focus, Focus::Composer | Focus::ContextApp))
         && !app.view.footer_tokens_area.is_empty()
         && app.view.footer_tokens_area.contains(at.into())
 }
@@ -176,22 +170,15 @@ pub fn clickable_at(app: &App, at: (u16, u16)) -> bool {
     tokens_at(app, at) || link_at(app, at).is_some()
 }
 
-/// The painted link at `at` (the cwd's copy icon or the PR/MR link), unless an overlay drawn over the footer blocks it.
+/// The painted link at `at` (the cwd's copy icon), unless an overlay drawn over the footer blocks it.
 pub fn link_at(app: &App, at: (u16, u16)) -> Option<&BarLink> {
     use crate::focus::Focus;
-    let focus = app.focus();
-    if matches!(focus, Focus::Config | Focus::ReleaseNotes) {
+    if matches!(app.focus(), Focus::Config | Focus::ReleaseNotes) {
         return None;
     }
-    // The PR list would open under any panel that has focus over it.
-    let lists = matches!(
-        focus,
-        Focus::ArtifactsModal | Focus::SubagentList | Focus::Composer
-    );
     app.view
         .bottom_bar_links
         .iter()
-        .filter(|link| lists || !matches!(link.action, BarLinkAction::ListArtifacts))
         .find(|link| link.area.contains(at.into()))
 }
 
@@ -229,6 +216,7 @@ fn paint_selection(app: &mut App, f: &mut Frame, area: Rect) {
             cell.set_style(cell.style().patch(style));
         }
     }
+    app.view.copy_light.paint(buf, &[(area.y, x0, x1)]);
 }
 
 /// Copy a bottom-bar selection whose release armed a deferred copy, using the
@@ -242,7 +230,7 @@ pub fn honor_pending_copy(app: &mut App) {
         return;
     }
     let text = sel.text.clone();
-    crate::ui::notice::copy_if_autocopy(app, &text);
+    crate::ui::selection::autocopy(app, &text);
     if let Some(sel) = app.selection.bottom_bar.as_mut() {
         sel.pending_copy = false;
     }

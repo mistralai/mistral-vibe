@@ -2,8 +2,8 @@
 
 A session follows its own config, and tells its client with
 ``runtime/updated``. A settings screen with no session open has nothing to
-follow: the org config the process holds is refreshed in the background, and
-another connection may write a setting. Each connection that subscribed
+follow: the org config and the model catalog the process holds are refreshed
+in the background, and another connection may write a setting. Each connection that subscribed
 (``config/subscribe``) is told here, and re-reads what it shows.
 """
 

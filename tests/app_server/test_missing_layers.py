@@ -112,7 +112,7 @@ def oidc_credentials(monkeypatch):
 
 
 _CLIENT = ClientInfo(name="vibe-desktop", version="9.9.9")
-_ORG_TOML = 'default_agent = "ask"\n'
+_ORG_TOML = 'default_approval_policy = "ask"\n'
 _LIMIT = 0.2
 # Long enough that the fake org server always answers within it on a loaded
 # worker; only tests of a hanging org config wait for it.
@@ -317,7 +317,7 @@ async def test_stored_oidc_without_tenant_resolves_then_fetches_picker_layers(
     remote = _Remote(monkeypatch, org_server)
     handler = _handler(process_services=process_services)
     view = (await _read_config(handler)).config
-    assert view.default_agent == "ask"
+    assert view.default_approval_policy == "ask"
     assert "catalog-model" in {model.alias for model in view.models}
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
     resolve.assert_awaited_once()
@@ -362,7 +362,7 @@ async def test_oidc_tenant_resolution_timeout_keeps_local_defaults(
     )
     remote = _Remote(monkeypatch, org_server)
     view = (await _read_config(_handler(process_services=process_services))).config
-    assert view.default_agent != "ask"
+    assert view.default_approval_policy != "ask"
     assert remote.calls == {"org": 0, "eval": 0, "catalog": 0}
 
 
@@ -467,9 +467,9 @@ async def test_a_read_with_nothing_cached_answers_with_the_fetched_config(
     agents = await _list_agents(handler)
 
     assert "catalog-model" in {model.alias for model in view.models}
-    assert view.default_agent == "ask"
-    assert agents.active.name == "ask"
-    assert "smart-approve" in {agent.name for agent in agents.agents}
+    assert view.default_approval_policy == "ask"
+    assert agents.active_approval_policy.name == "ask"
+    assert "smart-approve" in {policy.name for policy in agents.approval_policies}
     # The eval is evaluated for the client that asked, as a session's is.
     assert remote.client_names == ["vibe-desktop"]
     # The second read found the caches the first one wrote.
@@ -505,13 +505,13 @@ async def test_hanging_endpoints_answer_local_defaults_and_are_not_waited_for_ag
     remote.release.set()
 
     assert first_duration < 1.5
-    assert first.default_agent != "ask"
+    assert first.default_approval_policy != "ask"
     assert "catalog-model" not in {model.alias for model in first.models}
     # Every source failed or hit its limit: the second read neither fetches
     # nor waits.
     assert second_duration < 2.5
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
-    assert second.default_agent == first.default_agent
+    assert second.default_approval_policy == first.default_approval_policy
 
 
 @pytest.mark.asyncio
@@ -625,7 +625,7 @@ async def test_concurrent_reads_share_one_fetch(
     views = await asyncio.gather(_read_config(handler), _read_config(handler))
 
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
-    assert [view.config.default_agent for view in views] == ["ask", "ask"]
+    assert [view.config.default_approval_policy for view in views] == ["ask", "ask"]
 
 
 @pytest.mark.asyncio
@@ -653,9 +653,9 @@ async def test_a_session_start_after_a_failed_org_config_read_waits_for_the_retr
             SessionOptions(cwd=str(tmp_path)), org_config=OrgConfigSource.ENSURED
         )
 
-        assert during.config_orchestrator.config.default_agent != "ask"
+        assert during.config_orchestrator.config.default_approval_policy != "ask"
         assert remote.calls["org"] == 2
-        assert after.config_orchestrator.config.default_agent == "ask"
+        assert after.config_orchestrator.config.default_approval_policy == "ask"
     finally:
         await services.close()
 
@@ -773,7 +773,7 @@ async def test_only_the_source_without_a_cache_is_fetched(
     agents = await _list_agents(handler)
 
     # The eval the process holds answers again, unfetched.
-    assert "smart-approve" in {agent.name for agent in agents.agents}
+    assert "smart-approve" in {policy.name for policy in agents.approval_policies}
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
 
 
@@ -878,7 +878,7 @@ async def test_an_org_config_the_folder_rejects_is_cached_and_rejected_per_read(
     remote = _Remote(
         monkeypatch,
         org_server,
-        org_toml='default_agent = "ask"\nenable_telemetry = "maybe"\n',
+        org_toml='default_approval_policy = "ask"\nenable_telemetry = "maybe"\n',
     )
     handler = _handler(process_services=process_services)
 
@@ -886,8 +886,8 @@ async def test_an_org_config_the_folder_rejects_is_cached_and_rejected_per_read(
     second = (await _read_config(handler)).config
 
     assert remote.calls["org"] == 1
-    assert first.default_agent != "ask"
-    assert second.default_agent != "ask"
+    assert first.default_approval_policy != "ask"
+    assert second.default_approval_policy != "ask"
 
 
 @pytest.mark.asyncio
