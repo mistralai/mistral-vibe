@@ -24,8 +24,8 @@ from vibe.core.config.layer import (
     LayerNotLoadedError,
     RawConfig,
 )
+from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.layers.default import DefaultConfigLayer
-from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.model_catalog import ModelCatalogLayer
 from vibe.core.config.layers.project import ProjectConfigLayer
 from vibe.core.config.layers.user import UserConfigLayer
@@ -99,19 +99,19 @@ class DefaultLayerResolutionError(Exception):
 
 type DefaultLayerResolver = Callable[[], ConfigLayer[RawConfig]]
 
-# A model alias any of these layers defines takes a sparse (field-only)
-# write. Durable layers reconstruct the model at restart; the catalog and
-# GrowthBook layers re-fetch theirs at launch, and once they no longer define
-# the model the missing-model fallback drops the sparse entry with a warning
-# instead of failing validation (VIBE-4877). A model only a session override,
-# an agent profile or the admin layer defines is excluded: nothing redefines
-# it at launch, so its write must carry identity fields.
+# A model alias any of these layers defines takes a field-only write: each
+# layer defines its models again at the next launch (the admin layer from its
+# cache or the server), and once one stops, the missing-model fallback drops
+# the leftover fields with a warning (VIBE-4877). Copied identity fields would
+# keep the model running instead. Models only a session override or an agent
+# profile defines are written whole: nothing defines them again, so a
+# field-only entry would be an orphan.
 _SPARSE_OVERRIDE_LAYER_TYPES = (
     DefaultConfigLayer,
     UserConfigLayer,
     ProjectConfigLayer,
     ModelCatalogLayer,
-    GrowthbookLayer,
+    AdminConfigLayer,
 )
 
 
@@ -244,10 +244,9 @@ class ConfigOrchestrator[S: ConfigSchema]:
     async def sparse_override_model_aliases(self) -> set[str]:
         """Model aliases a sparse (field-only) write is safe for.
 
-        Durable layers reconstruct the model at restart; the catalog and
-        GrowthBook layers re-fetch theirs at launch. A model none of them
-        defines gets its identity materialized instead, or its sparse entry
-        would be an orphan no layer completes on the next launch.
+        Those that a layer rebuilding its models at launch defines (default,
+        user, project, model catalog, admin). A field write to any other model
+        must carry its identity fields.
         """
         return await _sparse_override_model_aliases(self.layers)
 

@@ -35,6 +35,8 @@ pub struct ArtifactDetails {
     #[serde(default)]
     pub state: Option<PrState>,
     #[serde(default)]
+    pub is_in_merge_queue: bool,
+    #[serde(default)]
     pub pr_status: Option<PrStatus>,
     /// Why `pr_status` is `action_needed` or `waiting`, decided by the server.
     #[serde(default)]
@@ -48,6 +50,8 @@ pub struct ArtifactDetails {
 #[serde(rename_all = "snake_case")]
 pub enum PrState {
     Open,
+    #[serde(skip)]
+    Queued,
     Draft,
     Merged,
     Closed,

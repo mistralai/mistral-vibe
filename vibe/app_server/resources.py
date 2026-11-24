@@ -19,6 +19,7 @@ from vibe.app_server._service_resources import (
     FeedbackResource,
     NarrationResource,
     TelemetryResource,
+    VoiceResource,
 )
 from vibe.app_server._session_resources import (
     GoalResource,
@@ -57,6 +58,7 @@ class AppServerResources:
         self.goal = GoalResource(connection, state)
         self.telemetry = TelemetryResource(connection, state)
         self.narration = NarrationResource(connection, state)
+        self.voice = VoiceResource(connection, state)
         self.feedback = FeedbackResource(connection, state)
 
     async def refresh(self) -> None:
@@ -66,6 +68,8 @@ class AppServerResources:
         previous_config = self.config.current
         if await self.runtime.consume_notification(notification):
             self.config.publish_change(previous_config)
+            return True
+        if await self.voice.consume_notification(notification):
             return True
         return await self.mcp.consume_notification(notification)
 

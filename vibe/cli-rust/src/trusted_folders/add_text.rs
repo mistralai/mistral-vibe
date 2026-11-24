@@ -33,6 +33,7 @@ pub fn status(add: &Add) -> Option<(Tone, String)> {
 pub fn row(candidate: &TrustFolderCandidate) -> (String, Option<&'static str>) {
     let note = match (candidate.problem.as_deref(), candidate.stored.as_deref()) {
         (Some("home"), _) => Some("home folder"),
+        (Some("scratch"), _) => Some("scratch folder"),
         (Some(_), _) => Some("filesystem root"),
         (None, Some("trusted")) => Some("already trusted"),
         (None, Some(_)) => Some("untrusted"),
@@ -51,6 +52,7 @@ pub fn details(add: &Add) -> Vec<(Tone, String)> {
     if let Some(problem) = candidate.problem.as_deref() {
         let why = match problem {
             "home" => "Your home folder cannot be trusted: it would trust every project in it.",
+            "scratch" => "A scratch folder cannot be trusted: a session with no project wrote it.",
             _ => "A filesystem root cannot be trusted: it would trust every folder on the drive.",
         };
         return vec![(Tone::Error, why.to_owned())];

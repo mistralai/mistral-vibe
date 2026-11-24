@@ -41,11 +41,11 @@ artifacts/pr_command_empty 466461670716
 
 artifacts/pr_skill_flag_off f017ea2887ed
 
-artifacts/pr_states 4efd40a8ffa1
+artifacts/pr_states a284aa67e9d0
 
 artifacts/rail_active_pr 88f5ab2b49bc
 
-artifacts/rail_pr_chip 23e9718734b1
+artifacts/rail_pr_chip d03cc1dbe697
 
 artifacts/same_pr_two_records 466461670716
 
@@ -54,6 +54,36 @@ banner/lechonk f4e6de3078f0
 banner/narrow_plan 2b64f7dcb8f3
 
 banner/no_greeting f017ea2887ed
+
+cd/arrow_enter 0d3ee197509c
+
+cd/back 27a71bc7f482
+
+cd/busy b41bcf65853c
+
+cd/busy_server a7c09073b435
+
+cd/no_previous 0bdca7d2f384
+
+cd/not_a_directory 807048cd8db9
+
+cd/paste_escaped d88f6d5cfc84
+
+cd/prefix_enter 21d4278ca861
+
+cd/success b8a0a557de50
+
+cd/tab_accept 0b99382716fd
+
+cd/tab_completion d8cf833c5689
+
+cd/tab_hidden 0b99382716fd
+
+cd/trust_accept 2a9dbf86e378
+
+cd/trust_cancel 537a46e11c52
+
+cd/trust_decline 537a46e11c52
 
 config/config 1224469bf291
 
@@ -192,10 +222,6 @@ conversation/edit_diff_word_wrap 472f6f19dac7
 conversation/edit_write_expand 59f2d5e3850b
 
 conversation/effect_header_long_path d14da9a476b9
-
-conversation/history_preview_loading 4368f628db9e
-
-conversation/history_preview_scroll_top_loading ace499e0ce5e
 
 conversation/history_scroll_top_loading e2710b74b24d
 
@@ -349,6 +375,8 @@ conversation/user_message_tabs c774d4977819
 
 conversation/user_message_wrap c774d4977819
 
+conversation/waiting_line_narrow 6454c3ea94e9
+
 conversation/web_connector 505ac318c78f
 
 conversation/web_fetch 4a70e09c0faa
@@ -407,11 +435,13 @@ feedback/rating_good ce2eb27fa887
 
 feedback/snooze 49831091ca53
 
+file_mention/absolute_path_filter f017ea2887ed
+
 file_mention/at_file_mention 40c54b7eadcb
 
-file_mention/at_popup_scroll_up 7b42c36958a8
+file_mention/at_popup_scroll_up a6b00a1b520b
 
-file_mention/at_popup_selection 9749927d5290
+file_mention/at_popup_selection 87f1dd700c0a
 
 file_mention/atomic_mentions f017ea2887ed
 
@@ -425,11 +455,19 @@ file_mention/directory_descent f017ea2887ed
 
 file_mention/directory_submit c774d4977819
 
+file_mention/home_path_listing f017ea2887ed
+
 file_mention/image_placeholder_prepare_failed 1d8dbe3ecb7d
 
 file_mention/image_placeholder_submit a14bbb50318e
 
+file_mention/index_directory_first f017ea2887ed
+
 file_mention/mouse_caret_completion f017ea2887ed
+
+file_mention/parent_path_descent f017ea2887ed
+
+file_mention/tab_keeps_popup_open 982a148f6033
 
 file_mention/vertical_caret_completion f017ea2887ed
 
@@ -669,6 +707,12 @@ input_zero_width_grapheme d0d8a1f48825
 
 lifecycle/graceful_exit 32947a173ecf
 
+loading_easter_eggs/egg_narrow_falls_back c774d4977819
+
+loading_easter_eggs/egg_replaces_generating c774d4977819
+
+loading_easter_eggs/egg_shown c774d4977819
+
 log_level/log_level 3b43dcbdb455
 
 log_level/log_level_click dc0274cff537
@@ -689,17 +733,25 @@ log_level/log_level_toggle 20d79248227a
 
 log_level/log_level_while_busy 0e066dc04566
 
-loops/idle_next_loop 831b479a0cfa
+loops/manager_delete 05cd668fdffb
 
-loops/manager_delete f8d8622839b0
+loops/manager_edit 7fd794dae357
 
-loops/manager_form 2957489b24df
+loops/manager_form d1f5e64b8c8f
 
-loops/manager_keeps_order 40f9de7061cf
+loops/manager_keeps_order a52c4ee71523
 
-loops/manager_side_pane bc10f48972df
+loops/manager_run 2f5d88d4ffbf
+
+loops/manager_side_pane 8b790169202e
 
 loops/manager_while_busy c774d4977819
+
+loops/rail_chip e0eac1e529b9
+
+loops/rail_chip_narrow c774d4977819
+
+loops/rail_chip_opens 64a460da173a
 
 markdown/autolink f82efaebfff1
 
@@ -913,6 +965,12 @@ model/model_border_resume e87b41ffe1a9
 
 model/model_cancel 81ed9113c54d
 
+model/model_catalog_check_failed b00650273cbb
+
+model/model_catalog_check_skipped 37f798ab50b8
+
+model/model_catalog_check_unlocks b00650273cbb
+
 model/model_chain_cancel 43cd0299316c
 
 model/model_click 41670c587c72
@@ -953,7 +1011,7 @@ model/model_session_chain 9fbfef769bac
 
 model/model_session_enter_chain 00e73ea6c381
 
-model/model_source_groups b49f99e4df96
+model/model_source_groups 1b4fb61f8c67
 
 model/model_write_fallback 4ff5c7763aa3
 
@@ -985,7 +1043,7 @@ notice/config_validation_warning_startup f017ea2887ed
 
 notice/config_validation_warning_updated c774d4977819
 
-notice/failure_block_over_picker 580f963b1be6
+notice/failure_block_over_picker 8eabe78a80b1
 
 notice/failure_held_while_typing e87b41ffe1a9
 
@@ -1129,15 +1187,15 @@ queue/ctrl_enter_steers 134d23156f51
 
 queue/edit_consumed_while_saving 66d284ec920b
 
-queue/edit_paused_queue 898096c4805b
+queue/edit_paused_queue a204c615d587
 
-queue/edit_queued_prompt 0cee11f4779f
+queue/edit_queued_prompt 6ad7a323b0e8
 
 queue/edit_queued_prompt_with_image 0f1880007859
 
 queue/edit_saved_enter_steers 466607c6d5aa
 
-queue/escape_restores_draft fe84fe21e06c
+queue/escape_restores_draft e0012a6539c7
 
 queue/first_prompt_hint 3529078eea9c
 
@@ -1145,47 +1203,53 @@ queue/hints_on_header cecbaa44c378
 
 queue/merged_prompts_promoted 3e962bf09194
 
-queue/paused_queue 08e41878fd15
+queue/paused_queue c015be949917
+
+queue/paused_queue_header f531409c6c70
+
+queue/paused_queue_header_narrow 58c269ff1f4d
 
 queue/promoted_turn_loading 370431378211
 
-queue/queue_selection_steady_caret d8353c56e775
+queue/queue_selection_steady_caret a4322befe08d
 
-queue/queued_prompt 6bebb5ba67c5
+queue/queued_prompt 6f49a33ba970
 
 queue/queued_turn_promoted a6dde8894e86
 
 queue/remove_from_paused_queue 7ff328811c41
 
-queue/remove_selected_prompt 633514045507
+queue/remove_selected_prompt 8c5aed8d86a2
 
-queue/reply_lands_above_queue de0935418135
+queue/reply_lands_above_queue 24b027ed9694
 
-queue/select_queued_prompt 00eeea09ba4d
+queue/retry_with_paused_queue 199567cde5e8
 
-queue/server_steers_into_waiting_turn 4351cebd37d9
+queue/select_queued_prompt cba67e854fce
+
+queue/server_steers_into_waiting_turn c19f8d356660
 
 queue/steer_keeps_output_order 134d23156f51
 
-queue/steer_queued_prompt 50ffc6c9fbb5
+queue/steer_queued_prompt 83b86c7126b3
 
-queue/steer_waits_for_history 98c28bd9b57b
+queue/steer_waits_for_history 3150b989a790
 
 queue/super_enter_steers 134d23156f51
 
-queue/two_queued_prompts d56c18902d32
+queue/two_queued_prompts 2e7c3b311190
 
 rail/agents_list c774d4977819
 
 rail/agents_list_open 7e079c360212
 
-rail/arrow_windows 8536226045f0
+rail/arrow_windows 63e200ee3419
 
 rail/child_view_esc c774d4977819
 
 rail/click_chip_closes c774d4977819
 
-rail/click_window 778a58035e64
+rail/click_window 360c599b8286
 
 rail/copy_notice_above 3110d2dce210
 
@@ -1209,6 +1273,14 @@ rail/goal_window_clear 395135b1bb35
 
 rail/goal_window_pause 69c3a45a9fe1
 
+rail/hint_back_after_a_week c774d4977819
+
+rail/hint_hidden_within_a_week c774d4977819
+
+rail/hint_hides_after_click c774d4977819
+
+rail/hint_hides_after_ctrl_x c774d4977819
+
 rail/hover 4529c50f98db
 
 rail/items 8479793a8b61
@@ -1221,13 +1293,49 @@ rail/narrow_shrinks c774d4977819
 
 rail/switch_window 1c46c1c89e0b
 
-rail/tab_windows 0e7f9dd5c1e4
+rail/tab_windows a2f50ac82da0
 
-rail/tasks_click f222dada3744
+rail/tasks_click 0683436a9de3
 
-rail/tasks_panel 9a1c1d50f5ca
+rail/tasks_output 9528d0514425
 
-rail/tasks_scroll 0f4b485be1cd
+rail/tasks_output_back c774d4977819
+
+rail/tasks_output_click db6c631a3501
+
+rail/tasks_output_scroll c774d4977819
+
+rail/tasks_output_scrollbar c774d4977819
+
+rail/tasks_output_search 265f68a13b1a
+
+rail/tasks_output_search_clear c774d4977819
+
+rail/tasks_output_search_click c774d4977819
+
+rail/tasks_output_search_esc c774d4977819
+
+rail/tasks_output_search_hidden_click c774d4977819
+
+rail/tasks_output_search_leave c774d4977819
+
+rail/tasks_output_search_next c774d4977819
+
+rail/tasks_output_search_paste c774d4977819
+
+rail/tasks_output_search_resize c774d4977819
+
+rail/tasks_output_search_typing c774d4977819
+
+rail/tasks_output_selection c774d4977819
+
+rail/tasks_output_selection_edge c774d4977819
+
+rail/tasks_output_selection_scroll b0e26d043154
+
+rail/tasks_panel aa882a099a7e
+
+rail/tasks_scroll 662cf0696364
 
 rail/todo_window 9540c21f23a8
 
@@ -1304,6 +1412,50 @@ scroll/scrollbar dedf4219f559
 scroll/scrollbar_drag 370486a406e6
 
 scroll/scrollbar_track_click d6fd9ec9a216
+
+sessions_page/archive_notice e61ec8c884a8
+
+sessions_page/archived_restore 1933e88966b0
+
+sessions_page/busy a94ab0544252
+
+sessions_page/folder_click f017ea2887ed
+
+sessions_page/folders_column 19b120810321
+
+sessions_page/gone_folders aff7edba7398
+
+sessions_page/grouped af5a4a96c585
+
+sessions_page/help d2f178ce2d58
+
+sessions_page/left_opens 21d19548a7e8
+
+sessions_page/left_with_text_moves_the_caret 7272e230619a
+
+sessions_page/narrow 4553a5e516f7
+
+sessions_page/open_long_history 85ac7eaeb82c
+
+sessions_page/open_other_folder 69ba21ddab01
+
+sessions_page/preview_interact cabad333c04d
+
+sessions_page/preview_link e5406fa5ca7d
+
+sessions_page/preview_running_turn 370431378211
+
+sessions_page/preview_select 7e5f7fd11035
+
+sessions_page/rename 2474373900a1
+
+sessions_page/reopen_keeps_place bb2ca57778d9
+
+sessions_page/search_filter_sort 645599fce9c2
+
+sessions_page/started_sessions 0374dc9f07fa
+
+sessions_page/three_columns ce5d051cfdf0
 
 skill_mention/atomic_mention f017ea2887ed
 
@@ -1547,21 +1699,17 @@ slash_command/rename f017ea2887ed
 
 slash_command/resume 4e287930253a
 
+slash_command/resume_archive_locked 793850d59c49
+
 slash_command/resume_busy e87b41ffe1a9
 
-slash_command/resume_click b0920a8bc4a7
+slash_command/resume_click 46c10dff1de2
 
-slash_command/resume_commit f36f5caa1fd7
+slash_command/resume_commit 3b81302c0515
 
 slash_command/resume_commit_prompt 771d6826c55f
 
-slash_command/resume_delete 580f963b1be6
-
-slash_command/resume_delete_cancel f017ea2887ed
-
-slash_command/resume_delete_last 580f963b1be6
-
-slash_command/resume_delete_locked 793850d59c49
+slash_command/resume_details_failed 0497c2a2131d
 
 slash_command/resume_drops_todos c774d4977819
 
@@ -1569,13 +1717,9 @@ slash_command/resume_failed_prompt 0a137af825fb
 
 slash_command/resume_lock 793850d59c49
 
-slash_command/resume_long_cwd f017ea2887ed
-
 slash_command/resume_own_lease e87b41ffe1a9
 
-slash_command/resume_preview_failed 663a70813533
-
-slash_command/resume_scrollbar ec664bf08c8f
+slash_command/resume_scrollbar b4b217f5669d
 
 slash_command/retry d435044639aa
 
@@ -1609,7 +1753,7 @@ slash_command/slash_command_caret_filter d89663c86725
 
 slash_command/slash_command_click f017ea2887ed
 
-slash_command/slash_command_menu 4afe1ed01084
+slash_command/slash_command_menu 719e167ad956
 
 slash_command/slash_command_menu_closes_after_command f017ea2887ed
 
@@ -1623,11 +1767,11 @@ slash_command/slash_command_rank c60641b3ce77
 
 slash_command/slash_command_retry_retro e5286ae166bc
 
-slash_command/slash_command_scroll 434b196fc283
+slash_command/slash_command_scroll 209e5ed89901
 
-slash_command/slash_command_wheel 4ac16104a30c
+slash_command/slash_command_wheel 473619b7bbd8
 
-slash_command/slash_command_while_busy 5dcf9314d0bf
+slash_command/slash_command_while_busy fe22698bdb6a
 
 slash_command/status 540392a4a7cd
 
@@ -1659,6 +1803,10 @@ startup/continue_whats_new df0f00edb40f
 
 startup/initial_prompt a746c1be1851
 
+startup/model_flag 4c77db9c3477
+
+startup/model_flag_unknown b083981296b1
+
 startup/narrow_bottom_bar 4ffe8f2b4172
 
 startup/resume_by_id c4500931bb01
@@ -1675,15 +1823,15 @@ startup/resume_by_id_subagents 461d1a530806
 
 startup/resume_mixed_history c557d1fa9a85
 
-startup/resume_picker f589cc56ced1
+startup/resume_picker b6d4bb0080a5
 
 startup/resume_picker_prompt_cancel 32d63559f519
 
 startup/resume_picker_prompt_select 1eef2cfe3640
 
-startup/resume_picker_start_kind 4efe57836783
+startup/resume_picker_start_kind b15e5c1ad5b4
 
-startup/resume_waiting_turn f7d30dd8a989
+startup/resume_waiting_turn e05e08d3de40
 
 startup/startup 2a5c8a62500c
 
@@ -1723,71 +1871,79 @@ sticky_prompt/sections 7a0d7cfe8183
 
 sticky_prompt/short_terminal 3f1b2a67803c
 
+sticky_prompt/steer c4728189d4a3
+
+sticky_prompt/steer_packed_click c774d4977819
+
+sticky_prompt/steer_short_terminal f48792c64f32
+
+sticky_prompt/steer_slides_under_pin c774d4977819
+
 sticky_prompt/table_cell_selection b81f2bba64e9
 
-storage/archive_done 952cb55031a3
+storage/archive_done 77d9e88bbfe8
 
-storage/archive_earlier_failed baf5fbd91f20
+storage/archive_earlier_failed 74fb045b897a
 
-storage/archive_earlier_scan_first b684a1780c83
+storage/archive_earlier_scan_first 756f631518cb
 
-storage/archive_measured_row 831bc6936ee7
+storage/archive_measured_row ac90dbb569d2
 
-storage/archive_open_refused 5d8a6c74a585
+storage/archive_open_refused 55c7fcdf5ebe
 
-storage/archive_other_scan_late 116b77c4845e
+storage/archive_other_scan_late d35b2de5d346
 
-storage/archive_scan_failed 326ec5f03edf
+storage/archive_scan_failed 8fbfe355b76d
 
-storage/archive_single_busy c0273f985834
+storage/archive_single_busy 1dff0b9ed5fb
 
-storage/cleanup_kept 1959f7bca503
+storage/cleanup_kept e44f757e3bf7
 
-storage/cleanup_review 93172f309cf7
+storage/cleanup_review d25d753dc01c
 
-storage/delete_confirm_needs_y e541b0735e98
+storage/delete_confirm_needs_y 40af6ab641d6
 
-storage/delete_removes_worktree 27faccdb80c0
+storage/delete_removes_worktree d74fb16ef83d
 
-storage/delete_review a96c1e7fa079
+storage/delete_review 204cb1182ff3
 
-storage/delete_review_kept 6912cd120ae1
+storage/delete_review_kept 7de80ea41e17
 
-storage/delete_review_toggle a7ea0b37702c
+storage/delete_review_toggle 77a17b4f9ed5
 
-storage/delete_shared e150755902b0
+storage/delete_shared e7a9ede0802a
 
-storage/delete_suggestion_at_least a7ea0b37702c
+storage/delete_suggestion_at_least 77a17b4f9ed5
 
-storage/delete_unknown_size a7ea0b37702c
+storage/delete_unknown_size 77a17b4f9ed5
 
-storage/details 8736e6e1f516
+storage/details e0367cdb5f44
 
-storage/details_worktrees a7ea0b37702c
+storage/details_worktrees 77a17b4f9ed5
 
-storage/first_scan d558bc934b4d
+storage/first_scan 5745ec91836e
 
-storage/flag_off 975c7e95bbc2
+storage/flag_off 3bece872fedb
 
 storage/flag_off_low_disk 310c8ba3d8a6
 
-storage/low_disk d2b32791c416
+storage/low_disk 14ab76b6b9f5
 
-storage/old_archived_hint a7ea0b37702c
+storage/old_archived_hint 77a17b4f9ed5
 
-storage/panel b71f1eebdbc6
+storage/panel 2bf570927856
 
-storage/refreshing 3bc4ccedbbfd
+storage/refreshing 74b82994b3fd
 
-storage/refreshing_failed 1d8ed4bf6971
+storage/refreshing_failed 7ac85b92a2c1
 
-storage/review c1e1a064ae2b
+storage/review c22905f229da
 
-storage/review_toggle_sort 58f74559599b
+storage/review_toggle_sort 9686e2df5d49
 
 storage/startup_low_disk_notice cb16b4e17ac3
 
-storage/unarchive ba0451a3059e
+storage/unarchive 7f03615325d6
 
 storage/unsupported ccade83b8161
 
@@ -1989,7 +2145,7 @@ theme/button_hover_ansi_light 8a1b95c44bf6
 
 theme/button_hover_mistral_dark 91e01719f163
 
-theme/ctrl_c_while_busy 897aed89e16b
+theme/ctrl_c_while_busy 52f68c87e862
 
 theme/late_report 699a18ce4fde
 
@@ -2081,6 +2237,8 @@ trusted_folders_command/add_home 3c68c45032e8
 
 trusted_folders_command/add_invalid 7f19ba606bfb
 
+trusted_folders_command/add_scratch d13de9a605c1
+
 trusted_folders_command/browser 7216dc88542d
 
 trusted_folders_command/close ba783814c2cc
@@ -2115,7 +2273,11 @@ turn_details/select_inside 02f47a9d7920
 
 turn_details/setting_off_live c774d4977819
 
-turn_details/steer_outside ffaddb95e7c5
+turn_details/steer_click_second c774d4977819
+
+turn_details/steer_expanded 894d0dfbded4
+
+turn_details/steer_outside 5fbb4947f72d
 
 turn_details/table_cell_inside 001d8d230da0
 

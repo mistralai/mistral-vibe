@@ -139,14 +139,14 @@ pub struct Cli {
     )]
     pub approval_policy: Option<String>,
 
-    /// Model alias to use instead of 'active_model' (headless mode only, new
-    /// sessions). Not saved as the default.
+    /// Model alias to use instead of 'active_model' (new sessions only). Not
+    /// saved as the default.
     #[arg(long = "model", value_name = "ALIAS", overrides_with = "model")]
     pub model: Option<String>,
 
     /// Thinking level of the model (off, low, medium, high, xhigh, max, or a
-    /// level the model lists; any other word is sent as written), headless
-    /// mode only, new sessions. Not saved.
+    /// level the model lists; any other word is sent as written), new sessions
+    /// only. Not saved.
     #[arg(long = "thinking", value_name = "LEVEL", overrides_with = "thinking")]
     pub thinking: Option<String>,
 
@@ -368,6 +368,13 @@ pub enum StartupResume {
     Continue,
 }
 
+/// The new session's model and thinking level, applied to it only.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartModel {
+    pub model: Option<String>,
+    pub thinking: Option<String>,
+}
+
 /// The session a headless run works in: `-c` as `--continue` does, `--resume <id>` that exact one.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum HeadlessSession {
@@ -551,12 +558,7 @@ impl Cli {
             return Err("No prompt provided for programmatic mode".to_owned());
         }
         let session = self.headless_session()?;
-        if self.model.is_some() && session != HeadlessSession::New {
-            return Err("--model only applies to a new session".to_owned());
-        }
-        if self.thinking.is_some() && session != HeadlessSession::New {
-            return Err("--thinking only applies to a new session".to_owned());
-        }
+        let start_model = self.start_model()?;
         let system_prompt = self
             .system_prompt_file
             .as_deref()
@@ -573,8 +575,8 @@ impl Cli {
             time_limit: self.time_limit,
             output_dir: self.output_dir.clone(),
             system_prompt,
-            model: self.model.clone(),
-            thinking: self.thinking.clone(),
+            model: start_model.model,
+            thinking: start_model.thinking,
             agent: execution_control.agent,
             approval_policy: execution_control.approval_policy,
             auto_approve: execution_control.auto_approve,
@@ -617,6 +619,22 @@ impl Cli {
             workspace_roots: crate::utils::paths::resolve_add_dirs(&self.add_dir)?,
             worktree,
             terminal_key,
+        })
+    }
+
+    /// `--model` / `--thinking`, which only a new session takes.
+    pub fn start_model(&self) -> Result<StartModel, String> {
+        if self.startup_resume() != StartupResume::None {
+            if self.model.is_some() {
+                return Err("--model only applies to a new session".to_owned());
+            }
+            if self.thinking.is_some() {
+                return Err("--thinking only applies to a new session".to_owned());
+            }
+        }
+        Ok(StartModel {
+            model: self.model.clone(),
+            thinking: self.thinking.clone(),
         })
     }
 

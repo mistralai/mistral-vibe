@@ -556,7 +556,6 @@ class SubagentLimits(SubagentModel):
     max_depth: Literal[1] = 1
     max_children: int = Field(default=32, gt=0)
     max_concurrent_turns: int = Field(default=32, gt=0)
-    max_lifetime_names: int = Field(default=128, gt=0)
 
 
 class SubagentRuntimeState(SubagentModel):

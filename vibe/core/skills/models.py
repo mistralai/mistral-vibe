@@ -21,6 +21,8 @@ class SkillScope(StrEnum):
     GLOBAL = auto()
     PROJECT = auto()
     SESSION = auto()
+    # A plugin synced from the user's AI Registry plugins (``vibe.core.plugins.remote``).
+    REMOTE = auto()
 
 
 # The registry's reserved alias that always resolves to the newest version,

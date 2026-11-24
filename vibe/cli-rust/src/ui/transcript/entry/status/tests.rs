@@ -65,7 +65,7 @@ fn resumed() -> CheckpointEntry {
 #[test]
 fn a_resumed_turn_paints_a_settled_row_from_the_server() {
     let mut lines = LinkedLines::default();
-    push_checkpoint(&mut lines, &resumed(), false, false, 0);
+    push_checkpoint(&mut lines, &resumed(), 80, false, false, 0);
     assert_eq!(texts(&lines)[1], "✓ Resumed after a restart");
     assert!(!renders_nothing(
         &HistoryEntry::Checkpoint(resumed()),

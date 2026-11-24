@@ -68,7 +68,7 @@ class WorktreeContext(BaseModel):
 
 # A "cloud" id names a cloud project the starter did not resolve to a local one (the
 # flag was off, say): readers must still resolve it through a local project's backing.
-# "none" (no id) is read for the projectless sessions to come; nothing writes it yet.
+# "none" (no id) stamps a projectless session, which runs in a scratch folder.
 class SessionProject(BaseModel):
     # A field a newer version adds must not invalidate the whole meta.json.
     model_config = ConfigDict(extra="ignore")
@@ -157,6 +157,14 @@ class SessionMetadata(BaseModel):
     artifacts: list[SessionArtifact] = Field(default_factory=list)
     worktrees: list[WorktreeArtifact] = Field(default_factory=list)
     owed_replies: list[OwedReply] = Field(default_factory=list)
+    # Notes for the model a change made while no process held the session,
+    # such as a move to another directory; its next turn sends and clears them.
+    pending_context_notes: list[str] = Field(default_factory=list)
+    # The git repository and the checkout (main or linked worktree) the
+    # session's folder belongs to, recorded when the folder is set so a session
+    # still groups and reads by them once the folder is gone.
+    repository_root: str | None = None
+    checkout_root: str | None = None
     # Registry skills picked for this session only (``skills/import`` with scope
     # ``session``); reopening the session restores them.
     skill_pins: Annotated[

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import hashlib
+from typing import cast
 
 from mistralai_vibe_local_harness.vibe._mcp_models import (
     JsonObject,
@@ -57,6 +58,12 @@ class _PooledConnection:
             raise TypeError("MCP call request returned an invalid result")
         return result
 
+    async def read_resource(self, uri: str) -> JsonObject:
+        result = await self._request("read", uri, None, self._server.tool_timeout_s)
+        if not isinstance(result, dict):
+            raise TypeError("MCP read request returned an invalid result")
+        return cast(JsonObject, result)
+
     async def _request(
         self,
         kind: str,
@@ -107,6 +114,12 @@ class _PooledConnection:
         connection = await self._ensure_connection()
         if request.kind == "list":
             return await connection.list_tools()
+        if request.kind == "read":
+            if request.name is None:
+                raise TypeError("MCP read request is incomplete")
+            return await connection.read_resource(
+                request.name, timeout_s=request.timeout_s
+            )
         if request.name is None or request.arguments is None:
             raise TypeError("MCP call request is incomplete")
         return await connection.call_tool(
@@ -280,6 +293,12 @@ class MCPStdioPoolLease:
     ) -> MCPNormalizedResult:
         connection = await self._pool.acquire(self, server)
         return await connection.call_tool(name, arguments)
+
+    async def read_resource(
+        self, server: ResolvedMCPServerConfig, *, uri: str
+    ) -> JsonObject:
+        connection = await self._pool.acquire(self, server)
+        return await connection.read_resource(uri)
 
     async def close_server(self, server: ResolvedMCPServerConfig) -> None:
         await self._pool.release(self, server)

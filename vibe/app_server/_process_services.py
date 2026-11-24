@@ -17,11 +17,13 @@ from vibe.app_server._background_worker import BackgroundWorker
 from vibe.app_server._config_changes import ConfigChanges
 from vibe.app_server._experiments_service import ExperimentsService
 from vibe.app_server._keep_awake import KeepAwake
+from vibe.app_server._left_turns import LeftTurns
 from vibe.app_server._mcp_discovery_service import MCPDiscoveryService
 from vibe.app_server._missing_model_warnings import MissingModelWarnings
 from vibe.app_server._model_catalog_service import ModelCatalogService
 from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigService
+from vibe.app_server._platform_credential_lenders import PlatformCredentialLenders
 from vibe.app_server._skill_shadows import ShadowWarnings
 from vibe.app_server._skill_store_cleanup import SkillStoreCleanup
 from vibe.app_server._storage_usage import StorageUsageService
@@ -58,6 +60,11 @@ class ProcessServices:
     # The bot's local sessions this process runs: a reply owed to the bot
     # reaches it from any connection.
     vibe_bot_sessions: VibeBotLocalSessions
+    # Desktop channels by account, so a session whose channel closed borrows
+    # its account's sign-in from another.
+    platform_credential_lenders: PlatformCredentialLenders
+    # Turns an earlier process left mid-flight, resumed once per owner.
+    left_turns: LeftTurns
 
     def __post_init__(self) -> None:
         self.org_config.on_changed(lambda _key: self.config_changes.publish())
@@ -86,12 +93,15 @@ class ProcessServices:
             vibe_bot_sessions=VibeBotLocalSessions(
                 client_id_file=VIBE_HOME.path / VIBE_BOT_CLIENT_ID_FILE
             ),
+            platform_credential_lenders=PlatformCredentialLenders(),
+            left_turns=LeftTurns(),
         )
 
     async def close(self) -> None:
         # Off the loop: stopping the request waits for its process to exit.
         await asyncio.to_thread(self.keep_awake.close)
         try:
+            await self.left_turns.close()
             await self.org_config.close()
             await self.connector_catalog.close()
             await self.experiments.close()

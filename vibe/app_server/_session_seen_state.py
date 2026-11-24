@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from vibe.app_server._utils import optional_time_ms
+from vibe.app_server._utils import iso_from_time_ms, optional_time_ms
 from vibe.app_server.models import (
     BlockedSessionStatus,
     FailedSessionStatus,
@@ -32,12 +32,25 @@ class SessionSeenState:
         seen_at = optional_time_ms(self.seen_at)
         return seen_at is None or unseen_at > seen_at
 
+    # The state is compared at millisecond precision, so a mark landing in the
+    # same millisecond as the other one, or on a clock that stepped back, is
+    # moved just past it: the latest call always wins.
     def mark_unseen(self, at: datetime) -> SessionSeenState:
+        seen_at = optional_time_ms(self.seen_at)
+        if seen_at is not None and _ms(at) <= seen_at:
+            return SessionSeenState(
+                unseen_at=iso_from_time_ms(seen_at + 1), seen_at=self.seen_at
+            )
         return SessionSeenState(
             unseen_at=at.astimezone(UTC).isoformat(), seen_at=self.seen_at
         )
 
     def mark_seen(self, at: datetime) -> SessionSeenState:
+        unseen_at = optional_time_ms(self.unseen_at)
+        if unseen_at is not None and _ms(at) < unseen_at:
+            return SessionSeenState(
+                unseen_at=self.unseen_at, seen_at=iso_from_time_ms(unseen_at)
+            )
         return SessionSeenState(
             unseen_at=self.unseen_at, seen_at=at.astimezone(UTC).isoformat()
         )
@@ -46,6 +59,10 @@ class SessionSeenState:
         return metadata.model_copy(
             update={"unseen_at": self.unseen_at, "seen_at": self.seen_at}
         )
+
+
+def _ms(at: datetime) -> int:
+    return int(at.timestamp() * 1000)
 
 
 def should_mark_session_unseen(

@@ -28,7 +28,7 @@ handshake = {
 }
 on_request = {"session/turn/queue/steer": [_STEERED]}
 
-screen_contains = ("> second",)
+screen_contains = ("↳ second",)
 screen_excludes = ("Queued",)
 
 # CSI 13;9u is Super+Enter in the kitty keyboard protocol.

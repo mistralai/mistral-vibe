@@ -111,6 +111,8 @@ from vibe.app_server.protocol import (
     TurnQueueResumeResponse,
     TurnQueueSteerParams,
     TurnQueueSteerResponse,
+    TurnRetryParams,
+    TurnRetryResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
@@ -342,7 +344,7 @@ class AppServerSession:  # noqa: PLR0904
     async def connect(self) -> None:
         await self._ensure_attached()
 
-    async def act(
+    def act(
         self,
         message: str,
         client_message_id: str | None = None,
@@ -354,6 +356,39 @@ class AppServerSession:  # noqa: PLR0904
         mention_stats: MentionStats | None = None,
         injected: bool = False,
     ) -> AsyncGenerator[AppServerEvent]:
+        return self._run_turn(
+            "turn/start",
+            TurnStartParams(
+                session_id=self.session_id,
+                message=_content_blocks(message, images, resources),
+                injected=injected,
+                client_user_message_id=client_message_id,
+                auto_title=auto_title,
+                user_display_content=user_display_content,
+                mention_stats=mention_stats,
+            ),
+            TurnStartResponse,
+        )
+
+    def retry(
+        self, expected_turn_id: str, instructions: str = ""
+    ) -> AsyncGenerator[AppServerEvent]:
+        return self._run_turn(
+            "turn/retry",
+            TurnRetryParams(
+                session_id=self.session_id,
+                expected_turn_id=expected_turn_id,
+                instructions=instructions,
+            ),
+            TurnRetryResponse,
+        )
+
+    async def _run_turn(
+        self,
+        method: str,
+        params: TurnStartParams | TurnRetryParams,
+        response_model: type[TurnStartResponse] | type[TurnRetryResponse],
+    ) -> AsyncGenerator[AppServerEvent]:
         if self.turn_active:
             raise RuntimeError("A turn is already running")
         # Mark the turn as starting before the prologue, so a cancel arriving
@@ -363,19 +398,7 @@ class AppServerSession:  # noqa: PLR0904
         try:
             client = await self._ensure_attached()
             response = validate_wire(
-                TurnStartResponse,
-                await client.request(
-                    "turn/start",
-                    TurnStartParams(
-                        session_id=self.session_id,
-                        message=_content_blocks(message, images, resources),
-                        injected=injected,
-                        client_user_message_id=client_message_id,
-                        auto_title=auto_title,
-                        user_display_content=user_display_content,
-                        mention_stats=mention_stats,
-                    ),
-                ),
+                response_model, await client.request(method, params)
             )
             turn = response.turn
             self._state.projection.begin_turn(turn)

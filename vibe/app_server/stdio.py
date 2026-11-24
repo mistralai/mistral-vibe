@@ -85,6 +85,12 @@ async def _serve_with(
     additional_builtin_plugin_roots: Sequence[Path],
     agent_socket: AgentSocketMount | None,
 ) -> None:
+    from vibe.app_server._connection_protocol import InitializeParams
+    from vibe.app_server._left_turns import (
+        close_left_turns_first,
+        list_on_own_channel,
+        resume_on_own_channel,
+    )
     from vibe.app_server._runtime import HarnessProcess, create_harness_server
     from vibe.app_server.multiplex import serve_multiplexed
     from vibe.core.config.harness_files import HarnessFilesManager
@@ -93,7 +99,9 @@ async def _serve_with(
     if multiplex:
 
         async def create_channel(
-            channel: JsonRpcTransport, options: ChannelOpen | None
+            channel: JsonRpcTransport,
+            options: ChannelOpen | None,
+            left_turn_session: str | None = None,
         ) -> ChannelServer:
             if options is not None:
                 from vibe.app_server._run_channel import RunChannelServer
@@ -115,10 +123,38 @@ async def _serve_with(
             )
             process.start_connector_warm_up()
             return await create_harness_server(
-                channel, transport_kind="stdio", process=process
+                channel,
+                transport_kind="stdio",
+                process=process,
+                open_sessions=services.open_sessions,
+                left_turns=services.left_turns,
+                open_left_turn_channel=open_left_turn_channel,
+                list_on_own_channel=list_left_on_own_channel,
+                left_turn_session=left_turn_session,
             )
 
-        await serve_multiplexed(transport, create_channel)
+        async def serve_own_channel(channel: JsonRpcTransport, session_id: str) -> None:
+            server = await create_channel(channel, None, session_id)
+            await server.serve()
+
+        async def serve_listing_channel(channel: JsonRpcTransport) -> None:
+            server = await create_channel(channel, None)
+            await server.serve()
+
+        async def list_left_on_own_channel(params: InitializeParams) -> list[str]:
+            return await list_on_own_channel(serve_listing_channel, params)
+
+        async def open_left_turn_channel(
+            params: InitializeParams, session_id: str, interrupt: bool
+        ) -> None:
+            await resume_on_own_channel(
+                serve_own_channel, params, session_id, interrupt
+            )
+
+        try:
+            await serve_multiplexed(transport, create_channel)
+        finally:
+            await close_left_turns_first(services.left_turns, services.open_sessions)
         return
     if agent_socket is None:
         process = HarnessProcess(

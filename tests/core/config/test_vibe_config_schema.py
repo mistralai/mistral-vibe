@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
+import tomllib
 from types import UnionType
 from typing import Any, Union, get_args, get_origin
 from unittest.mock import patch
@@ -26,10 +26,9 @@ from vibe.core.config.models import ModelRequirement
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.config.schema import MergeFieldMetadata
 from vibe.core.config.vibe_schema import VibeConfigSchema, outside_workdir_denied
+from vibe.core.types import Backend
 from vibe.core.utils.merge import MergeStrategy
 from vibe.permissions import OutsideWorkdirPolicy
-
-_ROUTED_TEST_ALIAS = "target-testing-model-alias"
 
 
 def test_retired_settings_stay_loadable_and_are_deprecated_in_public_schema() -> None:
@@ -51,17 +50,6 @@ def test_retired_settings_stay_loadable_and_are_deprecated_in_public_schema() ->
         assert serialized[name] == value
         assert schema["properties"][name]["deprecated"] is True
         assert "no effect" in schema["properties"][name]["description"]
-
-
-_ROUTED_TEST_MODEL = ModelConfig(
-    name="target-testing-model-name",
-    provider="mistral",
-    alias=_ROUTED_TEST_ALIAS,
-    input_price=0.0,
-    output_price=0.0,
-    supports_images=False,
-)
-_ROUTED_TEST_MODEL_JSON = _ROUTED_TEST_MODEL.model_dump_json()
 
 
 @pytest.mark.asyncio
@@ -229,22 +217,11 @@ def test_unknown_active_model_falls_back_to_default() -> None:
     )
 
 
-def test_unknown_active_model_uses_routed_default() -> None:
-    config = VibeConfigSchema.model_validate({
-        "active_model": "does-not-exist",
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
-    })
-
-    assert config.active_model == ""
-    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
-
-
 def test_active_model_defaults_to_unpinned_sentinel() -> None:
     config = VibeConfigSchema()
 
     # The empty string is the "unpinned/default" sentinel; it is preserved (not
-    # rewritten to a concrete alias) so the routing experiment can target it.
+    # rewritten to a concrete alias) so the default model can change under it.
     assert config.active_model == ""
 
 
@@ -281,6 +258,11 @@ def test_file_autocomplete_defaults_to_enabled() -> None:
 
 def test_system_trust_store_is_enabled_by_default() -> None:
     assert VibeConfigSchema().enable_system_trust_store is True
+
+
+def test_model_catalog_is_enabled_by_default() -> None:
+    # build_test_vibe_config turns the catalog off, so read the schema default.
+    assert VibeConfigSchema.model_fields["enable_model_catalog"].default is True
 
 
 def test_pr_monitoring_is_enabled_by_default() -> None:
@@ -419,301 +401,13 @@ def test_unpinned_active_model_falls_back_to_first_configured_model() -> None:
     assert config.missing_model_warnings == ()
 
 
-def test_routed_default_model_resolves_when_unpinned() -> None:
-    config = VibeConfigSchema.model_validate({
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
-    })
-
-    assert config.active_model == ""
-    assert config.resolve_default_model_alias() == _ROUTED_TEST_ALIAS
-    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
-
-
-def test_routed_default_model_ignored_when_pinned() -> None:
-    models = [
-        ModelConfig(name="model-a", provider="mistral", alias="a"),
-        ModelConfig(name="model-b", provider="mistral", alias="b"),
-    ]
-    config = VibeConfigSchema.model_validate({
-        "active_model": "a",
-        "routed_default_model": "b",
-        "models": models,
-    })
-
-    # An explicit pin always wins; the routed default only fills the unpinned case.
-    assert config.active_model == "a"
-    assert config.get_active_model().alias == "a"
-
-
-def test_unknown_routed_default_model_falls_back_to_default() -> None:
-    models = [
-        ModelConfig(name="model-a", provider="mistral", alias="a"),
-        ModelConfig(name="model-b", provider="mistral", alias="b"),
-    ]
-    config = VibeConfigSchema.model_validate({
-        "active_model": "",
-        "routed_default_model": "does-not-exist",
-        "models": models,
-    })
-
-    # A routed alias that names no configured model is ignored, not raised.
-    assert config.resolve_default_model_alias() == "a"
-    assert config.get_active_model().alias == "a"
-
-
-def test_gated_model_absent_from_defaults() -> None:
-    config = VibeConfigSchema()
-
-    assert _ROUTED_TEST_ALIAS not in config.models
-
-
-def test_routed_model_config_is_injected() -> None:
-    config = VibeConfigSchema.model_validate({
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
-    })
-
-    assert config.models.get(_ROUTED_TEST_ALIAS) == _ROUTED_TEST_MODEL
-
-
-def test_routed_model_display_name_is_injected() -> None:
-    routed = _ROUTED_TEST_MODEL.model_copy(
-        update={"display_name": "glm-5.2 (Mistral Hosted)"}
-    )
-    config = VibeConfigSchema.model_validate({
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": routed.model_dump_json(),
-    })
-
-    assert config.get_active_model().display_name == "glm-5.2 (Mistral Hosted)"
-
-
 def test_model_display_name_is_optional() -> None:
     config = VibeConfigSchema.model_validate({
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
+        "active_model": "a",
+        "models": [ModelConfig(name="model-a", provider="mistral", alias="a")],
     })
 
     assert config.get_active_model().display_name is None
-
-
-def test_routed_model_not_injected_without_config() -> None:
-    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
-
-    config = VibeConfigSchema(routed_default_model=_ROUTED_TEST_ALIAS)
-
-    assert _ROUTED_TEST_ALIAS not in config.models
-    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
-
-
-def test_routed_model_not_injected_on_alias_mismatch() -> None:
-    mismatched = ModelConfig(
-        name="x", provider="mistral", alias="other-alias"
-    ).model_dump_json()
-    config = VibeConfigSchema.model_validate({
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": mismatched,
-    })
-
-    assert _ROUTED_TEST_ALIAS not in config.models
-    assert "other-alias" not in config.models
-
-
-def test_malformed_routed_model_config_string_fails_open() -> None:
-    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
-
-    config = VibeConfigSchema.model_validate({
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": "not-json",
-    })
-
-    assert config.routed_model_config is None
-    assert _ROUTED_TEST_ALIAS not in config.models
-    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
-
-
-def test_gated_model_not_injected_without_routing() -> None:
-    config = VibeConfigSchema.model_validate({"active_model": ""})
-
-    assert _ROUTED_TEST_ALIAS not in config.models
-
-
-def test_routed_model_available_but_not_active_when_pinned_to_other() -> None:
-    config = VibeConfigSchema.model_validate({
-        "active_model": "mistral-medium-3.5",
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
-    })
-
-    assert config.active_model == "mistral-medium-3.5"
-    assert config.get_active_model().alias == "mistral-medium-3.5"
-    assert _ROUTED_TEST_ALIAS in config.models
-    assert config.resolve_default_model_alias() == _ROUTED_TEST_ALIAS
-
-
-def test_gated_model_injected_when_pinned_to_routed_alias() -> None:
-    config = VibeConfigSchema.model_validate({
-        "active_model": _ROUTED_TEST_ALIAS,
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
-    })
-
-    assert config.active_model == _ROUTED_TEST_ALIAS
-    assert config.models.get(_ROUTED_TEST_ALIAS) == _ROUTED_TEST_MODEL
-    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
-
-
-def test_user_model_entry_wins_over_routed_injection() -> None:
-    # A user-defined model for the routed alias is never overwritten by injection.
-    user_model = ModelConfig(
-        name="my-own-model", provider="mistral", alias=_ROUTED_TEST_ALIAS
-    )
-    config = VibeConfigSchema.model_validate({
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
-        "models": [user_model],
-    })
-
-    assert config.models[_ROUTED_TEST_ALIAS].name == "my-own-model"
-
-
-def test_sparse_user_entry_merges_routed_model_fields() -> None:
-    # A sparse user entry (e.g. only thinking) must still pick up the routed
-    # model's other fields (temperature, supports_images, …) so that writing a
-    # single field does not silently drop routed defaults on reload.
-    sparse_model = ModelConfig(
-        name=_ROUTED_TEST_MODEL.name,
-        provider="mistral",
-        alias=_ROUTED_TEST_ALIAS,
-        thinking="medium",
-    )
-    config = VibeConfigSchema.model_validate({
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
-        "models": [sparse_model],
-    })
-
-    merged = config.models[_ROUTED_TEST_ALIAS]
-    assert merged.thinking == "medium"
-    assert merged.input_price == _ROUTED_TEST_MODEL.input_price
-    assert merged.supports_images == _ROUTED_TEST_MODEL.supports_images
-
-
-_EXTRA_MODEL_ALIAS = "extra-dropdown-model"
-_EXTRA_MODEL = ModelConfig(
-    name="extra-dropdown-model-name",
-    provider="mistral",
-    alias=_EXTRA_MODEL_ALIAS,
-    input_price=0.0,
-    output_price=0.0,
-    supports_images=False,
-)
-_EXTRA_MODELS_JSON = f"[{_EXTRA_MODEL.model_dump_json()}]"
-
-
-def test_routed_extra_model_added_to_dropdown_without_becoming_default() -> None:
-    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
-
-    config = VibeConfigSchema.model_validate({
-        "active_model": "",
-        "routed_extra_models": _EXTRA_MODELS_JSON,
-    })
-
-    # Present in the dropdown ...
-    assert _EXTRA_MODEL_ALIAS in config.models
-    assert _EXTRA_MODEL_ALIAS in config.available_models()
-    # ... but never the default: it does not touch routed_default_model.
-    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
-    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
-
-
-def test_routed_extra_models_accepts_multiple_definitions() -> None:
-    second = ModelConfig(name="second-name", provider="mistral", alias="second-extra")
-    payload = f"[{_EXTRA_MODEL.model_dump_json()},{second.model_dump_json()}]"
-
-    config = VibeConfigSchema.model_validate({"routed_extra_models": payload})
-
-    assert _EXTRA_MODEL_ALIAS in config.models
-    assert "second-extra" in config.models
-
-
-def test_routed_extra_model_becomes_default_when_named_by_routed_default() -> None:
-    # New flag adds the model; old flag names it as default. The two compose:
-    # the model is both in the dropdown and promoted to default.
-    config = VibeConfigSchema.model_validate({
-        "active_model": "",
-        "routed_extra_models": _EXTRA_MODELS_JSON,
-        "routed_default_model": _EXTRA_MODEL_ALIAS,
-    })
-
-    assert _EXTRA_MODEL_ALIAS in config.models
-    assert config.resolve_default_model_alias() == _EXTRA_MODEL_ALIAS
-    assert config.get_active_model().alias == _EXTRA_MODEL_ALIAS
-
-
-def test_routed_extra_models_compose_with_routed_model_config() -> None:
-    # Old add-and-default flag and the new add-only flag stay independent: the
-    # routed default model is the default, the extra model is only in the dropdown.
-    config = VibeConfigSchema.model_validate({
-        "active_model": "",
-        "routed_default_model": _ROUTED_TEST_ALIAS,
-        "routed_model_config": _ROUTED_TEST_MODEL_JSON,
-        "routed_extra_models": _EXTRA_MODELS_JSON,
-    })
-
-    assert config.models.get(_ROUTED_TEST_ALIAS) == _ROUTED_TEST_MODEL
-    assert _EXTRA_MODEL_ALIAS in config.models
-    assert config.resolve_default_model_alias() == _ROUTED_TEST_ALIAS
-    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
-
-
-def test_malformed_routed_extra_models_fails_open() -> None:
-    config = VibeConfigSchema.model_validate({"routed_extra_models": "not-json"})
-
-    assert config.routed_extra_models == []
-    assert _EXTRA_MODEL_ALIAS not in config.models
-
-
-def test_invalid_routed_extra_model_entries_are_dropped() -> None:
-    payload = json.dumps([
-        {"not": "a model"},
-        json.loads(_EXTRA_MODEL.model_dump_json()),
-    ])
-
-    config = VibeConfigSchema.model_validate({"routed_extra_models": payload})
-
-    aliases = {model.alias for model in config.routed_extra_models}
-    assert aliases == {_EXTRA_MODEL_ALIAS}
-    assert _EXTRA_MODEL_ALIAS in config.models
-
-
-def test_empty_alias_extra_model_is_not_injected_and_keeps_default() -> None:
-    from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
-
-    # An empty alias would collide with the unpinned active_model sentinel ("")
-    # and hijack the default. It must be dropped, not injected.
-    empty_alias = ModelConfig(name="", provider="mistral", alias="")
-    config = VibeConfigSchema.model_validate({
-        "active_model": "",
-        "routed_extra_models": f"[{empty_alias.model_dump_json()}]",
-    })
-
-    assert "" not in config.models
-    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
-    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
-
-
-def test_user_model_entry_wins_over_routed_extra_injection() -> None:
-    user_model = ModelConfig(
-        name="my-own-model", provider="mistral", alias=_EXTRA_MODEL_ALIAS
-    )
-    config = VibeConfigSchema.model_validate({
-        "routed_extra_models": _EXTRA_MODELS_JSON,
-        "models": [user_model],
-    })
-
-    assert config.models[_EXTRA_MODEL_ALIAS].name == "my-own-model"
 
 
 def test_known_active_model_is_not_overridden() -> None:
@@ -1320,11 +1014,8 @@ async def test_a_layer_setting_one_nested_field_keeps_the_others(
     assert session_logging.save_dir == str(save_dir)
 
 
-# Nested models the winning layer is meant to supply whole. GrowthBook hands
-# ``routed_model_config`` over atomically as one experiment-chosen model, so
-# merging it per field would splice leftover user keys into a definition the
-# experiment never described.
-ATOMIC_NESTED_FIELDS = frozenset({"routed_model_config"})
+# Nested models the winning layer is meant to supply whole, each with a reason.
+ATOMIC_NESTED_FIELDS: frozenset[str] = frozenset()
 
 
 def _nested_model_fields() -> dict[str, FieldInfo]:
@@ -1380,7 +1071,6 @@ def test_the_guard_inspects_the_optional_nested_fields_too() -> None:
     """
     inspected = _nested_model_fields()
     assert "compaction_model" in inspected
-    assert "routed_model_config" in inspected
     assert {"session_logging", "project_context", "experiments"} <= set(inspected)
 
 
@@ -1680,3 +1370,295 @@ def test_a_vibebot_local_tools_entry_asks_by_default_and_caps_its_result_size() 
     assert config.vibe_bot_local_tool_max_bytes == 8 * 1024
     with pytest.raises(ValidationError):
         build_test_vibe_config(vibe_bot_local_tool_max_bytes=64 * 1024 + 1)
+
+
+_GATEWAY = "https://internal-ai-gateway.mistralai.com"
+
+
+def test_tool_result_images_is_off_by_default() -> None:
+    # The OpenAI Chat Completions spec allows only text in a tool message
+    # (ChatCompletionRequestToolMessage, openai/openai-openapi), so an
+    # OpenAI-compatible endpoint gets images there only when it opts in.
+    provider = ProviderConfig(name="llamacpp", api_base="http://127.0.0.1:8080/v1")
+
+    assert provider.sends_tool_result_images is False
+
+
+@pytest.mark.parametrize("api_base", [_GATEWAY, f"{_GATEWAY}/v1", f"{_GATEWAY}./v1"])
+def test_tool_result_images_is_on_for_the_internal_ai_gateway(api_base: str) -> None:
+    provider = ProviderConfig(
+        name="gateway", api_base=api_base, backend=Backend.GENERIC
+    )
+
+    assert provider.sends_tool_result_images is True
+    assert provider.tool_result_images is None
+
+
+def test_an_explicit_false_wins_on_the_internal_ai_gateway() -> None:
+    provider = ProviderConfig(
+        name="gateway", api_base=_GATEWAY, tool_result_images=False
+    )
+
+    assert provider.sends_tool_result_images is False
+
+
+def test_a_lookalike_gateway_host_keeps_tool_result_images_off() -> None:
+    provider = ProviderConfig(name="gw", api_base=f"{_GATEWAY}.example.org")
+
+    assert provider.sends_tool_result_images is False
+
+
+@pytest.mark.parametrize(
+    ("api_base", "expected"), [(_GATEWAY, True), ("https://vllm.example/v1", False)]
+)
+def test_tool_result_images_follows_a_copy_onto_another_api_base(
+    api_base: str, expected: bool
+) -> None:
+    # The setup wizard merges its api_base with model_copy, which runs no
+    # validator: the value is derived on read, so it cannot go stale.
+    provider = ProviderConfig(name="p", api_base="https://other.example/v1")
+
+    assert (
+        provider.model_copy(update={"api_base": api_base}).sends_tool_result_images
+        is expected
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("line", "expected"), [("", True), ("tool_result_images = false", False)]
+)
+async def test_tool_result_images_resolves_from_a_gateway_toml(
+    tmp_path: Path, line: str, expected: bool
+) -> None:
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text(
+        "[[providers]]\n"
+        'name = "gateway"\n'
+        f'api_base = "{_GATEWAY}"\n'
+        'api_style = "openai"\n'
+        'backend = "generic"\n'
+        f"{line}\n"
+        "[[providers]]\n"
+        'name = "llamacpp"\n'
+        'api_base = "http://127.0.0.1:8080/v1"\n'
+    )
+    from vibe.core.config.layers.user import UserConfigLayer
+    from vibe.core.config.orchestrator import ConfigOrchestrator
+
+    layer = UserConfigLayer(path=toml_path)
+    orchestrator = await ConfigOrchestrator[VibeConfigSchema].create(
+        schema=VibeConfigSchema, layers=[layer], default_layer_resolver=lambda: layer
+    )
+    providers = {p.name: p for p in orchestrator.config.providers}
+
+    assert providers["gateway"].sends_tool_result_images is expected
+    assert providers["llamacpp"].sends_tool_result_images is False
+
+
+_UNCONFIGURED_MODEL = {
+    "alias": "my-model",
+    "name": "gpt-6.2-sol",
+    "provider": "my-gateway",
+}
+
+
+async def _orchestrator_from_toml(
+    toml_path: Path, data: dict[str, Any]
+) -> ConfigOrchestrator[VibeConfigSchema]:
+    from vibe.core.config.layers.default import DefaultConfigLayer
+
+    toml_path.write_text(tomli_w.dumps(data))
+    with patch.dict(os.environ, {}, clear=True):
+        user = UserConfigLayer(path=toml_path)
+        return await ConfigOrchestrator.create(
+            schema=VibeConfigSchema,
+            layers=[DefaultConfigLayer(schema=VibeConfigSchema), user],
+            default_layer_resolver=lambda: user,
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_pin_on_a_model_without_its_provider_falls_back_and_names_it(
+    tmp_path: Path,
+) -> None:
+    toml_path = tmp_path / "config.toml"
+    data = {"active_model": "my-model", "models": [_UNCONFIGURED_MODEL]}
+
+    orchestrator = await _orchestrator_from_toml(toml_path, data)
+    config = orchestrator.config
+
+    model = config.get_active_model()
+    assert model.alias == "mistral-large-4-0"
+    assert config.get_provider_for_model(model).name == "mistral"
+    notice = (
+        "Model 'my-model' is not available: provider 'my-gateway' is not "
+        "configured — running 'Mistral Large 4'. Pick another model to stop "
+        "this notice."
+    )
+    assert config.missing_model_warnings == (
+        "Model 'my-model' left out: provider 'my-gateway' is not configured",
+        notice,
+    )
+    assert notice in config.validation_warnings
+    assert tomllib.loads(toml_path.read_text()) == data
+
+
+@pytest.mark.asyncio
+async def test_a_model_without_its_provider_is_left_out_and_only_logged(
+    tmp_path: Path,
+) -> None:
+    toml_path = tmp_path / "config.toml"
+    data = {"models": [_UNCONFIGURED_MODEL]}
+
+    orchestrator = await _orchestrator_from_toml(toml_path, data)
+    config = orchestrator.config
+
+    assert "my-model" not in config.models
+    assert "my-model" not in config.available_models()
+    assert config.get_active_model().alias == "mistral-large-4-0"
+    # Nothing shown: the line goes to the log, once per process, through
+    # the missing-model notices the app server logs.
+    assert config.validation_warnings == ()
+    assert config.missing_model_warnings == (
+        "Model 'my-model' left out: provider 'my-gateway' is not configured",
+    )
+    assert tomllib.loads(toml_path.read_text()) == data
+
+
+@pytest.mark.asyncio
+async def test_a_model_on_a_configured_provider_is_kept(tmp_path: Path) -> None:
+    gateway = {"name": "my-gateway", "api_base": "https://gateway.example.com"}
+    data = {
+        "active_model": "my-model",
+        "providers": [gateway],
+        "models": [_UNCONFIGURED_MODEL],
+    }
+
+    orchestrator = await _orchestrator_from_toml(tmp_path / "config.toml", data)
+    config = orchestrator.config
+
+    model = config.get_active_model()
+    assert model.alias == "my-model"
+    assert config.get_provider_for_model(model).name == "my-gateway"
+    # The built-in providers stay alongside the user's own.
+    assert "mistral-large-4-0" in config.available_models()
+    assert config.missing_model_warnings == ()
+
+
+@pytest.mark.asyncio
+async def test_strict_config_falls_back_on_a_model_without_its_provider(
+    tmp_path: Path,
+) -> None:
+    data = {
+        "strict_config": True,
+        "active_model": "my-model",
+        "models": [_UNCONFIGURED_MODEL],
+    }
+
+    orchestrator = await _orchestrator_from_toml(tmp_path / "config.toml", data)
+
+    assert orchestrator.config.get_active_model().alias == "mistral-large-4-0"
+
+
+@pytest.mark.asyncio
+async def test_a_pin_on_a_missing_model_keeps_the_generic_notice(
+    tmp_path: Path,
+) -> None:
+    orchestrator = await _orchestrator_from_toml(
+        tmp_path / "config.toml", {"active_model": "gone-model"}
+    )
+
+    assert orchestrator.config.missing_model_warnings == (
+        "Model 'gone-model' is not available — running 'Mistral Large 4'. "
+        "Pick another model to stop this notice.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_models_are_kept_when_none_has_a_configured_provider(
+    tmp_path: Path,
+) -> None:
+    """Leaving every model out would fail the whole config, not one session."""
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text(tomli_w.dumps({"models": [_UNCONFIGURED_MODEL]}))
+
+    with patch.dict(os.environ, {}, clear=True):
+        user = UserConfigLayer(path=toml_path)
+        orchestrator = await ConfigOrchestrator.create(
+            schema=VibeConfigSchema, layers=[user], default_layer_resolver=lambda: user
+        )
+
+    assert list(orchestrator.config.models) == ["my-model"]
+
+
+@pytest.mark.asyncio
+async def test_a_rebuild_that_drops_the_active_models_provider_falls_back() -> None:
+    from vibe.core.config.layers.admin import AdminConfigLayer
+    from vibe.core.config.layers.default import DefaultConfigLayer
+    from vibe.core.config.layers.overrides import OverridesLayer
+
+    model = '[[models]]\nalias = "opus"\nname = "azure_ai/opus"\nprovider = "gw"\n'
+    admin = AdminConfigLayer()
+    admin.load_managed_toml(
+        f'[[providers]]\nname = "gw"\napi_base = "https://gw.example.com"\n{model}'
+    )
+    overrides = OverridesLayer(data={"active_model": "opus"})
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[DefaultConfigLayer(schema=VibeConfigSchema), overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+    assert orchestrator.config.get_active_model().alias == "opus"
+
+    # The refreshed admin config no longer defines the provider.
+    admin.load_managed_toml(model)
+    await orchestrator.reload()
+
+    assert orchestrator.config.get_active_model().alias == "mistral-large-4-0"
+    assert orchestrator.config.missing_model_warnings == (
+        "Model 'opus' left out: provider 'gw' is not configured",
+        "Model 'opus' is not available: provider 'gw' is not configured — "
+        "running 'Mistral Large 4'. Pick another model to stop this notice.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_admin_allowlist_error_names_the_models_left_out() -> None:
+    from vibe.core.config.layers.admin import AdminConfigLayer
+    from vibe.core.config.layers.default import DefaultConfigLayer
+    from vibe.core.config.layers.overrides import OverridesLayer
+
+    admin = AdminConfigLayer()
+    admin.load_managed_toml(
+        'allowed_models = ["corp-model"]\n'
+        '[[models]]\nalias = "corp"\nname = "corp-model"\nprovider = "gw"\n'
+    )
+    overrides = OverridesLayer(data={})
+
+    with pytest.raises(ValueError, match="provider .gw. is not configured") as error:
+        await ConfigOrchestrator.create(
+            schema=VibeConfigSchema,
+            layers=[DefaultConfigLayer(schema=VibeConfigSchema), overrides, admin],
+            default_layer_resolver=lambda: overrides,
+        )
+
+    assert "Admin allowed_models matches none of the configured models." in str(
+        error.value
+    )
+
+
+def test_a_pin_on_a_left_out_model_is_not_taken_by_a_catalog_alias() -> None:
+    config = VibeConfigSchema.model_validate({
+        "active_model": "my-model",
+        "catalog_model_aliases": {"catalog-model": ["my-model"]},
+        "models": [
+            {"alias": "catalog-model", "name": "catalog-model", "provider": "mistral"},
+            _UNCONFIGURED_MODEL,
+        ],
+    })
+
+    assert config.get_active_model().alias == "catalog-model"
+    assert config.missing_model_warnings[-1].startswith(
+        "Model 'my-model' is not available: provider 'my-gateway' is not configured"
+    )

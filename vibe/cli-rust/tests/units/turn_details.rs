@@ -1,4 +1,4 @@
-//! A settled turn's steps collapse into one `Worked for` group above its final answer.
+//! A settled turn's steps collapse into `Worked for` groups, one per segment between the user's rows.
 
 use serde_json::{json, Value};
 use vibe_rs::transcript::{Transcript, TurnDetails};
@@ -34,6 +34,13 @@ fn steer() -> Value {
     let mut steer = message("s1", "user", "also check the docs");
     steer["source"] = json!("turn_steer");
     steer
+}
+
+/// The turn's only group, if it forms exactly one.
+fn single(transcript: &Transcript, prompt: usize, running: bool) -> Option<TurnDetails> {
+    let mut groups = transcript.turn_details(prompt, running);
+    assert!(groups.len() <= 1, "expected at most one group: {groups:?}");
+    groups.pop()
 }
 
 fn span(details: &TurnDetails) -> (usize, usize, usize, usize) {
@@ -80,7 +87,7 @@ fn subagent_turn() -> Vec<Value> {
 
 #[test]
 fn a_settled_turn_groups_its_steps_above_the_final_answer() {
-    let details = transcript(worked("u1")).turn_details(0, false);
+    let details = single(&transcript(worked("u1")), 0, false);
     let details = details.expect("the turn has details");
     assert_eq!(span(&details), (1, 3, 1, 2));
     assert_eq!(details.key, "turn-details:u1");
@@ -91,9 +98,9 @@ fn the_running_turn_shows_its_steps_until_it_settles() {
     let mut history = worked("u1");
     history.extend(worked("u2"));
     let transcript = transcript(history);
-    assert!(transcript.turn_details(0, true).is_some());
-    assert_eq!(transcript.turn_details(5, true), None);
-    assert!(transcript.turn_details(5, false).is_some());
+    assert!(single(&transcript, 0, true).is_some());
+    assert_eq!(single(&transcript, 5, true), None);
+    assert!(single(&transcript, 5, false).is_some());
 }
 
 #[test]
@@ -101,7 +108,7 @@ fn the_label_reads_the_time_from_the_prompt_to_the_answer() {
     let mut history = worked("u1");
     history[0] = at(history[0].clone(), 1_000);
     history[4] = at(history[4].clone(), 73_500);
-    let details = transcript(history).turn_details(0, false).unwrap();
+    let details = single(&transcript(history), 0, false).unwrap();
     assert_eq!(details.elapsed_ms, Some(72_500));
     assert_eq!(
         details.label(),
@@ -116,7 +123,6 @@ fn the_label_formats_short_and_long_durations() {
         first: 0,
         last: 0,
         close: 0,
-        outside: Vec::new(),
         messages: 0,
         tools: 1,
         elapsed_ms: Some(elapsed_ms),
@@ -131,7 +137,7 @@ fn the_label_formats_short_and_long_durations() {
 
 #[test]
 fn without_timestamps_the_label_leaves_out_the_duration() {
-    let details = transcript(worked("u1")).turn_details(0, false).unwrap();
+    let details = single(&transcript(worked("u1")), 0, false).unwrap();
     assert_eq!(details.elapsed_ms, None);
     assert_eq!(details.label(), "Worked · 1 message · 2 tool calls");
 }
@@ -142,18 +148,18 @@ fn a_turn_with_nothing_before_its_answer_has_no_details() {
         message("u1", "user", "hi"),
         message("a1", "assistant", "Hello."),
     ];
-    assert_eq!(transcript(history).turn_details(0, false), None);
+    assert_eq!(single(&transcript(history), 0, false), None);
 }
 
 #[test]
 fn a_turn_without_an_answer_has_no_details() {
     let history = vec![message("u1", "user", "hi"), bash("t1")];
-    assert_eq!(transcript(history).turn_details(0, false), None);
+    assert_eq!(single(&transcript(history), 0, false), None);
 }
 
 #[test]
-fn only_a_prompt_opens_details() {
-    assert_eq!(transcript(worked("u1")).turn_details(1, false), None);
+fn only_a_prompt_returns_the_turns_groups() {
+    assert_eq!(single(&transcript(worked("u1")), 1, false), None);
 }
 
 #[test]
@@ -161,39 +167,49 @@ fn each_turn_ends_at_the_next_prompt() {
     let mut history = worked("u1");
     history.extend(worked("u2"));
     let transcript = transcript(history);
-    assert_eq!(
-        span(&transcript.turn_details(0, false).unwrap()),
-        (1, 3, 1, 2)
-    );
-    assert_eq!(
-        span(&transcript.turn_details(5, false).unwrap()),
-        (6, 8, 1, 2)
-    );
+    assert_eq!(span(&single(&transcript, 0, false).unwrap()), (1, 3, 1, 2));
+    assert_eq!(span(&single(&transcript, 5, false).unwrap()), (6, 8, 1, 2));
 }
 
 #[test]
 fn a_subagent_notification_does_not_split_the_turn() {
-    let details = transcript(subagent_turn()).turn_details(0, false);
+    let details = single(&transcript(subagent_turn()), 0, false);
     assert_eq!(details.map(|details| span(&details)), Some((1, 5, 2, 2)));
 }
 
 #[test]
-fn a_steer_stays_in_the_turn_but_out_of_the_group() {
+fn a_steer_splits_the_turn_into_a_group_before_it_and_one_after_it() {
     let mut history = worked("u1");
     history.insert(3, steer());
+    history[0] = at(history[0].clone(), 1_000);
+    history[3] = at(history[3].clone(), 11_000);
+    history[5] = at(history[5].clone(), 41_000);
     let transcript = transcript(history);
-    assert_eq!(transcript.turn_details(3, false), None);
-    let details = transcript.turn_details(0, false).unwrap();
-    assert_eq!(span(&details), (1, 4, 1, 2));
-    assert_eq!(details.outside, vec![3]);
-    assert!(!details.contains(3) && details.contains(4));
+    assert!(transcript.turn_details(3, false).is_empty());
+    let groups = transcript.turn_details(0, false);
+    let spans: Vec<_> = groups.iter().map(span).collect();
+    assert_eq!(spans, [(1, 2, 1, 1), (4, 4, 0, 1)]);
+    let keys: Vec<_> = groups.iter().map(|group| group.key.as_str()).collect();
+    assert_eq!(keys, ["turn-details:u1", "turn-details:s1"]);
+    let elapsed: Vec<_> = groups.iter().map(|group| group.elapsed_ms).collect();
+    assert_eq!(elapsed, [Some(10_000), Some(30_000)]);
+    assert!(groups.iter().all(|group| !group.contains(3)));
+}
+
+#[test]
+fn a_steer_right_before_the_answer_opens_no_group() {
+    let mut history = worked("u1");
+    history.insert(4, steer());
+    let groups = transcript(history).turn_details(0, false);
+    let spans: Vec<_> = groups.iter().map(span).collect();
+    assert_eq!(spans, [(1, 3, 1, 2)]);
 }
 
 #[test]
 fn a_steer_does_not_settle_the_running_turn() {
     let mut history = worked("u1");
     history.insert(3, steer());
-    assert_eq!(transcript(history).turn_details(0, true), None);
+    assert_eq!(single(&transcript(history), 0, true), None);
 }
 
 #[test]
@@ -203,8 +219,8 @@ fn prompts_sent_together_form_one_turn() {
     let mut history = worked("u1");
     history.insert(1, follow_up);
     let transcript = transcript(history);
-    assert_eq!(transcript.turn_details(1, false), None);
-    let details = transcript.turn_details(0, false).unwrap();
+    assert_eq!(single(&transcript, 1, false), None);
+    let details = single(&transcript, 0, false).unwrap();
     assert_eq!(span(&details), (2, 4, 1, 2));
 }
 
@@ -215,14 +231,14 @@ fn a_queued_prompt_does_not_settle_the_running_turn() {
     queued["pending"] = json!(true);
     history.push(queued);
     let transcript = transcript(history);
-    assert_eq!(transcript.turn_details(0, true), None);
-    assert!(transcript.turn_details(0, false).is_some());
-    assert_eq!(transcript.turn_details(5, false), None);
+    assert_eq!(single(&transcript, 0, true), None);
+    assert!(single(&transcript, 0, false).is_some());
+    assert_eq!(single(&transcript, 5, false), None);
 }
 
 #[test]
 fn a_running_turn_without_a_new_prompt_keeps_the_last_turn_open() {
-    assert_eq!(transcript(worked("u1")).turn_details(0, true), None);
+    assert_eq!(single(&transcript(worked("u1")), 0, true), None);
 }
 
 #[test]
@@ -233,7 +249,7 @@ fn blank_and_discarded_replies_are_not_counted() {
     history.insert(1, message("blank", "assistant", "  "));
     history.insert(1, discarded);
     history.push(message("trailing", "assistant", " "));
-    let details = transcript(history).turn_details(0, false).unwrap();
+    let details = single(&transcript(history), 0, false).unwrap();
     assert_eq!((details.last, details.messages, details.tools), (5, 1, 2));
 }
 
@@ -248,7 +264,7 @@ fn a_folded_tool_group_closes_the_group_on_its_first_call() {
         message("a2", "assistant", "Done."),
     ];
     let transcript = transcript(history);
-    let details = transcript.turn_details(0, false).unwrap();
+    let details = single(&transcript, 0, false).unwrap();
     assert_eq!(details.last, 4);
     assert_eq!(transcript.closing_step(&details, |_| false), 2);
     assert_eq!(transcript.closing_step(&details, |_| true), 4);
@@ -262,8 +278,7 @@ fn a_mid_turn_notice_folds_with_the_steps() {
     });
     let mut history = worked("u1");
     history.insert(2, notice);
-    let details = transcript(history).turn_details(0, false).unwrap();
-    assert!(details.outside.is_empty());
+    let details = single(&transcript(history), 0, false).unwrap();
     assert!(details.contains(2));
 }
 
@@ -271,7 +286,7 @@ fn a_mid_turn_notice_folds_with_the_steps() {
 fn an_interrupted_turn_keeps_its_steps() {
     let mut history = worked("u1");
     history.push(json!({"id": "i1", "type": "interrupt", "local": true}));
-    assert_eq!(transcript(history).turn_details(0, false), None);
+    assert_eq!(single(&transcript(history), 0, false), None);
 }
 
 #[test]
@@ -286,12 +301,13 @@ fn an_entry_finds_the_prompt_of_its_turn() {
 }
 
 #[test]
-fn ctrl_o_keys_name_every_prompt() {
+fn ctrl_o_keys_name_every_prompt_and_steer() {
     let mut history = worked("u1");
+    history.insert(3, steer());
     history.extend(worked("u2"));
     assert_eq!(
         transcript(history).details_keys(),
-        ["turn-details:u1", "turn-details:u2"]
+        ["turn-details:u1", "turn-details:s1", "turn-details:u2"]
     );
 }
 
@@ -301,14 +317,14 @@ fn a_resumed_interrupted_turn_keeps_its_steps() {
     cut["outcome"] = json!({"type": "discarded", "cause": "interrupt"});
     let mut history = worked("u1");
     history.push(cut);
-    assert_eq!(transcript(history).turn_details(0, false), None);
+    assert_eq!(single(&transcript(history), 0, false), None);
 }
 
 #[test]
 fn a_step_after_the_last_reply_means_no_final_answer() {
     let mut history = worked("u1");
     history.push(bash("u1-t3"));
-    assert_eq!(transcript(history).turn_details(0, false), None);
+    assert_eq!(single(&transcript(history), 0, false), None);
 }
 
 #[test]
@@ -320,7 +336,7 @@ fn reasoning_alone_folds_under_a_bare_label() {
     ];
     let mut transcript = transcript(history);
     transcript.set_show_reasoning(true);
-    let details = transcript.turn_details(0, false).unwrap();
+    let details = single(&transcript, 0, false).unwrap();
     assert_eq!((details.first, details.last), (1, 1));
     assert_eq!(details.label(), "Worked");
 }
@@ -334,7 +350,7 @@ fn rows_after_the_answer_that_are_not_model_steps_keep_the_group() {
         json!({"id": "s1", "type": "notice", "level": "info", "message": "ok", "local": true});
     let mut history = worked("u1");
     history.extend([model_change, status]);
-    assert!(transcript(history).turn_details(0, false).is_some());
+    assert!(single(&transcript(history), 0, false).is_some());
 }
 
 #[test]
@@ -347,11 +363,11 @@ fn a_lone_notice_before_the_answer_forms_no_group() {
         notice,
         message("a1", "assistant", "Hello."),
     ];
-    assert_eq!(transcript(history).turn_details(0, false), None);
+    assert_eq!(single(&transcript(history), 0, false), None);
 }
 
 #[test]
-fn a_bang_command_after_the_answer_keeps_the_group_and_stays_shown() {
+fn a_bang_command_splits_the_steps_and_one_after_the_answer_keeps_them() {
     let bang = json!({
         "id": "x1", "type": "effect", "generationStatus": "completed",
         "detail": {"kind": "shell", "toolName": "shell", "display": {"verb": "Ran"}},
@@ -362,9 +378,9 @@ fn a_bang_command_after_the_answer_keeps_the_group_and_stays_shown() {
         json!({"id": "x2", "type": "effect", "generationStatus": "completed",
         "detail": {"kind": "shell", "toolName": "shell", "display": {"verb": "Ran"}}}),
     );
-    let details = transcript(history).turn_details(0, false).unwrap();
-    assert_eq!(details.outside, vec![2]);
-    assert_eq!((details.messages, details.tools), (1, 2));
+    let groups = transcript(history).turn_details(0, false);
+    let spans: Vec<_> = groups.iter().map(span).collect();
+    assert_eq!(spans, [(1, 1, 1, 0), (3, 4, 0, 2)]);
 }
 
 #[test]
@@ -375,9 +391,9 @@ fn a_server_step_after_the_answer_means_no_group() {
     );
     let mut transcript = transcript(history);
     transcript.set_show_reasoning(true);
-    assert_eq!(transcript.turn_details(0, false), None);
+    assert_eq!(single(&transcript, 0, false), None);
     transcript.set_show_reasoning(false);
-    assert!(transcript.turn_details(0, false).is_some());
+    assert!(single(&transcript, 0, false).is_some());
 }
 
 #[test]
@@ -387,5 +403,5 @@ fn an_agent_shell_call_after_the_answer_means_no_group() {
         json!({"id": "t9", "type": "effect", "generationStatus": "completed",
         "detail": {"kind": "shell", "toolName": "bash", "display": {"verb": "Ran"}}}),
     );
-    assert_eq!(transcript(history).turn_details(0, false), None);
+    assert_eq!(single(&transcript(history), 0, false), None);
 }

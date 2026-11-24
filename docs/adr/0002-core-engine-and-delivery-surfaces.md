@@ -11,6 +11,10 @@ Vibe uses Unified Harness Core and Runtime outside `vibe.app_server`.
 | App server | Product capabilities, resolved configuration, integrations, public projections, session hosting and cross-session coordination. |
 | Clients | Presentation, input, navigation and explicitly client-local facilities. |
 
+A decision that depends on state shared across clients or sessions, such as
+what to clean up after a mutation or whether a resource is still in use,
+belongs to the app server. Clients send the intent and render the outcome.
+
 Runtime exposes typed session operations and generic capability bindings. It
 invokes supplied handlers without importing app-server modules. Adapters map
 resolved product inputs and dependency-neutral errors at that boundary.
@@ -36,8 +40,11 @@ and hosting contracts allow features to change independently.
 - Identify the owner of each state value and side effect before changing it.
 - Use session capabilities while preserving leases, idempotency and cleanup.
 - Keep execution-relevant feature state within existing persistence capabilities.
+- Put a decision that reads other sessions' or clients' state behind an
+  app-server method; a client never scans shared state to decide it.
 
 ## Flag To User When
 
 - A change creates two authoritative owners for execution or durable state.
+- A client decides an outcome that depends on another session's or client's state.
 - A proposed boundary exposes private engine or storage details.

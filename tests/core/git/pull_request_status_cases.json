@@ -19,6 +19,19 @@
     "cliReason": null
   },
   {
+    "name": "a pull request in the merge queue keeps its queued state",
+    "input": {
+      "state": "open",
+      "isInMergeQueue": true,
+      "checksStatus": "pending",
+      "reviewDecision": "approved",
+      "mergeStatus": "blocked"
+    },
+    "status": "queued",
+    "cliStatus": "waiting",
+    "cliReason": "checks_pending"
+  },
+  {
     "name": "a pull request without a lifecycle state is unknown",
     "input": {},
     "status": "unknown",

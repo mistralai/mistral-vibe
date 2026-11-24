@@ -685,7 +685,8 @@ class _Multiplexed:
             },
         })
         return await self._next(
-            channel, lambda message: message.get("id") == request_id
+            channel,
+            lambda message: message.get("id") == request_id and "method" not in message,
         )
 
     async def start(self, channel: str, cwd: Path) -> str:

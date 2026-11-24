@@ -185,6 +185,63 @@ class LocalProjectStore:
             self._write(data, entries)
         return _ProjectEntry.model_validate(entry).to_project()
 
+    def set_roots(
+        self, project_id: str, root_paths: Sequence[Path], links: VibeProjectsStore
+    ) -> LocalProject:
+        """Replaces the project's folders; the first becomes its working folder."""
+        roots = list(dict.fromkeys(root_paths))
+        if not roots:
+            raise LocalProjectError("A project needs at least one folder")
+        with exclusive_file_lock(self._path):
+            data = self._read()
+            self._check_supported(data)
+            entries = _entries(data)
+            entry = _find(entries, project_id)
+            current = _raw_roots(entry)
+            for root in roots:
+                # Unlike a folder it has, a new one or a new working folder must be there.
+                is_new = root not in current or (root == roots[0] != current[0])
+                if is_new and not os.path.isdir(root):
+                    raise LocalProjectError(f"Not a folder: {str(root)!r}")
+            # A retired backing still names its cloud project: relinking it backs it again.
+            cloud = entry.get("cloud")
+            cloud_id = cloud.get("project_id") if isinstance(cloud, dict) else None
+            project_links, _ = links.read_project_links()
+            linked = {
+                project_link_path(link): link.project_id
+                for link in project_links
+                if link.project_id.strip()
+            }
+            for root in roots:
+                # The link import would move it out to its own cloud project.
+                if root not in current and linked.get(root, cloud_id) != cloud_id:
+                    raise LocalProjectConflict(
+                        f"{root} is linked to another cloud project"
+                    )
+            # Unlinked, or the link import would add them back.
+            unlinked = [
+                root
+                for root in current
+                if root not in roots
+                and cloud_id is not None
+                and linked.get(root) == cloud_id
+            ]
+            # The link import drops a backing none of whose folders is linked.
+            if (
+                unlinked
+                and _backing_id(entry) is not None
+                and not any(linked.get(root) == cloud_id for root in roots)
+            ):
+                raise LocalProjectError(
+                    f"{unlinked[0]} links the project to its cloud project"
+                )
+            for root in unlinked:
+                links.delete_project_link(repo_root=root)
+            entry["root_paths"] = [str(root) for root in roots]
+            entry["updated_at"] = now_ms()
+            self._write(data, entries)
+        return _ProjectEntry.model_validate(entry).to_project()
+
     def remove(self, project_id: str, links: VibeProjectsStore) -> None:
         """Drops the project and the folder links that would import it back; its folders, sessions and worktrees stay."""
         with exclusive_file_lock(self._path):
@@ -235,6 +292,7 @@ class LocalProjectStore:
             data = self._read()
             entries = _entries(data)
             own: dict[str, object] | None = None
+            holder: LocalProject | None = None
             for entry in entries:
                 project = _parse(entry)
                 if project is None or root_path not in project.root_paths:
@@ -247,8 +305,15 @@ class LocalProjectStore:
                     raise LocalProjectConflict(
                         f"{root_path} is already linked to another cloud project"
                     )
-                if own is None and project.root_paths[0] == root_path:
+                if project.root_paths[0] != root_path:
+                    holder = holder or project
+                elif own is None:
                     own = entry
+            # Backed later, its project would drop a folder another cloud project links.
+            if own is None and holder is not None:
+                raise LocalProjectConflict(
+                    f"{root_path} is a folder of the local project {holder.name!r}"
+                )
             now = now_ms()
             backing = next(
                 (entry for entry in entries if _backing_id(entry) == cloud_project_id),

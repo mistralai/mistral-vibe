@@ -18,6 +18,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
+import unicodedata
 
 from pydantic import Field
 
@@ -202,6 +203,10 @@ class LocalTools:
             "truncated": truncated,
         }
 
+    async def is_read_only(self, server: str, tool: str) -> bool:
+        listed = await (await self._runtime()).list_tools([server], refresh=False)
+        return any(d.name == tool and d.read_only for d in listed.get(server, ()))
+
     async def mode(self, server: str, tool: str) -> tuple[ApprovalMode, int, float]:
         """How a call to an exposed tool runs: its approval, the byte cap of
         its answer and its timeout. Raises ``not_exposed`` or ``unknown_tool``.
@@ -240,6 +245,20 @@ class LocalTools:
             approval,
             config.vibe_bot_local_tool_max_bytes,
             min(MAX_CALL_SECONDS, server_timeout),
+        )
+
+    async def ceiling_allows(self) -> bool:
+        """Whether this machine's Vibebot ceiling alone lets any call run, read
+        only or not: only then may the user's "Always allow" in the bot's inbox
+        lift a tool's own ask (VIB2-268). The server's read-only claim never
+        widens it.
+        """
+        config = await self._read_config()
+        return (
+            local_tool_mode(
+                "allow", config.vibe_bot_max_approval_policy, read_only=False
+            )
+            == "allow"
         )
 
     async def allowed_only_as_read_only(self, server: str, tool: str) -> bool:
@@ -293,10 +312,17 @@ class LocalTools:
 
     async def drop_runtime(self) -> None:
         """Closes the servers on a detach; the next call opens them again."""
-        async with self._mcp_lock:
-            mcp, self._mcp = self._mcp, None
+        mcp = await self.detach_runtime()
         if mcp is not None:
             await mcp.aclose()
+
+    async def detach_runtime(self) -> LocalMCP | None:
+        """Takes the servers out: the next call opens new ones, and the caller
+        closes these once the calls that still use them are done.
+        """
+        async with self._mcp_lock:
+            mcp, self._mcp = self._mcp, None
+        return mcp
 
     async def _runtime(self) -> LocalMCP:
         async with self._mcp_lock:
@@ -309,6 +335,54 @@ class LocalTools:
             if self._mcp is None:
                 self._mcp = await self._mcp_factory()
             return self._mcp
+
+
+MAX_APPROVAL_ARGUMENTS = 2000
+
+
+_INVISIBLE = frozenset({"Cc", "Cf", "Co", "Cn", "Cs", "Zl", "Zp"})
+
+
+def approval_text(arguments: Mapping[str, Any]) -> str:
+    """The arguments as the inbox shows them (the workflow's `local_tools.shown_arguments`)."""
+    return _escape_invisible(json.dumps(arguments, sort_keys=True, ensure_ascii=False))
+
+
+_BLANK = frozenset("\u034f\u115f\u1160\u3164\uffa0")
+
+
+def _escape_invisible(text: str) -> str:
+    """Every character that shows nothing or hides what it is, as the workflow's
+    `connector_writes.escape_invisible`: controls, format characters (bidi, zero-width),
+    blank-looking ones and variation selectors, as `\\uXXXX` (two past U+FFFF).
+    """
+    return "".join(_escaped(c) if _invisible(c) else c for c in text)
+
+
+_VARIATION_SELECTORS = (range(0xFE00, 0xFE10), range(0xE0100, 0xE01F0))
+_BMP_END = 0xFFFF
+
+
+def _invisible(char: str) -> bool:
+    code = ord(char)
+    if any(code in selectors for selectors in _VARIATION_SELECTORS):
+        return True
+    return char in _BLANK or unicodedata.category(char) in _INVISIBLE
+
+
+def _escaped(char: str) -> str:
+    code = ord(char)
+    if code <= _BMP_END:
+        return f"\\u{code:04x}"
+    high, low = divmod(code - 0x10000, 0x400)
+    return f"\\u{0xD800 + high:04x}\\u{0xDC00 + low:04x}"
+
+
+def args_hash(arguments: Mapping[str, Any]) -> str:
+    """The arguments the user approved: the call runs only with these."""
+    return hashlib.sha256(
+        json.dumps(arguments, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def _exposed_entries(config: VibeConfigSchema) -> list[VibeBotLocalToolsEntry]:
@@ -573,5 +647,6 @@ __all__ = [
     "VibeBotLocalToolServer",
     "VibeBotLocalToolsParams",
     "VibeBotLocalToolsResponse",
+    "args_hash",
     "local_tool_mode",
 ]

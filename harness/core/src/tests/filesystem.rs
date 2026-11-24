@@ -85,7 +85,7 @@ fn direct_tool_completion(action_id: &str, call_id: &str, name: &str, arguments:
                 "arguments_json": arguments.to_string(),
             }],
             "finish_reason": "tool_call",
-            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+            "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }

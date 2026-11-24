@@ -12,6 +12,7 @@ from vibe.app_server._unified_scheduled_loops import (
     ScheduledLoopStoreError,
     UnifiedScheduledLoops,
 )
+from vibe.core.loop import LoopError
 
 
 @pytest.mark.asyncio
@@ -160,6 +161,14 @@ async def test_scheduled_loop_mutations_are_atomic_when_persistence_fails(
     assert await loops.list() == before
 
     with pytest.raises(ScheduledLoopStoreError):
+        await loops.update(created.id, "do not keep me", interval="1m")
+    assert await loops.list() == before
+
+    with pytest.raises(ScheduledLoopStoreError):
+        await loops.run_now(created.id)
+    assert await loops.list() == before
+
+    with pytest.raises(ScheduledLoopStoreError):
         await loops.delete(created.id)
     assert await loops.list() == before
 
@@ -171,3 +180,161 @@ async def test_scheduled_loop_mutations_are_atomic_when_persistence_fails(
         await loops.mark_fired(created.id, now=100.0)
     assert await loops.list() == before
     assert path.read_text(encoding="utf-8") == persisted
+
+
+@pytest.mark.asyncio
+async def test_updating_a_loop_prompt_keeps_its_identity_and_next_run(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A persistent store with one loop due at a known time.
+    *Do*: Update its prompt with the same interval, then restore the store.
+    *Assert*: The loop keeps its id, creation time and next run, with the new prompt.
+    """
+    # Prepare
+    path = tmp_path / "scheduled-loops.json"
+    loops = UnifiedScheduledLoops(path, persistent=lambda: True)
+    created = await loops.create("10m", "Old\ncheck the build")
+    await loops.replace([created.model_copy(update={"next_fire_at": 1234.0})])
+
+    # Do
+    updated = await loops.update(created.id, "New\ncheck the tests", interval="10M")
+    restored = UnifiedScheduledLoops(path, persistent=lambda: True)
+    await restored.restore()
+
+    # Assert
+    assert updated.model_dump() == {
+        **created.model_dump(),
+        "prompt": "New\ncheck the tests",
+        "next_fire_at": 1234.0,
+    }
+    assert await restored.list() == [updated]
+
+
+@pytest.mark.asyncio
+async def test_a_cron_respaced_on_edit_keeps_its_next_run(tmp_path: Path) -> None:
+    """*Prepare*: A cron loop stored with doubled spaces, due at a known time.
+    *Do*: Update its prompt with the same cron written with single spaces.
+    *Assert*: The schedule counts as unchanged, so the next run is kept.
+    """
+    # Prepare
+    loops = UnifiedScheduledLoops(
+        tmp_path / "scheduled-loops.json", persistent=lambda: False
+    )
+    created = await loops.create_cron("0  9 * * 1-5", "check the build")
+    await loops.replace([created.model_copy(update={"next_fire_at": 1234.0})])
+
+    # Do
+    updated = await loops.update(created.id, "check the tests", cron="0 9 * * 1-5")
+
+    # Assert
+    assert updated.next_fire_at == 1234.0
+
+
+@pytest.mark.asyncio
+async def test_updating_a_loop_schedule_counts_its_next_run_from_now(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A loop every ten minutes, due at a known time.
+    *Do*: Change it to every hour, then to a cron, at a fixed time.
+    *Assert*: Each new schedule replaces the old one and its next run counts from now.
+    """
+    # Prepare
+    loops = UnifiedScheduledLoops(
+        tmp_path / "scheduled-loops.json", persistent=lambda: False
+    )
+    created = await loops.create("10m", "check the build")
+    await loops.replace([created.model_copy(update={"next_fire_at": 1234.0})])
+    monkeypatch.setattr(scheduled_loops_module.time, "time", lambda: 10_000.0)
+
+    # Do
+    hourly = await loops.update(created.id, "check the build", interval="1h")
+    cron = await loops.update(created.id, "check the build", cron=" 0 9 * * 1-5 ")
+
+    # Assert
+    assert (hourly.interval_seconds, hourly.cron, hourly.next_fire_at) == (
+        3600,
+        None,
+        13_600.0,
+    )
+    assert (cron.interval_seconds, cron.cron) == (None, "0 9 * * 1-5")
+    assert cron.next_fire_at > 10_000.0
+    assert await loops.list() == [cron]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("loop_id", "prompt", "interval", "message"),
+    [
+        ("missing", "check the build", "10m", "No scheduled loop with id `missing`."),
+        (None, "/compact", "10m", "Prompt cannot start with '/'."),
+        (None, "check the build", "5s", "Interval must be at least 30s."),
+    ],
+)
+async def test_an_invalid_loop_update_changes_nothing(
+    tmp_path: Path, loop_id: str | None, prompt: str, interval: str, message: str
+) -> None:
+    """*Prepare*: A store with one loop.
+    *Do*: Update an unknown loop, or the loop with an invalid prompt or interval.
+    *Assert*: The update is refused with a readable reason and the loop is unchanged.
+    """
+    # Prepare
+    loops = UnifiedScheduledLoops(
+        tmp_path / "scheduled-loops.json", persistent=lambda: False
+    )
+    created = await loops.create("10m", "check the build")
+
+    # Do / Assert
+    with pytest.raises(LoopError) as caught:
+        await loops.update(loop_id or created.id, prompt, interval=interval)
+    assert str(caught.value) == message
+    assert await loops.list() == [created]
+
+
+@pytest.mark.asyncio
+async def test_running_a_loop_now_makes_it_due_then_it_keeps_its_schedule(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A loop every ten minutes, next due far in the future.
+    *Do*: Run it now, then mark it fired as the runner does.
+    *Assert*: It is due at once, and its next run is one interval after the fire.
+    """
+    # Prepare
+    loops = UnifiedScheduledLoops(
+        tmp_path / "scheduled-loops.json", persistent=lambda: False
+    )
+    created = await loops.create("10m", "check the build")
+    await loops.replace([created.model_copy(update={"next_fire_at": 99_999.0})])
+
+    # Do
+    due = await loops.run_now(created.id, now=1_000.0)
+    picked = await loops.due(now=1_000.0)
+    fired = await loops.mark_fired(created.id, now=1_000.0)
+
+    # Assert
+    assert due.next_fire_at == 1_000.0
+    assert picked == due
+    assert fired is not None
+    assert (fired.id, fired.prompt, fired.next_fire_at) == (
+        created.id,
+        "check the build",
+        1_600.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_running_an_unknown_loop_is_refused(tmp_path: Path) -> None:
+    """*Prepare*: A store with one loop.
+    *Do*: Run a loop id it does not have.
+    *Assert*: The run is refused with a readable reason and the loop is unchanged.
+    """
+    # Prepare
+    loops = UnifiedScheduledLoops(
+        tmp_path / "scheduled-loops.json", persistent=lambda: False
+    )
+    created = await loops.create("10m", "check the build")
+
+    # Do / Assert
+    with pytest.raises(LoopError) as caught:
+        await loops.run_now("missing")
+    assert str(caught.value) == "No scheduled loop with id `missing`."
+    assert await loops.list() == [created]

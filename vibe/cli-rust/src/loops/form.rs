@@ -1,9 +1,11 @@
-//! The form that adds a loop: a one-line title and schedule, and multi-line instructions.
+//! The form that adds or edits a loop: a one-line title and schedule, and multi-line instructions.
 
+use ratatui::layout::Rect;
 use serde_json::{json, Value};
 
 use crate::chat_input::{self, Action};
 use crate::proxy_setup::{Field, MAX_INPUT_BYTES};
+use crate::server::{method, ScheduledLoop};
 use crate::ui::composer_layout::ComposerLayout;
 
 /// Instructions rows shown before the field scrolls.
@@ -43,13 +45,56 @@ pub struct Form {
     pub schedule: Field,
     pub instructions: Field,
     pub focused: usize,
-    /// The in-flight `loops/create` (its `LoopsApp::submissions` count); Enter waits for its answer.
+    /// The loop being edited; `None` adds a new one.
+    pub editing: Option<Editing>,
+    /// The in-flight `loops/create` or `loops/update` (its `LoopsApp::submissions` count); Enter waits for its answer.
     pub submission: Option<u64>,
     /// The instructions input's width in the last frame, for moving the caret by wrapped row.
     pub width: u16,
+    /// Each field as last drawn, for clicks.
+    pub areas: Vec<FieldArea>,
+}
+
+/// The loop a form saves over.
+pub struct Editing {
+    pub id: String,
+    /// It had no instructions (the agent scheduled it on one line), so it may keep none.
+    pub one_line: bool,
+}
+
+/// Where a field was drawn: its whole row, label included, and its input.
+#[derive(Clone, Copy)]
+pub struct FieldArea {
+    pub field: FormField,
+    pub row: Rect,
+    pub input: Rect,
 }
 
 impl Form {
+    /// A form filled from `scheduled`, saving over it.
+    pub fn editing(scheduled: &ScheduledLoop) -> Self {
+        let field = |text: String| Field {
+            anchor: None,
+            ..Field::new(text)
+        };
+        let every = match (&scheduled.cron, scheduled.interval_seconds) {
+            (Some(cron), _) => cron.clone(),
+            (None, Some(seconds)) => super::schedule::interval(seconds),
+            (None, None) => String::new(),
+        };
+        let instructions = super::schedule::instructions(scheduled);
+        Self {
+            title: field(super::schedule::title(scheduled).to_owned()),
+            schedule: field(every),
+            instructions: field(instructions.to_owned()),
+            editing: Some(Editing {
+                id: scheduled.id.clone(),
+                one_line: instructions.is_empty(),
+            }),
+            ..Self::default()
+        }
+    }
+
     pub fn field(&mut self, which: FormField) -> &mut Field {
         match which {
             FormField::Title => &mut self.title,
@@ -60,6 +105,37 @@ impl Form {
 
     pub fn focused_field(&self) -> FormField {
         FormField::ALL[self.focused]
+    }
+
+    /// A click on a field's row focuses it; on its text it also moves the caret there.
+    pub fn press(&mut self, at: (u16, u16)) {
+        let Some(&FieldArea {
+            field: which,
+            input,
+            ..
+        }) = self.areas.iter().find(|area| area.row.contains(at.into()))
+        else {
+            return;
+        };
+        self.focused = FormField::ALL
+            .iter()
+            .position(|field| *field == which)
+            .unwrap_or(0);
+        if !input.contains(at.into()) {
+            return;
+        }
+        let (row, column) = (usize::from(at.1 - input.y), usize::from(at.0 - input.x));
+        let cursor = match which {
+            FormField::Instructions => {
+                let top = self.instructions.scroll;
+                self.instructions_layout(self.width)
+                    .offset_at(top + row, column)
+            }
+            _ => self.field(which).byte_at(column),
+        };
+        let field = self.field(which);
+        field.cursor = cursor;
+        field.anchor = None;
     }
 
     /// Tab and the arrows move between the inputs, wrapping at both ends.
@@ -110,19 +186,29 @@ impl Form {
         field.anchor = None;
     }
 
-    /// The `loops/create` params, or why the form cannot be sent yet.
-    pub fn params(&self, session_id: &str) -> Result<Value, String> {
+    /// The method and params that save the form, `loops/update` when editing, or why it cannot be sent yet.
+    pub fn request(&self, session_id: &str) -> Result<(&'static str, Value), String> {
         let title = self.title.text.trim();
         let instructions = self.instructions.text.trim();
         if title.is_empty() {
             return Err("Give the loop a title.".into());
         }
-        if instructions.is_empty() {
-            return Err("Write the instructions the loop sends.".into());
-        }
-        let prompt = format!("{title}\n{instructions}");
+        let one_line = self
+            .editing
+            .as_ref()
+            .is_some_and(|editing| editing.one_line);
+        let prompt = match instructions {
+            "" if one_line => title.to_owned(),
+            "" => return Err("Write the instructions the loop sends.".into()),
+            _ => format!("{title}\n{instructions}"),
+        };
         let (key, value) = schedule(&self.schedule.text)?;
-        Ok(json!({"sessionId": session_id, key: value, "prompt": prompt}))
+        let mut params = json!({"sessionId": session_id, key: value, "prompt": prompt});
+        let Some(editing) = &self.editing else {
+            return Ok((method::LOOPS_CREATE, params));
+        };
+        params["loopId"] = json!(editing.id);
+        Ok((method::LOOPS_UPDATE, params))
     }
 }
 

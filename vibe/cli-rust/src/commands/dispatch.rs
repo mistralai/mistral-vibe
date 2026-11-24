@@ -13,10 +13,7 @@ use super::stress;
 use super::submission::clear_and_remember;
 use crate::app::{App, Severity};
 use crate::server::Client;
-use crate::{
-    config, log_level_picker, mcp, model_picker, paste_image, resume_picker, rewind, theme_picker,
-    ui,
-};
+use crate::{config, log_level_picker, mcp, model_picker, paste_image, rewind, theme_picker, ui};
 
 pub(super) fn run_command(
     app: &mut App,
@@ -34,13 +31,19 @@ pub(super) fn run_command(
         "/voice" => crate::voice_app::open(app),
         "/proxy-setup" => crate::proxy_setup::open(app, client),
         "/theme" => theme_picker::open(app),
-        "/model" => model_picker::open(app),
+        "/model" => model_picker::open(app, client),
         "/thinking" => super::thinking::command(app, client, command_args(value)),
         "/log-level" => log_level_picker::open(app),
         "/debug" => crate::debug_console::toggle(app, client),
-        "/resume" | "/continue" => resume_picker::open(app, client),
+        "/resume" | "/continue" => {
+            crate::sessions_page::open(app, client, crate::sessions_page::Trigger::ResumeCommand)
+        }
+        "/sessions" => {
+            crate::sessions_page::open(app, client, crate::sessions_page::Trigger::SessionsCommand)
+        }
         "/storage" => crate::storage_panel::open(app, client),
         "/rewind" => rewind::command(app, client),
+        "/cd" => super::cd::run(app, client, command_args(value)),
         "/branch" | "/fork" => super::branch::branch_session(app, client),
         "/mcp" | "/connectors" => mcp::show(app, client, value),
         "/plugins" => crate::plugins::show(app, client),

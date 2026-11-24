@@ -117,6 +117,7 @@ async def test_a_server_closing_itself_mid_read_ends_its_serving_cleanly(
     server = AppServer(
         InputEndingTransport(transport),
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, Host()),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
@@ -143,6 +144,9 @@ class _ClientLossHost:
     def mark_client_disconnected(self) -> None:
         self.disconnected = True
 
+    def mark_client_reconnected(self) -> None:
+        self.disconnected = False
+
     async def shutdown(self) -> None:
         pass
 
@@ -153,6 +157,7 @@ def _server_over(
     return AppServer(
         transport,
         oidc_tenants=services.oidc_tenants,
+        platform_credential_lenders=services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, host),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),

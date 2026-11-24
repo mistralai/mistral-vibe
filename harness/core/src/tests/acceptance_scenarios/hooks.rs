@@ -1178,7 +1178,7 @@ fn context_sent_during_a_retry_pre_llm_hook_reaches_the_retried_model_call() {
                 "result": {
                     "parts": [{"type": "text", "text": "first fragment"}],
                     "finish_reason": "length",
-                    "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+                    "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
                 },
             }),
             running(turn_id)

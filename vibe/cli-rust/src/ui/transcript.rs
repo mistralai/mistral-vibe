@@ -7,6 +7,7 @@ mod document;
 mod entry;
 mod layout;
 mod paint;
+mod preview;
 pub mod sticky;
 mod table_cells;
 mod viewport;
@@ -15,6 +16,7 @@ pub use diff::{gutter_width, language, occurrences, render_edit_diff, DiffOccurr
 pub use difflib::{unified_diff, Hunk, Opcode, Tag};
 
 pub(crate) use document::selection_slice;
+pub use preview::{draw_tail, Shown, Tail};
 
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -91,6 +93,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
         // Short content flows from the top (banner top-left), no scrollbar; the queue stays at the bottom.
         view.scroll_to_entry = None;
         view.sticky_prompt = None;
+        view.sticky_steer = None;
         view.scroll_anchor = None;
         view.selection_region.scrollbar = false;
         view.selection_scrollbar.clear();
@@ -193,15 +196,10 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     }
     // Rewind selection asks for an entry to sit at the top of the viewport; the
     // layout that answers it only exists here.
-    if let Some(index) = view.scroll_to_entry.take() {
-        if let Some(entry) = content_layout.entries.iter().find(|e| e.index == index) {
-            let document_top = document_top.saturating_add(entry.top);
-            let scroll = total
-                .saturating_sub(area.height)
-                .saturating_sub(document_top);
-            view.scroll = scroll;
-            view.scroll_target = scroll;
-        }
+    let landing = view.scroll_to_entry.take();
+    if let Some(scroll) = landing.and_then(|index| sticky::scroll_to(&pin, index, total)) {
+        view.scroll = scroll;
+        view.scroll_target = scroll;
     }
     let scroll = scroll_view(total, area.height, view.scroll);
     view.scroll = scroll.scroll;

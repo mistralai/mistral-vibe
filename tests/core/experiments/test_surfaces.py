@@ -20,8 +20,8 @@ def test_every_experiment_declares_the_surfaces_it_applies_on() -> None:
     "name",
     [
         ExperimentName.SYSTEM_PROMPT,
-        ExperimentName.CLI_MODEL_ROUTING,
-        ExperimentName.CLI_EXTRA_MODELS,
+        ExperimentName.REGISTRY_SKILLS,
+        ExperimentName.MODEL_CATALOG_FILTER,
     ],
 )
 @pytest.mark.parametrize("surface", list(ExperimentSurface))

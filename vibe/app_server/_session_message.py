@@ -66,14 +66,20 @@ def session_message_display(sender: SessionMessageSender) -> UserDisplayContent:
     return UserDisplayContent(version="1", host="vibe", content=[marker])
 
 
-def handed_task_text(started_by_session_id: str) -> str:
+def handed_task_text(started_by_session_id: str, *, can_message: bool) -> str:
+    """``can_message``: the session has `send_to_session`."""
+    ask = (
+        " Use `send_to_session`, leaving `session_id` out, only for a question "
+        "that session alone can answer before you can finish."
+        if can_message
+        else ""
+    )
     return (
         f'<started_by_session session_id="{escape(started_by_session_id)}">\n'
         "Another session started this one and handed it the task above. Your "
         "final reply when the turn ends goes back to it on its own, so end "
         "with a short, self-contained summary of the outcome, not a "
-        "transcript. Use `send_to_session`, leaving `session_id` out, only "
-        "for a question that session alone can answer before you can finish."
+        f"transcript.{ask}"
         "\n</started_by_session>"
     )
 

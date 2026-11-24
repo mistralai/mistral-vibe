@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -544,3 +544,208 @@ def test_moved_display_roots_reproject_the_paths_they_show() -> None:
     # Assert
     assert _raw_ids(changes) == ["effect-read"]
     assert projection.history == _projected_at_once(entries, moved)
+
+
+def test_a_change_mid_history_splices_it_and_reports_the_unchanged_prefix() -> None:
+    """*Prepare*: A projection holding the Turn without the tool's result, so
+        the call shows nothing yet, with entries after it; its history taken.
+    *Do*: Apply the result, then take the history twice.
+    *Assert*: The effect is spliced in where the call is; the first take says
+        the entries before it are the objects the previous take returned, and
+        the second take, with no event between, says all of them are.
+    """
+    # Prepare
+    entries = [
+        entry
+        for entry in _entries(_steps())
+        if not isinstance(entry, ToolResultHistoryEntry)
+    ]
+    projection = _projection(entries)
+    before, unchanged_before = projection.take_history()
+
+    # Do
+    projection.apply(HistoryEntryCompletedEvent(entry=_completed_result()))
+    after, unchanged = projection.take_history()
+    again, unchanged_again = projection.take_history()
+
+    # Assert
+    assert unchanged_before == 0
+    assert after == _projected_at_once([*entries, _completed_result()])
+    position = [entry.id for entry in after].index("effect-read")
+    assert unchanged == position
+    assert all(old is new for old, new in zip(before[:position], after, strict=False))
+    assert after[position + 1 :] == before[position:]
+    assert (again, unchanged_again) == (after, len(after))
+
+
+class _RecordingApps:
+    """``SessionMcpApps`` stand-in that records what it was asked to link."""
+
+    def __init__(self) -> None:
+        self.linked: list[list[str]] = []
+
+    def apply(self, history: Sequence[PublicHistoryEntry]) -> list[PublicHistoryEntry]:
+        self.linked.append([entry.id for entry in history])
+        return [entry.model_copy() for entry in history]
+
+
+def test_a_live_update_links_only_the_entries_that_changed() -> None:
+    """*Prepare*: A Session API path over a projection holding the Turn
+        without the tool's result, linked once.
+    *Do*: Apply the result and link again; then link a new projection.
+    *Assert*: The second link passes only the effect and what follows it to
+        the MCP apps and keeps the earlier linked copies; a new projection is
+        linked whole.
+    """
+    # Prepare
+    from types import SimpleNamespace
+
+    from vibe.app_server._session_api_path import SessionApiPath
+    from vibe.app_server._session_api_session import ApiSessionState
+    from vibe.app_server.models import (
+        IdleSessionStatus,
+        PublicSession,
+        PublicSessionState,
+    )
+
+    apps = _RecordingApps()
+    path = SessionApiPath(cast(Any, SimpleNamespace(_mcp_apps=apps)), cast(Any, None))
+    entries = [
+        entry
+        for entry in _entries(_steps())
+        if not isinstance(entry, ToolResultHistoryEntry)
+    ]
+    state = ApiSessionState(SESSION_ID, [ROOT])
+    state.history_projection.reset(entries)
+    client = PublicSessionState(
+        event_id=0,
+        session=PublicSession(
+            id=SESSION_ID, status=IdleSessionStatus(), created_at=1, updated_at=1
+        ),
+    )
+    first = path._linked_history(state, client)
+
+    # Do
+    state.history_projection.apply(
+        HistoryEntryCompletedEvent(entry=_completed_result())
+    )
+    second = path._linked_history(state, client)
+    other = ApiSessionState(SESSION_ID, [ROOT])
+    other.history_projection.reset(entries)
+    path._linked_history(other, client)
+
+    # Assert
+    ids = [entry.id for entry in second]
+    position = ids.index("effect-read")
+    assert apps.linked[1] == ids[position:]
+    assert all(old is new for old, new in zip(first[:position], second, strict=False))
+    assert apps.linked[2] == [entry.id for entry in first]
+
+
+def _client_state(history: list[PublicHistoryEntry]) -> Any:
+    """The state a client holds, with ``history``."""
+    from vibe.app_server.models import (
+        IdleSessionStatus,
+        PublicSession,
+        PublicSessionState,
+    )
+
+    return PublicSessionState(
+        event_id=0,
+        session=PublicSession(
+            id=SESSION_ID, status=IdleSessionStatus(), created_at=1, updated_at=1
+        ),
+        history=history,
+    )
+
+
+def _settled_question_path() -> tuple[
+    Any, Any, PublicCallbackEntry, PublicCallbackEntry
+]:
+    """A Session API path, a state whose projection holds a settled question,
+    the projection's copy of it, and a client copy that differs in its time.
+    """
+    from types import SimpleNamespace
+
+    from vibe.app_server._session_api_path import SessionApiPath
+    from vibe.app_server._session_api_session import ApiSessionState
+
+    output = UserInputCallbackOutput(
+        result=UserQuestionResult(answers=[UserAnswer(question="Ship?", answer="Yes")])
+    )
+    question = UnknownHistoryEntry.model_validate({
+        **_base("user-input-1", 0),
+        "type": "callback",
+        "callbackId": "user-input-1",
+        "title": "User input required",
+        "detail": {
+            "kind": "user_input",
+            "request": {
+                "questions": [
+                    {
+                        "question": "Ship?",
+                        "options": [{"label": "Yes"}, {"label": "No"}],
+                    }
+                ]
+            },
+        },
+        "state": {
+            "status": "answered",
+            "output": output.model_dump(mode="json", by_alias=True),
+        },
+    })
+    state = ApiSessionState(SESSION_ID, [ROOT])
+    [projected] = state.history_projection.reset([question])
+    assert isinstance(projected, PublicCallbackEntry)
+    kept = projected.model_copy(update={"created_at": 1})
+    path = SessionApiPath(
+        cast(Any, SimpleNamespace(_mcp_apps=_RecordingApps())), cast(Any, None)
+    )
+    return path, state, projected, kept
+
+
+def test_a_live_update_keeps_the_client_copy_of_a_settled_callback() -> None:
+    """*Prepare*: A Session API path over a projection that holds a settled
+        question, and a client that already holds its own settled copy.
+    *Do*: Link the history twice, the second time with nothing changed.
+    *Assert*: Both links hold the client's copy, so the next update shares it
+        with the client instead of comparing the rest of the history again.
+    """
+    # Prepare
+    path, state, _projected, kept = _settled_question_path()
+    client = _client_state([kept])
+
+    # Do
+    first = path._linked_history(state, client)
+    second = path._linked_history(state, client)
+
+    # Assert
+    assert first[0] is kept
+    assert second[0] is kept
+
+
+def test_a_resolution_after_its_entry_links_the_client_copy_next_time() -> None:
+    """*Prepare*: A Session API path that linked a settled question while the
+        client still held the question open.
+    *Do*: The resolution reaches the client with its own copy; link again with
+        nothing changed in the projection.
+    *Assert*: The first link holds the projection's copy, the second the
+        client's, so later updates share it with the client.
+    """
+    # Prepare
+    path, state, projected, kept = _settled_question_path()
+    open_client = _client_state([
+        kept.model_copy(
+            update={"generation_status": PublicEntryGenerationStatus.IN_PROGRESS}
+        )
+    ])
+    first = path._linked_history(state, open_client)
+
+    # Do
+    path._question_resolved = True
+    second = path._linked_history(state, _client_state([kept]))
+
+    # Assert
+    assert first[0] == projected
+    assert first[0] is not kept
+    assert second[0] is kept

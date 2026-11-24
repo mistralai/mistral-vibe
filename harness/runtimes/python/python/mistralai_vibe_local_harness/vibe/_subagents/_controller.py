@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import time
 from typing import Literal, Protocol, cast
 
@@ -35,6 +36,10 @@ from mistralai_vibe_local_harness.vibe._observability import (
     record_subagent_operation,
 )
 from mistralai_vibe_local_harness.vibe._storage import RuntimeStateV3, sha256_json
+from mistralai_vibe_local_harness.vibe._subagents._closed_log import (
+    ClosedSubagentLog,
+    known_child_records,
+)
 from mistralai_vibe_local_harness.vibe._subagents._core_adapter import (
     CORE_AGENT_TOOL_NAMES,
     controller_action,
@@ -126,6 +131,9 @@ class ParentRuntime(Protocol):
     @property
     def identity(self) -> SessionIdentity: ...
 
+    @property
+    def session_root(self) -> Path: ...
+
     async def update_runtime_state(
         self, update: Callable[[RuntimeStateV3], RuntimeStateV3]
     ) -> None: ...
@@ -188,6 +196,7 @@ class SubagentController:
         self._rejected_agent_types = dict(rejected_agent_types or {})
         self._policy_ceiling = policy_ceiling
         self._limits = limits
+        self._closed_log = ClosedSubagentLog(runtime.session_root)
         self._graph_lock = asyncio.Lock()
         self._notification_lock = asyncio.Lock()
         self._turn_admission_lock = asyncio.Lock()
@@ -201,6 +210,10 @@ class SubagentController:
         # reconciliation leaves their receipts alone.
         self._running_operations: set[str] = set()
         self._abandoning_operations: set[str] = set()
+        # What close() unloads: a child can leave the state while still loaded.
+        self._loaded_children: set[str] = set()
+        self._child_host_calls = 0
+        self._child_host_idle = asyncio.Condition()
 
     @classmethod
     async def open(
@@ -251,6 +264,8 @@ class SubagentController:
             limits=limits or SubagentLimits(),
             rejected_agent_types=rejected_agent_types,
         )
+        # Moves the closed children an older build kept in the state to the log.
+        await controller._commit(controller._subagents())
         # A recovered notification can immediately ask the model for more child
         # work, so install the controller before replaying any queued delivery.
         runtime.configure_subagent_controller(controller)
@@ -614,10 +629,9 @@ class SubagentController:
         self, child_session_id: str
     ) -> ResolvedChildSessionBinding | None:
         """The binding a child of this parent opens under, or None for another Session."""
-        state = self._runtime.runtime_state.subagents
-        if state is None:
+        if self._runtime.runtime_state.subagents is None:
             return None
-        for child in state.children.values():
+        for child in self.known_child_records():
             if child.child_session_id == child_session_id:
                 return self._bindings.get(child.agent_type)
         return None
@@ -759,21 +773,18 @@ class SubagentController:
         if watchers:
             await asyncio.gather(*watchers, return_exceptions=True)
         self._watchers.clear()
-        children = sorted(
-            (
-                child
-                for child in self._subagents().children.values()
-                # A child closed to make room keeps its store and may still be loaded.
-                if not isinstance(
-                    child.state, CreationFailedChild | CreationCleanupPendingChild
-                )
-            ),
-            key=lambda child: child.child_session_id,
-        )
-        for child in children:
-            await self._child_host.unload_child(
-                ChildSessionHandle(session_id=child.child_session_id)
-            )
+        # No child loads from here on (`_open_child` refuses while closing),
+        # so after the in-flight calls drain, the loaded set only shrinks.
+        async with self._child_host_idle:
+            await self._child_host_idle.wait_for(lambda: self._child_host_calls == 0)
+        failures: list[Exception] = []
+        for session_id in sorted(self._loaded_children):
+            try:
+                await self._unload(ChildSessionHandle(session_id=session_id))
+            except Exception as error:
+                failures.append(error)
+        if failures:
+            raise failures[0]
 
     async def _finish_abandonment(self, action_id: str) -> None:
         async with self._graph_lock:
@@ -889,7 +900,7 @@ class SubagentController:
             )
             await self._commit(state)
         try:
-            await self._child_host.delete_child(target.child_session_id)
+            await self._delete(target.child_session_id)
         except Exception:
             return
         async with self._graph_lock:
@@ -997,12 +1008,9 @@ class SubagentController:
                         agents.append(listed_agent(child, "running"))
                     case IdleChild():
                         agents.append(listed_agent(child, "idle"))
-                    case ChildTombstone():
-                        agents.append(listed_agent(child, "stopped"))
-                    case (
-                        CreationFailedChild(failure=stored_failure)
-                        | CreationCleanupPendingChild(failure=stored_failure)
-                    ):
+                    case ChildTombstone() | CreationFailedChild():
+                        continue
+                    case CreationCleanupPendingChild(failure=stored_failure):
                         agents.append(
                             listed_agent(child, "failed", stored_failure.message)
                         )
@@ -1034,22 +1042,9 @@ class SubagentController:
                             )
                         ), {}
                     state = self._subagents()
-                    if request.agent_name in state.children:
-                        return error_output(
-                            failure(
-                                "subagent_name_conflict",
-                                f"Subagent name is already reserved: {request.agent_name}",
-                                retryable=False,
-                            )
-                        ), {}
-                    if len(state.children) >= self._limits.max_lifetime_names:
-                        return error_output(
-                            failure(
-                                "subagent_name_limit",
-                                "Subagent lifetime name limit reached",
-                                retryable=False,
-                            )
-                        ), {}
+                    conflict = self._name_conflict(state, request.agent_name)
+                    if conflict is not None:
+                        return error_output(conflict), {}
                     if live_child_count(state) >= self._limits.max_children:
                         evicted = _longest_waiting_child(state)
                         if evicted is None:
@@ -1120,9 +1115,7 @@ class SubagentController:
     async def _unload_evicted_child(self, child: ChildSessionRecord) -> None:
         # Only frees memory: the child is already closed, so the spawn goes on.
         try:
-            await self._child_host.unload_child(
-                ChildSessionHandle(session_id=child.child_session_id)
-            )
+            await self._unload(ChildSessionHandle(session_id=child.child_session_id))
         except Exception:
             logger.warning(
                 "Could not unload subagent %s closed to make room for a new one",
@@ -1204,7 +1197,7 @@ class SubagentController:
             )
             await self._commit(state)
         try:
-            await self._child_host.delete_child(target.child_session_id)
+            await self._delete(target.child_session_id)
         except Exception:
             pass
         else:
@@ -1523,6 +1516,9 @@ class SubagentController:
                     raise RuntimeError("new close operation requires its Core Action")
                 async with self._graph_lock:
                     child = self._require_child(request.agent_name)
+                    if request.agent_name not in self._subagents().children:
+                        # Retired to the closed log: already closed.
+                        return success_output()
                     if isinstance(child.state, ChildTombstone):
                         target: CloseIdleTarget | CloseRunningTarget = CloseIdleTarget(
                             child_session_id=child.child_session_id
@@ -1622,8 +1618,8 @@ class SubagentController:
                 "subagent_recovery_unsafe", "Close did not reach cleanup"
             )
         if handle is not None:
-            await self._child_host.unload_child(handle)
-        await self._child_host.delete_child(child.child_session_id)
+            await self._unload(handle)
+        await self._delete(child.child_session_id)
         result = success_output()
         async with self._graph_lock:
             state = self._subagents()
@@ -1944,7 +1940,7 @@ class SubagentController:
                     phase="child_preflight",
                 )
             for handle in reversed(opened):
-                await self._child_host.unload_child(handle)
+                await self._unload(handle)
             raise
 
     async def _skip_unrestorable_child(
@@ -2029,22 +2025,47 @@ class SubagentController:
         start_new_actions: bool = True,
         require_existing: bool | None = None,
     ) -> ChildSessionHandle:
-        return await self._child_host.create_or_restore_child(
-            identity=SubagentSessionIdentity(
-                session_id=child.child_session_id,
-                root_session_id=self._runtime.identity.root_session_id,
-                parent_session_id=self._runtime.session_id,
-            ),
-            binding=binding,
-            instructions=child.instructions,
-            spawn_key=child.spawn_action_id,
-            start_new_actions=start_new_actions,
-            require_existing=(
-                not isinstance(child.state, ReservedChild)
-                if require_existing is None
-                else require_existing
-            ),
-        )
+        if self._closing:
+            raise RuntimeError("subagent controller is closed")
+        async with self._child_host_call():
+            handle = await self._child_host.create_or_restore_child(
+                identity=SubagentSessionIdentity(
+                    session_id=child.child_session_id,
+                    root_session_id=self._runtime.identity.root_session_id,
+                    parent_session_id=self._runtime.session_id,
+                ),
+                binding=binding,
+                instructions=child.instructions,
+                spawn_key=child.spawn_action_id,
+                start_new_actions=start_new_actions,
+                require_existing=(
+                    not isinstance(child.state, ReservedChild)
+                    if require_existing is None
+                    else require_existing
+                ),
+            )
+            self._loaded_children.add(handle.session_id)
+        return handle
+
+    @asynccontextmanager
+    async def _child_host_call(self) -> AsyncIterator[None]:
+        self._child_host_calls += 1
+        try:
+            yield
+        finally:
+            self._child_host_calls -= 1
+            async with self._child_host_idle:
+                self._child_host_idle.notify_all()
+
+    async def _unload(self, handle: ChildSessionHandle) -> None:
+        async with self._child_host_call():
+            await self._child_host.unload_child(handle)
+            self._loaded_children.discard(handle.session_id)
+
+    async def _delete(self, child_session_id: str) -> None:
+        async with self._child_host_call():
+            await self._child_host.delete_child(child_session_id)
+            self._loaded_children.discard(child_session_id)
 
     def _binding(self, child: ChildSessionRecord) -> ResolvedChildSessionBinding:
         binding = self._bindings.get(child.agent_type)
@@ -2062,6 +2083,8 @@ class SubagentController:
     def _require_child(self, agent_name: str) -> ChildSessionRecord:
         child = self._subagents().children.get(agent_name)
         if child is None:
+            child = self._closed_log.record(agent_name)
+        if child is None:
             raise ExpectedSubagentError(
                 failure(
                     "subagent_not_found",
@@ -2077,7 +2100,44 @@ class SubagentController:
             raise RuntimeError("subagent controller state is not initialized")
         return state.model_copy(deep=True)
 
+    def _name_conflict(
+        self, state: SubagentRuntimeState, agent_name: str
+    ) -> SubagentFailure | None:
+        child = state.children.get(agent_name)
+        if child is not None and not _is_closed(child):
+            return failure(
+                "subagent_name_conflict",
+                f"Subagent name is already reserved: {agent_name}",
+                retryable=False,
+            )
+        if child is None and self._closed_log.record(agent_name) is None:
+            return None
+        return failure(
+            "subagent_name_conflict",
+            "Subagent name belongs to a closed subagent; choose another name: "
+            f"{agent_name}",
+            retryable=False,
+        )
+
+    def known_child_records(self) -> tuple[ChildSessionRecord, ...]:
+        return known_child_records(self._subagents(), self._closed_log)
+
     async def _commit(self, subagents: SubagentRuntimeState) -> None:
+        retired = _retirable_children(subagents)
+        if retired:
+            # Write-ahead: a crash before the generation leaves the record in
+            # both places, and readers prefer the state's copy.
+            await asyncio.to_thread(self._closed_log.append, retired)
+            retired_names = {child.agent_name for child in retired}
+            subagents = subagents.model_copy(
+                update={
+                    "children": {
+                        name: child
+                        for name, child in subagents.children.items()
+                        if name not in retired_names
+                    }
+                }
+            )
         updated_subagents = _sorted_state(subagents)
         await self._runtime.update_runtime_state(
             lambda state: state.model_copy(
@@ -2146,6 +2206,20 @@ def _same_enforced_policy(
     # Compare enforced policy only: ambient env names are launcher noise, not drift.
     excluded = {"allowed_environment_names"}
     return stored.model_dump(exclude=excluded) == current.model_dump(exclude=excluded)
+
+
+def _is_closed(child: ChildSessionRecord) -> bool:
+    return isinstance(child.state, ChildTombstone | CreationFailedChild)
+
+
+def _retirable_children(state: SubagentRuntimeState) -> list[ChildSessionRecord]:
+    named = {receipt.agent_name for receipt in state.operation_receipts.values()}
+    named.update(item.agent_name for item in state.notifications.pending)
+    return [
+        child
+        for child in state.children.values()
+        if _is_closed(child) and child.agent_name not in named
+    ]
 
 
 def _may_have_child_store(state: ChildLifecycleState) -> bool:

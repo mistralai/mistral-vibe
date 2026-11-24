@@ -229,6 +229,7 @@ mod tests {
                     },
                     model_facts: crate::core::testing::test_model_facts(),
                     compaction_model_input_modalities: None,
+                    compaction_model_window: None,
                     instructions: Default::default(),
                 },
                 tools: ToolSettings {

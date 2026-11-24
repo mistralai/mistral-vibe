@@ -1,4 +1,4 @@
-//! `/loop` manager and next-loop row: schedules, the list, delete, the add form and the idle row.
+//! `/loop` manager and the rail's loops chip: schedules, the list, delete, the add form and the chip.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use vibe_rs::loops::{self, schedule, Event};
 use vibe_rs::server::{notification, Client, ScheduledLoop};
 use vibe_rs::ui;
 
-use crate::support::{key, notify, render, rows};
+use crate::support::{ctrl, key, notify, render, rows};
 
 fn scheduled(id: &str, prompt: &str, in_seconds: f64) -> Value {
     json!({
@@ -138,46 +138,40 @@ fn a_due_loop_does_not_stop_later_rows_from_updating() {
 }
 
 #[test]
-fn the_idle_row_names_the_soonest_loop_and_its_title() {
+fn the_rail_chip_shows_the_soonest_loop_idle_or_busy_and_never_its_title() {
     let mut app = with_loops(json!([
         scheduled("late", "Nightly report\nSummarize the day.", 3_600.0),
         scheduled("soon", "PR watch #42\nCheck the PR's CI.", 290.0),
     ]));
-    let screen = screen(&mut app, 120);
-    assert!(
-        screen.contains("◷ next loop in 5m: PR watch #42"),
-        "{screen}"
-    );
-    assert!(!screen.contains("Nightly report"), "{screen}");
-    assert!(!screen.contains("Check the PR"), "{screen}");
-}
-
-#[test]
-fn the_idle_row_cuts_the_title_then_drops_it_on_a_narrow_screen() {
-    let title = "Review every open pull request on the dashboard repository";
-    let mut app = with_loops(json!([scheduled("l", title, 290.0)]));
-    let row = |app: &mut App, width: u16| {
-        rows(&render(width, 24, |frame| ui::draw(app, frame)))
-            .into_iter()
-            .find(|row| row.contains("next loop"))
-            .expect("the next-loop row")
-            .trim()
-            .to_owned()
-    };
-    assert_eq!(row(&mut app, 120), format!("◷ next loop in 5m: {title}"));
-    let cut = row(&mut app, 40);
-    assert!(cut.starts_with("◷ next loop in 5m: Review"), "{cut}");
-    assert!(cut.ends_with('…'), "{cut}");
-    assert_eq!(row(&mut app, 24), "◷ next loop in 5m");
-}
-
-#[test]
-fn no_next_loop_row_while_a_turn_runs() {
-    let mut app = with_loops(json!([scheduled("l", "Build watch\nCheck it.", 290.0)]));
+    let idle = screen(&mut app, 120);
+    assert!(idle.contains("◷ loop in 5m"), "{idle}");
+    assert!(!idle.contains("PR watch #42"), "{idle}");
+    assert!(!idle.contains("next loop"), "{idle}");
     app.set_status(Status::Generating {
         since: vibe_rs::clock::now(),
     });
-    assert!(!screen(&mut app, 120).contains("next loop"));
+    let busy = screen(&mut app, 120);
+    assert!(busy.contains("◷ loop in 5m"), "{busy}");
+}
+
+#[test]
+fn the_loops_chip_is_the_first_to_shrink_then_to_drop() {
+    let mut app = with_loops(json!([scheduled("l", "Build watch\nCheck it.", 290.0)]));
+    app.todo_tracker
+        .record(vec![vibe_rs::todo_tracker::TodoItem {
+            id: "1".into(),
+            content: "Run the suite".into(),
+            status: vibe_rs::todo_tracker::TodoStatus::InProgress,
+        }]);
+    let rail =
+        |app: &mut App, width: u16| crate::support::row(&crate::support::rail(app, width), 0);
+    assert!(rail(&mut app, 40).contains("◷ loop in 5m · ≡ 0/1"));
+    assert!(rail(&mut app, 16).contains("◷ 5m · ≡ 0/1"));
+    let narrow = rail(&mut app, 10);
+    assert!(
+        narrow.contains("≡ 0/1") && !narrow.contains('◷'),
+        "{narrow:?}"
+    );
 }
 
 #[test]
@@ -403,7 +397,7 @@ fn a_created_loop_closes_the_form_and_highlights_it() {
 }
 
 fn created(submission: u64, result: Result<ScheduledLoop, String>) -> Event {
-    Event::Created {
+    Event::Saved {
         session_id: "session".into(),
         submission,
         result,
@@ -424,7 +418,7 @@ fn a_late_answer_for_a_closed_form_or_another_session_is_dropped() {
         "an older submission keeps the new form"
     );
     assert_eq!(app.session.loops.len(), 1);
-    let elsewhere = Event::Created {
+    let elsewhere = Event::Saved {
         session_id: "other".into(),
         submission: 2,
         result: Ok(loop_b()),
@@ -491,10 +485,62 @@ fn bare_loop_opens_the_manager_and_loop_with_arguments_stays_a_prompt() {
 }
 
 #[test]
-fn an_open_manager_hides_the_idle_next_loop_row() {
+fn the_loops_chip_opens_the_manager_and_a_second_click_closes_it() {
     let mut app = with_loops(json!([scheduled("l", "Build watch\nCheck it.", 290.0)]));
+    let client = std::sync::Arc::new(Client::stub());
+    vibe_rs::rail::open(&mut app, &client, vibe_rs::rail::Item::Loops);
+    assert!(app.loops.open);
+    assert_eq!(
+        vibe_rs::rail::open_item(&app),
+        Some(vibe_rs::rail::Item::Loops)
+    );
+    assert!(screen(&mut app, 120).contains("Build watch"));
+    let (x, y) = {
+        let &(_, x, _) = app
+            .rail
+            .hits
+            .iter()
+            .find(|hit| hit.0 == vibe_rs::rail::Item::Loops)
+            .unwrap();
+        (x, app.rail.area.y)
+    };
+    vibe_rs::rail::click(&mut app, &client, x, y);
+    assert!(!app.loops.open);
+}
+
+#[test]
+fn ctrl_x_over_the_loop_list_keeps_it_drawn_and_o_keeps_its_highlight() {
+    let mut app = with_loops(json!([
+        scheduled("a", "First\nx", 290.0),
+        scheduled("b", "Second\ny", 900.0),
+    ]));
+    let client = std::sync::Arc::new(Client::stub());
+    vibe_rs::rail::open(&mut app, &client, vibe_rs::rail::Item::Loops);
+    loops::handle_key(&mut app, &client, key(KeyCode::Down));
+    screen(&mut app, 120);
+    vibe_rs::rail::enter_from_box(&mut app, &client, &ctrl('x'));
+    assert_eq!(app.focus(), vibe_rs::focus::Focus::Rail);
+    assert!(screen(&mut app, 120).contains("Second"));
+    vibe_rs::rail::handle_key(&mut app, &client, &key(KeyCode::Char('o')));
+    assert_eq!(loops::selected(&app).map(|row| row.id.as_str()), Some("b"));
+}
+
+#[test]
+fn ctrl_x_closes_a_manager_without_its_chip_like_any_picker() {
+    let mut app = with_loops(json!([]));
+    app.todo_tracker
+        .record(vec![vibe_rs::todo_tracker::TodoItem {
+            id: "1".into(),
+            content: "Run".into(),
+            status: vibe_rs::todo_tracker::TodoStatus::InProgress,
+        }]);
+    let client = std::sync::Arc::new(Client::stub());
     loops::open(&mut app);
-    assert!(!screen(&mut app, 120).contains("next loop"));
+    assert_eq!(vibe_rs::rail::open_item(&app), None);
+    screen(&mut app, 120);
+    assert!(vibe_rs::rail::enter_from_box(&mut app, &client, &ctrl('x')));
+    assert!(!app.loops.open);
+    assert_eq!(app.focus(), vibe_rs::focus::Focus::Rail);
 }
 
 #[test]
@@ -513,7 +559,8 @@ fn the_manager_columns_line_up() {
             .unwrap_or_else(|| panic!("{needle}\n{screen}"))
     };
     assert_eq!(column("every 20m"), column("weekdays 09:00"), "{screen}");
-    assert_eq!(column("in 5m"), column("in ~2h"), "{screen}");
+    // Two spaces lead the manager's column, not the rail chip's `loop in 5m`.
+    assert_eq!(column("  in 5m"), column("  in ~2h"), "{screen}");
 }
 
 fn ids(app: &App) -> Vec<String> {

@@ -1,19 +1,16 @@
-//! Paints the status rail at the right of the loading row: chips shrink from the left, then drop, when narrow.
+//! Paints the status rail at the right of the loading row: chips shrink from the left, then drop, subagents and PRs last, when narrow.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
-use super::{goal_row, hint_line, list_hover, theme};
+use super::{hint_line, list_hover, theme};
 use crate::app::App;
-use crate::artifacts::Standing;
 use crate::focus::Focus;
-use crate::goal::format;
 use crate::hints::{action, key};
 use crate::rail::{self, Item};
-use crate::server::GoalStatus;
 
 /// Columns the loading text keeps at least before the rail takes the rest of its row.
 const LOADING_MIN: u16 = 24;
@@ -21,6 +18,10 @@ const LOADING_MIN: u16 = 24;
 /// Columns before the first chip, and the muted dot between two.
 const LEAD: u16 = 2;
 const SEP: &str = " · ";
+
+mod chips;
+
+use chips::content;
 
 /// One painted item and its spans.
 type Group = (Item, Vec<Span<'static>>);
@@ -30,10 +31,39 @@ pub fn width(app: &App, max: u16) -> u16 {
     layout(app, max, false).2
 }
 
-/// The rail's width on a loading row of `row` columns, `others` of them already taken; the loading text keeps all it shows.
+/// The rail's width on a loading row of `row` columns, `others` of them already taken; the loading text keeps all it shows unless chips need the room: a waiting line shrinks to `◷ Waiting…` before a chip does, and pinned chips take what their short form needs.
 pub fn width_beside(app: &App, row: u16, others: u16) -> u16 {
-    let loading = super::loading::width(app).max(LOADING_MIN);
-    width(app, row.saturating_sub(others.saturating_add(loading)))
+    let free = row.saturating_sub(others);
+    let items = rail::items(app);
+    if items.is_empty() {
+        return 0;
+    }
+    let full = super::loading::width(app).max(LOADING_MIN);
+    // A waiting line shrinks before any chip; another line keeps its full width, and wraps only for pinned chips.
+    let (keep, floor) = match super::loading::narrow_width(app) {
+        Some(narrow) => (narrow, narrow),
+        None => (full, super::loading::min_width(app).max(LOADING_MIN)),
+    };
+    let whole = total(&self::groups(app, &items, 0, false));
+    if whole <= free.saturating_sub(full) {
+        return width(app, free.saturating_sub(full));
+    }
+    if whole <= free.saturating_sub(keep) {
+        return whole;
+    }
+    let (_, groups, width) = layout(app, free.saturating_sub(keep), false);
+    let shown = |item: &Item| !pinned(*item) || groups.iter().any(|(painted, _)| painted == item);
+    if items.iter().all(shown) {
+        return width;
+    }
+    let kept: Vec<Item> = items.into_iter().filter(|item| pinned(*item)).collect();
+    let needed = total(&self::groups(app, &kept, kept.len(), false));
+    self::width(app, needed.min(free.saturating_sub(floor)))
+}
+
+/// Subagents and PRs stay on the rail: the other chips drop before them.
+fn pinned(item: Item) -> bool {
+    matches!(item, Item::Agents | Item::Prs)
 }
 
 /// Paint the rail on the last row of its loading-area column, against the box or window under it.
@@ -115,19 +145,11 @@ fn hint() -> Vec<Span<'static>> {
     spans
 }
 
-/// Whether the hint leads, the chips that fit in `max`, and their width: the hint goes first, then the leftmost chips shrink to their short form, then drop.
+/// Whether the hint leads, the chips that fit in `max`, and their width: the hint goes first, then the leftmost chips shrink to their short form, then drop, pinned ones last.
 fn layout(app: &App, max: u16, letters: bool) -> (bool, Vec<Group>, u16) {
     let mut items = rail::items(app);
-    let total = |groups: &[Group]| {
-        groups
-            .iter()
-            .enumerate()
-            .map(|(index, (_, spans))| separator(index).width() as u16 + spans_width(spans))
-            .sum::<u16>()
-            + 1
-    };
-    // Once focused, the letters it announces take over.
-    if !app.rail.focused && !items.is_empty() {
+    // Once focused, the letters it announces take over; a week after the rail's last use, it comes back.
+    if !app.rail.focused && !rail::hint_hidden(app) && !items.is_empty() {
         let groups = groups(app, &items, 0, letters);
         let width = total(&groups) + spans_width(&hint());
         if width <= max {
@@ -142,9 +164,20 @@ fn layout(app: &App, max: u16, letters: bool) -> (bool, Vec<Group>, u16) {
                 return (false, groups, width);
             }
         }
-        items.remove(0);
+        let drop = items.iter().position(|item| !pinned(*item)).unwrap_or(0);
+        items.remove(drop);
     }
     (false, Vec::new(), 0)
+}
+
+/// Columns `groups` take, separators and the trailing space included.
+fn total(groups: &[Group]) -> u16 {
+    groups
+        .iter()
+        .enumerate()
+        .map(|(index, (_, spans))| separator(index).width() as u16 + spans_width(spans))
+        .sum::<u16>()
+        + 1
 }
 
 /// The chips for `items`, the first `compact` of them in their short form.
@@ -191,123 +224,4 @@ fn chip(app: &App, item: Item, compact: bool, letters: bool) -> Vec<Span<'static
         spans.pop();
     }
     spans
-}
-
-/// An item's glyph, the glyph's style, and the text after it: `count noun` with the noun muted, or the count alone when compact.
-fn content(app: &App, item: Item, compact: bool) -> (&'static str, Style, Vec<Span<'static>>) {
-    match item {
-        Item::Agents => {
-            let (running, listed) = rail::agent_counts(app);
-            let (glyph, style, count) = match running {
-                0 => ("○", theme::muted_style(), listed),
-                _ => (spinner(app), theme::text(theme::primary()), running),
-            };
-            (glyph, style, counted(count, "agent", compact, fg()))
-        }
-        Item::Tasks => (
-            "▪",
-            theme::text(theme::text_accent()),
-            counted(app.session.background_tasks.len(), "task", compact, fg()),
-        ),
-        Item::Prs => prs(app, compact),
-        Item::Goal => goal(app, compact),
-        Item::Plan => (
-            "≡",
-            theme::dim(theme::muted()),
-            vec![Span::styled(
-                crate::todo_tracker::progress_label(app.todo_tracker.todos()),
-                fg(),
-            )],
-        ),
-    }
-}
-
-/// The running-subagents glyph: a quarter-turn every 250ms while a turn runs, else still.
-fn spinner(app: &App) -> &'static str {
-    const FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
-    match app.session.status {
-        crate::app::Status::Generating { since } => {
-            FRAMES[(crate::clock::since(since).as_millis() / 250 % 4) as usize]
-        }
-        _ => FRAMES[0],
-    }
-}
-
-/// `● PR #123` with its state dot, or `● 2 PRs` counting every PR its window lists; unseen ones stand out until the list opens.
-fn prs(app: &App, compact: bool) -> (&'static str, Style, Vec<Span<'static>>) {
-    let shown: Vec<_> = app.session.artifacts.iter().collect();
-    let unseen = shown.iter().any(|a| crate::artifacts::is_unseen(app, a));
-    let number = match unseen {
-        true => theme::text(theme::primary()).add_modifier(Modifier::BOLD),
-        false => fg(),
-    };
-    let [artifact] = shown.as_slice() else {
-        let noun = crate::artifacts::kinds(&shown);
-        return (
-            "●",
-            theme::muted_style(),
-            counted_as(shown.len(), noun, compact, number),
-        );
-    };
-    let dot = theme::text(match crate::artifacts::standing(artifact) {
-        Standing::Ready => theme::text_success(),
-        Standing::Blocked => theme::text_error(),
-        Standing::Merged => theme::merged(),
-        Standing::Pending => theme::muted(),
-    });
-    let label = crate::artifacts::label(artifact);
-    let mut rest = Vec::new();
-    let id = match label.split_once(' ') {
-        Some((noun, id)) => {
-            if !compact {
-                rest.push(Span::styled(format!("{noun} "), theme::muted_style()));
-            }
-            id.to_owned()
-        }
-        None => label,
-    };
-    rest.push(Span::styled(id, number));
-    ("●", dot, rest)
-}
-
-/// `▶ goal 4m` while it runs, `‖ goal paused` once it stops, `✓ goal` when done; compact keeps the glyph and a running goal's time.
-fn goal(app: &App, compact: bool) -> (&'static str, Style, Vec<Span<'static>>) {
-    let Some(goal) = &app.goal.goal else {
-        return ("▶", Style::default(), Vec::new());
-    };
-    let (glyph, glyph_style) = goal_row::icon(goal.status);
-    let active = goal.status == GoalStatus::Active;
-    let detail = match goal.status {
-        GoalStatus::Active => format::duration(goal.time_used_seconds),
-        GoalStatus::Complete => String::new(),
-        _ => format::row_detail(goal),
-    };
-    let mut rest = Vec::new();
-    if !compact {
-        rest.push(Span::styled("goal ", theme::muted_style()));
-    }
-    if active || !compact {
-        let style = if active { fg() } else { theme::muted_style() };
-        rest.push(Span::styled(detail, style));
-    }
-    (glyph, glyph_style, rest)
-}
-
-/// `3 tasks` with the noun muted, or `3` when compact.
-fn counted(count: usize, noun: &str, compact: bool, number: Style) -> Vec<Span<'static>> {
-    let plural = if count == 1 { "" } else { "s" };
-    counted_as(count, &format!("{noun}{plural}"), compact, number)
-}
-
-/// `2 PRs`: the count in `number`, then the already plural noun, muted.
-fn counted_as(count: usize, noun: &str, compact: bool, number: Style) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::styled(count.to_string(), number)];
-    if !compact {
-        spans.push(Span::styled(format!(" {noun}"), theme::muted_style()));
-    }
-    spans
-}
-
-fn fg() -> Style {
-    theme::text(theme::foreground())
 }

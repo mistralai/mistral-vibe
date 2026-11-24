@@ -25,6 +25,7 @@ from vibe.app_server.events import (
     UnknownNotificationError,
     parse_server_event,
     reconcile_snapshot,
+    unchanged_prefix,
 )
 from vibe.app_server.models import (
     ApprovalCallbackDetail,
@@ -273,6 +274,53 @@ def test_snapshot_reconciliation_replays_missing_stream_updates() -> None:
     assert apply_json_patch(
         entry.model_dump(mode="json", by_alias=True), update.patch
     ) == completed.model_dump(mode="json", by_alias=True)
+
+
+def test_reconciling_states_that_share_a_prefix_emits_only_what_follows() -> None:
+    """*Prepare*: Two states that share their first entry object; after it, the
+        current state changes the second entry, adds a third, and drops nothing.
+    *Do*: Reconcile them, and measure their shared prefix.
+    *Assert*: The shared prefix ends at the changed entry, and only the change
+        and the addition become events, as a full comparison gives.
+    """
+
+    # Prepare
+    def message(entry_id: str, text: str) -> PublicMessageEntry:
+        return PublicMessageEntry(
+            id=entry_id,
+            session_id="session-1",
+            turn_id="turn-1",
+            role="assistant",
+            content=[TextContentBlock(text=text)],
+            generation_status=PublicEntryGenerationStatus.COMPLETED,
+            created_at=1,
+            updated_at=1,
+        )
+
+    shared = message("assistant-1", "kept")
+    previous = _projection().state.model_copy(
+        update={"history": [shared, message("assistant-2", "old")]}
+    )
+    current = previous.model_copy(
+        update={
+            "history": [
+                shared,
+                message("assistant-2", "new"),
+                message("assistant-3", "added"),
+            ]
+        }
+    )
+
+    # Do
+    events = reconcile_snapshot(previous, current)
+
+    # Assert
+    assert unchanged_prefix(previous.history or [], current.history or []) == 1
+    assert [
+        (type(event).__name__, event.entry.id)
+        for event in events
+        if isinstance(event, HistoryEntryAdded | HistoryEntryUpdated)
+    ] == [("HistoryEntryUpdated", "assistant-2"), ("HistoryEntryAdded", "assistant-3")]
 
 
 def test_reconnect_replays_steered_user_before_later_output_and_queue_update() -> None:

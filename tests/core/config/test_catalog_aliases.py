@@ -335,33 +335,6 @@ async def test_an_alias_map_set_in_the_user_file_reads_and_writes_the_same(
 
 
 @pytest.mark.asyncio
-async def test_a_routed_model_claiming_the_old_name_keeps_the_entry_orphaned(
-    config_dir: Path,
-) -> None:
-    """A routed model injected from a layer that does not materialize it under
-    ``models`` (here the user file) is still a model key: an alias it claims
-    resolves to nothing, and the read side and the write side must agree.
-    """
-    orchestrator = await _orchestrator(
-        config_dir,
-        models={_OLD: {"temperature": 0.7}},
-        routed_extra_models=[
-            {"name": "routed-glm", "provider": "mistral", "alias": _OLD}
-        ],
-    )
-
-    config = orchestrator.config
-    # The alias is a model key, so it resolves to nothing and the entry under
-    # it stays orphaned: it must not move onto the catalog model, and the read
-    # side (prepare_layers) and the write side (resolve_model_name) agree.
-    assert config.models[_GLM].temperature != 0.7
-    assert config.resolve_model_name(_OLD) == _OLD
-    assert config.validation_warnings == (
-        f"Settings for model '{_OLD}' are ignored: no such model is available.",
-    )
-
-
-@pytest.mark.asyncio
 async def test_a_pick_without_an_entry_in_the_file_pins_the_catalog_id(
     config_dir: Path,
 ) -> None:

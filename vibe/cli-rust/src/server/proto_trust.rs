@@ -60,7 +60,7 @@ pub struct TrustFolderCandidate {
     pub path: String,
     /// The field text that selects it.
     pub value: String,
-    /// `home` or `root`: the folder cannot be trusted.
+    /// `home`, `root` or `scratch`: the folder cannot be trusted.
     #[serde(default)]
     pub problem: Option<String>,
     /// `trusted` or `untrusted` when the folder is already stored.

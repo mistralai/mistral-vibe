@@ -23,6 +23,8 @@ const HINTS: &[Hint] = &[
     hints::CANCEL,
 ];
 
+const TITLE: &str = "Select Model";
+
 /// Rows around the options: 2 borders, title, search, blank, margin-top, help.
 const CHROME: u16 = 7;
 
@@ -58,15 +60,23 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, rows: &[Row]) {
     let w = area.width;
     let h = area.height;
 
-    f.buffer_mut().set_string(
+    let (title_end, _) = f.buffer_mut().set_stringn(
         bx + 2,
         by + 1,
-        "Select Model",
+        TITLE,
+        w.saturating_sub(4) as usize,
         Style::default()
             .fg(theme::primary())
             .bg(theme::background())
             .add_modifier(Modifier::BOLD),
     );
+    if app.model_picker.checks_in_flight > 0 {
+        let style = theme::muted_style().bg(theme::background());
+        let room = (bx + w).saturating_sub(title_end + 2) as usize;
+        let label = format!("  · {}", model_picker::CHECKING_LABEL);
+        f.buffer_mut()
+            .set_stringn(title_end, by + 1, label, room, style);
+    }
 
     search_field::draw_under_title(
         app,

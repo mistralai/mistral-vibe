@@ -6,6 +6,7 @@ import contextlib
 import json
 from pathlib import Path
 import tomllib
+from typing import Any
 
 import httpx
 import pytest
@@ -34,19 +35,25 @@ from vibe.app_server.models import (
     PublicHistoryEntry,
     PublicMessageEntry,
     PublicTurn,
+    PublicTurnStatus,
     ResourceContentBlock,
     SubagentEffectDetail,
     TextContentBlock,
     TurnErrorCode,
 )
 from vibe.app_server.protocol import (
+    NOTHING_TO_RETRY_REASON,
     AppServerResponseError,
     ClientCapabilities,
     PageRequest,
     ProtocolErrorCode,
     SessionOptions,
+    SessionReadParams,
+    SessionReadResponse,
     SessionTurnsListParams,
     SessionTurnsListResponse,
+    TurnRetryParams,
+    TurnRetryResponse,
     TurnSteerParams,
 )
 from vibe.app_server.session import AppServerSession, AppServerTurnError
@@ -93,6 +100,33 @@ async def test_turn_streams_public_events_over_json_rpc(
         entry.generation_status == "completed"
         for entry in backend_contract_session.history
     )
+
+
+@pytest.mark.asyncio
+async def test_a_local_runtime_turn_carries_no_final_answer(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    """*Prepare*: A session on the local runtime, on either path.
+    *Do*: Run a turn that answers.
+    *Assert*: Its ``turn/completed`` carries no ``finalAnswer``: the local
+        runtime reports no answer, so a client reads it from the history, as
+        it did before the field existed.
+    """
+    # Prepare
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("hello")
+    )
+
+    # Do
+    _ = [event async for event in backend_contract_session.act("hi")]
+
+    # Assert
+    [completed] = backend_contract_session.state.turns or []
+    assert completed.status is PublicTurnStatus.COMPLETED
+    assert completed.final_answer is None
+    assert "finalAnswer" not in completed.model_dump(mode="json", by_alias=True)
 
 
 @pytest.mark.asyncio
@@ -582,6 +616,219 @@ async def test_failed_turn_is_typed_and_leaves_the_session_usable(
         and entry.text == "recovered"
         for entry in backend_contract_session.history
     )
+
+
+@pytest.mark.asyncio
+async def test_retry_reruns_a_failed_turn_without_a_visible_prompt(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+            backend_contract_mistral_response("recovered"),
+        ]
+    )
+    with pytest.raises(AppServerTurnError):
+        _ = [event async for event in backend_contract_session.act("fail first")]
+    failed_turn = backend_contract_session.state.latest_turn
+    assert failed_turn is not None and failed_turn.retryable
+
+    _ = [
+        event
+        async for event in backend_contract_session.retry(
+            failed_turn.id, "keep it short"
+        )
+    ]
+
+    retry_request = backend_contract_mistral_api.calls[-1].request.content.decode()
+    assert "previous response was interrupted" in retry_request
+    assert "keep it short" in retry_request
+    assert [
+        entry.text
+        for entry in backend_contract_session.history
+        if isinstance(entry, PublicMessageEntry)
+    ] == ["fail first", "recovered"]
+
+
+@pytest.mark.asyncio
+async def test_retry_after_a_completed_turn_is_refused_as_nothing_to_retry(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        return_value=backend_contract_mistral_response("done")
+    )
+    _ = [event async for event in backend_contract_session.act("hello")]
+    completed_turn = backend_contract_session.state.latest_turn
+    assert completed_turn is not None
+
+    with pytest.raises(AppServerResponseError) as exc_info:
+        _ = [event async for event in backend_contract_session.retry(completed_turn.id)]
+
+    assert exc_info.value.error.code == ProtocolErrorCode.CONFLICT
+    assert exc_info.value.error.data == {"reason": NOTHING_TO_RETRY_REASON}
+    assert backend_contract_mistral_api.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_resent_with_its_key_replays_the_retry_it_started(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+            backend_contract_mistral_response("recovered"),
+        ]
+    )
+    with pytest.raises(AppServerTurnError):
+        _ = [event async for event in backend_contract_session.act("fail first")]
+    failed_turn = backend_contract_session.state.latest_turn
+    assert failed_turn is not None
+    client = backend_contract_connection.client
+    retry = TurnRetryParams(
+        session_id=backend_contract_session.session_id,
+        expected_turn_id=failed_turn.id,
+        idempotency_key="retry-key",
+    )
+
+    first = TurnRetryResponse.model_validate(await client.request("turn/retry", retry))
+    await _wait_until_turn_ends(
+        backend_contract_connection, retry.session_id, first.turn.id
+    )
+    second = TurnRetryResponse.model_validate(await client.request("turn/retry", retry))
+
+    assert second.turn.id == first.turn.id
+    assert backend_contract_mistral_api.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_resent_after_its_response_was_lost_starts_afresh(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+    opened_backends: list[Any],
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+            backend_contract_mistral_response("recovered"),
+        ]
+    )
+    with pytest.raises(AppServerTurnError):
+        _ = [event async for event in backend_contract_session.act("fail first")]
+    failed_turn = backend_contract_session.state.latest_turn
+    assert failed_turn is not None
+    backend = opened_backends[-1]
+    retry = TurnRetryParams(
+        session_id=backend_contract_session.session_id,
+        expected_turn_id=failed_turn.id,
+        idempotency_key="retry-key",
+    )
+
+    lost = await backend.retry_turn(retry)
+    assert lost.on_response_abandoned is not None
+    lost.on_response_abandoned()
+    resent = await backend.retry_turn(retry)
+    if resent.after_response is not None:
+        resent.after_response()
+    await _wait_until_turn_ends(
+        backend_contract_connection, retry.session_id, resent.response.turn.id
+    )
+
+    assert resent.response.turn.id != lost.response.turn.id
+    assert backend_contract_mistral_api.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_resent_while_the_first_starts_gets_the_same_retry(
+    backend_contract_connection: BackendContractConnection,
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+    opened_backends: list[Any],
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+            backend_contract_mistral_response("recovered"),
+        ]
+    )
+    with pytest.raises(AppServerTurnError):
+        _ = [event async for event in backend_contract_session.act("fail first")]
+    failed_turn = backend_contract_session.state.latest_turn
+    assert failed_turn is not None
+    backend = opened_backends[-1]
+    retry = TurnRetryParams(
+        session_id=backend_contract_session.session_id,
+        expected_turn_id=failed_turn.id,
+        idempotency_key="retry-key",
+    )
+
+    first, resent = await asyncio.gather(
+        backend.retry_turn(retry), backend.retry_turn(retry)
+    )
+    if first.after_response is not None:
+        first.after_response()
+    await _wait_until_turn_ends(
+        backend_contract_connection, retry.session_id, first.response.turn.id
+    )
+
+    assert resent.response.turn.id == first.response.turn.id
+    assert backend_contract_mistral_api.call_count == 2
+
+
+async def _wait_until_turn_ends(
+    connection: BackendContractConnection, session_id: str, turn_id: str
+) -> None:
+    async with asyncio.timeout(5):
+        while True:
+            state = SessionReadResponse.model_validate(
+                await connection.client.request(
+                    "session/read", SessionReadParams(session_id=session_id)
+                )
+            ).state
+            latest = state.latest_turn
+            if (
+                latest is not None
+                and latest.id == turn_id
+                and latest.status is not PublicTurnStatus.IN_PROGRESS
+            ):
+                return
+            await asyncio.sleep(0.05)
+
+
+@pytest.mark.asyncio
+async def test_retry_of_a_turn_that_is_no_longer_the_latest_is_refused(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[[str], httpx.Response],
+    backend_contract_session: AppServerSession,
+) -> None:
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+            httpx.Response(400, json={"message": "provider rejected the request"}),
+        ]
+    )
+    with pytest.raises(AppServerTurnError):
+        _ = [event async for event in backend_contract_session.act("first")]
+    first_turn = backend_contract_session.state.latest_turn
+    assert first_turn is not None
+    with pytest.raises(AppServerTurnError):
+        _ = [event async for event in backend_contract_session.act("second")]
+
+    with pytest.raises(AppServerResponseError) as exc_info:
+        _ = [event async for event in backend_contract_session.retry(first_turn.id)]
+
+    assert exc_info.value.error.code == ProtocolErrorCode.CONFLICT
+    assert exc_info.value.error.data == {"reason": NOTHING_TO_RETRY_REASON}
+    assert backend_contract_mistral_api.call_count == 2
 
 
 @pytest.mark.asyncio

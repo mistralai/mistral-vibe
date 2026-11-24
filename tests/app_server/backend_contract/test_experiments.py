@@ -28,6 +28,7 @@ from vibe.app_server.protocol import (
 from vibe.app_server.session import AppServerSession
 from vibe.core.config import build_default_orchestrator
 from vibe.core.experiments._constants import build_eval_url
+from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.cache import (
     load_cached_eval_response,
     store_cached_eval_response,
@@ -41,20 +42,15 @@ _IDENTITY_PATH = "/v1/users/me"
 _EVAL_API_HOST = "https://experiments.mistral.services/"
 _EVAL_CLIENT_KEY = "sdk-test"
 
-_ROUTED_ALIAS = "contract-routed"
-_EXTRA_MODELS_VARIANT = json.dumps({
-    "models": [
-        {"name": "contract-routed-model", "provider": "mistral", "alias": _ROUTED_ALIAS}
-    ]
-})
+_STORAGE_USAGE = ExperimentName.STORAGE_USAGE.value
 
 # Only a forced rule (or a confirmed track) becomes a config override, so a bare
 # ``defaultValue`` would resolve without changing anything.
 _EVAL_PAYLOAD: dict[str, Any] = {
     "features": {
-        "vibe_cli_extra_models": {
-            "defaultValue": "{}",
-            "rules": [{"force": _EXTRA_MODELS_VARIANT, "tracks": []}],
+        _STORAGE_USAGE: {
+            "defaultValue": False,
+            "rules": [{"force": True, "tracks": []}],
         }
     }
 }
@@ -121,30 +117,30 @@ async def experiments_connection(
         await connection.host.close()
 
 
-async def _model_aliases(
+async def _storage_usage_enabled(
     connection: BackendContractConnection, session: AppServerSession
-) -> list[str]:
-    # The catalog the *session* is serving, not the host's.
+) -> bool:
+    # The config the *session* is serving, not the host's.
     response = ConfigReadResponse.model_validate(
         await connection.client.request(
             "config/read", ConfigReadParams(session_id=session.session_id)
         )
     )
-    return [model.alias for model in response.config.models]
+    return response.config.experimental_enable_storage_usage
 
 
-async def _await_alias(
-    connection: BackendContractConnection, session: AppServerSession, alias: str
-) -> list[str]:
+async def _await_storage_usage(
+    connection: BackendContractConnection, session: AppServerSession
+) -> bool:
     # Resolution runs in the background by design — it must never sit on the
     # session-open path — so there is no event to wait on.
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _SETTLE_SECONDS
-    aliases = await _model_aliases(connection, session)
-    while alias not in aliases and loop.time() < deadline:
+    enabled = await _storage_usage_enabled(connection, session)
+    while not enabled and loop.time() < deadline:
         await asyncio.sleep(0.05)
-        aliases = await _model_aliases(connection, session)
-    return aliases
+        enabled = await _storage_usage_enabled(connection, session)
+    return enabled
 
 
 async def _seed_the_eval_cache() -> None:
@@ -184,9 +180,7 @@ async def test_a_resolved_variant_is_cached_for_the_next_session(
     assert growthbook_api.call_count == 1
     cached = await _read_cached_variants()
     assert cached is not None
-    assert cached.features["vibe_cli_extra_models"].rules[0].force == (
-        _EXTRA_MODELS_VARIANT
-    )
+    assert cached.features[_STORAGE_USAGE].rules[0].force is True
 
 
 @pytest.mark.both_paths
@@ -201,11 +195,11 @@ async def test_unified_pushes_a_freshly_resolved_variant_into_the_live_session(
 
     session = await experiments_connection.host.open_session()
     try:
-        aliases = await _await_alias(experiments_connection, session, _ROUTED_ALIAS)
+        enabled = await _await_storage_usage(experiments_connection, session)
     finally:
         await session.close()
 
-    assert _ROUTED_ALIAS in aliases
+    assert enabled
     assert growthbook_api.call_count == 1
 
 
@@ -240,14 +234,14 @@ async def test_no_eval_is_requested_when_the_ab_opt_out_is_set(
         session = await connection.host.open_session()
         try:
             await asyncio.sleep(_QUIET_SECONDS)
-            aliases = await _model_aliases(connection, session)
+            enabled = await _storage_usage_enabled(connection, session)
         finally:
             await session.close()
     finally:
         await connection.host.close()
 
     assert growthbook_api.call_count == 0
-    assert _ROUTED_ALIAS not in aliases
+    assert not enabled
 
 
 @pytest.mark.asyncio
@@ -267,7 +261,7 @@ async def test_a_failed_eval_leaves_the_session_on_its_cached_variants(
         session = await connection.host.open_session()
         try:
             await asyncio.sleep(_QUIET_SECONDS)
-            aliases = await _model_aliases(connection, session)
+            enabled = await _storage_usage_enabled(connection, session)
         finally:
             await session.close()
     finally:
@@ -276,4 +270,4 @@ async def test_a_failed_eval_leaves_the_session_on_its_cached_variants(
     # Fail-open means the last good assignment keeps governing, not that the
     # user silently falls back to control.
     assert growthbook_api.call_count == 1
-    assert _ROUTED_ALIAS in aliases
+    assert enabled

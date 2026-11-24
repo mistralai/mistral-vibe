@@ -1,0 +1,11 @@
+[
+  "mcp_app_consent_required",
+  "mcp_app_invalid_arguments",
+  "mcp_app_resource_too_large",
+  "mcp_app_server_failed",
+  "mcp_app_tool_denied",
+  "mcp_app_tool_not_app_visible",
+  "mcp_app_unavailable",
+  "mcp_app_unknown_server",
+  "mcp_app_unknown_tool"
+]

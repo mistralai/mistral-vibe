@@ -6,6 +6,7 @@ mod composer;
 mod flow;
 pub mod fold;
 mod gesture;
+mod preview;
 pub mod region;
 mod row_ranges;
 mod snap;
@@ -15,6 +16,7 @@ pub use bottom_bar::BottomBarSelection;
 pub use composer::{blur_composer, in_input, offset_at};
 pub use fold::{Fold, Folds};
 pub use gesture::{chained, ClickChain, Granularity};
+pub use preview::copy as copy_preview;
 pub use region::{Region, RegionId, RowSpan, ScrollTarget};
 pub use row_ranges::RowChrome;
 pub use table::{TableCellHit, TableCellKey, TableCellSelection, TableCellSpan};
@@ -117,8 +119,15 @@ pub fn drag(app: &mut App, at: (u16, u16)) {
             } else {
                 Some(i32::from(at.1))
             };
+            let output = region::get(app, owner).scroll_area;
             let edge_scroll = match scroll_target {
                 ScrollTarget::None => 0,
+                // Past the output's top or bottom edge, it scrolls a row at a time.
+                ScrollTarget::Output => match i32::from(at.1) {
+                    row if row < i32::from(output.y) => -1,
+                    row if row >= i32::from(output.bottom()) => 1,
+                    _ => 0,
+                },
                 _ => edge_row.map_or(0, |row| {
                     app.view.selection_scrollbar.selection_edge_scroll(row)
                 }),
@@ -241,6 +250,7 @@ pub fn auto_scroll(app: &mut App) -> bool {
             -(i32::from(scroll) - i32::from(old_scroll))
         }
         ScrollTarget::Trust => crate::trust_folders::scroll_by(app, i16::from(edge_scroll)),
+        ScrollTarget::Output => crate::rail::scroll_by(app, i32::from(edge_scroll)),
     };
     if delta == 0 {
         stop_auto_scroll(app);
@@ -294,6 +304,27 @@ pub fn honor_pending_copy(app: &mut App) {
         selection.pending_copy = false;
     }
     crate::ui::selection::autocopy(app, &text);
+}
+
+/// Move `owner`'s document selection by `rows`, when rows above it went away; one left with nothing selected clears.
+pub fn shift(app: &mut App, owner: RegionId, rows: i32) {
+    let left = region::get(app, owner).scroll_area.x;
+    let Some(selection) = app.selection.region.as_mut() else {
+        return;
+    };
+    if selection.owner != owner || selection.scroll_target == ScrollTarget::None || rows == 0 {
+        return;
+    }
+    selection.anchor.1 += rows;
+    selection.head.1 += rows;
+    if selection.anchor.1.max(selection.head.1) < 0 {
+        return clear_region(app, owner);
+    }
+    for point in [&mut selection.anchor, &mut selection.head] {
+        if point.1 < 0 {
+            *point = (left, 0);
+        }
+    }
 }
 
 /// Clear a selection when its rendered region disappears or changes content.

@@ -253,11 +253,15 @@ fn apply_position(app: &mut App, target: MouseTarget, position: usize, max: usiz
             details.scroll = position.min(details.lines.saturating_sub(details.visible));
         }
         MouseTarget::Trust => app.trust.scroll = position,
+        MouseTarget::RailWindow => crate::rail::scroll_to(app, position),
         MouseTarget::ReleaseNotes => app.release_notes.scroll = position,
         MouseTarget::CodePreview => crate::code_preview::scroll_to(app, position),
         MouseTarget::ProxySetup => {
             app.proxy_setup.scroll = position;
             app.proxy_setup.free_scroll = true;
+        }
+        MouseTarget::SessionsPreview => {
+            crate::sessions_page::preview_view::scroll_to(app, transcript_scroll(position, max));
         }
         // The console's scrollbar position is its top line; the console's
         // scroll offset counts up from the bottom, like the transcript's.

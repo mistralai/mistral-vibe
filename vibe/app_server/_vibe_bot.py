@@ -1,11 +1,13 @@
 """Vibebot: this machine's side of a user's bot.
 
-The bot's sessions run in the cloud and call ``bot.start_local_session`` and
-``bot.send_to_local_session``, client tools for this machine. Once a client
-names them (``vibebot/follow``), the connection follows their open callbacks
-on the Agents Session API with its platform credentials, does the work
-through the client (``vibebot/startLocal``, ``vibebot/sendLocal``) and answers
-each call at once, so the bot's turn never waits on local work.
+The bot's workflow holds what its local threads are owed: a start
+(``spawn_thread(kind: "code_local")``), a message or a stop. The client hands
+them over from its heartbeat (``vibebot/deliver``); this server does each
+through the client (``vibebot/startLocal``, ``vibebot/sendLocal``,
+``vibebot/stopLocal``) under the delivery's key, then reports it. Once a client
+names the bot's sessions (``vibebot/follow``), the connection also follows
+their open local MCP tool calls on the Agents Session API with its platform
+credentials, and answers them.
 
 The bot's workflow stays the only writer to its sessions: what happened here
 goes to it as ``local_session_event`` reports, through the client
@@ -17,28 +19,36 @@ not a message. The decisions live here; the client only passes requests on.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
+from contextlib import contextmanager
+import hashlib
 from http import HTTPStatus
 import json
 import os
 from pathlib import Path
-from typing import Any, Final, Literal, Protocol
+import time
+from typing import Any, BinaryIO, Final, Literal, Protocol
 import uuid
 
 import httpx2
 from pydantic import Field, ValidationError
 
+from vibe.app_server._client_instance import is_dev_desktop_copy
 from vibe.app_server._dispatch import RequestFailure
 from vibe.app_server._model import ProtocolModel, validate_wire
 from vibe.app_server._session_peers import VIBE_BOT_SENDER_PREFIX, SessionPeerError
 from vibe.app_server._vibe_bot_tools import (
     LIST_TOOL,
     LOCAL_TOOLS,
+    MAX_APPROVAL_ARGUMENTS,
+    MAX_CALL_SECONDS,
     VIBE_BOT_LOCAL_TOOLS_METHOD,
     LocalToolFailure,
     LocalTools,
     VibeBotLocalToolsParams,
     VibeBotLocalToolsResponse,
+    approval_text,
+    args_hash,
 )
 from vibe.app_server.protocol import (
     PeerDelivery,
@@ -51,7 +61,9 @@ from vibe.core.platform_auth import (
     PlatformCredentialUnavailable,
 )
 from vibe.core.platform_auth._mistral import credential_request, credential_stream
+from vibe.core.utils.file_lock import acquire_file_lock, release_file_lock
 from vibe.observability.logging import logger
+from vibe.utils.file_lock import exclusive_file_lock
 
 VIBE_BOT_METHODS: Final = frozenset({
     "vibebot/follow",
@@ -63,8 +75,6 @@ VIBE_BOT_SEND_LOCAL_METHOD: Final = "vibebot/sendLocal"
 VIBE_BOT_STOP_LOCAL_METHOD: Final = "vibebot/stopLocal"
 VIBE_BOT_ARCHIVE_LOCAL_METHOD: Final = "vibebot/archiveLocal"
 VIBE_BOT_REPORT_METHOD: Final = "vibebot/report"
-START_TOOL: Final = "bot.start_local_session"
-SEND_TOOL: Final = "bot.send_to_local_session"
 # A followed session's callbacks stream, opened again after it closes or
 # fails: the wait doubles up to the maximum, and is reset by a frame.
 RECONNECT_SECONDS: Final = 1.0
@@ -77,16 +87,31 @@ NOT_YET_RETRY_SECONDS: Final = 1.0
 # just started, a report that failed) waits before it fails.
 NOT_YET_GRACE_SECONDS: Final = 30.0
 VIBE_BOT_CLIENT_ID_FILE: Final = "vibe_bot_client_id"
-ORCHESTRATOR_ONLY: Final = (
-    "not_allowed_for_role: only the orchestrator starts a local session or "
-    "writes to it with these tools: write to a local thread with "
-    "`send_message`, or ask the orchestrator to start one"
+VIBE_BOT_INSTANCE_CLIENT_IDS_FILE: Final = "vibe_bot_client_ids.json"
+# Client tools of bot builds before `spawn_thread(kind: "code_local")`: a session
+# of such a build may still call them, and must not wait an hour for an answer.
+RETIRED_TOOLS: Final = frozenset({
+    "bot.start_local_session",
+    "bot.send_to_local_session",
+})
+RETIRED: Final = (
+    'invalid_input: this tool is gone: start a local thread with spawn_thread(kind: "code_local"), '
+    "and write to it with send_message"
+)
+VIBE_BOT_PENDING_TOOLS_FILE: Final = "vibe_bot_pending_tools.json"
+VIBE_BOT_RUNS_DIR: Final = "vibe_bot_runs"
+HELD_TOOL_MAX_AGE_SECONDS: Final = 7 * 24 * 3600
+_LOCAL_TOOL_FAILED: Final = (
+    "The local tool failed on this computer; the user can see why in Vibe's logs"
 )
 
 
 def bot_sender_id(bot: str, thread_id: str) -> str:
     """How a local session names the bot thread it works for, as its starter.
-    `bot` is the bot's workflow id, `vibe-bot--<user>--<bot id>`.
+    `bot` is the bot's workflow id, `vibe-bot--<user>--<bot id>`: no `:` in it
+    (`BOT_ID_PATTERN`, and user ids are UUIDs). `thread_id` may hold some (a
+    `code_local` thread is `local_<tool call id>`), so `_bot_thread_of_sender`
+    splits on the first `:`.
     """
     return f"{VIBE_BOT_SENDER_PREFIX}{bot}:{thread_id}"
 
@@ -94,7 +119,7 @@ def bot_sender_id(bot: str, thread_id: str) -> str:
 def _bot_thread_of_sender(sender_id: str) -> tuple[str, str] | None:
     if not sender_id.startswith(VIBE_BOT_SENDER_PREFIX):
         return None
-    bot, _, thread_id = sender_id.removeprefix(VIBE_BOT_SENDER_PREFIX).rpartition(":")
+    bot, _, thread_id = sender_id.removeprefix(VIBE_BOT_SENDER_PREFIX).partition(":")
     return (bot, thread_id) if bot and thread_id else None
 
 
@@ -102,7 +127,7 @@ class VibeBotLocalSession(ProtocolModel):
     thread_id: str
     handle: str
     local_session_id: str
-    # The machine that runs it; another machine leaves its calls alone.
+    # The Desktop (profile) that runs it; another leaves its calls alone.
     client_id: str | None = None
 
 
@@ -110,23 +135,31 @@ class VibeBotFollowParams(ProtocolModel):
     # The bot's workflow id; everything below is this bot's.
     bot_workflow_id: str = Field(min_length=1)
     session_ids: list[str]
-    # Only its calls drive local sessions; a worker's fail before any delivery.
-    orchestrator_session_id: str | None = None
     local_sessions: list[VibeBotLocalSession] = Field(default_factory=list)
     # The API the client is signed in to, whose credential it lends; without
     # it, this server's own Mistral provider's.
     api_base_url: str | None = None
+    # The bot's run ended, as its BFF says: `archived`, the user archived it
+    # (`local_sessions` are then those of its last state); `stopped`, any
+    # other end, which a new run may follow.
+    ended: Literal["archived", "stopped"] | None = None
 
 
 class VibeBotFollowResponse(ProtocolModel):
-    # This machine's id for this bot's workflow, kept across restarts.
+    # This Desktop profile's id for this bot's workflow, kept across restarts.
     client_id: str
+    # It starts code_local threads from `start` deliveries: the client says so
+    # in its heartbeat, so the bot sends no start to a server that drops it.
+    starts_local: bool = True
+    # False once this server has nothing left to do for the bot: the client
+    # stops asking about it.
+    following: bool = True
 
 
 class VibeBotDeliverParams(ProtocolModel):
     bot_workflow_id: str = Field(min_length=1)
     # What the bot's local threads are owed, from its heartbeat, in order: a
-    # message or a stop the bot held while no Desktop was connected.
+    # start, a message or a stop.
     deliveries: list[dict[str, Any]]
 
 
@@ -181,19 +214,14 @@ class VibeBotReportParams(ProtocolModel):
 class VibeBotReportResponse(ProtocolModel):
     duplicate: bool = False
     refused: str | None = None
-    held: dict[str, Any] | None = None
+
+
+class VibeBotLocalSessionGone(Exception):
+    """The client has no such local session (deleted): nothing runs in it."""
 
 
 class VibeBotCallRefused(Exception):
     """The bot refused the claim: the call fails with this message, now."""
-
-
-class VibeBotCallHeld(Exception):
-    """The bot held the send for this machine's reconnect: the call is answered with `output`, nothing delivered."""
-
-    def __init__(self, output: dict[str, Any]) -> None:
-        super().__init__("held by the bot")
-        self.output = output
 
 
 class VibeBotEmpty(ProtocolModel):
@@ -210,30 +238,32 @@ class _CheckoutNewWorktree(ProtocolModel):
     repository: str
 
 
-class _StartInput(ProtocolModel):
+class _StartDelivery(ProtocolModel):
+    kind: Literal["start"]
+    request_id: str
+    thread_id: str
     handle: str
-    title: str | None = None
+    title: str
     brief: str
     done_when: list[str] | None = None
     # As Desktop reads it: the kind names the one folder it runs in.
     checkout: _CheckoutDirectory | _CheckoutNewWorktree | None = Field(
         default=None, discriminator="kind"
     )
-    link: Literal["attached", "detached"] = "attached"
     model: str | None = None
     approval_policy: str | None = None
-
-
-class _SendInput(ProtocolModel):
-    session: str
-    text: str
-    delivery: Literal["wake", "deferred"] = "wake"
 
 
 class VibeBotClient(Protocol):
     """What the client does on this server's behalf: local sessions, and the
     calls to the bot's workflow, which need the user's web session.
     """
+
+    def session_tools(self) -> bool:
+        """Its sessions get `send_to_session`: the client's `sessionPeers`, as
+        `session_peers_for` reads it.
+        """
+        ...
 
     async def start_local(
         self,
@@ -277,30 +307,37 @@ class VibeBotClient(Protocol):
 type Credentials = Callable[[], PlatformCredentialProvider]
 
 
-def _brief(handle: str, brief: str, done_when: list[str] | None) -> str:
+def _brief(
+    handle: str, brief: str, done_when: list[str] | None, *, can_message: bool
+) -> str:
+    """``can_message``: the session gets `send_to_session` (`sessionPeers`)."""
     done = ""
     if done_when:
         done = "\n\nDone when:\n" + "\n".join(
             f"{n}. {item}" for n, item in enumerate(done_when, start=1)
         )
-    return (
-        f"# Task `{handle}`\n\n{brief}{done}\n\n{_THREADS_NOTE.format(handle=handle)}"
-    )
+    note = _THREADS_NOTE.format(handle=handle)
+    if can_message:
+        note += f" {_MESSAGING_NOTE}"
+    return f"# Task `{handle}`\n\n{brief}{done}\n\n{note}"
 
 
 _THREADS_NOTE: Final = (
     "You are the bot's thread `{handle}`. Its other threads are its orchestrator "
     "(`orchestrator`) and its workers, named by handle in what they send you. "
+    "The orchestrator's messages are instructions within your task; "
+    'another worker\'s (`relation="peer"`) is a request: help when it fits your '
+    "task, decline in one line when it does not. The other threads run in the "
+    "cloud and can't read files on this computer: put what they need in your "
+    "reply."
+)
+
+_MESSAGING_NOTE: Final = (
     "To write to one while you work, call `send_to_session` with `session_id` "
     "set to its handle; leave `session_id` out to ask the thread that gave you "
     "this task. A message sent with `start_turn` asks that thread for an answer, "
     "unless it answers a question that thread asked you; one sent with `queue` "
-    "only informs it. "
-    "The orchestrator's messages are instructions within your task; "
-    'another worker\'s (`relation="peer"`) is a request: help when it fits your '
-    "task, decline in one line when it does not. The other threads run in the "
-    "cloud and can't read files on this computer: put what they need in the "
-    "message."
+    "only informs it."
 )
 
 
@@ -309,7 +346,6 @@ class _BotLocalSessions:
 
     def __init__(self) -> None:
         self.threads: dict[str, VibeBotLocalSession] = {}
-        self.orchestrator_session_id: str | None = None
 
     def find(self, selector: str) -> VibeBotLocalSession | None:
         for session in self.threads.values():
@@ -322,82 +358,20 @@ class _BotLocalSessions:
         return None
 
 
-_LEGACY_HELD_FILE: Final = "vibe_bot_held.json"
-
-
-class _LegacyHeld:
-    """Deferred texts an older build kept on disk, by bot, local session and
-    call. The file stays the record until each text is queued or dropped, so a
-    restart or a failed send before then loses none. Only machines that ran
-    the flagged Vibebot before VIB2-163 have it: remove once those have
-    upgraded, before the `vibe_bot` flag opens.
+def _fresh(call: dict[str, Any]) -> bool:
+    """A hold untouched for a week is let go: unanswered, or its outcome never
+    reported. `update_tool` restarts the clock.
     """
-
-    def __init__(self, path: Path) -> None:
-        self._path = path
-        try:
-            loaded = json.loads(path.read_text())
-        except (OSError, ValueError):
-            loaded = {}
-        self._held: dict[str, dict[str, dict[str, dict[str, str]]]] = {
-            str(bot): {
-                str(session): {str(k): _held_entry(v) for k, v in texts.items()}
-                for session, texts in sessions.items()
-                if isinstance(texts, dict) and texts
-            }
-            for bot, sessions in (loaded if isinstance(loaded, dict) else {}).items()
-            if isinstance(sessions, dict)
-        }
-        self._in_flight: set[tuple[str, str]] = set()
-
-    def take(self, bot: str, local_session_id: str) -> dict[str, dict[str, str]] | None:
-        """The session's held texts by call, or None when it has none or they
-        are already on their way.
-        """
-        key = (bot, local_session_id)
-        held = self._held.get(bot, {}).get(local_session_id)
-        if not held or key in self._in_flight:
-            return None
-        self._in_flight.add(key)
-        return dict(held)
-
-    def done(self, bot: str, local_session_id: str, callback_ids: list[str]) -> None:
-        """Ends a `take`, dropping the texts queued or no longer this
-        machine's to send.
-        """
-        self._in_flight.discard((bot, local_session_id))
-        if not callback_ids:
-            return
-        sessions = self._held.get(bot, {})
-        texts = sessions.get(local_session_id, {})
-        for callback_id in callback_ids:
-            texts.pop(callback_id, None)
-        if not texts:
-            sessions.pop(local_session_id, None)
-        if not sessions:
-            self._held.pop(bot, None)
-        self._save()
-
-    def _save(self) -> None:
-        try:
-            if not any(self._held.values()):
-                self._path.unlink(missing_ok=True)
-                return
-            _write_atomically(self._path, json.dumps(self._held))
-        except OSError:
-            logger.warning("Could not update Vibebot's old held file", exc_info=True)
+    return call.get("heldAt", 0) >= time.time() - HELD_TOOL_MAX_AGE_SECONDS
 
 
-def _held_entry(raw: object) -> dict[str, str]:
-    if isinstance(raw, dict):
-        return {str(k): str(v) for k, v in raw.items()}
-    return {"text": str(raw)}
-
-
-def _write_atomically(path: Path, text: str) -> None:
+def _write_atomically(path: Path, text: str, *, mode: int = 0o644) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f"{path.name}.tmp")
-    temporary.write_text(text)
+    temporary.unlink(missing_ok=True)
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    with os.fdopen(fd, "w") as file:
+        file.write(text)
     temporary.replace(path)
 
 
@@ -409,16 +383,152 @@ class VibeBotLocalSessions:
 
     def __init__(self, *, client_id_file: Path) -> None:
         self._client_id_file = client_id_file
-        self.legacy_held = _LegacyHeld(client_id_file.with_name(_LEGACY_HELD_FILE))
+        self._instance_client_ids_file = client_id_file.with_name(
+            VIBE_BOT_INSTANCE_CLIENT_IDS_FILE
+        )
+        self._pending_tools_file = client_id_file.with_name(VIBE_BOT_PENDING_TOOLS_FILE)
+        self._runs_dir = client_id_file.with_name(VIBE_BOT_RUNS_DIR)
+        # Approved runs in flight, shared like their holds: a second connection
+        # handed the same approval leaves the run to the first.
+        self.approved_runs: set[tuple[str, str]] = set()
         self._client_ids: dict[str, str] | None = None
+        self._instance_client_ids: dict[tuple[str, str], str] = {}
         self._bots: dict[str, _BotLocalSessions] = {}
         self.reporter: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None
 
     def of(self, bot: str) -> _BotLocalSessions:
         return self._bots.setdefault(bot, _BotLocalSessions())
 
-    def client_id(self, bot: str) -> str:
-        """This machine's id for one bot's workflow, kept across restarts."""
+    def hold_tool(self, bot: str, callback_id: str, call: dict[str, Any]) -> None:
+        """A retry of the same call keeps its hold: a `running` or `outcome` it
+        holds means the tool ran, and must not run again.
+        """
+        with self._editing_pending_tools() as pending:
+            kept = pending.get(bot, {}).get(callback_id)
+            if kept is not None and kept.get("argsHash") == call.get("argsHash"):
+                return
+            pending.setdefault(bot, {})[callback_id] = call | {"heldAt": time.time()}
+
+    def held_tool(self, bot: str, callback_id: str) -> dict[str, Any] | None:
+        """The hold, or None once it is a week old, checked on every read: an
+        app server can run for longer than a week.
+        """
+        with exclusive_file_lock(self._pending_tools_file):
+            return self._read_pending_tools().get(bot, {}).get(callback_id)
+
+    def update_tool(
+        self, bot: str, callback_id: str, *, required: bool = False, **fields: Any
+    ) -> None:
+        """`required`: a mark the one-run guarantee rests on raises when it
+        cannot be saved, rather than letting the run go on without it.
+        """
+        with self._editing_pending_tools(required=required) as pending:
+            call = pending.get(bot, {}).get(callback_id)
+            if call is not None:
+                # The week counts from the last change: a run near it keeps its
+                # `running` mark and outcome, so a retry never says it did not run.
+                call.update(fields | {"heldAt": time.time()})
+
+    def drop_tool(self, bot: str, callback_id: str) -> None:
+        with self._editing_pending_tools() as pending:
+            pending.get(bot, {}).pop(callback_id, None)
+
+    def held_outcomes(self, bot: str, client_id: str) -> list[str]:
+        """A hold from before holds named their Desktop goes to whichever
+        follows first: the bot refuses the report of a Desktop it did not ask.
+        """
+        return [
+            callback_id
+            for callback_id, call in self._locked_pending_tools().get(bot, {}).items()
+            if "outcome" in call and call.get("clientId", client_id) == client_id
+        ]
+
+    def claim_run(self, bot: str, callback_id: str) -> BinaryIO | None:
+        """The lock that makes this process the machine's only runner of an
+        approved call, or None while another app server here holds it. The OS
+        lets go of it when its process dies.
+        """
+        name = hashlib.sha256(f"{bot}\0{callback_id}".encode()).hexdigest()[:32]
+        try:
+            self._runs_dir.mkdir(parents=True, exist_ok=True)
+            self._clear_old_run_locks()
+            path = self._runs_dir / name
+            # Before the lock: Windows may refuse to touch a file it holds open.
+            path.touch()
+            lock = path.open("a+b")
+        except OSError:
+            logger.warning("Could not open a Vibebot run lock", exc_info=True)
+            return None
+        try:
+            acquire_file_lock(lock)
+        except BlockingIOError:
+            lock.close()
+            return None
+        return lock
+
+    def _clear_old_run_locks(self) -> None:
+        # A run's lock outlives its hold by no more than the week a hold lasts.
+        cutoff = time.time() - HELD_TOOL_MAX_AGE_SECONDS
+        for path in self._runs_dir.iterdir():
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink()
+            except OSError:
+                continue
+
+    @staticmethod
+    def release_run(lock: BinaryIO) -> None:
+        # The file stays: unlinking it would let two runners lock different inodes.
+        release_file_lock(lock)
+        lock.close()
+
+    def _read_pending_tools(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """Read anew on every use: every app server of this machine shares it."""
+        try:
+            loaded = json.loads(self._pending_tools_file.read_text())
+        except (OSError, ValueError):
+            loaded = {}
+        return {
+            str(bot): {
+                str(k): v for k, v in calls.items() if isinstance(v, dict) and _fresh(v)
+            }
+            for bot, calls in (loaded if isinstance(loaded, dict) else {}).items()
+            if isinstance(calls, dict)
+        }
+
+    def _locked_pending_tools(self) -> dict[str, dict[str, dict[str, Any]]]:
+        with exclusive_file_lock(self._pending_tools_file):
+            return self._read_pending_tools()
+
+    @contextmanager
+    def _editing_pending_tools(
+        self, *, required: bool = False
+    ) -> Iterator[dict[str, dict[str, dict[str, Any]]]]:
+        with exclusive_file_lock(self._pending_tools_file):
+            pending = self._read_pending_tools()
+            yield pending
+            kept = {bot: c for bot, c in pending.items() if c}
+            try:
+                # The bot's tool arguments: as private as a token file.
+                _write_atomically(
+                    self._pending_tools_file, json.dumps(kept), mode=0o600
+                )
+            except OSError:
+                if required:
+                    raise
+                logger.warning(
+                    "Could not save Vibebot's pending tool calls", exc_info=True
+                )
+
+    def client_id(self, bot: str, *, instance: str | None = None) -> str:
+        """This Desktop's id for one bot's workflow, kept across restarts.
+
+        `instance` names the Desktop (its profile): every Desktop sharing this
+        Vibe home gets its own ids, or the bot takes them for one and each
+        takes the other's starts and calls. Without it, the machine's ids.
+        """
+        if instance is not None:
+            return self._instance_client_id(bot, instance)
         if self._client_ids is None:
             try:
                 loaded = json.loads(self._client_id_file.read_text())
@@ -440,11 +550,64 @@ class VibeBotLocalSessions:
             logger.warning("Could not save the Vibebot client id", exc_info=True)
         return created
 
+    def _instance_client_id(self, bot: str, instance: str) -> str:
+        # Entries are never pruned: a profile gone for good (an old dev port)
+        # leaves a few bytes, and pruning one still in use would orphan its
+        # open start cards and local tool rules.
+        known = self._instance_client_ids.get((instance, bot))
+        if known is not None:
+            return known
+        with exclusive_file_lock(self._instance_client_ids_file):
+            try:
+                loaded = json.loads(self._instance_client_ids_file.read_text())
+            except (OSError, ValueError):
+                loaded = {}
+            saved = loaded if isinstance(loaded, dict) else {}
+            instances = saved.get("instances")
+            instances = instances if isinstance(instances, dict) else {}
+            ids = instances.get(instance)
+            ids = (
+                {str(k): str(v) for k, v in ids.items()}
+                if isinstance(ids, dict)
+                else None
+            )
+            adopted = saved.get("adoptedBy")
+            if ids is None and adopted is None and not is_dev_desktop_copy(instance):
+                # The first Desktop after the upgrade keeps the machine's ids:
+                # its open start cards and local tool rules are keyed on them.
+                # Only Desktop follows a bot, so no other client still uses them.
+                ids = {k: self.client_id(k) for k in self._legacy_client_ids()}
+                adopted = instance
+            ids = ids or {}
+            created = ids.get(bot) is None
+            if created:
+                ids[bot] = str(uuid.uuid4())
+            if created or saved.get("adoptedBy") != adopted:
+                instances[instance] = ids
+                try:
+                    _write_atomically(
+                        self._instance_client_ids_file,
+                        json.dumps({"adoptedBy": adopted, "instances": instances}),
+                    )
+                except OSError:
+                    logger.warning(
+                        "Could not save the Vibebot client id", exc_info=True
+                    )
+        self._instance_client_ids[instance, bot] = ids[bot]
+        return ids[bot]
+
+    def _legacy_client_ids(self) -> list[str]:
+        try:
+            loaded = json.loads(self._client_id_file.read_text())
+        except (OSError, ValueError):
+            return []
+        return [str(k) for k in loaded] if isinstance(loaded, dict) else []
+
     def handles(self, target_session_id: str) -> bool:
         return _bot_thread_of_sender(target_session_id) is not None
 
     async def deliver_reply(
-        self, params: SessionPeerSendParams
+        self, params: SessionPeerSendParams, *, instance: str | None = None
     ) -> SessionPeerSendResponse:
         """A local session's message to its bot, reported to that bot's
         workflow: the end of the turn the thread it works for started, or a
@@ -457,13 +620,21 @@ class VibeBotLocalSessions:
                 ProtocolErrorCode.NOT_FOUND, "No Vibebot is followed here"
             )
         bot, thread_id = target
+        # The Desktop that runs the session, whichever connection the reply
+        # leaves on: one with no instance would name another Desktop.
+        session = self.of(bot).threads.get(thread_id)
+        client_id = (
+            session.client_id
+            if session is not None and session.client_id is not None
+            else self.client_id(bot, instance=instance)
+        )
         if not params.reply:
             try:
                 await self.reporter(
                     bot,
                     {
                         "kind": "message",
-                        "clientId": self.client_id(bot),
+                        "clientId": client_id,
                         "requestId": params.idempotency_key,
                         "threadId": thread_id,
                         "localSessionId": params.sender.session_id,
@@ -486,17 +657,24 @@ class VibeBotLocalSessions:
                 session_id=params.bot_to or params.target_session_id,
                 queued=params.delivery == "queue",
             )
-        await self.reporter(
-            bot,
-            {
-                "kind": "turn_ended",
-                "clientId": self.client_id(bot),
-                "threadId": thread_id,
-                "localSessionId": params.sender.session_id,
-                **({"turnId": params.reply_turn_id} if params.reply_turn_id else {}),
-                "result": {"outcome": "completed", "finalText": params.text},
-            },
-        )
+        try:
+            await self.reporter(
+                bot,
+                {
+                    "kind": "turn_ended",
+                    "clientId": client_id,
+                    "threadId": thread_id,
+                    "localSessionId": params.sender.session_id,
+                    **(
+                        {"turnId": params.reply_turn_id} if params.reply_turn_id else {}
+                    ),
+                    "result": {"outcome": "completed", "finalText": params.text},
+                },
+            )
+        except VibeBotCallRefused as exc:
+            # Final: `send_reply` stops sending it (a thread the bot no longer
+            # has, or that no longer runs this session). An error stays retried.
+            raise SessionPeerError(str(exc)) from exc
         return SessionPeerSendResponse(
             session_id=params.target_session_id, queued=False
         )
@@ -615,7 +793,7 @@ class _Follower:
         callback_id = callback.get("id")
         if (
             callback.get("kind") != "client_tool"
-            or callback.get("name") not in {START_TOOL, SEND_TOOL, *LOCAL_TOOLS}
+            or callback.get("name") not in {*LOCAL_TOOLS, *RETIRED_TOOLS}
             or not isinstance(callback_id, str)
             or callback_id in self._answering
             or callback_id in self._answered
@@ -681,6 +859,11 @@ class _Follower:
         self, session_id: str, callback_id: str, name: str, tool_input: dict[str, Any]
     ) -> dict[str, Any] | None:
         """The call's answer, or None when this machine does not answer it."""
+        if name in RETIRED_TOOLS:
+            return {
+                "callbackId": callback_id,
+                "error": {"code": "callback_failed", "message": RETIRED},
+            }
         try:
             output = await self._controller.run_call(
                 self.bot, session_id, callback_id, name, tool_input
@@ -698,11 +881,6 @@ class _Follower:
             result: dict[str, Any] = {
                 "callbackId": callback_id,
                 "error": {"code": "callback_failed", "message": str(exc)},
-            }
-        except _NotOrchestrator:
-            result = {
-                "callbackId": callback_id,
-                "error": {"code": "callback_failed", "message": ORCHESTRATOR_ONLY},
             }
         except LocalToolFailure as exc:
             result = {
@@ -728,17 +906,10 @@ def _failed_locally(exc: Exception, name: str, server: object) -> LocalToolFailu
         extra={"tool": name, "server": server},
         exc_info=exc,
     )
-    return LocalToolFailure(
-        "local_tool_failed",
-        "The local tool failed on this computer; the user can see why in Vibe's logs",
-    )
+    return LocalToolFailure("local_tool_failed", _LOCAL_TOOL_FAILED)
 
 
 class _OtherMachine(Exception):
-    pass
-
-
-class _NotOrchestrator(Exception):
     pass
 
 
@@ -763,11 +934,15 @@ class VibeBotController:
         not_yet_grace_seconds: float = NOT_YET_GRACE_SECONDS,
         not_yet_retry_seconds: float = NOT_YET_RETRY_SECONDS,
         local_tools: LocalTools | None = None,
+        client_instance: Callable[[], str | None] = lambda: None,
     ) -> None:
         self._local_tools = local_tools
+        self._client_instance = client_instance
         # A restart or a reconnect claims anew: the workflow tells a claim with
         # another nonce that the call may have run, rather than letting it run again.
         self._claim_nonce = uuid.uuid4().hex
+        self._approved_runs: dict[tuple[str, str], asyncio.Task[None]] = {}
+        self._dropping: set[asyncio.Task[None]] = set()
         self.not_yet_grace_seconds = not_yet_grace_seconds
         self.not_yet_retry_seconds = not_yet_retry_seconds
         self.credentials = credentials
@@ -786,16 +961,25 @@ class VibeBotController:
     def sessions(self) -> VibeBotLocalSessions:
         return self._sessions
 
+    def client_id(self, bot: str) -> str:
+        return self._sessions.client_id(bot, instance=self._client_instance())
+
     async def dispatch(self, method: str, raw_params: dict[str, Any]) -> ProtocolModel:
         match method:
             case "vibebot/follow":
                 params = validate_wire(VibeBotFollowParams, raw_params)
                 origin = (params.api_base_url or await self._api_origin()).rstrip("/")
                 self.sessions_url = f"{origin}/v2/agents/sessions"
+                client_id = self.client_id(params.bot_workflow_id)
+                if params.ended == "archived":
+                    return VibeBotFollowResponse(
+                        client_id=client_id, following=not await self._archived(params)
+                    )
+                if params.ended == "stopped":
+                    self._unfollow_bot(params.bot_workflow_id)
+                    return VibeBotFollowResponse(client_id=client_id)
                 self._follow(params)
-                return VibeBotFollowResponse(
-                    client_id=self._sessions.client_id(params.bot_workflow_id)
-                )
+                return VibeBotFollowResponse(client_id=client_id)
             case "vibebot/deliver":
                 params = validate_wire(VibeBotDeliverParams, raw_params)
                 await self._deliver(params.bot_workflow_id, params.deliveries)
@@ -807,9 +991,6 @@ class VibeBotController:
                 return await self._local_tools.summary()
         raise RequestFailure(ProtocolErrorCode.METHOD_NOT_FOUND, method)
 
-    def orchestrator_of(self, bot: str) -> str | None:
-        return self._sessions.of(bot).orchestrator_session_id
-
     def _follow(self, params: VibeBotFollowParams) -> None:
         bot = params.bot_workflow_id
         self._sessions.reporter = self._client.report
@@ -817,8 +998,10 @@ class VibeBotController:
         # The bot's live local threads, archived ones left out: a send to one
         # not listed fails before it reaches any session.
         local.threads = {s.thread_id: s for s in params.local_sessions}
-        local.orchestrator_session_id = params.orchestrator_session_id
-        self._queue_legacy_held(bot)
+        # Once the workflow expires a call it stops sending its approval: an
+        # outcome whose report was lost goes out without one.
+        for callback_id in self._sessions.held_outcomes(bot, self.client_id(bot)):
+            self._start_approved(bot, {"callbackId": callback_id, "flush": True})
         wanted = {(bot, session_id) for session_id in params.session_ids}
         for key in list(self._followers):
             if key[0] == bot and key not in wanted:
@@ -830,66 +1013,44 @@ class VibeBotController:
             follower.task = asyncio.get_running_loop().create_task(follower.run())
             self._followers[bot, session_id] = follower
 
-    def _queue_legacy_held(self, bot: str) -> None:
-        mine = self._sessions.client_id(bot)
-        for session in self._sessions.of(bot).threads.values():
-            if session.client_id not in {None, mine}:
-                continue
-            held = self._sessions.legacy_held.take(bot, session.local_session_id)
-            if held:
-                asyncio.get_running_loop().create_task(
-                    self._queue_one_legacy_held(bot, session, held)
-                )
-
-    async def _queue_one_legacy_held(
-        self, bot: str, session: VibeBotLocalSession, held: dict[str, dict[str, str]]
-    ) -> None:
-        """Queues an older build's held texts into their session. A text that
-        build claimed is claimed again first: one the bot answered itself
-        meanwhile is dropped, one whose claim cannot be checked stays held.
+    async def _archived(self, params: VibeBotFollowParams) -> bool:
+        """The user archived the bot, maybe while this machine was offline, so
+        its stops never came: it is no longer followed, and each of its local
+        sessions here has its running turn interrupted. False while an
+        interrupt failed: the next follow tries again.
         """
-        done: list[str] = []
-        texts: list[str] = []
-        try:
-            for callback_id, entry in held.items():
-                caller = entry.get("caller")
-                if caller is not None:
-                    try:
-                        taken = await self._client.report(
-                            bot,
-                            {
-                                "kind": "claimed",
-                                "clientId": self._sessions.client_id(bot),
-                                "requestId": callback_id,
-                                "threadId": session.thread_id,
-                                "callerSessionId": caller,
-                            },
-                        )
-                    except (VibeBotCallHeld, VibeBotCallRefused):
-                        taken = True
-                    if taken:
-                        done.append(callback_id)
-                        continue
-                texts.append(entry.get("text", ""))
-            if texts:
-                await self._client.send_local(
+        bot = params.bot_workflow_id
+        self._unfollow_bot(bot)
+        here = self.client_id(bot)
+        local = self._sessions.of(bot)
+        held = {s.local_session_id: s for s in local.threads.values()}
+        held |= {s.local_session_id: s for s in params.local_sessions}
+        stopped = True
+        for session in held.values():
+            if session.client_id not in {None, here}:
+                continue
+            try:
+                await self._client.stop_local(
                     bot=bot,
                     local_session_id=session.local_session_id,
-                    thread_id=session.thread_id,
-                    text="\n\n".join(texts),
-                    idempotency_key=f"held-{session.local_session_id}",
-                    delivery="queue",
+                    idempotency_key=f"archived-{session.local_session_id}",
                 )
-            done = list(held)
-        except Exception:
-            logger.warning(
-                "Could not queue a Vibebot text an older build held; the next "
-                "follow tries again",
-                extra={"local_session_id": session.local_session_id},
-                exc_info=True,
-            )
-        finally:
-            self._sessions.legacy_held.done(bot, session.local_session_id, done)
+            except VibeBotLocalSessionGone:
+                continue
+            except Exception:
+                logger.warning(
+                    "Could not stop a local session of an archived bot",
+                    extra={"local_session_id": session.local_session_id},
+                    exc_info=True,
+                )
+                stopped = False
+        if stopped:
+            local.threads = {}
+        return stopped
+
+    def _unfollow_bot(self, bot: str) -> None:
+        for key in [key for key in self._followers if key[0] == bot]:
+            self._unfollow(key)
 
     def _unfollow(self, key: tuple[str, str]) -> None:
         follower = self._followers.pop(key, None)
@@ -926,18 +1087,17 @@ class VibeBotController:
         name: str,
         tool_input: dict[str, Any],
     ) -> dict[str, Any]:
-        if name in {START_TOOL, SEND_TOOL} and self.orchestrator_of(bot) not in {
-            None,
-            session_id,
-        }:
-            raise _NotOrchestrator
-        if name == START_TOOL:
-            return await self.start(bot, session_id, callback_id, tool_input)
-        if name == SEND_TOOL:
-            return await self.send(bot, session_id, callback_id, tool_input)
         return await self._local_tool_call(
             bot, session_id, callback_id, name, tool_input
         )
+
+    def _tools(self) -> LocalTools:
+        if self._local_tools is None:
+            raise LocalToolFailure(
+                "local_tools_unavailable",
+                "This computer runs no local tools for Vibebot",
+            )
+        return self._local_tools
 
     async def _local_tool_call(
         self,
@@ -952,7 +1112,7 @@ class VibeBotController:
         too: the workflow lets it answer only when no connected machine can.
         """
         _validated_input(tool_input)
-        machine = self._sessions.client_id(bot)
+        machine = self.client_id(bot)
         named = tool_input.get("machine")
         server = tool_input.get("server")
         tools = self._local_tools
@@ -990,26 +1150,37 @@ class VibeBotController:
             )
         assert tools is not None
         try:
-            return await self._serve_local_tool(tools, machine, name, tool_input)
-        except LocalToolFailure:
+            return await self._serve_local_tool(
+                tools,
+                machine,
+                name,
+                tool_input,
+                bot=bot,
+                caller_session_id=caller_session_id,
+                callback_id=callback_id,
+            )
+        except (LocalToolFailure, _NotYet):
             raise
         except Exception as exc:
             raise _failed_locally(exc, name, server) from exc
 
     async def _serve_local_tool(
-        self, tools: LocalTools, machine: str, name: str, tool_input: dict[str, Any]
+        self,
+        tools: LocalTools,
+        machine: str,
+        name: str,
+        tool_input: dict[str, Any],
+        *,
+        bot: str,
+        caller_session_id: str,
+        callback_id: str,
     ) -> dict[str, Any]:
         if name == LIST_TOOL:
             return await tools.list(tool_input, machine)
         call = _validated_call(tool_input)
         approval, max_bytes, timeout_s = await tools.mode(call.server, call.tool)
         if approval == "ask":
-            raise LocalToolFailure(
-                "approval_required",
-                f"`{call.server}.{call.tool}` needs the user's approval on this "
-                "computer, which Vibebot cannot ask for yet: ask the user to run "
-                "it, or to allow it in vibe_bot_local_tools",
-            )
+            return await self._ask_user(bot, caller_session_id, callback_id, call)
         result = await tools.run(
             call.server,
             call.tool,
@@ -1021,6 +1192,166 @@ class VibeBotController:
             ),
         )
         return {"machine": machine, "server": call.server, "tool": call.tool, **result}
+
+    async def _ask_user(
+        self, bot: str, caller_session_id: str, callback_id: str, call: _CallInput
+    ) -> dict[str, Any]:
+        """The call waits on this machine for the user's answer in the inbox; the
+        bot hears of it at once and its result wakes the bot later.
+        """
+        if len(approval_text(call.arguments)) > MAX_APPROVAL_ARGUMENTS:
+            raise LocalToolFailure(
+                "arguments_too_long",
+                f"`{call.server}.{call.tool}` needs the user's approval, and the inbox "
+                f"shows at most {MAX_APPROVAL_ARGUMENTS} characters of arguments: "
+                "call it with shorter arguments",
+            )
+        digest = args_hash(call.arguments)
+        self._sessions.hold_tool(
+            bot,
+            callback_id,
+            {
+                "server": call.server,
+                "tool": call.tool,
+                "arguments": call.arguments,
+                "argsHash": digest,
+                "clientId": self.client_id(bot),
+            },
+        )
+        try:
+            await self._client.report(
+                bot,
+                {
+                    "kind": "tool_pending",
+                    "clientId": self.client_id(bot),
+                    "requestId": callback_id,
+                    "callerSessionId": caller_session_id,
+                    "server": call.server,
+                    "tool": call.tool,
+                    "arguments": call.arguments,
+                    "argsHash": digest,
+                    "readOnly": await self._tools().is_read_only(
+                        call.server, call.tool
+                    ),
+                    "context": {"ceilingAllows": await self._tools().ceiling_allows()},
+                },
+            )
+        except Exception as exc:
+            # Kept: the workflow may have taken the report whose answer was lost.
+            # A hold nobody answers goes after a week.
+            raise _NotYet(f"The bot did not take the approval request: {exc}") from exc
+        return {"status": "awaiting_approval", "approvalId": callback_id}
+
+    def _start_approved(self, bot: str, delivery: dict[str, Any]) -> None:
+        """The run goes on after `vibebot/deliver` answers, which the heartbeat
+        waits for; the workflow sends the approval again until the run's report
+        arrives, and a call already running here is not run again.
+        """
+        callback_id = str(delivery.get("callbackId") or "")
+        key = (bot, callback_id)
+        if key in self._sessions.approved_runs:
+            return
+        self._sessions.approved_runs.add(key)
+        task = asyncio.get_running_loop().create_task(
+            self._report_approved(bot, delivery)
+        )
+        self._approved_runs[key] = task
+
+        def done(_: asyncio.Task[None]) -> None:
+            self._approved_runs.pop(key, None)
+            self._sessions.approved_runs.discard(key)
+
+        task.add_done_callback(done)
+
+    async def _report_approved(self, bot: str, delivery: dict[str, Any]) -> None:
+        try:
+            await self._run_approved(bot, delivery)
+        except Exception as exc:
+            logger.warning("Reporting a Vibebot tool approval failed", exc_info=exc)
+
+    async def _run_approved(self, bot: str, delivery: dict[str, Any]) -> None:
+        """Runs the approved call once. The call stays held until its report is
+        accepted: marked running before the run and given its outcome after, so
+        a lost report is sent again and a crash mid-run reports `expired`
+        rather than running it twice.
+        """
+        callback_id = str(delivery.get("callbackId") or "")
+        lock = self._sessions.claim_run(bot, callback_id)
+        if lock is None:
+            # Another app server of this machine runs and reports it.
+            return
+        try:
+            await self._run_claimed(bot, callback_id, delivery)
+        finally:
+            self._sessions.release_run(lock)
+
+    async def _run_claimed(
+        self, bot: str, callback_id: str, delivery: dict[str, Any]
+    ) -> None:
+        held = self._sessions.held_tool(bot, callback_id)
+        if delivery.get("flush") and (held is None or "outcome" not in held):
+            # Another app server of this machine reported it meanwhile.
+            return
+        report: dict[str, Any] = {
+            "kind": "tool_result",
+            "clientId": self.client_id(bot),
+            "requestId": callback_id,
+        }
+        if held is not None and "outcome" in held:
+            report |= held["outcome"]
+        elif delivery.get("decision") != "allow":
+            # A deny needs nothing held: it stays the user's refusal.
+            report |= {"outcome": "rejected"}
+        elif held is None:
+            report |= {
+                "outcome": "expired",
+                "error": "this computer no longer held the call: it did not run",
+            }
+        elif held.get("running"):
+            report |= {
+                "outcome": "expired",
+                "error": "it was running when Vibe stopped on this computer: it may have run",
+            }
+        else:
+            if delivery.get("argsHash") != held["argsHash"]:
+                outcome: dict[str, Any] = {
+                    "outcome": "failed",
+                    "error": "the approval was for other arguments: nothing ran",
+                }
+            else:
+                self._sessions.update_tool(
+                    bot, callback_id, required=True, running=True
+                )
+                outcome = await self._run_held(held)
+            self._sessions.update_tool(bot, callback_id, outcome=outcome)
+            report |= outcome
+        await self._client.report(bot, report)
+        self._sessions.drop_tool(bot, callback_id)
+
+    async def _run_held(self, held: dict[str, Any]) -> dict[str, Any]:
+        tools = self._tools()
+        try:
+            _, max_bytes, timeout_s = await tools.mode(held["server"], held["tool"])
+            result = await tools.run(
+                held["server"],
+                held["tool"],
+                held["arguments"],
+                max_bytes=max_bytes,
+                timeout_s=timeout_s,
+            )
+        except LocalToolFailure as exc:
+            return {"outcome": "failed", "error": f"{exc.code}: {exc}"}
+        except Exception as exc:
+            logger.warning(
+                "An approved Vibebot local tool call failed",
+                extra={"tool": held["tool"], "server": held["server"]},
+                exc_info=exc,
+            )
+            return {
+                "outcome": "failed",
+                "error": f"local_tool_failed: {_LOCAL_TOOL_FAILED}",
+            }
+        return {"outcome": "ok", **result}
 
     async def _claim(
         self,
@@ -1039,7 +1370,7 @@ class VibeBotController:
                 bot,
                 {
                     "kind": "tool_claimed",
-                    "clientId": self._sessions.client_id(bot),
+                    "clientId": self.client_id(bot),
                     "requestId": callback_id,
                     "callerSessionId": caller_session_id,
                     "tool": name.removeprefix("bot."),
@@ -1057,168 +1388,54 @@ class VibeBotController:
         if duplicate:
             raise _OtherMachine
 
-    async def start(
-        self,
-        bot: str,
-        caller_session_id: str,
-        callback_id: str,
-        raw_input: dict[str, Any],
-    ) -> dict[str, Any]:
-        tool_input = _validated(_StartInput, raw_input)
-        await self._require_local_project(tool_input.checkout)
-        thread_id = f"local_{callback_id}"
-        title = tool_input.title or tool_input.handle
-        local_session_id, turn_id = await self._client.start_local(
-            bot=bot,
-            idempotency_key=callback_id,
-            thread_id=thread_id,
-            prompt=_brief(tool_input.handle, tool_input.brief, tool_input.done_when),
-            title=title,
-            checkout=tool_input.checkout.model_dump(by_alias=True)
-            if tool_input.checkout is not None
-            else None,
-            model=tool_input.model,
-            approval_policy=tool_input.approval_policy,
-        )
-        try:
-            duplicate = await self._client.report(
-                bot,
-                {
-                    "kind": "accepted",
-                    "clientId": self._sessions.client_id(bot),
-                    "requestId": callback_id,
-                    "threadId": thread_id,
-                    "localSessionId": local_session_id,
-                    **({"turnId": turn_id} if turn_id else {}),
-                    "call": {
-                        "kind": "start",
-                        "callerSessionId": caller_session_id,
-                        "handle": tool_input.handle,
-                        "title": title,
-                        "link": tool_input.link,
-                    },
-                },
-            )
-        except Exception:
-            # The bot refused it (a taken handle, too many sessions) or could
-            # not be told: no session it does not know of keeps running.
-            await self._client.archive_local(bot=bot, local_session_id=local_session_id)
-            raise
-        if duplicate:
-            await self._client.archive_local(bot=bot, local_session_id=local_session_id)
-            raise _OtherMachine
-        self._sessions.of(bot).threads[thread_id] = VibeBotLocalSession(
-            thread_id=thread_id,
-            handle=tool_input.handle,
-            local_session_id=local_session_id,
-            client_id=self._sessions.client_id(bot),
-        )
-        return {
-            "sessionId": local_session_id,
-            "handle": tool_input.handle,
-            "title": title,
-        }
-
-    async def send(
-        self,
-        bot: str,
-        caller_session_id: str,
-        callback_id: str,
-        raw_input: dict[str, Any],
-    ) -> dict[str, Any]:
-        tool_input = _validated(_SendInput, raw_input)
-        local = self._sessions.of(bot)
-        target = local.find(tool_input.session)
-        if target is None:
-            raise _NotYet(
-                f"No local session `{tool_input.session}` of this bot runs on the user's computers"
-            )
-        if target.client_id not in {None, self._sessions.client_id(bot)}:
-            raise _OtherMachine
-        client_id = self._sessions.client_id(bot)
-        # Claimed before it is delivered or held, unlike a start: a delivered
-        # message cannot be taken back, while a second session can be archived.
-        try:
-            taken = await self._client.report(
-                bot,
-                {
-                    "kind": "claimed",
-                    "clientId": client_id,
-                    "requestId": callback_id,
-                    "threadId": target.thread_id,
-                    "callerSessionId": caller_session_id,
-                },
-            )
-        except VibeBotCallHeld as held:
-            return held.output
-        except VibeBotCallRefused:
-            raise
-        except Exception as exc:
-            raise _NotYet(f"The bot could not be asked for the message: {exc}") from exc
-        if taken:
-            # The bot answered it while this machine was away (it holds the
-            # message for it), or another machine claimed it.
-            raise _OtherMachine
-        deferred = tool_input.delivery == "deferred"
-        try:
-            turn_id = await self._client.send_local(
-                bot=bot,
-                local_session_id=target.local_session_id,
-                thread_id=target.thread_id,
-                text=tool_input.text,
-                idempotency_key=callback_id,
-                delivery="queue" if deferred else "start_turn",
-            )
-        except Exception as exc:
-            await self._release(bot, callback_id, target.thread_id, exc)
-            raise _NotYet(f"The message could not be delivered: {exc}") from exc
-        try:
-            await self._client.report(
-                bot,
-                {
-                    "kind": "accepted",
-                    "clientId": client_id,
-                    "requestId": callback_id,
-                    "threadId": target.thread_id,
-                    "localSessionId": target.local_session_id,
-                    **({"turnId": turn_id} if turn_id else {}),
-                    "call": {
-                        "kind": "send",
-                        "callerSessionId": caller_session_id,
-                        "text": tool_input.text,
-                        **({"delivery": "deferred"} if deferred else {}),
-                    },
-                },
-            )
-        except Exception as exc:
-            # Delivered, but the bot does not know yet: the next poll claims
-            # it again (this machine's claim stands) and sends again under the
-            # same key, which delivers nothing twice.
-            raise _NotYet(f"The bot was not told of the message: {exc}") from exc
-        return {
-            "sessionId": target.local_session_id,
-            "delivered": "queued" if deferred else "started_or_joined_turn",
-        }
-
-    async def _release(
-        self, bot: str, callback_id: str, thread_id: str, error: Exception
-    ) -> None:
-        """Gives back a claimed call this machine could not deliver: its retry
-        claims it again, or the bot holds it.
+    async def _start(self, bot: str, raw: dict[str, Any]) -> None:
+        """A `code_local` start the bot holds for this machine: started under
+        its key, so a start handed back after a lost report finds the same
+        session, then reported. A start the bot no longer waits for (stopped,
+        archived, another machine's) leaves no session running.
         """
+        report: dict[str, Any] = {
+            "clientId": self.client_id(bot),
+            "requestId": str(raw.get("requestId") or ""),
+            "threadId": str(raw.get("threadId") or ""),
+        }
         try:
-            await self._client.report(
-                bot,
-                {
-                    "kind": "refused",
-                    "clientId": self._sessions.client_id(bot),
-                    "requestId": callback_id,
-                    "threadId": thread_id,
-                    "error": str(error),
-                },
+            delivery = _validated(_StartDelivery, raw)
+            await self._require_local_project(delivery.checkout)
+            local_session_id, turn_id = await self._client.start_local(
+                bot=bot,
+                idempotency_key=delivery.request_id,
+                thread_id=delivery.thread_id,
+                prompt=_brief(
+                    delivery.handle,
+                    delivery.brief,
+                    delivery.done_when,
+                    can_message=self._client.session_tools(),
+                ),
+                title=delivery.title,
+                checkout=delivery.checkout.model_dump(by_alias=True)
+                if delivery.checkout is not None
+                else None,
+                model=delivery.model,
+                approval_policy=delivery.approval_policy,
             )
-        except Exception:
-            logger.warning("Releasing a Vibebot call failed", exc_info=True)
+        except Exception as exc:
+            await self._client.report(
+                bot, report | {"kind": "refused", "error": str(exc)}
+            )
+            return
+        accepted = report | {"kind": "accepted", "localSessionId": local_session_id}
+        if turn_id:
+            accepted["turnId"] = turn_id
+        if await self._client.report(bot, accepted):
+            await self._client.archive_local(bot=bot, local_session_id=local_session_id)
+            return
+        self._sessions.of(bot).threads[delivery.thread_id] = VibeBotLocalSession(
+            thread_id=delivery.thread_id,
+            handle=delivery.handle,
+            local_session_id=local_session_id,
+            client_id=self.client_id(bot),
+        )
 
     async def _deliver(self, bot: str, deliveries: list[dict[str, Any]]) -> None:
         """Delivers each, in order, then reports it; a delivery whose report
@@ -1228,14 +1445,20 @@ class VibeBotController:
         for delivery in deliveries:
             request_id = str(delivery.get("requestId") or "")
             local_session_id = str(delivery.get("localSessionId") or "")
-            if (
-                not request_id
-                or delivery.get("kind") not in {"send", "stop"}
-                or not local_session_id
+            if delivery.get("kind") == "tool_approval":
+                self._start_approved(bot, delivery)
+                continue
+            starts = delivery.get("kind") == "start"
+            if not request_id or not (
+                starts
+                or (delivery.get("kind") in {"send", "stop"} and local_session_id)
             ):
                 continue
             try:
-                await self._deliver_one(bot, delivery, local_session_id)
+                if starts:
+                    await self._start(bot, delivery)
+                else:
+                    await self._deliver_one(bot, delivery, local_session_id)
             except Exception as exc:
                 logger.warning(
                     "Reporting a Vibebot delivery failed",
@@ -1250,7 +1473,7 @@ class VibeBotController:
         request_id = str(delivery["requestId"])
         thread_id = str(delivery.get("threadId") or "")
         report: dict[str, Any] = {
-            "clientId": self._sessions.client_id(bot),
+            "clientId": self.client_id(bot),
             "requestId": request_id,
             "threadId": thread_id,
         }
@@ -1283,7 +1506,8 @@ class VibeBotController:
 
     def close(self) -> list[asyncio.Task[None]]:
         """The tasks to cancel; the MCP servers close in `aclose_tools` (final
-        close) or `drop_tools` (detach), awaited after them.
+        close) or `drop_tools` (detach), awaited after them. An approved run is
+        not cancelled: the user allowed it, and its tool's timeout bounds it.
         """
         tasks = [f.task for f in self._followers.values() if f.task is not None]
         self._followers.clear()
@@ -1292,16 +1516,61 @@ class VibeBotController:
         return tasks
 
     async def aclose_tools(self) -> None:
+        """Waits for the approved runs in flight, bounded by the longest a tool
+        may run, then closes the servers.
+        """
+        await _finish(list(self._approved_runs.values()))
+        if self._dropping:
+            await asyncio.wait(list(self._dropping), timeout=_RUN_GRACE_SECONDS)
         if self._local_tools is not None:
             await self._local_tools.aclose()
 
     async def drop_tools(self) -> None:
         """On a detach: the controller lives on, and a call it was running may
-        be claimed again by the next connection, which is not a retry.
+        be claimed again by the next connection, which is not a retry. The
+        servers in use are taken out now, so the next connection opens its own,
+        and closed once the approved runs in flight are done.
         """
         self._claim_nonce = uuid.uuid4().hex
-        if self._local_tools is not None:
-            await self._local_tools.drop_runtime()
+        tools = self._local_tools
+        if tools is None:
+            return
+        mcp = await tools.detach_runtime()
+        if mcp is None:
+            return
+        runs = list(self._approved_runs.values())
+        if not runs:
+            await mcp.aclose()
+            return
+
+        async def close_after_runs() -> None:
+            await _finish(runs)
+            await mcp.aclose()
+
+        task = asyncio.get_running_loop().create_task(close_after_runs())
+        self._dropping.add(task)
+        task.add_done_callback(self._dropping.discard)
+
+
+_RUN_GRACE_SECONDS: Final = 10.0
+
+
+async def _finish(runs: list[asyncio.Task[None]]) -> None:
+    """Approved runs end within their tool's timeout; one still running after
+    that is cancelled, and its hold reports that it may have run.
+    """
+    if not runs:
+        return
+    _, late = await asyncio.wait(runs, timeout=MAX_CALL_SECONDS + _RUN_GRACE_SECONDS)
+    for task in late:
+        task.cancel()
+    if late:
+        _, stuck = await asyncio.wait(late, timeout=_RUN_GRACE_SECONDS)
+        if stuck:
+            logger.warning(
+                "Vibebot approved runs ignored their cancel",
+                extra={"count": len(stuck)},
+            )
 
 
 _MAX_NAME: Final = 256
@@ -1368,7 +1637,6 @@ __all__ = [
     "VIBE_BOT_START_LOCAL_METHOD",
     "VIBE_BOT_STOP_LOCAL_METHOD",
     "VibeBotArchiveLocalParams",
-    "VibeBotCallHeld",
     "VibeBotCallRefused",
     "VibeBotClient",
     "VibeBotController",

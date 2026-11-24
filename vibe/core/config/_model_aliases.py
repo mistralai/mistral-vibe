@@ -13,11 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from vibe.core.config.models import (
-    merge_model_payloads,
-    normalize_model_configs,
-    routed_model_keys,
-)
+from vibe.core.config.models import merge_model_payloads, normalize_model_configs
 from vibe.observability.logging import logger
 
 # The config is rebuilt several times per session: log once, not per rebuild.
@@ -96,35 +92,22 @@ CATALOG_LAYER = "model_catalog"
 def catalog_alias_index(layers: Sequence[tuple[str, Mapping[str, Any]]]) -> AliasIndex:
     """The catalog's aliases over every layer's whole models.
 
-    An alias any layer defines a whole model under keeps naming that model;
-    so does a routed-model field, which injects its model without a ``models``
-    entry. The alias map is read with the same replace-merge the merged
+    An alias any layer defines a whole model under keeps naming that model.
+    The alias map is read with the same replace-merge the merged
     ``catalog_model_aliases`` field gets: the topmost layer that defines it
     wins, normally the model catalog layer.
     """
     aliases: Mapping[str, Sequence[str]] = {}
     model_keys: set[str] = set()
-    routed: dict[str, Any] = {}
     for _name, data in layers:
         raw = data.get("catalog_model_aliases")
         if isinstance(raw, Mapping):
             aliases = raw
-        # The routed fields merge by replace per field, like the merged config:
-        # derive their keys from the merged values, not per layer, so this
-        # index and the validators cannot disagree.
-        for field in (
-            "routed_default_model",
-            "routed_model_config",
-            "routed_extra_models",
-        ):
-            if field in data:
-                routed[field] = data[field]
         models = normalize_model_configs(data.get("models"))
         if isinstance(models, Mapping):
             model_keys.update(
                 key for key, payload in models.items() if defines_model(payload)
             )
-    model_keys.update(routed_model_keys(routed))
     return build_alias_index(
         {key: names for key, names in aliases.items() if key in model_keys}, model_keys
     )

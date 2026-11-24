@@ -1,20 +1,24 @@
-//! The loading line in rows: it breaks only before a hint or a trailing note, so a key never parts from its action.
+//! The loading line in rows: it breaks only before the timer, a hint or a trailing note, so a key never parts from its action.
 
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-/// Where a row may start: a ` · ` separator, an opening ` · ` or ` typing` note.
-fn breaks_before(span: &Span) -> bool {
-    span.content.starts_with(" · ") || span.content.starts_with(" typing")
+/// Where a row may start: a ` · ` separator, an opening ` · ` or ` typing` note, or the `(` opening the timer right after the label's `… `.
+fn breaks_before(span: &Span, after_label: bool) -> bool {
+    span.content.starts_with(" · ")
+        || span.content.starts_with(" typing")
+        || (after_label && span.content.starts_with('('))
 }
 
-/// The spans laid out in rows of at most `width` columns, breaking only before a separator.
+/// The spans laid out in rows of at most `width` columns, breaking only where [`breaks_before`] allows.
 pub(super) fn rows(spans: Vec<Span<'static>>, width: u16) -> Vec<Line<'static>> {
     let mut units: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut after_label = false;
     for span in spans {
-        if breaks_before(&span) {
+        if breaks_before(&span, after_label) {
             units.push(Vec::new());
         }
+        after_label = span.content.ends_with("… ");
         if let Some(unit) = units.last_mut() {
             unit.push(span);
         }

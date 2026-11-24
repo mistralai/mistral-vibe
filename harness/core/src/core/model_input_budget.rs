@@ -5,7 +5,9 @@ use crate::core::error::CoreError;
 use crate::core::model_input_projection::project_model_input_messages;
 use crate::core::step_protocol::ToolDefinition;
 use crate::core::wire::content::{ContentBlock, strip_model_hidden_content_fields};
-use crate::core::wire::message::{AssistantPart, AssistantSemanticPart, Message, StoredMessage};
+use crate::core::wire::message::{
+    AssistantPart, AssistantSemanticPart, Message, StoredMessage, ToolArguments,
+};
 
 pub(crate) const APPROX_BYTES_PER_TOKEN: usize = 4;
 
@@ -48,10 +50,17 @@ fn budget_message(message: &mut Message, image_cost: ImageCostRule) -> u64 {
             AssistantPart::Content(block) => {
                 keep_budgeted_block(block, image_cost, &mut image_tokens)
             }
-            AssistantPart::Semantic(
-                AssistantSemanticPart::Reasoning { meta, .. }
-                | AssistantSemanticPart::ToolCall { meta, .. },
-            ) => {
+            AssistantPart::Semantic(AssistantSemanticPart::Reasoning { meta, .. }) => {
+                *meta = None;
+                true
+            }
+            AssistantPart::Semantic(AssistantSemanticPart::ToolCall {
+                arguments, meta, ..
+            }) => {
+                // The wire sends `raw`; `value` repeats it parsed.
+                if let ToolArguments::Json { value, .. } = arguments {
+                    *value = serde_json::Value::Null;
+                }
                 *meta = None;
                 true
             }
@@ -128,6 +137,48 @@ mod tests {
             )
             .expect("model input without metadata serializes")
         );
+    }
+
+    #[test]
+    fn counts_tool_call_arguments_as_sent() {
+        let call_with = |arguments: serde_json::Value| {
+            StoredMessage::visible(
+                serde_json::from_value(json!({
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_call",
+                        "id": "call-1",
+                        "name": "lookup",
+                        "arguments": arguments,
+                    }],
+                }))
+                .expect("assistant message is valid"),
+            )
+        };
+        let estimate = |message: StoredMessage| {
+            estimate_model_input_tokens(&[message], &[], ImageDeliveryMode::Native, TEST_IMAGE_COST)
+                .expect("tool call serializes")
+        };
+        let query = "x".repeat(4_000);
+        let value = json!({"query": query});
+        let raw = value.to_string();
+
+        let both = estimate(call_with(
+            json!({"type": "json", "raw": raw, "value": value}),
+        ));
+        let empty = estimate(call_with(json!({"type": "json", "raw": "", "value": {}})));
+        let escaped = estimate(call_with(json!({
+            "type": "json",
+            "raw": raw.replace('x', "\\u0078"),
+            "value": value,
+        })));
+
+        let argument_tokens = both - empty;
+        assert!(
+            (1_000..1_010).contains(&argument_tokens),
+            "{argument_tokens}"
+        );
+        assert!(escaped - empty > 6 * argument_tokens, "{escaped}");
     }
 
     #[test]

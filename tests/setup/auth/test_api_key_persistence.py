@@ -177,6 +177,32 @@ def test_persist_provider_does_not_pin_field_defaults_into_mistral_entry(
     assert "preserve_api_base" not in mistral_entry
 
 
+@pytest.mark.parametrize(("setting", "expected"), [(None, None), (False, False)])
+def test_persist_provider_does_not_pin_the_gateway_tool_result_images(
+    config_dir: Path, setting: bool | None, expected: bool | None
+) -> None:
+    """A gateway provider's tool_result_images comes from its api_base when
+    unset: persisting it writes the setting only when it was set, an explicit
+    false included.
+    """
+    config_file = config_dir / "config.toml"
+    config_file.write_text("", encoding="utf-8")
+    gateway = ProviderConfig(
+        name="internal-ai-gateway",
+        api_base="https://internal-ai-gateway.mistralai.com",
+        api_key_env_var="LITELLM_API_KEY",
+        tool_result_images=setting,
+    )
+
+    _ = persist_provider_to_config(gateway)
+
+    persisted = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    entry = next(
+        p for p in persisted["providers"] if p["name"] == "internal-ai-gateway"
+    )
+    assert entry.get("tool_result_images") is expected
+
+
 def test_persist_provider_round_trips_preserve_api_base(config_dir: Path) -> None:
     """exclude_defaults=True would drop a False flag, so only True proves the
     field survives the TOML round trip.

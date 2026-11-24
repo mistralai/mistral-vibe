@@ -27,7 +27,6 @@ from vibe.core.model_catalog import cache as model_cache
 from vibe.core.model_catalog.models import ModelCatalogResponse
 from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.telemetry.send import mistral_credential_cache_key
-from vibe.core.utils.fetch_wait import FetchFailures
 from vibe.core.utils.remote_cache import Cached
 from vibe.setup.auth import _oidc_runtime
 from vibe.setup.auth._oidc_config import OidcConfig, OidcError
@@ -142,7 +141,7 @@ def test_shared_disk_caches_never_load_another_oidc_identity(
     evaluation = EvalResponse.model_validate({
         "features": {"feature-a": {"defaultValue": "a"}}
     })
-    catalog_config = build_test_vibe_config(experimental_enable_model_catalog=True)
+    catalog_config = build_test_vibe_config(enable_model_catalog=True)
     first_catalog_key = ModelCatalogKey.current(catalog_config, None)
     assert first_catalog_key is not None
     managed_config_cache.store_cached_managed_config(first_key, 'theme = "nord"')
@@ -207,9 +206,7 @@ def test_unsafe_identity_bypasses_shared_caches_without_api_key_fallback(
     assert _oidc_runtime.stored_oidc_cache_key() is None
     assert mistral_credential_cache_key(config) is None
     assert (
-        ModelCatalogKey.current(
-            build_test_vibe_config(experimental_enable_model_catalog=True), None
-        )
+        ModelCatalogKey.current(build_test_vibe_config(enable_model_catalog=True), None)
         is None
     )
     managed_config_cache.store_cached_managed_config(None, 'theme = "nord"')
@@ -442,7 +439,7 @@ def test_disk_store_requires_the_fetching_oidc_identity(
     config = build_test_vibe_config(enable_telemetry=True)
     first_key = mistral_credential_cache_key(config)
     catalog_key = ModelCatalogKey.current(
-        build_test_vibe_config(experimental_enable_model_catalog=True), None
+        build_test_vibe_config(enable_model_catalog=True), None
     )
     assert catalog_key is not None
     # Without the key a fetch started under, an OIDC store cannot tell whose it is.
@@ -462,7 +459,7 @@ def test_disk_store_requires_the_fetching_oidc_identity(
 async def test_session_model_fetch_skips_cache_after_oidc_switch(
     credentials, monkeypatch, field
 ):
-    config = build_test_vibe_config(experimental_enable_model_catalog=True)
+    config = build_test_vibe_config(enable_model_catalog=True)
     key = await ModelCatalogKey.of(config, None)
     assert key is not None
 
@@ -518,7 +515,6 @@ async def test_session_experiment_fetch_skips_cache_after_oidc_switch(
             manager=manager,
             launch_context=launch,
             harness=ExperimentSurface.UNIFIED,
-            failures=FetchFailures(),
         )
     else:
         from vibe.app_server import _experiments_service
@@ -554,7 +550,7 @@ async def test_disabled_remote_features_do_not_discover_oidc_tenant(
     monkeypatch.setattr(_oidc_runtime, "oidc_headers", headers)
     assert (
         await ModelCatalogKey.of(
-            build_test_vibe_config(experimental_enable_model_catalog=False), None
+            build_test_vibe_config(enable_model_catalog=False), None
         )
         is None
     )
@@ -570,7 +566,6 @@ async def test_disabled_remote_features_do_not_discover_oidc_tenant(
         manager=MagicMock(),
         launch_context=None,
         harness=ExperimentSurface.UNIFIED,
-        failures=FetchFailures(),
     )
     headers.assert_not_awaited()
 

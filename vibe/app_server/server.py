@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import (
+    AbstractAsyncContextManager,
+    asynccontextmanager,
+    nullcontext,
+    suppress,
+)
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 import os
@@ -37,10 +42,31 @@ from vibe.app_server._execution import cancel_tasks, raise_if_cancelled
 from vibe.app_server._host import HostRequestHandler
 from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._imports import ImportsService
+from vibe.app_server._left_turns import (
+    AccountLender,
+    LeftTurns,
+    LenderOf,
+    ListOnOwnChannel,
+    OpenLeftTurnChannel,
+    Owner,
+    ResumeOne,
+    SignsInItself,
+    owner_key,
+)
+from vibe.app_server._left_turns_claim import LeftTurnsClaim
 from vibe.app_server._local_projects import LocalProjectStore
 from vibe.app_server._local_projects_controller import list_local_projects
 from vibe.app_server._model import ProtocolModel, validate_wire
+from vibe.app_server._open_sessions import OpenSessions
+from vibe.app_server._parked_sessions import attach_parked, park_running_session
+from vibe.app_server._platform_credential_lenders import (
+    AccountPlatformCredentialProvider,
+    LenderAvailability,
+    PlatformCredentialLenders,
+    account_key,
+)
 from vibe.app_server._platform_credentials import ConnectionPlatformCredentialProvider
+from vibe.app_server._scratch_folders import scratch_folder_for
 from vibe.app_server._session_backend_port import (
     SessionBackend,
     SessionBackendCallbackSink,
@@ -64,6 +90,7 @@ from vibe.app_server._session_backend_port import (
     SessionBackendHostPin,
     SessionBackendHostRelocate,
     SessionBackendHostSeenState,
+    SessionBackendHostStorageRoot,
     SessionBackendNotificationSink,
     SessionBackendOpenCallbacks,
     SessionBackendQueuedTurnEditing,
@@ -77,6 +104,7 @@ from vibe.app_server._session_backend_port import (
 )
 from vibe.app_server._session_backend_services import SessionBackendServices
 from vibe.app_server._session_lease_subscription import SessionLeaseSubscription
+from vibe.app_server._session_link import SessionLink
 from vibe.app_server._session_peers import SessionPeerError
 from vibe.app_server._session_spawn import SessionSpawnError
 from vibe.app_server._setup_oidc import SetupOidcHandler
@@ -90,10 +118,10 @@ from vibe.app_server._vibe_bot import (
     VIBE_BOT_START_LOCAL_METHOD,
     VIBE_BOT_STOP_LOCAL_METHOD,
     VibeBotArchiveLocalParams,
-    VibeBotCallHeld,
     VibeBotCallRefused,
     VibeBotController,
     VibeBotEmpty,
+    VibeBotLocalSessionGone,
     VibeBotLocalSessions,
     VibeBotReportParams,
     VibeBotReportResponse,
@@ -119,11 +147,13 @@ from vibe.app_server.events import (
 )
 from vibe.app_server.models import OpenCallbackState, PublicCallbackEntry
 from vibe.app_server.protocol import (
+    PEER_SEND_NOT_DELIVERED_IN_TIME,
     SERVER_METHODS,
     SESSION_PEER_ARCHIVE_METHOD,
     SESSION_PEER_LIST_METHOD,
     SESSION_PEER_MARK_SEEN_METHOD,
     SESSION_PEER_READ_METHOD,
+    SESSION_PEER_RENAME_METHOD,
     SESSION_PEER_RESTORE_METHOD,
     SESSION_PEER_SEND_METHOD,
     SESSION_SPAWN_METHOD,
@@ -161,6 +191,12 @@ from vibe.app_server.protocol import (
     JsonRpcErrorResponse,
     JsonRpcProtocolError,
     JsonRpcSuccessResponse,
+    LeftTurnEntry,
+    LeftTurnsInterruptParams,
+    LeftTurnsInterruptResponse,
+    LeftTurnsReadParams,
+    LeftTurnsReadResponse,
+    LeftTurnsStatus,
     MCPAuthUrlParams,
     ModelConfigWriteParams,
     Notification,
@@ -185,6 +221,7 @@ from vibe.app_server.protocol import (
     SessionHistoryListParams,
     SessionListParams,
     SessionMarkAsSeenParams,
+    SessionMarkAsUnseenParams,
     SessionMoveParams,
     SessionPeerArchiveParams,
     SessionPeerArchiveResponse,
@@ -194,6 +231,8 @@ from vibe.app_server.protocol import (
     SessionPeerMarkSeenResponse,
     SessionPeerReadParams,
     SessionPeerReadResponse,
+    SessionPeerRenameParams,
+    SessionPeerRenameResponse,
     SessionPeerRestoreParams,
     SessionPeerRestoreResponse,
     SessionPeerSendParams,
@@ -212,6 +251,7 @@ from vibe.app_server.protocol import (
     SessionStartParams,
     SessionStartResponse,
     SessionTitleUpdateParams,
+    StoppedLeftTurnEntry,
     StorageLeftoversCleanParams,
     StorageSessionKept,
     StorageSessionKeptReason,
@@ -232,6 +272,7 @@ from vibe.app_server.protocol import (
     TurnQueueReplaceParams,
     TurnQueueResumeParams,
     TurnQueueSteerParams,
+    TurnRetryParams,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
@@ -328,6 +369,7 @@ _SESSION_BACKEND_METHODS = frozenset({
     "session/turn/queue/steer",
     "session/turn/queue/resume",
     "turn/interrupt",
+    "turn/retry",
     "turn/start",
     "turn/steer",
 })
@@ -362,17 +404,45 @@ class _ErrorDispatch:
     on_response_abandoned: Callable[[], None] | None = None
 
 
+@dataclass(slots=True)
+class ChannelRuntime:
+    """What a channel runs its session on. It moves, as one, with a session
+    another channel attaches to: the session reaches its client only through
+    ``link``.
+    """
+
+    link: SessionLink
+    session_backend_host: SessionBackendHost
+    host_handler: HostRequestHandler
+    mcp_catalog_service: MCPCatalogService | None
+    connector_catalog_service: ConnectorCatalogService | None
+    plugin_catalog_service: PluginCatalogService | None
+    imports_service: ImportsService | None
+    configure_agent_plugins: (
+        Callable[
+            [list[AgentPlugin], list[ClientToolDefinitionParams], ClientToolRunner],
+            None,
+        ]
+        | None
+    )
+
+
 class AppServer:
     # Reset with ``_client_info``: the account the client reported at initialize.
     _client_account: ClientAccount | None = None
+    # This connection's lending provider; kept after a close, so a parked
+    # session can still ask about its account's lenders.
+    _lending: AccountPlatformCredentialProvider | None = None
+    _client_instance: str | None = None
 
-    def __init__(  # noqa: PLR0913, PLR0915 - one collaborator per concern, all keyword-only
+    def __init__(  # noqa: PLR0913 - one collaborator per concern, all keyword-only
         self,
         transport: JsonRpcTransport,
         *,
         session_backend_host_factory: SessionBackendHostFactory,
         host_handler: HostRequestHandler,
         oidc_tenants: OidcTenantResolver,
+        platform_credential_lenders: PlatformCredentialLenders,
         transport_kind: TransportKind = "in_process",
         account_gateway: AccountGateway | None = None,
         identity_gateway: IdentityGateway | None = None,
@@ -388,10 +458,16 @@ class AppServer:
             None,
         ]
         | None = None,
+        open_sessions: OpenSessions | None = None,
+        left_turns: LeftTurns | None = None,
+        open_left_turn_channel: OpenLeftTurnChannel | None = None,
+        list_on_own_channel: ListOnOwnChannel | None = None,
+        left_turn_session: str | None = None,
     ) -> None:
         self._root: SessionBackend | None = None
-        self._host_handler = host_handler
-        self._setup_oidc = SetupOidcHandler(self._host_handler.setup_telemetry)
+        self._setup_oidc = SetupOidcHandler(
+            lambda client: self._host_handler.setup_telemetry(client)
+        )
         self._transport: JsonRpcTransport | None = transport
         self._initialization = InitializationState.UNINITIALIZED
         self._client_info: ClientInfo | None = None
@@ -435,21 +511,81 @@ class AppServer:
         # This connection's providers, built at ``initialize`` once the client
         # is known, and kept for the connection's lifetime.
         self._credential_selection: ConnectionCredentialSelection | None = None
-        self._mcp_catalog_service = mcp_catalog_service
-        self._connector_catalog_service = connector_catalog_service
-        self._plugin_catalog_service = plugin_catalog_service
-        self._imports_service = imports_service
         self._storage_usage = storage_usage
+        link = SessionLink(self)
+        self._runtime = ChannelRuntime(
+            link=link,
+            session_backend_host=session_backend_host_factory(link),
+            host_handler=host_handler,
+            mcp_catalog_service=mcp_catalog_service,
+            connector_catalog_service=connector_catalog_service,
+            plugin_catalog_service=plugin_catalog_service,
+            imports_service=imports_service,
+            configure_agent_plugins=configure_agent_plugins,
+        )
+        if self._runtime.session_backend_host is None:
+            raise TypeError(
+                "session_backend_host_factory must return a SessionBackendHost"
+            )
         self._vibe_bot = self._new_vibe_bot(vibe_bot_sessions)
         # This connection's storage/usage/updated, from its first storage call.
         self._stop_storage_updates: Callable[[], None] | None = None
         self._oidc_tenants = oidc_tenants
-        self._configure_agent_plugins = configure_agent_plugins
-        self._session_backend_host = session_backend_host_factory(self)
-        if self._session_backend_host is None:
-            raise TypeError(
-                "session_backend_host_factory must return a SessionBackendHost"
-            )
+        self._platform_credential_lenders = platform_credential_lenders
+        self._open_sessions = open_sessions
+        # With ``left_turn_session``, this channel is the process's own resume
+        # of that session: it waits for no one, and borrows a sign-in without
+        # lending its own.
+        self._left_turns, self._open_left_turn_channel, self._left_turn_session = (
+            left_turns,
+            open_left_turn_channel,
+            left_turn_session,
+        )
+        self._list_on_own_channel = list_on_own_channel
+
+    @property
+    def session_link(self) -> SessionLink:
+        return self._runtime.link
+
+    @property
+    def _link(self) -> SessionLink:
+        return self._runtime.link
+
+    @property
+    def _session_backend_host(self) -> SessionBackendHost:
+        return self._runtime.session_backend_host
+
+    @property
+    def _host_handler(self) -> HostRequestHandler:
+        return self._runtime.host_handler
+
+    @property
+    def _mcp_catalog_service(self) -> MCPCatalogService | None:
+        return self._runtime.mcp_catalog_service
+
+    @property
+    def _connector_catalog_service(self) -> ConnectorCatalogService | None:
+        return self._runtime.connector_catalog_service
+
+    @property
+    def _plugin_catalog_service(self) -> PluginCatalogService | None:
+        return self._runtime.plugin_catalog_service
+
+    @property
+    def _imports_service(self) -> ImportsService | None:
+        return self._runtime.imports_service
+
+    @property
+    def _configure_agent_plugins(
+        self,
+    ) -> (
+        Callable[
+            [list[AgentPlugin], list[ClientToolDefinitionParams], ClientToolRunner],
+            None,
+        ]
+        | None
+    ):
+        return self._runtime.configure_agent_plugins
 
     def _require_root(self) -> SessionBackend:
         if self._root is None:
@@ -715,6 +851,7 @@ class AppServer:
             self._initialization = InitializationState.UNINITIALIZED
             self._client_info = None
             self._client_account = None
+            self._client_instance = None
             self._client_capabilities = ClientCapabilities()
             self._platform_credentials = None
             self._credential_selection = None
@@ -776,15 +913,21 @@ class AppServer:
             serve_task = self._serve_task
             if serve_task is not None and serve_task is not current:
                 serve_task.cancel()
+            # Before the session shutdown, which can take a while: no other
+            # channel's session may borrow from a client that is gone.
+            self._stop_lending("The app server closed")
+            # Before parking: the session's event forwarder must be gone before
+            # another channel attaches and reads the same event stream.
             errors = await self._stop_background_tasks(current)
             try:
                 await self._setup_oidc.close()
             except BaseException as exc:
                 errors.append(exc)
-            try:
-                await self._close_root()
-            except BaseException as exc:
-                errors.append(exc)
+            if not self._park_running_session():
+                try:
+                    await self._close_root()
+                except BaseException as exc:
+                    errors.append(exc)
             self._callback_deliveries.requests.clear()
             self._abandon_client_requests("The app server closed")
             self._abandon_platform_credential_requests("The app server closed")
@@ -803,6 +946,31 @@ class AppServer:
             if errors:
                 raise BaseExceptionGroup("App server shutdown failed", errors)
 
+    def _park_running_session(self) -> bool:
+        if self._open_sessions is None:
+            return False
+        return park_running_session(self, self._open_sessions)
+
+    def _opening(self, session_id: str) -> AbstractAsyncContextManager[None]:
+        if self._open_sessions is None or self._left_turn_session == session_id:
+            return nullcontext()
+        return self._open_sessions.opening(session_id)
+
+    async def _attach_parked(
+        self, params: SessionResumeParams
+    ) -> SessionReadResponse | None:
+        if self._open_sessions is None:
+            return None
+        return await attach_parked(self, self._open_sessions, params)
+
+    def _subscribe_artifacts(self) -> None:
+        self._stop_artifact_subscription()
+        host = self._session_backend_host
+        if isinstance(host, SessionBackendHostArtifacts):
+            self._unsubscribe_artifacts = host.subscribe_artifacts(
+                self._send_notification_soon
+            )
+
     async def _close_root(self) -> None:
         async with self._lifecycle_transition():
             root = self._root
@@ -818,6 +986,9 @@ class AppServer:
             return
         if self._closed:
             return
+        # A reconnectable connection also drops its selection below: only a
+        # closed channel (``close``) keeps one its parked sessions borrow with.
+        self._stop_lending("The client disconnected")
         errors = await self._stop_request_tasks(asyncio.current_task())
         try:
             await self._setup_oidc.close()
@@ -839,6 +1010,7 @@ class AppServer:
         self._initialization = InitializationState.UNINITIALIZED
         self._client_info = None
         self._client_account = None
+        self._client_instance = None
         self._client_capabilities = ClientCapabilities()
         self._platform_credentials = None
         self._credential_selection = None
@@ -993,7 +1165,7 @@ class AppServer:
                 if (denied := vibe_home_access_denied(exc)) is None:
                     raise
                 raise denied from exc
-            if dispatched.session_attached:
+            if dispatched.session_attached and not dispatched.callbacks_checked:
                 await self._validate_open_callback_capabilities(request.method)
             return dispatched
         except (RequestFailure, SessionBackendError) as exc:
@@ -1092,6 +1264,8 @@ class AppServer:
             )
         if method == "events/read":
             return self._events_read(raw_params)
+        if method in {"session/leftTurns/read", "session/leftTurns/interrupt"}:
+            return await self._dispatch_left_turns(method, raw_params)
         if method == "imports/discover":
             validate_wire(ImportDiscoveryParams, raw_params)
             return await self._require_imports().discover()
@@ -1146,6 +1320,7 @@ class AppServer:
             "projects/rename",
             "projects/retireCloud",
             "projects/setCloud",
+            "projects/setRoots",
             "session/history/get",
             "setup/status",
             "setup/store-credential",
@@ -1376,7 +1551,12 @@ class AppServer:
             )
             if result is not None:
                 return result
-        if method in {"session/pin", "session/archive", "session/markAsSeen"}:
+        if method in {
+            "session/pin",
+            "session/archive",
+            "session/markAsSeen",
+            "session/markAsUnseen",
+        }:
             return await self._dispatch_backend_host_metadata(method, raw_params)
         if method == "session/fork":
             params = validate_wire(SessionForkParams, raw_params)
@@ -1463,11 +1643,16 @@ class AppServer:
             params = validate_wire(SessionArchiveParams, raw_params)
             response = await self._session_backend_host.archive(params)
             await asyncio.to_thread(touch_stale_marker)
-        else:
+        elif method == "session/markAsSeen":
             if not isinstance(self._session_backend_host, SessionBackendHostSeenState):
                 raise method_not_found(method)
             params = validate_wire(SessionMarkAsSeenParams, raw_params)
             response = await self._session_backend_host.mark_as_seen(params)
+        else:
+            if not isinstance(self._session_backend_host, SessionBackendHostSeenState):
+                raise method_not_found(method)
+            params = validate_wire(SessionMarkAsUnseenParams, raw_params)
+            response = await self._session_backend_host.mark_as_unseen(params)
         if self._root is not None and self._root.session_id == params.session_id:
             await self._flush_backend_events(self._root)
         return DispatchResult(response)
@@ -1567,13 +1752,17 @@ class AppServer:
         self, method: str, raw_params: dict[str, Any]
     ) -> DispatchResult:
         if method == "session/start":
-            params = validate_wire(SessionStartParams, raw_params)
-            lifecycle = await self._session_backend_host.start(params)
-            try:
-                first_turn = await self._apply_start_choices(lifecycle.backend, params)
-            except BaseException:
-                await self._discard_started(lifecycle.backend)
-                raise
+            async with scratch_folder_for(
+                validate_wire(SessionStartParams, raw_params)
+            ) as params:
+                lifecycle = await self._session_backend_host.start(params)
+                try:
+                    first_turn = await self._apply_start_choices(
+                        lifecycle.backend, params
+                    )
+                except BaseException:
+                    await self._discard_started(lifecycle.backend)
+                    raise
             self._record_session_created(lifecycle.backend)
             response = await self._activate_lifecycle_backend(
                 method, lifecycle.backend, params.history_limit
@@ -1593,17 +1782,24 @@ class AppServer:
             )
         if method == "session/resume":
             params = validate_wire(SessionResumeParams, raw_params)
-            lifecycle = await self._session_backend_host.resume(params)
-            response = await self._activate_lifecycle_backend(
-                method, lifecycle.backend, params.history_limit
-            )
+            after_response = None
+            response = await self._attach_parked(params)
+            attached_parked = response is not None
+            if response is None:
+                async with self._opening(params.session_id):
+                    lifecycle = await self._session_backend_host.resume(params)
+                    after_response = lifecycle.after_response
+                    response = await self._activate_lifecycle_backend(
+                        method, lifecycle.backend, params.history_limit
+                    )
             return DispatchResult(
                 SessionResumeResponse(
                     state=response.state, last_event_id=response.last_event_id
                 ),
-                after_response=lifecycle.after_response,
+                after_response=after_response,
                 session_attached=True,
                 runtime_updated=True,
+                callbacks_checked=attached_parked,
             )
         if method == "session/continue":
             params = validate_wire(SessionContinueParams, raw_params)
@@ -1800,6 +1996,8 @@ class AppServer:
             result = await root.start_turn(validate_wire(TurnStartParams, raw_params))
         elif method == "turn/steer":
             result = await root.steer_turn(validate_wire(TurnSteerParams, raw_params))
+        elif method == "turn/retry":
+            result = await root.retry_turn(validate_wire(TurnRetryParams, raw_params))
         elif method == "turn/interrupt":
             result = await root.interrupt_turn(
                 validate_wire(TurnInterruptParams, raw_params)
@@ -1929,7 +2127,7 @@ class AppServer:
         if self._configure_agent_plugins is not None:
             try:
                 self._configure_agent_plugins(
-                    plugins, definitions, _ConnectionClientToolRunner(self)
+                    plugins, definitions, _ConnectionClientToolRunner(self._link)
                 )
             except ValueError as exc:
                 raise RequestFailure(
@@ -1937,6 +2135,7 @@ class AppServer:
                 ) from exc
         self._client_info = params.client_info
         self._client_account = params.account
+        self._client_instance = params.client_instance
         self._client_capabilities = params.capabilities
         if params.capabilities.platform_credentials is not None:
             self._platform_credentials = ConnectionPlatformCredentialProvider(
@@ -1946,7 +2145,7 @@ class AppServer:
             )
         self._credential_selection = ConnectionCredentialSelection(
             client=self._client_info,
-            connection=self._platform_credentials,
+            connection=self._start_lending(params.account),
             tenants=self._oidc_tenants,
         )
         self._initialization = InitializationState.INITIALIZE_RECEIVED
@@ -1969,6 +2168,7 @@ class AppServer:
             self._initialization = InitializationState.INITIALIZED
             self._note_self_hosted_deployment()
             self._gate_crash_reporting(self._host_handler.crash_reports_allowed)
+            self._resume_left_turns()
             return
         if (
             notification.method == "platformCredentials/invalidated"
@@ -1977,6 +2177,7 @@ class AppServer:
         ):
             validate_wire(PlatformCredentialsInvalidatedParams, notification.params)
             self._platform_credentials.invalidate()
+            self._platform_credential_lenders.reinstate(self._platform_credentials)
             return
         raise JsonRpcProtocolError(
             f"Unknown or unexpected client notification: {notification.method}"
@@ -2077,10 +2278,7 @@ class AppServer:
         if method == "artifacts/subscribe" and isinstance(
             host, SessionBackendHostArtifacts
         ):
-            self._stop_artifact_subscription()
-            self._unsubscribe_artifacts = host.subscribe_artifacts(
-                self._send_notification_soon
-            )
+            self._subscribe_artifacts()
             return DispatchResult(EmptyResponse())
         raise method_not_found(method)
 
@@ -2336,8 +2534,14 @@ class AppServer:
                 "Could not reject callback %s", callback.callback_id, exc_info=True
             )
 
-    async def _validate_open_callback_capabilities(self, attach_method: str) -> None:
-        callbacks = await self._read_open_callbacks(attach_method)
+    async def _validate_open_callback_capabilities(
+        self, attach_method: str, root: SessionBackend | None = None
+    ) -> None:
+        callbacks = (
+            await self._read_open_callbacks(attach_method)
+            if root is None
+            else await self._read_callbacks_of(root, attach_method)
+        )
         if callbacks is None:
             return
         required = {callback.detail.kind for callback in callbacks}
@@ -2358,7 +2562,11 @@ class AppServer:
         A failed read must not lock the client out of its Session: it still
         attaches and can answer, and callbacks that open later reach it live.
         """
-        root = self._root
+        return await self._read_callbacks_of(self._root, attach_method)
+
+    async def _read_callbacks_of(
+        self, root: SessionBackend | None, attach_method: str
+    ) -> list[PublicCallbackEntry] | None:
         if not isinstance(root, SessionBackendOpenCallbacks):
             return None
         try:
@@ -2393,6 +2601,13 @@ class AppServer:
             "account": account.model_dump(mode="json"),
         }
 
+    def lender_availability(self) -> LenderAvailability:
+        """Whether a session of this connection's account can still borrow a
+        sign-in once its own channel is gone. The account is kept after a
+        close, so a parked session's link still answers.
+        """
+        return "none" if self._lending is None else self._lending.availability()
+
     def current_session_id(self) -> str:
         return self._require_root().session_id
 
@@ -2407,8 +2622,9 @@ class AppServer:
             local_tools=self._new_vibe_bot_tools(),
             credentials=lambda: self.platform_credentials(MISTRAL_API_KEY_ENV),
             client=_VibeBotClientRequests(self),
-            api_origin=self._host_handler.mistral_api_origin,
+            api_origin=lambda: self._host_handler.mistral_api_origin(),
             project_roots=_local_project_roots,
+            client_instance=lambda: self._client_instance,
             sessions=sessions
             or VibeBotLocalSessions(
                 client_id_file=VIBE_HOME.path / VIBE_BOT_CLIENT_ID_FILE
@@ -2419,22 +2635,26 @@ class AppServer:
         """Read from the user's own config only: a repository's config could
         define a server under a name the user allowlisted.
         """
-        catalogs = self._mcp_catalog_service
-        if catalogs is None:
+        if self._mcp_catalog_service is None:
             return None
-        host = self._host_handler
+
+        def catalogs() -> MCPCatalogService:
+            service = self._mcp_catalog_service
+            if service is None:
+                raise RuntimeError("The connection has no MCP catalog")
+            return service
 
         async def read_config() -> VibeConfigSchema:
-            return (await host.user_config_orchestrator()).config
+            return (await self._host_handler.user_config_orchestrator()).config
 
         async def catalog(owner: object) -> ResolvedMCPCatalog:
-            orchestrator = await host.user_config_orchestrator()
-            return await catalogs.resolve_catalog(orchestrator, owner=owner)
+            orchestrator = await self._host_handler.user_config_orchestrator()
+            return await catalogs().resolve_catalog(orchestrator, owner=owner)
 
         async def mcp() -> LocalMCP:
             return HarnessLocalMCP(
                 catalog=catalog,
-                authorization=catalogs.authentication,
+                authorization=catalogs().authentication,
                 cache_root=VIBE_HOME.path / VIBE_BOT_MCP_CACHE_DIR,
             )
 
@@ -2498,7 +2718,9 @@ class AppServer:
         self, params: SessionPeerSendParams
     ) -> SessionPeerSendResponse:
         if self._vibe_bot.sessions.handles(params.target_session_id):
-            return await self._vibe_bot.sessions.deliver_reply(params)
+            return await self._vibe_bot.sessions.deliver_reply(
+                params, instance=self._client_instance
+            )
         return await self._request_peers(
             SESSION_PEER_SEND_METHOD,
             params,
@@ -2537,6 +2759,18 @@ class AppServer:
             ),
         )
 
+    async def rename_peer_session(
+        self, params: SessionPeerRenameParams
+    ) -> SessionPeerRenameResponse:
+        if not self._client_capabilities.session_peer_rename:
+            raise SessionPeerError("The attached client cannot rename sessions")
+        return await self._request_peers(
+            SESSION_PEER_RENAME_METHOD,
+            params,
+            SessionPeerRenameResponse,
+            lost="before confirming; the rename may have been applied.",
+        )
+
     async def mark_peer_sessions_seen(
         self, params: SessionPeerMarkSeenParams
     ) -> SessionPeerMarkSeenResponse:
@@ -2567,6 +2801,12 @@ class AppServer:
         except _ClientRequestLost as exc:
             raise SessionPeerError(f"{exc} {lost}") from exc
         except _ClientRequestFailed as exc:
+            if _refusal_reason(exc.data) == PEER_SEND_NOT_DELIVERED_IN_TIME:
+                raise SessionPeerError(
+                    "The session could not be reached in time, so the message "
+                    "was not sent. Send it again later, or tell the user.",
+                    reason=PEER_SEND_NOT_DELIVERED_IN_TIME,
+                ) from exc
             raise SessionPeerError(str(exc)) from exc
 
     async def _request_client[ResponseT: ProtocolModel](
@@ -2612,7 +2852,9 @@ class AppServer:
             if pending.answer.cancelled() or not pending.answer.done():
                 self._unanswered_client_requests[request_id] = method
         if isinstance(response, JsonRpcErrorResponse):
-            raise _ClientRequestFailed(response.error.message)
+            raise _ClientRequestFailed(
+                response.error.message, response.error.code, data=response.error.data
+            )
         try:
             return validate_wire(response_type, response.result)
         except ValidationError as exc:
@@ -2647,12 +2889,192 @@ class AppServer:
             if pending.cancelled() or not pending.done():
                 self._abandoned_platform_credential_requests.add(request_id)
 
+    def _owner_key(self) -> Owner | None:
+        if self._client_account is None or self._client_info is None:
+            return None
+        return owner_key(self._client_info, self._client_account)
+
+    def _left_turn_owner(
+        self,
+    ) -> tuple[Owner, ResumeOne, OpenSessions, InitializeParams] | None:
+        """This connection's owner, and how to resume one of its sessions on a
+        channel of its own, initialized as this connection was so that a
+        client of the same owner opening the session later attaches to it.
+        """
+        if (
+            self._left_turns is None
+            or self._open_left_turn_channel is None
+            or self._open_sessions is None
+            or self._client_account is None
+            or self._client_info is None
+        ):
+            return None
+        params = InitializeParams(
+            client_info=self._client_info,
+            capabilities=self._client_capabilities.model_copy(
+                update={"resume_left_turns": False}
+            ),
+            account=self._client_account,
+        )
+        open_channel = self._open_left_turn_channel
+
+        async def resume(session_id: str, interrupt: bool) -> None:
+            await open_channel(params, session_id, interrupt)
+
+        return (
+            owner_key(self._client_info, self._client_account),
+            resume,
+            self._open_sessions,
+            params,
+        )
+
+    def _resume_left_turns(self) -> None:
+        found = self._left_turn_owner()
+        if (
+            found is None
+            or self._left_turns is None
+            or not self._client_capabilities.resume_left_turns
+        ):
+            return
+        owner, resume, sessions, params = found
+        list_on_own_channel = self._list_on_own_channel
+        if list_on_own_channel is None:
+            return
+
+        # On a channel of the process's own, as its resumes: this connection
+        # may have closed by the time the owner's claim lets it list. Listing
+        # needs no sign-in, so that channel neither lends nor borrows one.
+        listing = params.model_copy(
+            update={
+                "capabilities": params.capabilities.model_copy(
+                    update={"platform_credentials": None}
+                )
+            }
+        )
+
+        async def list_left() -> list[str]:
+            return await list_on_own_channel(listing)
+
+        if self._lacks_process_lender():
+            return
+        assert self._client_account is not None
+        host = self._session_backend_host
+        # Only a store shared with other processes needs a claim among them.
+        claim = (
+            LeftTurnsClaim(owner, host.storage_root)
+            if isinstance(host, SessionBackendHostStorageRoot)
+            else None
+        )
+        # A client without platform credentials signs in on its own.
+        lender: LenderOf = (
+            AccountLender(
+                self._platform_credential_lenders, account_key(self._client_account)
+            )
+            if self._platform_credentials is not None
+            else SignsInItself()
+        )
+        self._left_turns.resume_once(
+            owner, list_left, resume, sessions, lender=lender, claim=claim
+        )
+
+    def _lacks_process_lender(self) -> bool:
+        """Lends its sign-in only while it is open: a left turn would run on
+        it and fail once it closes.
+        """
+        capability = self._client_capabilities.platform_credentials
+        return capability is not None and capability.lifetime != "process"
+
+    def _left_turns_status(self, status: LeftTurnsStatus) -> LeftTurnsStatus:
+        if (
+            status == "not_resuming"
+            and self._client_capabilities.resume_left_turns
+            and self._lacks_process_lender()
+        ):
+            return "needs_process_lender"
+        return status
+
+    async def _dispatch_left_turns(
+        self, method: str, raw_params: dict[str, Any]
+    ) -> DispatchResult:
+        owner = self._owner_key()
+        # This server resumes no left turns (it is not multiplexed).
+        unserved: LeftTurnsStatus = "no_account" if owner is None else "not_resuming"
+        if method == "session/leftTurns/read":
+            validate_wire(LeftTurnsReadParams, raw_params)
+            if owner is None or self._left_turns is None:
+                return DispatchResult(LeftTurnsReadResponse(status=unserved))
+            read = await self._left_turns.read(owner)
+            return DispatchResult(
+                LeftTurnsReadResponse(
+                    status=self._left_turns_status(read.status),
+                    turns=[
+                        LeftTurnEntry(session_id=turn.session_id, state=turn.state)
+                        for turn in read.turns
+                    ],
+                )
+            )
+        validate_wire(LeftTurnsInterruptParams, raw_params)
+        if owner is None or self._left_turns is None:
+            return DispatchResult(LeftTurnsInterruptResponse(status=unserved))
+        stopped = await self._left_turns.interrupt(owner)
+        return DispatchResult(
+            LeftTurnsInterruptResponse(
+                status=self._left_turns_status(stopped.status),
+                turns=[
+                    StoppedLeftTurnEntry(
+                        session_id=turn.session_id, outcome=turn.outcome
+                    )
+                    for turn in stopped.turns
+                ],
+            )
+        )
+
+    def _start_lending(
+        self, account: ClientAccount | None
+    ) -> PlatformCredentialProvider | None:
+        """Lend this channel's sign-in to every session of ``account`` in the
+        process, and give this connection a provider that borrows once it is
+        gone. A channel without an account neither lends nor borrows.
+        """
+        own = self._platform_credentials
+        self._lending = None
+        if own is None or account is None:
+            return own
+        capability = self._client_capabilities.platform_credentials
+        if self._left_turn_session is None:
+            self._platform_credential_lenders.register(
+                account_key(account),
+                own,
+                durable=capability is not None and capability.lifetime == "process",
+            )
+        self._lending = AccountPlatformCredentialProvider(
+            own, account=account, lenders=self._platform_credential_lenders
+        )
+        return self._lending
+
+    def _stop_lending(self, reason: str) -> None:
+        """Stop lending, and fail the resolves in flight on this channel now:
+        a session borrowing from it retries a live channel instead of waiting
+        for this one's shutdown.
+        """
+        if self._platform_credentials is not None:
+            self._platform_credential_lenders.unregister(self._platform_credentials)
+        # The client may still answer them while the channel closes: such a
+        # late reply is dropped, not a protocol error.
+        self._abandoned_platform_credential_requests.update(
+            self._platform_credential_requests
+        )
+        self._fail_platform_credential_requests(reason)
+
     def _abandon_platform_credential_requests(self, reason: str) -> None:
+        self._fail_platform_credential_requests(reason)
+        self._abandoned_platform_credential_requests.clear()
+
+    def _fail_platform_credential_requests(self, reason: str) -> None:
         for pending in self._platform_credential_requests.values():
             if not pending.done():
                 pending.set_exception(RuntimeError(reason))
         self._platform_credential_requests.clear()
-        self._abandoned_platform_credential_requests.clear()
 
     def _abandon_client_requests(self, reason: str) -> None:
         for pending in self._client_requests.values():
@@ -2768,7 +3190,12 @@ class _ClientRequest:
 
 
 class _ClientRequestFailed(Exception):
-    pass
+    def __init__(
+        self, message: str, code: str | None = None, *, data: JsonValue = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.data = data
 
 
 class _ClientUnreachable(_ClientRequestFailed):
@@ -2777,6 +3204,10 @@ class _ClientUnreachable(_ClientRequestFailed):
 
 class _ClientRequestLost(_ClientRequestFailed):
     """The client went away after the request was sent, so it may have acted."""
+
+
+def _refusal_reason(data: JsonValue) -> JsonValue:
+    return data.get("reason") if isinstance(data, dict) else None
 
 
 def _settle_platform_credentials(
@@ -2823,8 +3254,12 @@ def _notification_session_id(params: EventNotificationParams) -> str:
 
 
 class _ConnectionClientToolRunner:
-    def __init__(self, server: AppServer) -> None:
-        self._server = server
+    def __init__(self, link: SessionLink) -> None:
+        self._link = link
+
+    @property
+    def _server(self) -> AppServer:
+        return self._link.server
 
     async def call_tool(self, call: ClientToolCall) -> ClientToolResult:
         caller = call.caller
@@ -2861,6 +3296,14 @@ class _ConnectionClientToolRunner:
                 except Exception:
                     pass
             raise
+        except _ClientRequestLost as exc:
+            return ClientToolResult(
+                error=ClientToolError(
+                    f"{exc} before the client confirmed the call, so it may or may "
+                    "not have run. Check its effect before calling it again.",
+                    code="client_tool_unavailable",
+                )
+            )
         except _ClientRequestFailed as exc:
             return ClientToolResult(
                 error=ClientToolError(str(exc), code="client_tool_unavailable")
@@ -2901,7 +3344,12 @@ class _VibeBotClientRequests:
                 method, params, response_type, sessionless=True
             )
         except _ClientRequestFailed as exc:
+            if exc.code == ProtocolErrorCode.NOT_FOUND:
+                raise VibeBotLocalSessionGone(str(exc)) from exc
             raise RuntimeError(str(exc)) from exc
+
+    def session_tools(self) -> bool:
+        return self._server._client_capabilities.session_peers
 
     async def start_local(
         self,
@@ -2986,6 +3434,4 @@ class _VibeBotClientRequests:
         )
         if response.refused is not None:
             raise VibeBotCallRefused(response.refused)
-        if response.held is not None:
-            raise VibeBotCallHeld(response.held)
         return response.duplicate

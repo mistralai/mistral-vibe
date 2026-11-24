@@ -10,6 +10,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 import json
 import logging
+from pathlib import Path
 import re
 import secrets
 import time
@@ -589,6 +590,10 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     @property
     def session_id(self) -> str:
         return self._store.session_id
+
+    @property
+    def session_root(self) -> Path:
+        return self._store.session_root
 
     @property
     def runtime_state(self) -> RuntimeStateV3:
@@ -2977,8 +2982,13 @@ class DurableSessionRuntime:  # noqa: PLR0904 - implements the Runtime port surf
     async def close(self) -> None:
         controller = self._subagent_controller
         self._subagent_controller = None
-        if controller is not None:
-            await controller.close()
+        try:
+            if controller is not None:
+                await controller.close()
+        finally:
+            await self._close_after_subagents()
+
+    async def _close_after_subagents(self) -> None:
         manager = self._process_manager
         if manager is not None:
             self._processes_stopped_by_shutdown = frozenset(

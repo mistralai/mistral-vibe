@@ -1,4 +1,4 @@
-//! Rail chips sit exactly one ` · ` apart and end on visible text, whatever each chip shows; a dimmed Ctrl+X hint leads them.
+//! Rail chips sit exactly one ` · ` apart and end on visible text, whatever each chip shows; a dimmed Ctrl+X hint leads them until the rail is used.
 
 use serde_json::json;
 use vibe_rs::app::App;
@@ -107,4 +107,38 @@ fn a_dimmed_ctrl_x_hint_leads_the_rail_until_focus_or_a_narrow_row() {
         !row(&rail(&mut app, 80), 0).contains("Ctrl+X"),
         "focus hides it"
     );
+}
+
+#[test]
+fn entering_the_rail_hides_its_hint_once_back_in_the_prompt() {
+    let mut app = crate::rail::with_items(false);
+    vibe_rs::rail::enter(&mut app);
+    vibe_rs::rail::leave(&mut app);
+    let line = row(&rail(&mut app, 80), 0);
+    assert!(!line.contains("Ctrl+X"), "{line:?}");
+}
+
+#[test]
+fn a_chip_click_hides_the_hint_too() {
+    let mut app = crate::rail::with_items(false);
+    let line = row(&rail(&mut app, 80), 0);
+    let ((_, x, _), y) = (app.rail.hits[0], app.rail.area.y);
+    vibe_rs::rail::click(&mut app, &crate::support::stub(), x, y);
+    vibe_rs::rail::close_window(&mut app);
+    let after = row(&rail(&mut app, 80), 0);
+    assert!(
+        line.contains("Ctrl+X") && !after.contains("Ctrl+X"),
+        "{after:?}"
+    );
+}
+
+#[test]
+fn the_hint_comes_back_a_week_after_the_last_use() {
+    let mut app = crate::rail::with_items(false);
+    let now = (vibe_rs::utils::now_ms() / 1000) as i64;
+    let day = 24 * 60 * 60;
+    app.rail.used_at = Some(now - 6 * day);
+    assert!(!row(&rail(&mut app, 80), 0).contains("Ctrl+X"));
+    app.rail.used_at = Some(now - 7 * day);
+    assert!(row(&rail(&mut app, 80), 0).contains("Ctrl+X to navigate"));
 }

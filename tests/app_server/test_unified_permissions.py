@@ -43,6 +43,7 @@ from vibe.app_server._provided_tools import (
     VIBE_PROVIDED_TOOL_NAMES,
     VIBE_TOOL_GROUP,
 )
+from vibe.app_server._session_peers import RENAME_SESSION_TOOL_NAME
 from vibe.app_server._unified_permissions import (
     RUST_BUILTIN_TOOL_SOURCES,
     CommandEnvironment,
@@ -1067,6 +1068,47 @@ async def test_the_unified_todo_tool_obeys_the_permission_configured_for_todo(
     # Do / Assert
     assert (await denied.resolve(route, {"action": "read"})).decision == "deny"
     assert (await allowed.resolve(route, {"action": "read"})).decision == "allow"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("permission", "decision"), [("ask", "ask"), ("never", "deny")]
+)
+async def test_configured_peer_rename_permission_overrides_default_allow(
+    tmp_path: Path, permission: str, decision: str
+) -> None:
+    """A per-tool setting still asks or denies when renaming is allowed by default."""
+    resolver, _ = _resolver(
+        tmp_path, **{RENAME_SESSION_TOOL_NAME: {"permission": permission}}
+    )
+    resolver.provided_names.register(VIBE_TOOL_GROUP, VIBE_PROVIDED_TOOL_NAMES)
+
+    outcome = await resolver.resolve(
+        f"{VIBE_TOOL_GROUP}.{RENAME_SESSION_TOOL_NAME}",
+        {"session_id": "other", "title": "Short title"},
+    )
+
+    assert outcome.decision == decision
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("permission", "decision"),
+    [(ToolPermission.ASK, "ask"), (ToolPermission.NEVER, "deny")],
+)
+async def test_session_peer_rename_permission_overrides_default_allow(
+    tmp_path: Path, permission: ToolPermission, decision: str
+) -> None:
+    resolver, _ = _resolver(tmp_path)
+    resolver.provided_names.register(VIBE_TOOL_GROUP, VIBE_PROVIDED_TOOL_NAMES)
+    resolver.store.set_tool_permission(RENAME_SESSION_TOOL_NAME, permission)
+
+    outcome = await resolver.resolve(
+        f"{VIBE_TOOL_GROUP}.{RENAME_SESSION_TOOL_NAME}",
+        {"session_id": "other", "title": "Short title"},
+    )
+
+    assert outcome.decision == decision
 
 
 @pytest.mark.asyncio

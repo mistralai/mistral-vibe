@@ -14,10 +14,13 @@ from e2e.app_server.scenario import Timeline
 _PROMPT = "show safe output"
 # The lone shell call stays ungrouped, so its own header row unfolds the output.
 _EXPAND_RESULT = "\x1b[<0;1;11M\x1b[<0;1;11m"
-_OUTPUT = "old\rfinal \x1b[31mred\x1b[0m \x1b]0;hidden\x07visible\x07\n"
+_OUTPUT = (
+    "old\rfinal \x1b[31mred\x1b(B\x1b[m \x1b]0;hidden\x07visible\x07"
+    " \x1b7kept\x1b8 \x1b_Gf=100;QUFB\x1b\\shown\n"
+)
 
-screen_contains = ("final red visible",)
-screen_excludes = ("[31m", "]0;hidden")
+screen_contains = ("final red visible kept shown",)
+screen_excludes = ("[31m", "]0;hidden", "(B", "QUFB")
 
 timeline: Timeline = [
     f"{_PROMPT}\r",

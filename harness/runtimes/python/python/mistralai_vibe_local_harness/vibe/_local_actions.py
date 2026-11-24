@@ -77,8 +77,13 @@ from mistralai_vibe_local_harness.session_protocol import JsonObject
 from mistralai_vibe_local_harness.vibe._completion import execute_completion
 from mistralai_vibe_local_harness.vibe._file_tools import execute_file_tool
 from mistralai_vibe_local_harness.vibe._hook_matcher import qualified_tool_name
+from mistralai_vibe_local_harness.vibe._mcp_apps import MCPAppToolDenied
 from mistralai_vibe_local_harness.vibe._paths import PRIVATE_DIRECTORY_MODE, is_windows
-from mistralai_vibe_local_harness.vibe._permissions import ALWAYS_ASK, PermissionOutcome
+from mistralai_vibe_local_harness.vibe._permissions import (
+    ALWAYS_ASK,
+    PermissionOutcome,
+    approval_mode,
+)
 from mistralai_vibe_local_harness.vibe._projection import (
     APPROVAL_META_KEY,
     APPROVAL_NOTE_META_KEY,
@@ -1052,31 +1057,17 @@ class _LocalActionState:
                 )
             )
         try:
-            context = self._pre_tool_call_context(action.turn_id)
-            tool_call = action.input.tool_call
-            for _, handler in selected:
-                result = await handler(
-                    RustPreToolCallHookInput(tool_call=tool_call), context
-                )
-                output = result.output
-                if isinstance(output, RustHookSkip):
-                    # A deny short-circuits: no later hook can un-skip the call, and the
-                    # skip reason is the model-visible tool result.
-                    return RustHookCompletedEvent(
-                        action_id=action.action_id,
-                        result=RustPreToolCallHookResult(output=output),
-                    )
-                tool_call = _with_arguments(tool_call, output.effective_arguments)
+            output = await run_pre_tool_call_hooks(
+                selected,
+                action.input.tool_call,
+                self._pre_tool_call_context(action.turn_id),
+            )
         except Exception as error:
             return _hook_pipeline_failed(action, error)
         else:
             return RustHookCompletedEvent(
                 action_id=action.action_id,
-                result=RustPreToolCallHookResult(
-                    output=RustPreToolCallContinue(
-                        effective_arguments=tool_call.call.arguments
-                    )
-                ),
+                result=RustPreToolCallHookResult(output=output),
             )
         finally:
             if emit_run:
@@ -1087,6 +1078,38 @@ class _LocalActionState:
                         tool_call_id=call_id,
                     )
                 )
+
+    async def gate_app_tool_call(
+        self, binding_ids: Sequence[str], tool_call: RustHookToolCall
+    ) -> RustPreToolCallContinue | RustHookSkip:
+        """Run the session's ``pre_tool_call`` hooks on a call an MCP App makes.
+
+        The same hooks, selection and chain as a model's call to the tool, so a
+        hook that denies it to the model denies it to the app. The call is
+        outside any turn: no run notice, and no approval through a hook. A hook
+        that fails refuses the call (``MCPAppToolDenied``), as a failed hook
+        fails a model's call.
+        """
+        try:
+            selected = _select_for_tool(
+                _resolve_hooks(binding_ids, self._hook_handlers.pre_tool_call),
+                tool_call.call,
+            )
+            context = HookContext(
+                config=self._config,
+                messages=tuple(self._messages),
+                session_id=self._session_id,
+                session_root=self._filesystem_root,
+                parent_session_id=self._parent_session_id,
+            )
+            return await run_pre_tool_call_hooks(selected, tool_call, context)
+        except Exception as error:
+            logger.warning(
+                "pre_tool_call hook failed on an MCP App call to %s",
+                qualified_tool_name(tool_call.call),
+                exc_info=True,
+            )
+            raise MCPAppToolDenied("A pre_tool_call hook failed") from error
 
     async def _execute_pre_agent_turn_hook(
         self, action: RustPreAgentTurnHookAction
@@ -1592,8 +1615,7 @@ class _LocalActionState:
         calls it covers instead of prompting for each of them.
         """
         self._resolved_authorized_paths.pop(action.action_id, None)
-        if mode == "ask" and self._config.bypass_approval:
-            mode = "allow"
+        mode = approval_mode(mode, bypass_approval=self._config.bypass_approval)
         if mode != "ask":
             return await self._apply_approval_mode(action, mode, None)
         settled = self._settled_prompts
@@ -1982,6 +2004,26 @@ def _with_arguments(
     return tool_call.model_copy(
         update={"call": tool_call.call.model_copy(update={"arguments": arguments})}
     )
+
+
+async def run_pre_tool_call_hooks(
+    selected: Sequence[tuple[str, PreToolCallHookHandler]],
+    tool_call: RustHookToolCall,
+    context: HookContext,
+) -> RustPreToolCallContinue | RustHookSkip:
+    """Run selected ``pre_tool_call`` hooks in order on one pending call.
+
+    Each sees the arguments the previous one returned. A deny short-circuits:
+    no later hook can un-skip the call, and the skip reason is what the caller
+    is told.
+    """
+    for _, handler in selected:
+        result = await handler(RustPreToolCallHookInput(tool_call=tool_call), context)
+        output = result.output
+        if isinstance(output, RustHookSkip):
+            return output
+        tool_call = _with_arguments(tool_call, output.effective_arguments)
+    return RustPreToolCallContinue(effective_arguments=tool_call.call.arguments)
 
 
 def _resolve_hooks[H](

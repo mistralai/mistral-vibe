@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager, suppress
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
 from enum import StrEnum, auto
 from functools import cached_property, partial
@@ -59,6 +59,7 @@ _INVALID_WORKTREE_NAME_CHARS = frozenset('<>:"/\\|?*')
 _WORKTREE_REV_PARSE_PARTS = 2
 _AUTO_WORKTREE_BRANCH_PREFIX = "vibe/"
 _MAX_AUTO_WORKTREE_ATTEMPTS = 100
+_REMOVAL_POLL_SECONDS = 0.25
 # Under `refs/vibe/` rather than `refs/heads/`, so a snapshot never appears in
 # the branch picker, in `git branch`, or as something to push. It is a way back
 # to work removed by explicit deletion or automatic retention.
@@ -1024,7 +1025,9 @@ class ManagedWorktree:
         """Snapshot and remove the oldest inactive managed worktrees over the limit.
 
         Worktrees whose sessions are all finished do not count: the cleanup
-        worker reaps them outside this lock, which every session start needs.
+        worker reaps them. The prune lock, which every session start needs,
+        covers only choosing a worktree and taking its removal marker; the
+        slow snapshot and removal run outside it.
         """
         trust_store = trust_store or trusted_folders_manager.for_session()
         if limit < 0:
@@ -1032,58 +1035,97 @@ class ManagedWorktree:
 
         with worktree_prune_lock():
             cls._reclaim_abandoned_reservations()
-            claimed = sorted(
-                (
-                    (record, claim)
-                    for claim in WorktreeClaim.all()
-                    if (record := claim.read()) is not None
-                    and record.base_commit is not None
-                    and not (
-                        session_finished is not None
-                        and _all_finished(record, session_finished)
-                    )
-                ),
-                key=lambda item: (item[0].claimed_at, item[1].bucket, item[1].name),
-            )
-            excess = max(0, len(claimed) - limit)
-            removed = 0
-            for _record, claim in claimed:
-                if excess <= 0:
+        kept: set[WorktreeClaim] = set()
+        removed = 0
+        while True:
+            with cls._claimed_next_to_prune(
+                limit, session_finished, broken, kept
+            ) as chosen:
+                if chosen is None:
                     break
-                if claim.is_starting():
-                    continue
-                managed = cls(claim=claim)
-                if broken is not None and broken.known(managed):
-                    continue
+                record, managed = chosen
                 try:
-                    release = managed._prune_with_snapshot(trust_store=trust_store)
+                    release = managed._release_while_removing(
+                        record, snapshot_before_removal=True, trust_store=trust_store
+                    )
                 except BrokenCheckoutError as exc:
                     if broken is None:
                         raise
                     broken.record(managed, exc)
+                    kept.add(managed.claim)
                     continue
                 except (GitError, OSError) as exc:
-                    logger.warning(
-                        "Keeping managed worktree %s/%s: retention cleanup failed",
-                        claim.bucket,
-                        claim.name,
-                        exc_info=exc,
-                    )
+                    _log_kept_by_prune(managed.claim, exc)
+                    kept.add(managed.claim)
                     continue
-                # Reaped by another process meanwhile.
-                if (
-                    release.outcome
-                    in {
-                        WorktreeReleaseOutcome.REMOVED,
-                        WorktreeReleaseOutcome.NOT_FOUND,
-                    }
-                    or claim.read() is None
-                ):
-                    excess -= 1
-                if release.outcome is WorktreeReleaseOutcome.REMOVED:
-                    removed += 1
+            if release.outcome is WorktreeReleaseOutcome.REMOVED:
+                removed += 1
+            elif release.outcome is not WorktreeReleaseOutcome.NOT_FOUND:
+                kept.add(managed.claim)
         cls.empty_trash()
         return removed
+
+    @classmethod
+    @contextmanager
+    def _claimed_next_to_prune(
+        cls,
+        limit: int,
+        session_finished: Callable[[Path], bool] | None,
+        broken: BrokenCheckouts | None,
+        kept: set[WorktreeClaim],
+    ) -> Iterator[tuple[WorktreeRecord, ManagedWorktree] | None]:
+        """The oldest worktree over the limit, its removal marker held until exit.
+
+        A worktree another removal already claimed is neither counted nor
+        chosen, so concurrent prunes never go below the limit.
+        """
+        with ExitStack() as removal:
+            with worktree_prune_lock():
+                chosen = cls._choose_next_to_prune(
+                    limit, session_finished, broken, kept, removal
+                )
+            yield chosen
+
+    @classmethod
+    def _choose_next_to_prune(
+        cls,
+        limit: int,
+        session_finished: Callable[[Path], bool] | None,
+        broken: BrokenCheckouts | None,
+        kept: set[WorktreeClaim],
+        removal: ExitStack,
+    ) -> tuple[WorktreeRecord, ManagedWorktree] | None:
+        claimed = sorted(
+            (
+                (record, claim)
+                for claim in WorktreeClaim.all()
+                if (record := claim.read()) is not None
+                and record.base_commit is not None
+                and not (
+                    session_finished is not None
+                    and _all_finished(record, session_finished)
+                )
+                and not claim.is_removing()
+            ),
+            key=lambda item: (item[0].claimed_at, item[1].bucket, item[1].name),
+        )
+        if len(claimed) <= limit:
+            return None
+        for record, claim in claimed:
+            if claim in kept or claim.is_starting():
+                continue
+            managed = cls(claim=claim)
+            if broken is not None and broken.known(managed):
+                continue
+            try:
+                acquired = removal.enter_context(claim.removing())
+            except OSError as exc:
+                _log_kept_by_prune(claim, exc)
+                acquired = False
+            if acquired:
+                return record, managed
+            kept.add(claim)
+        return None
 
     @staticmethod
     def empty_trash() -> None:
@@ -1368,16 +1410,6 @@ class ManagedWorktree:
                 "Failed to delete retained snapshot %s: %s", recovery.snapshot_ref, exc
             )
 
-    def _prune_with_snapshot(
-        self, *, trust_store: TrustedFoldersManager | None = None
-    ) -> WorktreeRelease:
-        record = self.claim.read()
-        if record is None:
-            return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
-        return self._release_unheld(
-            record, snapshot_before_removal=True, trust_store=trust_store
-        )
-
     def restore(
         self, cwd: Path, *, trust_store: TrustedFoldersManager | None = None
     ) -> bool:
@@ -1390,8 +1422,23 @@ class ManagedWorktree:
                 f"Path {requested} is outside worktree {root}."
             ) from exc
 
-        with worktree_prune_lock():
+        with self._prune_lock_once_not_removing():
             return self._restore_locked(requested, root, trust_store=trust_store)
+
+    @contextmanager
+    def _prune_lock_once_not_removing(self) -> Iterator[None]:
+        """The prune lock, taken once no removal of this worktree is running.
+
+        A prune holds the removal marker, not the lock, while it snapshots, so
+        a restore of that one worktree waits for it and no other.
+        """
+        while True:
+            if not self.claim.is_removing():
+                with worktree_prune_lock():
+                    if not self.claim.is_removing():
+                        yield
+                        return
+            time.sleep(_REMOVAL_POLL_SECONDS)
 
     def _restore_locked(
         self,
@@ -1462,21 +1509,36 @@ class ManagedWorktree:
                 return WorktreeRelease(
                     WorktreeReleaseOutcome.KEPT_IN_USE, branch=record.branch
                 )
-            current = self.claim.read()
-            if current is None or current.claimed_at != record.claimed_at:
-                return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
-            if session_finished is not None and not _all_finished(
-                current, session_finished
-            ):
-                return WorktreeRelease(
-                    WorktreeReleaseOutcome.KEPT_CANCELLED, branch=current.branch
-                )
-            return self._remove_unheld(
-                current,
+            return self._release_while_removing(
+                record,
                 snapshot_before_removal=snapshot_before_removal,
                 session_finished=session_finished,
                 trust_store=trust_store,
             )
+
+    def _release_while_removing(
+        self,
+        record: WorktreeRecord,
+        *,
+        snapshot_before_removal: bool,
+        trust_store: TrustedFoldersManager | None = None,
+        session_finished: Callable[[Path], bool] | None = None,
+    ) -> WorktreeRelease:
+        current = self.claim.read()
+        if current is None or current.claimed_at != record.claimed_at:
+            return WorktreeRelease(WorktreeReleaseOutcome.KEPT_UNMANAGED)
+        if session_finished is not None and not _all_finished(
+            current, session_finished
+        ):
+            return WorktreeRelease(
+                WorktreeReleaseOutcome.KEPT_CANCELLED, branch=current.branch
+            )
+        return self._remove_unheld(
+            current,
+            snapshot_before_removal=snapshot_before_removal,
+            session_finished=session_finished,
+            trust_store=trust_store,
+        )
 
     def _remove_unheld(
         self,
@@ -1600,6 +1662,37 @@ class ManagedWorktree:
         )
 
 
+def access_roots_at(cwd: Path, roots: Iterable[Path]) -> tuple[Path, ...]:
+    """``roots`` seen from ``cwd``: each in its own checkout, or in the managed worktree at ``cwd`` made from it."""
+    here = cwd.resolve()
+    managed = ManagedWorktree.at(here)
+    record = None if managed is None else managed.claim.read()
+    source = None if record is None else Path(record.repo_root).resolve()
+    seen: list[Path] = []
+    for root in roots:
+        checkout_root = _in_its_checkout(root.resolve())
+        if (
+            managed is None
+            or source is None
+            or not checkout_root.is_relative_to(source)
+        ):
+            seen.append(checkout_root)
+            continue
+        # Its edits would land beside the worktree's: the worktree's copy, if it has one.
+        copy = managed.root / checkout_root.relative_to(source)
+        if copy.is_dir():
+            seen.append(copy)
+    return tuple(root for root in dict.fromkeys(seen) if root != here)
+
+
+def _in_its_checkout(root: Path) -> Path:
+    managed = ManagedWorktree.at(root)
+    record = None if managed is None else managed.claim.read()
+    if managed is None or record is None:
+        return root
+    return Path(record.repo_root).resolve() / root.relative_to(managed.root)
+
+
 class BrokenCheckouts:
     """Managed worktrees whose checkout is not a git repository any more.
 
@@ -1640,6 +1733,15 @@ def _checkout_signature(managed: ManagedWorktree) -> tuple[object, ...]:
         signature(managed.claim.directory / RECORD_FILENAME),
         signature(root),
         signature(root / ".git"),
+    )
+
+
+def _log_kept_by_prune(claim: WorktreeClaim, exc: Exception) -> None:
+    logger.warning(
+        "Keeping managed worktree %s/%s: retention cleanup failed",
+        claim.bucket,
+        claim.name,
+        exc_info=exc,
     )
 
 

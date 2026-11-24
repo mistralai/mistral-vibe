@@ -113,6 +113,7 @@ async fn run() -> Result<std::process::ExitCode> {
     timings.record("cli_parsed");
     logging::init_file_logging(logging::log_file().as_deref());
     observability::sentry::install_panic_hook();
+    ui::loading::easter_eggs::init();
 
     // Load ~/.vibe/.env into the client's own environment. The app-server
     // child loads the file itself: the dotenv-set keys are stripped from its
@@ -207,6 +208,10 @@ async fn run() -> Result<std::process::ExitCode> {
         worktree_request,
         vibe_rs::terminal_key::current(),
     )?;
+    let start_model = cli.start_model().unwrap_or_else(|message| {
+        eprintln!("Error: {message}");
+        std::process::exit(1);
+    });
     // After argument errors; before anything spawns or draws.
     terminal::require_interactive_terminal();
 
@@ -236,6 +241,7 @@ async fn run() -> Result<std::process::ExitCode> {
             show_unready_config,
             startup_resume.clone(),
             interactive_agent_config.clone(),
+            start_model.clone(),
             signals,
         )
         .await
@@ -294,6 +300,7 @@ async fn run() -> Result<std::process::ExitCode> {
         .or_else(|| cwd.clone());
     let cached_tokens = (0, startup_config.context_window);
     let mut app = App::default();
+    vibe_rs::rail::load_use(&mut app);
     // The index starts only from a warm cache that enables it; a cold start
     // defers to the Ready event's authoritative config. The env check is a
     // read-only shortcut so a single-run opt-out never pays for a build.
@@ -318,6 +325,7 @@ async fn run() -> Result<std::process::ExitCode> {
     app.session.initial_prompt = cli.interactive_initial_prompt(stdin_prompt);
     // One agent config for the process, resent on every resume.
     app.session.agent_config = interactive_agent_config.clone();
+    app.session.start_model = start_model.clone();
     app.chat_input.history = utils::history_manager::HistoryManager::load();
     let history_flush = app.chat_input.history.flush_handle();
     // `--setup` runs workspace-less (the wizard exits before
@@ -473,6 +481,7 @@ async fn run() -> Result<std::process::ExitCode> {
                         show_unready_config,
                         resume: app.session.startup_resume.clone(),
                         agent_config: interactive_agent_config.clone(),
+                        start_model,
                         notifications: None,
                         pre_initialized: None,
                         trust_already_resolved: false,

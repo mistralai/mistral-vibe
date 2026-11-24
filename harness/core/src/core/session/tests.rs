@@ -564,6 +564,57 @@ fn images_a_smaller_image_model_cannot_hold_refuse_the_move() {
 }
 
 ///
+/// *Prepare*: A Session past a 32,000-token model's threshold, whose separate
+/// compaction model has a 32,000-token window.
+/// *Do*: Move it to the same agent model with a compaction model whose window is
+/// 500 tokens.
+/// *Assert*: The move refuses, naming the compaction model's window and field, not
+/// the agent model's, because only the compaction model changed.
+///
+#[test]
+fn a_compaction_window_no_compaction_can_fit_is_refused_by_its_own_field() {
+    // Prepare
+    let session = HarnessSession::create_with_history(
+        automatic_compaction_config(),
+        vec![
+            Message::user_text("word ".repeat(20_000)),
+            crate::core::testing::assistant_text("Read."),
+        ],
+    )
+    .unwrap();
+    let mut current = small_model_config();
+    current.settings.context.compaction_model_window =
+        Some(crate::core::config::CompactionModelWindow {
+            context_window: 32_000,
+            summary_budget: 24_000,
+        });
+    let mut next = current.clone();
+    next.settings.context.compaction_model_window =
+        Some(crate::core::config::CompactionModelWindow {
+            context_window: 500,
+            summary_budget: 250,
+        });
+
+    // Do
+    let result =
+        HarnessSession::restore_moved_from(next, session.checkpoint().unwrap(), 0, Some(&current))
+            .map(drop);
+
+    // Assert
+    let Err(RestoreError::InvalidConfiguration { field, detail }) = result else {
+        panic!("a compaction window no compaction fits is refused: {result:?}");
+    };
+    assert_eq!(field, "settings.context.compaction_model_window");
+    assert!(
+        detail.starts_with(
+            "the Session's context cannot move to a compaction model with a 500-token \
+             context window: "
+        ),
+        "{detail}"
+    );
+}
+
+///
 /// *Prepare*: A Session whose newest user message, sent after the model's last reply,
 /// holds images larger than a 32,000-token model's threshold.
 /// *Do*: Restore it on that model, which takes images, and move it there.

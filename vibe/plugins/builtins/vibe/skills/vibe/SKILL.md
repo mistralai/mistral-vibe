@@ -183,14 +183,16 @@ Python versions the dependencies ship no wheels for yet, such as 3.15).
   `-p` too. The terminal is the tty device on macOS/Linux, the console window
   or `WT_SESSION` on Windows; `VIBE_TERMINAL_KEY` overrides it, and an empty
   value means "no terminal" (folder rule only).
-- `vibe --resume [SESSION_ID]`: specific session; without an id, opens a picker.
-- In-session: `/resume` (alias `/continue`).
+- `vibe --resume [SESSION_ID]`: specific session; without an id, opens the
+  Sessions page once the session is ready.
+- In-session: `←` on an empty prompt, `/sessions`, or `/resume` (alias
+  `/continue`) open the Sessions page.
 
 #### Session titles
 
 Each session has a `title` stored in `meta.json` (with `title_source`: `auto` or
 `manual`). A session stays untitled until a background LLM call generates a
-concise descriptive title (the `--resume` list shows a message preview until
+concise descriptive title (the Sessions page shows a message preview until
 then). Automatic generation runs only for the interactive CLI; other clients
 (ACP, app server, programmatic) keep their own session management and fall back
 to the message preview. Title generation runs on a small fast Mistral model when the
@@ -206,20 +208,19 @@ couple at most — so a large model isn't re-invoked every few turns. The refres
 keeps the opening intent and the latest exchange in view and feeds the previous
 title back so it refines rather than restarts. `/rename <title>` sets a `manual`
 title that auto-generation never overwrites. Set `session_logging.generate_titles
-= false` to turn automatic titles off (the `--resume` list and tab then use the
+= false` to turn automatic titles off (the Sessions page and tab then use the
 message preview). The current title also drives the terminal tab/window title
 (OSC), updated on rename, auto-title changes, and resume; it never blocks a turn.
 
 #### Session storage & folder scoping
 
 Local sessions are written under `~/.vibe/logs/session/` (override with
-`session_logging.save_dir`). Each session records the `cwd` it ran in. The
-`/resume` picker, `--continue`, and bare `--resume` (no id) are **scoped to the
-current folder**: only sessions whose `cwd` matches where Vibe is launched are
-listed, so the same directory shows its own history and nothing else. Switch
-folders to see a different set. The explicit `--resume <SESSION_ID>` form is
-**not** folder-scoped: it resolves the session by id regardless of which folder
-it ran in.
+`session_logging.save_dir`). Each session records the `cwd` it ran in.
+`--continue` is **scoped to the current folder**: it picks among the sessions
+whose `cwd` matches where Vibe is launched. The Sessions page lists **every**
+session, by project folder, with the current project first; `c` there keeps
+only the current folder. `--resume <SESSION_ID>` resolves the session by id
+regardless of which folder it ran in.
 
 The first user message pins the resolved model alias to the session. Resuming
 keeps that model even if the configured default changes. `/model` uses the same
@@ -268,7 +269,7 @@ built-in tool's settings, for an editor to validate `config.toml` against.
 
 ```toml
 # Model selection
-active_model = "mistral-medium-3.5"  # Model alias to pin; omit or set "" to follow the server-routed default
+active_model = "mistral-medium-3.5"  # Model alias to pin; omit or set "" to follow the model catalog's recommended default
 
 # UI preferences
 theme = "auto"  # Follow terminal background, then OS light/dark preference
@@ -342,6 +343,8 @@ mode, yank/paste, count or `:` command.
 bypass_tool_permissions = false    # Skip tool approval prompts
 outside_workdir = "ask"            # Outside-workdir file/shell access: "ask" prompts, "deny" refuses with a tool error
 worktree_copy_on_write = true      # macOS: clone new worktrees of a trusted repo from a template checkout; sets extensions.worktreeConfig in the repo
+enable_model_catalog = true        # List the models of Mistral's model catalog (needs a Mistral API key or sign-in); false keeps the built-in models
+enable_builtin_models = true       # Offer Mistral Large 4 and Mistral Medium 3.5 when the model catalog lists none; false (e.g. a self-hosted deployment that does not serve them) leaves only your [[models]] entries, and a config left with no model fails with "No models are configured"
 enable_pr_monitoring = true        # Track the session's PRs/MRs (gh/glab): detect created ones, find existing ones for the branch, keep their status fresh
 system_prompt_id = "cli"          # System prompt: "cli", "lean", or custom .md filename
 enable_telemetry = true
@@ -411,15 +414,18 @@ extra_headers = { "X-Custom-Header" = "value" }  # optional per-provider HTTP he
 emits_finish_reason = false  # set false for OpenAI-compatible endpoints that end
                              # streams without a finish reason; avoids spurious
                              # "incomplete stream" errors and retries (default true)
+tool_result_images = true  # set true for OpenAI-compatible endpoints that take
+                           # images in a tool message; off, tool results send
+                           # `[Image]` instead of each image (default false)
 ```
 
 ### Models
 
 ```toml
 # Restrict selectable models by their canonical API names, not their aliases.
-# Glob and "re:" patterns, matched in full. The only way to hide server-routed
-# models; a hidden routed default falls back to the catalog recommendation,
-# then Mistral Large 4, then the first allowed model. Keep one pattern per
+# Glob and "re:" patterns, matched in full. The only way to hide model catalog
+# models; a hidden catalog recommendation falls back to Mistral Large 4, then
+# the first allowed model. Keep one pattern per
 # model: a pattern matching
 # nothing warns — the drift signal; do not merge them to silence it.
 allowed_models = ["mistral-vibe-cli-*"]
@@ -1218,8 +1224,8 @@ vibe --max-turns N                  # Max assistant turns (programmatic mode)
 vibe --max-price DOLLARS            # Max cumulative run cost, root + subagents; models priced 0 are free (programmatic mode)
 vibe --max-tokens N                 # Max cumulative run tokens, root + subagents (programmatic mode)
 vibe --system-prompt-file PATH      # Replace Vibe's own system prompt instructions with PATH's text (programmatic mode)
-vibe --model ALIAS                  # Model alias for this run, not saved (programmatic mode)
-vibe --thinking LEVEL               # Thinking level of the run's model, not saved (programmatic mode)
+vibe --model ALIAS                  # Model alias for this new session, not saved
+vibe --thinking LEVEL               # Thinking level of the session's model, not saved
 vibe --enabled-tools TOOL           # Enable specific tools (repeatable)
 vibe --disabled-tools TOOL          # Disable specific tools (repeatable)
 vibe --output text|json|streaming   # Output format (programmatic mode)
@@ -1324,11 +1330,12 @@ session's model.
 
 - `/help` - Show help message
 - `/config` - Full-screen settings browser. Fields show their value and origin layer (default / TOML / env / override). Type to filter, arrows to move, Enter to edit; booleans toggle, closed-set fields (theme, models) pick from a list, scalars edit inline, complex fields open a JSON editor. The edit modal shows an inspector of the layers setting the field; edits persist to the user config (`~/.vibe/config.toml`) by default, `Tab` cycles the save target through the project config (`.vibe/config.toml`, when the project layer is active) and the ephemeral session override (until restart), and `Ctrl+R` clears the field one writable layer at a time toward the default. The `tools` field opens a grouped tool list with a per-tool config editor (permission, allow/deny lists, `Ctrl+E` for raw JSON). Enabling/disabling whole MCP servers or connectors stays in `/mcp`.
-- `/model` - Select active model. The picker's `/` focuses a fuzzy search that filters the list live; arrows move, Enter saves to config, `s` keeps the pick for this session only, Esc leaves search, clears the filter, then closes. The footer shows the active model and its thinking level (`Name[level]`) before the context gauge; clicking it opens `/model` and keeps the prompt being typed (only while idle, like the typed command).
+- `/model` - Select active model. The picker's `/` focuses a fuzzy search that filters the list live; arrows move, Enter saves to config, `s` keeps the pick for this session only, Esc leaves search, clears the filter, then closes. When your plan locks a model, opening the picker checks for models a plan upgrade unlocked ("· Checking for new models…" next to the title) and adds them to the open list. The footer shows the active model and its thinking level (`Name[level]`) before the context gauge; clicking it opens `/model` and keeps the prompt being typed (only while idle, like the typed command).
 - `/thinking` - Select thinking level; `/thinking <level>` (e.g. `/thinking high`) saves a level the model offers without opening the picker
 - `/theme` - Select UI theme; `auto` follows terminal/OS appearance, `mistral-dark` and `mistral-light` use the Mistral brand palette (persisted in config)
-- `/reload` - Reload configuration, agent instructions, and skills from disk (skills added or edited on disk are also picked up on their own while `file_watcher_for_autocomplete` is on, except in sandboxed sessions)
+- `/reload` - Reload configuration, agent instructions, agent and subagent profiles, and skills from disk (skills added or edited on disk are also picked up on their own while `file_watcher_for_autocomplete` is on, except in sandboxed sessions)
 - `/clear`, `/new` - Start a new conversation. Optionally pass a prompt to seed it
+- `/cd [path]` - Move the current session to another folder, keeping the conversation. The path works like a shell `cd`: relative to the session folder, `~` for home, no path for home, `-` for the folder the last `/cd` left. Tab completes folder names. An untrusted folder asks for trust first (Esc cancels and saves nothing). Only while idle. Leaving a Vibe-managed worktree releases it; it is cleaned up if it has no changes.
 - `/log` - Show path to current interaction log file
 - `/log-level` - Show or set the log level. `/log-level` prints the full chain
   (session, env, config, effective); `/log-level set <LEVEL>` sets a
@@ -1389,9 +1396,38 @@ session's model.
 - `/mcp login <alias>` - Start OAuth login for an MCP server
 - `/mcp logout <alias>` - Log out from an MCP server and delete stored OAuth
   secrets
-- `/resume` (or `/continue`) - Browse and resume past sessions for the current
-  folder. The picker header shows the folder being listed. Press `d` twice to
-  delete a saved session; the active session cannot be deleted here.
+- `/sessions` - Open the Sessions page (also `←` on an empty prompt, or
+  `/resume`): every saved session in three columns. Left, the folders: `All`
+  with the total, then one row per project (the Desktop project when there is
+  one, else the git repository, worktrees together), the current project first,
+  each with the most urgent marker of its sessions and its count. Middle, the
+  sessions of the selected folder (all of them under `All`), latest activity
+  first; each row shows a state marker (open in another Vibe process, working,
+  waiting for you, failed, unread), the title, the branch and the last activity,
+  and sessions an agent started sit under their starter (`Space` folds them).
+  Right, the highlighted session's title, state and the end of its
+  conversation, drawn like the conversation view, with its folder and token
+  usage at the bottom. Below 110 columns the folders column goes (the list then
+  groups by project and `c` keeps the current folder), below 80 the preview
+  goes too. Sessions whose folder is gone from disk are hidden, from search
+  too, until `g` shows them (marked `(deleted)`). Keys: `↑↓/jk` move, `←`/`h`
+  go to the folders (there `↑↓/jk` pick a folder and `→`/`l`/`Enter` come
+  back), `→`/`Enter` open (Vibe moves to the session's folder, asking for trust
+  first when it is new), `n` new session in the highlighted folder, `f` fork,
+  `r` rename, `a` archive (or restore; `.` then shows archived sessions), `/`
+  search, `c` this folder only, `s` sort by activity or creation date, `.`
+  archived sessions, `g` gone folders, `?` all keys, `Esc` back to the current
+  session. A click picks a folder or a session; a click on the highlighted
+  session opens it. The page reopens where it was left (folder, highlight,
+  search, sort and toggles), on the session just opened after `→`, and shows
+  its last listing at once while it refreshes; the first listing is read as soon
+  as Vibe starts. The preview keeps the last 20 conversations it read and reads
+  the rows around the highlight ahead, so moving back and forth is instant and
+  an opened session shows its conversation while it loads. Deleting a session
+  is in `/storage`. It opens while a turn runs too; then it refuses to switch
+  sessions until the turn ends.
+- `/resume` (or `/continue`) - Open the Sessions page, like `/sessions`, but
+  only while idle.
 - `/storage` - (Behind the `experimental_enable_storage_usage` setting, off by
   default; Mistral turns it on remotely.) Show how much disk Vibe uses: the total, active and archived
   sessions, leftover worktrees, other Vibe data, and free disk space, then every
@@ -1424,14 +1460,23 @@ session's model.
     instructions show in a pane under the rows, or beside them on a terminal at
     least 140 columns wide; `PageUp`/`PageDown` or the wheel scroll it. The rows
     keep their order while the manager is open (new loops join at the bottom)
-    and are sorted again when it reopens. `d` deletes the highlighted loop at
-    once, `n` opens a form (title, schedule as an interval like `10m` or a
+    and are sorted again when it reopens. `r` runs the highlighted loop now
+    (it fires as soon as the session is idle, then keeps its schedule), `d`
+    deletes the highlighted loop at once, `n` opens a form (title, schedule as an interval like `10m` or a
     five-field cron, and multi-line instructions where `Ctrl+J` or
-    `Shift+Enter` breaks the line; `Tab`/`Shift+Tab` or `↑↓` move between
-    fields, `Enter` creates, `Esc` goes back), `Esc` closes.
-  - While the session is idle, the row above the input shows the soonest loop:
-    `◷ next loop in 5m: <title>`, rounded to the minute under an hour, then to
-    the hour or day. The title is the first line of the loop's prompt.
+    `Shift+Enter` breaks the line; `Tab`/`Shift+Tab`, `↑↓` or a click move
+    between fields, a click on a field's text also places the caret, `Enter`
+    creates, `Esc` goes back), `Enter`, `e` or a click on the
+    highlighted row opens the same form filled from that loop, where `Enter`
+    saves it in place (same loop, same next run unless the schedule changed),
+    `Esc` closes.
+  - The status rail above the input shows a loops chip while the session has
+    loops: `◷ loop in 5m`, the soonest loop's next run, rounded to the minute
+    under an hour, then to the hour or day. Clicking it, or `Ctrl+X` then `o`,
+    opens the manager like bare `/loop`; the loop list is a rail window, so
+    `←→` (or `Tab`/`Shift+Tab`) move to the next item's window. The chip is the
+    rail's leftmost: on a narrow terminal it is the first to shrink (`◷ 5m`)
+    and the first to drop.
   - Fixed intervals have a 30-second minimum; calendar schedules use five-field
     cron in the machine's local timezone. Maximum 50 schedules per session.
   - Prompts run only while the session is live and idle, without catch-up bursts.
@@ -1457,15 +1502,17 @@ session's model.
     what they say. Replacing or clearing an unfinished goal asks for
     confirmation. All of them work while a turn runs.
   - The status rail on the loading line shows one chip per item, each a count
-    then a muted noun, separated by `·`: `◐ 1 agent · ▪ 2 tasks · ● 2 PRs ·
-    ▶ goal 4m · ≡ 2/5`. The goal chip shows the time spent while it runs,
+    then a muted noun, separated by `·`: `◷ loop in 5m · ◐ 1 agent · ▪ 2 tasks
+    · ● 2 PRs · ▶ goal 4m · ≡ 2/5`. The goal chip shows the time spent while it runs,
     `✓ goal` once complete, else its status (tokens used against the budget
     are in its window); the todo chip shows done over total. On a narrow
     terminal the leftmost chips shrink first (`◐ 1`, `▪ 2`, `▶ 4m`), and only
     then drop; the rail never squeezes the loading line's own text. A dimmed
     `Ctrl+X to navigate` leads the rail until it takes focus, and is the first
-    thing to go on a narrow row.
-    `Ctrl+X` focuses the rail and letters its items (`s` subagents, `b`
+    thing to go on a narrow row. Once you use the rail (`Ctrl+X` or a chip
+    click), the hint stays hidden for 7 days, across sessions
+    (`~/.vibe/cache.toml`).
+    `Ctrl+X` focuses the rail and letters its items (`o` loops, `s` subagents, `b`
     background tasks, `p` PRs/MRs, `g` goal, `t` todo): a letter opens that item's window
     in place of the input box, `←→` (or `Tab`/`Shift+Tab`) and `Enter` do the same step by step, `Esc` goes
     back. The letters show only until the next key: any key, even an arrow or
@@ -1475,10 +1522,13 @@ session's model.
     like `Ctrl+X`, works even while a picker such as `/model` or `/context`
     fills the box, which it closes first; a form or flow in progress (a goal
     edit, a tool approval, a question, a sign-in) keeps the box.
-    The windows list the subagents (`Enter` views one), the running
-    background commands (a click highlights one, `s` stops it), the PRs/MRs (as in `/pr`), the goal (`p` pause/resume, `e`
-    edit, `c` clear) and the todo list; `↑↓`/`jk` or the wheel scroll the goal
-    and todo windows, and `Esc` closes them. `Cmd/Alt+\` in the prompt docks
+    The windows list the scheduled loops (the `/loop` manager), the subagents (`Enter` views one), the running
+    background commands (`s` stops one; `Enter`, or a click on the highlighted one, shows its live
+    output with a draggable scrollbar, where `/` jumps to a search's latest match (`n`/`N` move between matches), `s` stops it
+    and `Esc` goes back to the list; stdout and stderr arrive merged, as the task runs in a terminal),
+    the PRs/MRs (as in `/pr`), the goal (`p` pause/resume, `e`
+    edit, `c` clear) and the todo list; `↑↓`/`jk` or the wheel scroll the goal,
+    todo and output windows, and `Esc` closes them. `Cmd/Alt+\` in the prompt docks
     the whole todo list on the right instead. The
     transcript marks each step: the goal set or changed, each goal turn, and
     why it stopped.
@@ -1602,8 +1652,14 @@ Type `@` in the chat input to autocomplete files and folders. A bare `@`
 lists non-hidden immediate children directly from the filesystem for fast
 browsing. Once you type a path character, Git workspaces use tracked and
 non-ignored untracked paths, including nested `.gitignore` rules; outside Git
-the picker falls back to the project tree. Pressing Tab/Enter inserts the
-chosen path. Your message text is sent as-is (the `@path` stays in the prompt);
+the picker falls back to the project tree. A path starting with `/`, `~/`,
+`./` or `../` lists that one directory instead, like a shell's Tab
+completion: typing filters its entries, hidden ones only after a `.`.
+Enter inserts the chosen path and closes the picker; Tab on a folder inserts
+it and keeps the picker open on its entries. A query ending in a folder's `/`
+lists that folder itself first, preselected, so Enter keeps it; typing a name
+drops that row. Paths with spaces are inserted
+quoted (`@'~/My Folder/'`). Your message text is sent as-is (the `@path` stays in the prompt);
 behavior then depends on the mention kind:
 
 - **Text files** trigger a synthetic `read_file` tool call injected right
@@ -1645,8 +1701,8 @@ Image attachments:
 - Snapshotted into `<session_dir>/attachments/<sha1>.<ext>` so that
   resumed sessions stay reproducible even if the source file is moved.
 - Capped at 10 MiB per image and 8 images per message.
-- Out-of-project paths work via `@/abs/path/to.png` (the picker only
-  suggests project files, but the `@`-parser accepts absolute paths).
+- Out-of-project paths work via `@/abs/path/to.png` or `@~/path/to.png`;
+  the picker completes them one directory at a time.
   Drag-and-drop from Finder into Terminal, iTerm2, or Ghostty is
   intercepted at paste time: if the pasted content is a standalone existing
   absolute or home-relative file or folder (or a newline-delimited list of
@@ -1708,8 +1764,9 @@ Only one side-channel command runs at a time. Besides read-only commands
 (`/help`, `/status`, `/copy`, ...), this includes settings a running turn
 never reads (`/theme`, `/log-level`, `/voice`, `/proxy-setup`,
 `/trusted-folders`), whose changes
-are saved at once, and `/branch`, which forks the conversation as it was before
-the running turn. These still wait for a compaction or agent install to finish.
+are saved at once, `/branch`, which forks the conversation as it was before
+the running turn, and `/sessions`, whose page lists and edits other sessions
+but refuses to switch sessions until the turn ends. These still wait for a compaction or agent install to finish.
 `/goal` and its subcommands also work while a turn runs: the app server tells
 the model about the change before its next turn.
 
@@ -1717,7 +1774,12 @@ Commands that change what a turn reads (e.g. `/config`, `/model`,
 `/thinking`, `/clear`, `/compact`, `/rewind`, `/resume`,
 `/reload`, `/leanstall`, `/unleanstall`, `/retry`, `/mcp`,
 `/connectors`, `/plugins`, `/reload-plugins`, `/skills`) are rejected while
-busy and can be retried when the session is idle.
+busy and can be retried when the session is idle. A paused queue does not count
+as busy: these commands run, and `/retry` re-runs the interrupted or failed
+turn first; the queued prompts are sent once the retry completes, and stay
+held if it fails or is interrupted. Only `/clear`, `/compact`, `/rewind`
+(also reached with Esc twice) and `/resume`, which would drop the queue, wait
+until it is resumed or emptied.
 
 While the queue is non-empty and the agent is busy, pressing **Up**
 enters queue selection mode: the last queued item is highlighted and

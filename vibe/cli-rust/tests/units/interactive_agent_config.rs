@@ -74,3 +74,25 @@ fn interactive_add_dir_rejects_missing_paths() {
         .unwrap_err();
     assert!(error.to_string().contains("--add-dir"));
 }
+
+#[test]
+fn model_and_thinking_apply_to_the_new_session() {
+    let cli = Cli::parse_from(["vibe-rs", "--model", "devstral-small", "--thinking", "high"]);
+
+    let start = cli.start_model().unwrap();
+
+    assert_eq!(start.model.as_deref(), Some("devstral-small"));
+    assert_eq!(start.thinking.as_deref(), Some("high"));
+}
+
+#[test]
+fn model_with_a_resume_is_a_usage_error() {
+    for resume in [&["-c"][..], &["--resume"][..], &["--resume", "abc"][..]] {
+        let mut args = vec!["vibe-rs", "--model", "devstral-small"];
+        args.extend_from_slice(resume);
+
+        let err = Cli::parse_from(args).start_model().unwrap_err();
+
+        assert_eq!(err, "--model only applies to a new session");
+    }
+}

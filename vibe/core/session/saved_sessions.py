@@ -113,9 +113,13 @@ async def relocate_saved_session_at_path(
 
     Nothing else moves. A detached session holds no trust grant, no harness
     root and no config layer to re-root -- those are built from this record the
-    next time it is opened, which is why the move is only this.
+    next time it is opened, which is why the move is only this. The recorded
+    repository and checkout belonged to the old folder, so they are dropped and
+    looked up again the next time the record is written.
     """
     metadata = _load_raw_metadata(session_dir)
+    metadata.pop("repository_root", None)
+    metadata.pop("checkout_root", None)
     environment = {**(metadata.get("environment") or {})}
     origin = metadata.get("origin_directory") or environment.get("working_directory")
     environment["working_directory"] = str(cwd)

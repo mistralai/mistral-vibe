@@ -1,4 +1,4 @@
-"""The startup picker holds the positional prompt; Esc drops it and the composer sends the next one."""
+"""The startup Sessions page holds the positional prompt; Esc drops it and the composer sends the next one."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from e2e.app_server.scenario import Timeline, take_snapshot
 
 _ESCAPE = "\x1b[27u"
 
-# The startup frame shows the picker with no turn started; only the typed prompt is enqueued.
+# The startup frame shows the page with no turn started; only the typed prompt is enqueued.
 client_args = ("continue the work", "--resume")
 timeline: Timeline = [
     _ESCAPE,

@@ -140,9 +140,17 @@ type ConnectorRuntimeEventSink = Callable[
 
 
 class ConnectorRuntimeFailure(Exception):
-    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        retry_after_s: int | None = None,
+    ) -> None:
         self.code = code
         self.retryable = retryable
+        self.retry_after_s = retry_after_s
         super().__init__(message)
 
 

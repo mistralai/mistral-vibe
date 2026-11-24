@@ -74,7 +74,10 @@ applied and pinned as the matching mid-session changes are: like
 the session it opened and fails the start. `project` (`{kind: "local" |
 "cloud", id}`) stamps the session's metadata with its project once; forks,
 rewinds and `/clear` replacements inherit their source's stamp. Without it the
-session stays unstamped, as CLI sessions are. Resume loads saved state;
+session stays unstamped, as CLI sessions are. `{kind: "none"}` starts a
+projectless session, which takes no worktree. Without a `cwd`, the server runs
+it in a new folder under `~/.vibe/scratch/`. No trust decision ever applies
+inside `~/.vibe/scratch/`. Resume loads saved state;
 continue selects the latest eligible session. List, stored read and history
 are passive operations. Fork creates an independent session from a supported
 boundary; `session/stop` flushes and shuts down the attached session, leaving
@@ -90,6 +93,15 @@ A session has at most one active turn:
 - `turn/start` requires idle state and starts work immediately.
 - `turn/steer` adds input to the expected active turn, without queueing a future turn.
 - `turn/interrupt` targets the expected active turn.
+- `turn/retry` re-runs the expected turn when it is still the latest one and it
+  failed with a retryable error or was interrupted, by starting an injected turn
+  that asks the model to finish the pending request; `instructions` adds user
+  guidance. It requires idle state, and refuses with `conflict` and
+  `data.reason: "nothing_to_retry"` otherwise.
+  Every `PublicTurn` carries `retryable` from the same status and error-code
+  rule, so clients offer retry without keeping their own list of error codes.
+  Only the latest turn's value means it can be retried now: older turns keep
+  theirs, and `turn/retry` refuses them.
 - `session/turn/enqueue` accepts context entries followed by at most one user
   entry as a separate future turn, without changing the active turn.
 
@@ -102,6 +114,11 @@ does not, and rejects it as an unknown field. Injected input reaches the model l
 public user entry: no `history/entryAdded` user message, no bubble to render.
 The server uses it for its own notes and goal continuations; a client sending
 user input leaves it unset.
+
+A completed turn may carry `finalAnswer`: the text of the answer that ended
+it, never a draft a hook sent back for a retry. When it is absent, a client
+reads the turn's last assistant message from history. A turn a hook skipped or
+rejected carries `skipReason` or `rejectReason` instead.
 
 A turn that fails carries a `PublicError` whose `code` names the cause.
 `usage_limit` means the provider refused the request because the account has
@@ -305,14 +322,17 @@ tool.
 A client that advertises `capabilities.sessionPeers` hosts the other sessions
 of a session's project: its sessions are offered `list_sessions`,
 `read_session`, `send_to_session` and `archive_sessions`, and also
-`restore_sessions` when it advertises `capabilities.sessionPeerRestore` and
-`mark_sessions_seen` when it advertises `capabilities.sessionPeerMarkSeen`. A
-client that predates `session/peer/restore` or `session/peer/markSeen` fails
-its whole connection on that request, so the server never sends it to a
-client that did not advertise the capability.
-Listing, reading and marking seen are allowed by default; sending, archiving
-and restoring ask, like `start_session`. Only listing and reading are
-callable from programs, so a model filters sessions on any field in code.
+`restore_sessions` when it advertises `capabilities.sessionPeerRestore`,
+`rename_session` when it advertises `capabilities.sessionPeerRename`, and
+`mark_sessions_seen` when it advertises `capabilities.sessionPeerMarkSeen`.
+These additional requests require their individual capabilities: an older
+client may fail its whole connection on an unknown request.
+Listing, reading, marking seen and renaming are allowed by default; sending,
+archiving and restoring ask, like `start_session`. Explicit per-tool permissions
+still override these defaults: an `ask` setting asks and a `never` setting denies.
+Tool filters and capability gating still determine which tools are offered.
+Only listing and reading are callable from programs, so a model filters sessions
+on any field in code; renaming remains a direct-only tool.
 Each call sends the client a request on the calling session's own
 connection, and the client answers for that session's project only:
 
@@ -334,10 +354,15 @@ connection, and the client answers for that session's project only:
   `tool` line per tool call naming what it ran or touched. A message longer
   than `maxMessageChars` is cut and says so. It never waits for the target.
 - **`session/peer/send`** `{targetSessionId, text, idempotencyKey, sender,
-  delivery, hops, reply?}` hands `text` to the target through
+  delivery, hops, deliverWithinMs?, reply?}` hands `text` to the target through
   `session/turn/enqueue`, with `sender`, `delivery`, `hops` and `reply` as they
   came, and answers `{sessionId, title?, url?, queued}`, `queued` as the
-  server's `waits` says.
+  server's `waits` says. When finding and opening the target takes longer than
+  `deliverWithinMs`, the client sends nothing, now or once it opens, and fails
+  the request with `conflict` and `data: {reason: "not_delivered_in_time"}`;
+  the server reports that to the model as not sent, with that `reason`. The
+  server sets the deadline below its own wait, so only a client that never
+  answers leaves the outcome unknown.
 - **`session/peer/archive`** `{sessionIds}` archives those sessions, as the
   user's archive action does, and answers `{archived: [{sessionId, title?}],
   failed: [{sessionId, error}]}`; one that is not a session of the project, is
@@ -347,6 +372,23 @@ connection, and the client answers for that session's project only:
   user's restore action does, and answers `{restored: [{sessionId, title?}],
   failed: [{sessionId, error}]}`; one that is not a session of the project
   fails alone, and one that is not archived is left as it is.
+- **`session/peer/rename`** `{sessionId, title}` renames a same-project peer
+  through the existing session rename operation and answers the authoritative
+  `{sessionId, title, url?}`. The title uses ECMAScript `String.trim()` semantics:
+  trim only U+0009–U+000D, U+0020, U+00A0, U+1680, U+2000–U+200A,
+  U+2028, U+2029, U+202F, U+205F, U+3000 and U+FEFF at either end.
+  U+001C–U+001F and U+0085 are preserved, unlike Python's default `str.strip()`.
+  After trimming, the title must be nonempty and at most 255 UTF-16 code units
+  (matching Desktop's title contract; emoji can count as two). It becomes a
+  manual title that automatic naming will not overwrite; the model may choose
+  a short, descriptive title. Busy and archived peers may be
+  renamed, but the caller itself and runtime subagents are outside this peer
+  scope. Project scope is best-effort: the client checks membership before
+  sending the rename request, but a concurrent project move may land afterward
+  and make the returned URL stale. Project moves and title updates are not
+  serialized. A timeout or disconnect leaves the outcome unknown; the rename
+  may still complete. No reread is required unless later work needs the current
+  title. Concurrent title changes use last-writer-wins behavior.
 - **`session/peer/markSeen`** `{sessionIds}` clears those sessions' unread
   mark, as the user opening them does, and answers `{marked: [{sessionId,
   title?}], failed: [{sessionId, error}]}`; one that is not a session of the
@@ -454,7 +496,11 @@ public history without starting one, so the session's next turn reads it
 (`waits: true`). The server counts `hops`, the messages and starts between
 sessions in a row since a user wrote: each send and `session/spawn` carries one
 more than the turn sending it, a turn the user starts, queues or steers resets
-the count, and a message joining a turn raises it. Past `MAX_SESSION_HOPS` (32)
+the count, and so does a scheduled loop firing, whoever set it up, while a
+message joining a turn raises it. A loop fires at most every 30 s, so the count
+does not build up across its firings; sessions waking each other in between
+still reach the limit. A goal continuing keeps the count, since a goal without
+a budget runs until it ends. Past `MAX_SESSION_HOPS` (32)
 the server refuses `send_to_session` and `start_session`. A detached session
 keeps the hops of its first turn too, so detached starts cannot chain past it.
 It also refuses `start_session` from a session attached to the one that started
@@ -529,6 +575,18 @@ sessions, reading no other, and `include: ["pullRequests"]` adds
 `items`. An answer that did not ask for them is unchanged. A client sends them
 only to an app server that asks it for `session/peer/*`, which is as recent.
 
+Each `session/list` row carries `repositoryRoot`, the main checkout of the git
+repository holding its `cwd`, so a client groups a repository's checkouts under
+one root: a linked worktree, or a managed worktree Vibe retained, reports its
+main checkout; a submodule reports itself. A session records the repository of
+its folder when the folder is set, so a row whose folder is gone from disk still
+reports the repository it was in. It is left out for a folder outside a
+repository, for an older session whose folder is gone, and by older app servers.
+Beside it, `checkoutRoot` names the checkout holding `cwd`: `repositoryRoot`
+itself, or the linked worktree; it is recorded and kept the same way. A row
+whose `cwd` is gone from disk, such as a removed worktree, carries
+`cwdMissing: true`; the field is left out otherwise.
+
 Every `PublicSession` carries its `project` stamp (`{kind, id}`), null while
 unstamped. A listing gives an
 unstamped session, or one stamped with a removed local project, the local
@@ -549,9 +607,10 @@ an older app server only hid.
 `{sessionId, project: {kind: "local", id} | {kind: "none"}}`. It answers
 `{state}`. The session is
 stamped with the project and moved to its primary folder, as `session/relocate`
-moves it, without the same-repository rule. A session that leaves a managed
+moves it. A session that leaves a managed
 worktree releases it; the worktree stays on disk. With `kind: "none"` the
-session keeps its folder. A working session, or one another connection or
+session moves to a new folder under `~/.vibe/scratch/`, or keeps the scratch
+folder it already runs in. A working session, or one another connection or
 process holds, is refused as a `conflict` before anything moves; an unknown
 project is `not_found`. A session only the
 legacy store has is refused as `invalid_params` until it is opened.
@@ -574,6 +633,18 @@ turn beats is retried when that turn ends; a move that fails, as when a
 background process runs, posts a notice. The call asks for approval unless the
 target folder is trusted or it cancels; an approval releases that move only. A `permission` set in
 `[tools.move_to_project]` overrides the trust check.
+
+`session/relocate` moves a root session to another directory,
+`{sessionId, cwd}`, and answers `{state}`; the session keeps its id. A
+directory that is not one is `invalid_params`. A checkout of the session's own
+repository (a linked worktree, or the main checkout from one) gets the
+session's trust; any other directory gets none, so a client asks for it with
+`workspace/trust/status` and `workspace/trust/decision` before the move. A
+sandboxed session moves only between checkouts of its repository. A session
+with a conversation is told of the move: the model reads, before its next
+message, that the working directory changed and that earlier paths name the
+previous one. A session no process holds keeps the note in `meta.json` until
+its next turn.
 
 `session/start` takes an optional `startedBySessionId`: the session that started
 this one to hand it `firstTurn`, and `hops`, the `session/spawn` request's, which
@@ -623,6 +694,10 @@ Status transitions:
 - `blocked`: the model reported a blocker (`model`), three continuations in a
   row called no tool (`no_progress`), three continuations in a row had only
   failed tool calls (`tool_failures`), or a goal turn failed (`turn_failed`).
+  `turn_failed` also covers a goal whose next turn cannot run: its model
+  requires a plan upgrade, the continuation failed to start, or the session
+  was archived. The goal stops instead of waiting active with nothing to say
+  it stopped, and its `blocked` notice says why.
 - `budget_limited`: `tokensUsed` reached `tokenBudget`. The limit is soft:
   the running turn is not interrupted, and no new continuation starts.
 - `usage_limited`: a goal turn failed with the `usage_limit` turn error.
@@ -672,8 +747,8 @@ hidden note before its next turn, so a running turn finishes on what it had.
 
 While the goal is `active` and the session is idle, the server starts the next
 continuation turn: after every queued user turn, and after any due scheduled
-loop. A paused queue, an open callback or an archived session holds it back,
-and so does a session no client is subscribed to: the server charges goal
+loop. A paused queue or an open callback holds it back (an archived session,
+or a model the plan cannot run, blocks the goal instead), and so does a session no client is subscribed to: the server charges goal
 turns from its event stream, so it starts none it could not charge. When a
 client subscribes again, the server settles the goal turns that ended in
 between.
@@ -724,7 +799,8 @@ without a turn recorded after the rewound message. Its `detail` has `kind: "goal
 | `status`, `statusReason` | as in `PublicGoal` | The goal's state right after the event. |
 | `continuation` | int or `null` | On `continued`: the continuation's number for this goal. |
 | `tokensUsed`, `tokenBudget`, `timeUsedSeconds` | as in `PublicGoal` | Counters right after the event. |
-| `error` | string or `null` | On `blocked` with `statusReason: "turn_failed"`: the failed turn's error message, at most 300 characters. |
+| `error` | string or `null` | On `blocked` with `statusReason: "turn_failed"`: the failed turn's error message, or why the next turn cannot run, at most 300 characters. |
+| `turnId` | string or `null` | Only on a `set` the model made: the turn whose tool call set the goal. The notice entry itself has no `turnId` and sits where its time puts it, inside that turn. Not kept in `goal-notices.json`, so a notice read back after a resume lacks it. |
 
 The user's own actions (`goal/set`, `goal/clear`) record `set`, `edited`,
 `paused`, `resumed` or `cleared`, and a goal the model creates records `set`.
@@ -835,6 +911,103 @@ The Rust CLI renders public values over the stdio API, in both interactive and
 programmatic mode, and ACP translates protocol content and callbacks.
 Clients own rendering and explicitly local facilities, while attached session
 mutations use public APIs.
+
+### Plugin and MCP server Apps
+
+A tool that declares `_meta.ui.resourceUri` (`ui://`) renders its calls as an
+MCP App when its server is a plugin's own MCP server or an MCP server of the
+user's or the project's Vibe config (`mcp_servers`). Whose server a name is
+comes from the merged catalog the session's runtime runs: a config entry that
+takes a plugin server's name wins it, even disabled (then neither runs and the
+name serves no app). A project plugin (shipped in the repository under
+`.vibe/plugins`, never installed) is served as a config server: `kind:
+"mcp_server"`, with its fingerprint and the user's consent; only an installed
+plugin is served as `kind: "plugin"`. Connectors keep their own apps. The effect's `mcpApp` is
+tagged by `kind`: `{kind: "connector", resourceUri, connectorId, connectorName,
+connectorDisplayName}` (an older server sends no `kind`; read it as
+`connector`), `{kind: "plugin", resourceUri, pluginName, server}` or
+`{kind: "mcp_server", resourceUri, server}`, where `server` is the server's
+catalog name. The runtime reads each tool's `_meta.ui.visibility`: one that
+omits `model` is not routed to the model, one that omits `app` cannot be called
+by its app. The client reads the app's resources with
+`session/mcpApp/readResource` (`{sessionId, server, uri, expectedFingerprint?}`)
+and runs the app's calls with `session/mcpApp/callTool` (`{sessionId, server,
+toolName, arguments, expectedFingerprint?}`); both reach only that server of
+the session. A call runs only when the tool exists on that server, is visible
+to `app`, its arguments validate against its `inputSchema`, the session's
+`pre_tool` hooks let it through, the arguments they return validate against the
+`inputSchema` too, and neither the user's tool filters nor a `never` rule (or a
+session that denies tools) refuse it, in that order; the server gets the
+arguments the hooks returned. An app's call never asks the user, whatever the
+approval policy and the tool's `readOnlyHint`, as an app's call in Vibe Work
+does not: Work checks only that the tool is visible to `app`. The approval
+policy's `ask` (and smart approve's classifier) applies to the model's calls
+only. A config server's app still needs the user's consent to its fingerprint
+first. Results go to the caller only, never to the history. Each
+call is logged without its arguments, with `source=plugin` or
+`source=mcp_server`.
+
+`session/mcpApp/readResource` answers `{contents, _meta?, source}`. `source`
+comes from the session's own catalogs, never from the request, so a host
+derives the app's origin from it:
+
+- `{kind: "plugin", pluginName, pluginRoot}`: `pluginRoot` is the absolute
+  install folder the session last pinned the plugin from (not its per-version
+  copy): it stays the same when that install is updated, differs between two
+  installs of the same name, and follows a re-pin from
+  another install, whose code the session then runs; once the plugin leaves the
+  session's pinned set, the server counts as unknown.
+- `{kind: "mcp_server", server, fingerprint, command?, url?}`: `command` (a
+  stdio server's command and arguments as configured, never its environment)
+  or `url` (an HTTP server's) is what the host shows the user when it asks for
+  consent. `fingerprint` is the sha256 hex of what decides which code the
+  server runs or where it connects, never its name, prompt, timeouts or a
+  secret value. For stdio it is hashed as the strings resolve: the absolute
+  folder the process starts in (its `cwd`, or the app server's working
+  directory when unset, as the process inherits it), its command (a path is
+  resolved from that folder; a bare program name such as `npx` stays as
+  written, with the `PATH` its config sets, so a toolchain upgrade keeps the
+  fingerprint), its arguments, its environment variable names, and the trusted
+  project folder whose `.vibe/config.toml` declares it, if one does. The same
+  entry in two projects therefore has two fingerprints. For HTTP it is its
+  transport, URL and authorization fingerprint.
+
+For a config server both methods take the `expectedFingerprint` the user
+consented to: when it is missing or not the server's current one, the request
+is refused with `mcp_app_consent_required` before anything reaches the server,
+and the refusal carries the current `fingerprint` and the server's `command` or
+`url` to ask the user about. The client always sends what it has; the runtime
+decides, on the server it dispatches to and with no wait in between, whether
+that server is a plugin's (no consent needed) or a config server's, so a config
+reloaded during the request, even one that gives a plugin server's name to a
+config server, is refused too. Plugin servers ignore `expectedFingerprint`. Arguments are validated offline: a `$ref`
+the tool's `inputSchema` does not hold itself is never retrieved, over the
+network or from disk, and fails the call, as does a schema over 256 KiB.
+
+A refusal carries its reason in the JSON-RPC error's `data.code`:
+
+- `mcp_app_unknown_server`: no plugin's own server or config server of this
+  session runs under that name.
+- `mcp_app_consent_required` (`forbidden`): a config server's request came
+  without its current fingerprint; `data` also carries `server`,
+  `fingerprint` (the server's current one) and `command` or `url`, as in
+  `source`. `vibe/tests/app_server/fixtures/mcp_app_consent_required.json` is
+  a real refusal's shape.
+- `mcp_app_unknown_tool`: the server lists no such tool.
+- `mcp_app_tool_not_app_visible`: the tool's `_meta.ui.visibility` omits `app`.
+- `mcp_app_invalid_arguments`: the arguments fail the `inputSchema`, or a
+  `pre_tool` hook rewrote them into ones that do (the message says so, as a
+  model call's `invalid_pre_hook_arguments`); the message names the failing
+  path, never a value.
+- `mcp_app_tool_denied`: the approval policy, the user's tool filters or a
+  `pre_tool` hook refuse the tool.
+- `mcp_app_resource_too_large`: the resource is over 5 MiB.
+- `mcp_app_server_failed`: the MCP server failed the request; `data.mcpCode`
+  names how.
+- `mcp_app_unavailable`: the session has no MCP runtime to serve apps.
+
+`vibe/tests/app_server/fixtures/mcp_app_refusal_codes.json` lists these codes;
+clients pin their own list to it.
 
 ### Storage usage
 
@@ -1012,6 +1185,97 @@ method remains unary and uses connection detachment for this cleanup.
 state, stop pending work, close children and release owned processes, clients
 and other execution resources. Cleanup must attempt all owned resources even
 when one fails.
+
+In a multiplexed process (`--multiplex`), closing a channel whose session still
+has turn work (a turn running, waiting on a callback, queued or settling) does
+not stop the session: it keeps running with no channel, and its lease stays
+held. A `session/resume` of it on any channel of the process attaches to the
+running session, with `turn/started` and its open callbacks sent again, as for
+any resume. A session with no channel stops once its turn work ends, and when
+the process exits. Meanwhile its model calls use the sign-in of another channel
+of the same account (`initialize.account`), an ID token only when it names the
+account's organization and the user the session first ran as; with none, a call
+waits for one, then fails the turn with `credential_unavailable`. A client tool
+call (`tools/call`) in flight when the channel closes fails with
+`client_tool_unavailable`, saying it may or may not have run, and is not sent
+again, since the client may already have run it; callbacks stay open for the
+next channel. An idle session still stops when its channel closes. The close
+acknowledgement of a channel whose session runs on therefore does not mean its
+lease is free. A resume that attaches it applies only its `historyLimit` and
+`interruptLeftTurn` (which ends the running turn as interrupted); it fails with
+`conflict` on a channel that already has a session, that reported another
+`account`, or that declared other client tools or client requests
+(`capabilities.clientTools`, `agentPlugins`, `clientToolDefinitions`) than the
+one that started it.
+
+A client that sends `initialize.capabilities.resumeLeftTurns: true` with an
+`account` has the server carry on, by itself, the turns that owner (its
+entrypoint and account) left mid-flight in an earlier process: once per owner
+per process, the server lists them as `session/list {interrupted: true}` would,
+on a channel of its own (so it needs no client's connection to stay open, and
+gives up after two minutes), and resumes each on a channel no client holds, a
+few at a time, then closes that channel so the session runs on as described
+above. A client of the same
+owner that resumes such a session waits while the server's own resume or stop
+of it is in flight, then attaches to it, or opens it if it no longer runs. The
+server gives its own resume of a session two minutes, its wait for the session
+included, and a client's wait is bounded the same: past it, the
+`session/resume` fails as for a session another holder has open (`conflict`,
+`data.harnessCode: "session_busy"`).
+`session/leftTurns/read` answers which of the owner's left turns the process is
+carrying on (`waiting_for_lender` while no channel of its account declared
+`platformCredentials.lifetime: "process"`, so a turn never runs on a sign-in
+that leaves with a chat; `queued`, `resuming` while no client holds it open,
+`running` with no client,
+`failed` when its resume failed or took over two minutes before its turn ran,
+or `running_elsewhere` while another live app-server process holds the session
+open). `session/leftTurns/interrupt` ends them all, a queued one as interrupted
+without running it, and answers each one's `outcome`: `interrupted`,
+`ended_before_running`, `still_running` (it stays listed), `taken_by_client` (a
+client holds it open now, so it is left alone), `already_ended`, `failed`, or
+`running_elsewhere` (another process runs it, so this one left it alone; it
+stays listed while that process holds it). Each other turn is answered once.
+Both answer a `status`: `listing` (more may follow), `listed`, `listing_failed`
+(the owner's next `initialize` with `resumeLeftTurns` lists again),
+`listing_timed_out` (the stop gave up waiting for the listing), `not_resuming`
+(nothing resumes this owner's left turns: it never opted in, or the server is
+not multiplexed), `resumed_elsewhere` (another process resumes them, see
+below), `needs_process_lender` (this connection asked for `resumeLeftTurns` but
+its `platformCredentials.lifetime` is not `process`, so nothing was resumed),
+or `no_account`. Only
+`session/resume` waits for the server's own resume of a session;
+`session/continue` does not, so a client that opts in opens left sessions with
+`session/resume`. A stop holds for the owner until the process exits: turns
+listed after it, even after `listing_timed_out` or a failed listing, end as
+interrupted without running, and the next `session/leftTurns/interrupt` reports
+them.
+
+Any app-server process sharing the session store may be asked to opt in, and
+the server makes sure only one of them resumes an owner's left turns at a time:
+the process that lists them takes a claim on the owner in the store (an OS file
+lock under `active/left-turns/`). It holds the claim while it lists and while
+any turn it listed is still waiting for a lender, queued, being resumed, or
+held by another process, then lets it go; a failed listing lets it go at once,
+and so does an exit or a crash (on a clean exit only once the sessions it
+carries on have stopped). The next opt-in for the owner, in any process, lists
+again, so a turn left later, by a process that died after that listing, is
+resumed too; turns another live process holds open are not listed again. A
+process that opts in while another holds the claim resumes nothing and answers
+`status: "resumed_elsewhere"`, and tries the claim again every few seconds: it
+lists and resumes once the holder lets go. Meanwhile `session/leftTurns/read`
+lists, as `running_elsewhere`, the turns the holder is resuming or runs with no
+client, and `session/leftTurns/interrupt` stops none of them and answers each
+with outcome `running_elsewhere`. It does not list the holder's `queued` or
+`waiting_for_lender` turns, nor a session a client merely holds open. Once the
+holder lets go, each process reports and stops only the left turns it runs
+itself. To stop an owner's left turns, a client sends
+`session/leftTurns/interrupt` to every process it runs; each stops what it
+runs. A stop asked of a process while another held the claim does not carry
+over once it takes it. When the holder finds a left session held open by
+another process (a client there opened it), it reads and stops that turn as
+`running_elsewhere`, never `failed`, and resumes it once that process lets the
+session go (within a few seconds of its lease being freed), or ends it as
+interrupted if a stop was asked meanwhile.
 
 `session/stop` does not end a running turn, and neither does closing the
 channel, losing the client or the app server exiting. The turn stops where it

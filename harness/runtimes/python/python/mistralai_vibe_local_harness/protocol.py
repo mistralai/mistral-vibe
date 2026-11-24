@@ -484,6 +484,19 @@ class RustModelFacts(RustProtocolModel):
         return self
 
 
+class RustCompactionModelWindow(RustProtocolModel):
+    """The window of a separate compaction model: what a summary request may hold."""
+
+    context_window: int = Field(gt=0)
+    summary_budget: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _validate_budget(self) -> Self:
+        if self.summary_budget >= self.context_window:
+            raise ValueError("0 < summary_budget < context_window must hold")
+        return self
+
+
 class RustInstructionsSettings(RustProtocolModel):
     max_tokens: int = Field(gt=0)
     max_threshold_percent: int = Field(ge=1, le=100)
@@ -499,6 +512,11 @@ class RustContextSettings(RustProtocolModel):
     # `model_facts.input_modalities`; omitted when compaction uses the agent
     # model.
     compaction_model_input_modalities: list[RustInputModality] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # The window of a separate compaction model, which sizes summary requests;
+    # omitted when compaction uses the agent model.
+    compaction_model_window: RustCompactionModelWindow | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
     # The bound on the live instructions; omitted means Core's defaults.
@@ -2257,6 +2275,7 @@ __all__ = [
     "RustCompactEvent",
     "RustCompactingTurn",
     "RustCompactingTurn",
+    "RustCompactionModelWindow",
     "RustCompactionPolicy",
     "RustCompletedAgentResult",
     "RustCompletedTurn",

@@ -13,12 +13,17 @@ use crate::server::MessageEntry;
 use crate::transcript::{split_loop_prompt, FiredLoop};
 use crate::utils::text;
 
-/// The prompt text behind its `> ` marker, cut to `max_rows` with a trailing `…`.
+/// The marker before a prompt's first row.
+pub(super) const PROMPT_MARKER: &str = "> ";
+/// The marker before a steer's first row: it continues the running turn.
+pub(super) const STEER_MARKER: &str = "↳ ";
+
+/// The prompt text behind its `marker`, cut to `max_rows` with a trailing `…`.
 pub(super) fn push(
     lines: &mut LinkedLines,
     message: &MessageEntry,
     width: u16,
-    (prompt, content): (Style, Style),
+    (marker, (prompt, content)): (&'static str, (Style, Style)),
     padded: bool,
     max_rows: usize,
 ) -> Collapsed {
@@ -79,7 +84,7 @@ pub(super) fn push(
     }
     for (mut row, gap, first) in rows {
         let marker = match first {
-            true => "> ",
+            true => marker,
             false => "  ",
         };
         if padded {
@@ -92,20 +97,34 @@ pub(super) fn push(
     collapsed
 }
 
-/// The pinned prompt: its transcript row cut to `max_rows` (a loop pins as `⏵ title`), then the separator.
+/// The pinned prompt cut to `max_rows` (a loop pins as `⏵ title`), then the separator.
+/// Under a `steer`, the prompt and the steer each take one row.
 pub(in crate::ui::transcript) fn sticky(
     message: &MessageEntry,
     fired_loop: Option<&FiredLoop>,
+    steer: Option<&MessageEntry>,
     width: u16,
     max_rows: usize,
 ) -> LinkedLines {
     let mut lines = LinkedLines::default();
     let styles = super::user::prompt_styles(fired_loop.is_some(), false, false);
+    let rows = if steer.is_some() { 1 } else { max_rows };
     match fired_loop {
-        Some(fired) => push_loop_title(&mut lines, message, fired, width, styles, max_rows),
+        Some(fired) => push_loop_title(&mut lines, message, fired, width, styles, rows),
         None => {
-            push(&mut lines, message, width, styles, false, max_rows);
+            push(
+                &mut lines,
+                message,
+                width,
+                (PROMPT_MARKER, styles),
+                false,
+                rows,
+            );
         }
+    }
+    if let Some(steer) = steer {
+        let styles = super::user::prompt_styles(false, false, false);
+        push(&mut lines, steer, width, (STEER_MARKER, styles), false, 1);
     }
     super::user::push_separator(&mut lines, width);
     lines

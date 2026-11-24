@@ -186,7 +186,8 @@
           "status": {"type": "idle"},
           "createdAt": 1787821243000,
           "updatedAt": 1787821245000,
-          "cwd": "/workspace"
+          "cwd": "/workspace",
+          "repositoryRoot": "/workspace"
         },
         {
           "id": "00000000-0000-4000-8000-000000000001",
@@ -204,6 +205,10 @@
       "previousCursor": null
     },
     "session/delete": {},
+    "projects/list": {"projects": []},
+    "session/pin": {"pinnedAt": 1787821246000},
+    "session/archive": {"archivedAt": 1787821246000},
+    "session/markAsSeen": {},
     "session/read": {
       "lastEventId": 1,
       "state": {

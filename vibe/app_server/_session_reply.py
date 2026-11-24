@@ -15,10 +15,12 @@ from dataclasses import dataclass
 from typing import Final
 import uuid
 
+from vibe.app_server._content_text import text_block_texts
 from vibe.app_server._session_peers import (
     MAX_MESSAGE_CHARS,
     SessionPeerError,
     SessionPeers,
+    is_vibe_bot_sender,
 )
 from vibe.app_server._session_spawn import MAX_SESSION_HOPS
 from vibe.app_server.models import PublicTurn, PublicTurnStatus, PublicTurnStopReason
@@ -42,8 +44,15 @@ REPLY_CUT_MARK: Final = "\n\n[Cut short. Read the session for the rest.]"
 _IDEMPOTENCY_NAMESPACE: Final = uuid.UUID("0c6f1e9a-3f0b-4d55-9b52-6e1a4f0d7c21")
 
 
-def replies_to(peers: SessionPeers | None) -> bool:
-    return peers is not None and peers.client_capabilities().session_peers
+def replies_to(peers: SessionPeers | None, to_session_id: str) -> bool:
+    """A Vibebot thread's reply goes through the app server's own link to the
+    bot, which the client's session tools (`sessionPeers`) do not gate.
+    """
+    if peers is None:
+        return False
+    return (
+        is_vibe_bot_sender(to_session_id) or peers.client_capabilities().session_peers
+    )
 
 
 def owed_reply(sender: str, turn_id: str, hops: int) -> OwedReply:
@@ -59,17 +68,7 @@ def final_message(entries: Sequence[Mapping[str, object]], turn_id: str) -> str 
             or entry.get("turnId") != turn_id
         ):
             continue
-        content = entry.get("content")
-        if not isinstance(content, list):
-            continue
-        texts = [
-            block["text"]
-            for block in content
-            if isinstance(block, dict)
-            and block.get("type") == "text"
-            and isinstance(block.get("text"), str)
-        ]
-        if text := "\n\n".join(texts).strip():
+        if text := "\n\n".join(text_block_texts(entry.get("content"))).strip():
             return text
     return None
 
@@ -155,7 +154,7 @@ async def send_reply(route: ReplyRoute, owed: OwedReply, text: str) -> bool:
     """
     delay = SEND_RETRY_SECONDS
     attempt = 0
-    while replies_to(route.peers):
+    while replies_to(route.peers, owed.to_session_id):
         if attempt:
             await asyncio.sleep(delay)
             delay = min(delay * 2, SEND_RETRY_MAX_SECONDS)
@@ -179,6 +178,14 @@ async def send_reply(route: ReplyRoute, owed: OwedReply, text: str) -> bool:
                 )
             )
         except Exception as exc:
+            if isinstance(exc, SessionPeerError) and is_vibe_bot_sender(
+                owed.to_session_id
+            ):
+                logger.warning(
+                    "The bot refused a reply; dropped",
+                    extra={"session_id": route.session_id, "error": str(exc)},
+                )
+                return True
             if isinstance(exc, SessionPeerError) and await _starter_gone(
                 route.peers, owed.to_session_id
             ):

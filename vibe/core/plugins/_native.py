@@ -62,6 +62,7 @@ from vibe.core.plugins._diagnostics import PluginDiagnosticCode
 from vibe.core.plugins._enablement import is_plugin_enabled
 from vibe.core.plugins._foreign import OpenCodePluginAdapter
 from vibe.core.plugins._kimi import KimiPluginAdapter
+from vibe.core.plugins.remote import remote_plugin_dirs, remote_plugin_names
 from vibe.core.skills.models import (
     DISABLE_MODEL_INVOCATION_FIELD,
     SkillInfo,
@@ -80,6 +81,7 @@ from vibe.utils.platform import is_windows
 
 if TYPE_CHECKING:
     from vibe.core.config.orchestrator import ConfigOrchestrator
+    from vibe.core.platform_auth import PlatformCredentialFactory
 
 logger = logging.getLogger(__name__)
 
@@ -230,8 +232,8 @@ class _VibePluginExtension(BaseModel):
     display_name: str | None = Field(
         default=None, alias="displayName", min_length=1, max_length=100
     )
-    # Shown only by hosts with a composer, such as Vibe Work: accepted here so
-    # that the extension stays valid.
+    # Shown by hosts with a composer: Vibe Work, and Vibe Desktop through the
+    # plugins list (``LocalPluginSummary.starter_prompt``).
     starter_prompt: _StarterPrompt | None = Field(default=None, alias="starterPrompt")
     tool_namespace: str | None = Field(
         default=None, alias="toolNamespace", pattern=_TYPESCRIPT_IDENTIFIER_PATTERN
@@ -468,6 +470,33 @@ def user_facing_issues(issues: Iterable[PluginConfigIssue]) -> list[PluginConfig
 
 
 @dataclass(frozen=True, slots=True)
+class PluginStarterPrompt:
+    """How a host starts a chat with the plugin (the extension's ``starterPrompt``).
+
+    ``prompt`` is by locale and always has ``en``; None when the plugin is
+    sent with no text of its own (``submit`` is then true). ``submit`` says
+    whether the host sends it at once.
+    """
+
+    prompt: Mapping[str, str] | None
+    submit: bool
+
+
+def _starter_prompt(
+    extension: _VibePluginExtension | None,
+) -> PluginStarterPrompt | None:
+    if extension is None or extension.starter_prompt is None:
+        return None
+    declared = extension.starter_prompt
+    return PluginStarterPrompt(
+        prompt=MappingProxyType(dict(declared.prompt))
+        if declared.prompt is not None
+        else None,
+        submit=declared.submit is True,
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class PluginDescriptor:
     name: str
     version: str | None
@@ -487,6 +516,10 @@ class PluginDescriptor:
     display_name: str | None = None
     # Off until listed in ``enabled_plugins`` (ai.mistral.vibe extension).
     default_enabled: bool = True
+    # Declared by the ai.mistral.vibe extension, which only some hosts honour
+    # (DSK-2284): read once here so callers need not parse the manifest again.
+    starter_prompt: PluginStarterPrompt | None = None
+    has_volumes: bool = False
 
     @property
     def component_prefix(self) -> str:
@@ -623,6 +656,8 @@ class PluginResolver:
         user_roots: Sequence[Path] = (),
         plugin_dirs: Sequence[Path] = (),
         builtin_roots: Sequence[Path] = (),
+        remote_dirs: Sequence[Path] = (),
+        remote_names: Iterable[str] = (),
         plugin_scopes: Mapping[Path, SkillScope] | None = None,
         data_root_base: Path | None = None,
         config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
@@ -634,6 +669,12 @@ class PluginResolver:
         self._project_roots = tuple(project_roots)
         self._user_roots = tuple(user_roots)
         self._builtin_roots = tuple(builtin_roots)
+        # Synced from the user's AI Registry plugins (``vibe.core.plugins.remote``).
+        self._remote_dirs = tuple(remote_dirs)
+        # Names the library lists, on or off: each belongs to the library, so a
+        # local plugin of one is not loaded and a name always means one plugin.
+        self._listed_remote_names = frozenset(remote_names)
+        self._remote_names: frozenset[str] = frozenset()
         # Named outright rather than discovered under a root: a pinned session
         # rebuilding its recorded set has nothing to scan, so these skip
         # discovery and take their scope from ``plugin_scopes``.
@@ -676,11 +717,18 @@ class PluginResolver:
         builtin_roots: Sequence[Path] = (),
         data_root_base: Path | None = None,
         config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None = None,
+        credentials: PlatformCredentialFactory | None = None,
     ) -> PluginResolver:
+        """``credentials`` is the connection's: library plugins load only for
+        the account they were synced for (``vibe.core.plugins.remote``).
+        """
+        config = config_orchestrator.config if config_orchestrator is not None else None
         return cls(
             project_roots=harness_files.project_plugins_dirs,
             user_roots=harness_files.user_plugins_dirs,
             builtin_roots=builtin_roots,
+            remote_dirs=remote_plugin_dirs(config, credentials),
+            remote_names=remote_plugin_names(config, credentials),
             data_root_base=data_root_base,
             config_orchestrator=config_orchestrator,
         )
@@ -689,19 +737,38 @@ class PluginResolver:
         self._issues = []
         self._unsupported_components = []
         named = self._named_dirs_by_scope()
-        project = self._load_scope(
-            [*named[SkillScope.PROJECT], *self._child_dirs(self._project_roots)],
-            SkillScope.PROJECT,
-        )
-        user = self._load_scope(
-            [*named[SkillScope.GLOBAL], *self._child_dirs(self._user_roots)],
-            SkillScope.GLOBAL,
-        )
+        self._remote_names = frozenset()
         builtin = self._load_scope(
             [*named[SkillScope.BUILTIN], *self._builtin_plugin_dirs], SkillScope.BUILTIN
         )
+        remote = self._without_builtin_names(
+            self._load_scope(
+                [*named[SkillScope.REMOTE], *self._remote_dirs], SkillScope.REMOTE
+            ),
+            builtin,
+        )
+        # A downloaded package's manifest name is the name le-chat lists for
+        # it: AI Registry takes a plugin's name from plugin.json at publish,
+        # per version (``PluginExtractor.extract``), and le-chat lists the name
+        # of the version it serves. The loaded names are added for a pinned
+        # session, which rebuilds its set from folders and is given no list.
+        self._remote_names = self._listed_remote_names | {
+            p.descriptor.name for p in remote
+        }
+        project = self._without_library_names(
+            self._load_scope(
+                [*named[SkillScope.PROJECT], *self._child_dirs(self._project_roots)],
+                SkillScope.PROJECT,
+            )
+        )
+        user = self._without_library_names(
+            self._load_scope(
+                [*named[SkillScope.GLOBAL], *self._child_dirs(self._user_roots)],
+                SkillScope.GLOBAL,
+            )
+        )
         installed = self._with_status(
-            self._select_by_precedence(project, user, builtin)
+            self._select_by_precedence(project, user, builtin, remote)
         )
         resolved = self._merge([p for p in installed if p.status == "loaded"])
         return replace(resolved, installed=tuple(installed))
@@ -812,6 +879,7 @@ class PluginResolver:
             SkillScope.PROJECT: [],
             SkillScope.GLOBAL: [],
             SkillScope.BUILTIN: [],
+            SkillScope.REMOTE: [],
         }
         for plugin_dir in self._plugin_dirs:
             scope = self._plugin_scopes.get(plugin_dir.resolve(), SkillScope.PROJECT)
@@ -882,7 +950,11 @@ class PluginResolver:
         if adapter is not None and scope is not SkillScope.BUILTIN:
             self._record_format_selection(detection)
             result = adapter.adapt(
-                root=root, data_root_base=self._plugin_data_root_base(root), scope=scope
+                root=root,
+                data_root_base=self._plugin_data_root_base(root)
+                if scope is not SkillScope.REMOTE
+                else self._scope_data_root(scope, root),
+                scope=scope,
             )
             self._record_adapter_result(detection.source_format, result.diagnostics)
             if result.package is None:
@@ -970,12 +1042,7 @@ class PluginResolver:
             if extension is not None and extension.tool_namespace is not None
             else _typescript_identifier(manifest.name)
         )
-        _builtin_reserved = (
-            _RESERVED_NAMESPACES
-            if scope is not SkillScope.BUILTIN
-            else (_RESERVED_NAMESPACES - {"vibe"})
-        )
-        if namespace in _builtin_reserved:
+        if namespace in _reserved_namespaces(scope):
             self._issues.append(
                 PluginConfigIssue(
                     file=manifest_path,
@@ -1010,6 +1077,8 @@ class PluginResolver:
             default_enabled=extension.default_enabled
             if extension is not None
             else True,
+            starter_prompt=_starter_prompt(extension),
+            has_volumes=extension is not None and bool(extension.volumes),
         )
         skills = self._load_skills(descriptor)
         mcp_servers = self._load_mcp_servers(descriptor)
@@ -1274,6 +1343,9 @@ class PluginResolver:
         return self._data_root_base or root.parent.parent / "plugin-data"
 
     def _scope_data_root(self, scope: SkillScope, root: Path) -> Path:
+        if scope is SkillScope.REMOTE:
+            # Apart from the user's own plugins, whose data the user owns.
+            return self._plugin_data_root_base(root) / "remote"
         if scope is SkillScope.BUILTIN:
             if self._data_root_base is None:
                 self._issues.append(
@@ -2086,12 +2158,65 @@ class PluginResolver:
                 )
         return selected
 
+    def _without_library_names(
+        self, local: Sequence[InstalledPlugin]
+    ) -> list[InstalledPlugin]:
+        """A name the user's library lists is the library plugin's, on or off.
+
+        So Work and this machine mean the same plugin by it. A local plugin of
+        that name is not loaded and is reported, until it is renamed.
+        """
+        kept: list[InstalledPlugin] = []
+        for candidate in local:
+            if candidate.descriptor.name in self._remote_names:
+                self._issues.append(
+                    PluginConfigIssue(
+                        file=candidate.manifest_path,
+                        message=(
+                            f"Plugin {candidate.descriptor.name!r} is not loaded: "
+                            "a plugin in your library has this name. Rename it "
+                            "to use it here"
+                        ),
+                        code="plugin.name.library_owned",
+                    )
+                )
+                continue
+            kept.append(candidate)
+        return kept
+
+    def _without_builtin_names(
+        self, remote: Sequence[InstalledPlugin], builtin: Sequence[InstalledPlugin]
+    ) -> list[InstalledPlugin]:
+        """A built-in plugin's name stays the built-in's: Vibe's own cannot move."""
+        builtin_names = {candidate.descriptor.name for candidate in builtin}
+        kept: list[InstalledPlugin] = []
+        for candidate in remote:
+            if candidate.descriptor.name in builtin_names:
+                self._issues.append(
+                    PluginConfigIssue(
+                        file=candidate.manifest_path,
+                        message=(
+                            f"Remote plugin {candidate.descriptor.name!r} has the "
+                            "name of a built-in plugin and is not loaded"
+                        ),
+                    )
+                )
+                continue
+            kept.append(candidate)
+        return kept
+
     @staticmethod
     def _select_by_precedence(
         project: Sequence[InstalledPlugin],
         user: Sequence[InstalledPlugin],
         builtin: Sequence[InstalledPlugin] = (),
+        remote: Sequence[InstalledPlugin] = (),
     ) -> list[InstalledPlugin]:
+        """Project over user over built-in for one name; remote names are their own.
+
+        A remote plugin never shares a name with a local one
+        (``_without_library_names``) nor a built-in one (``_without_builtin_names``).
+        """
         project_by_name = {
             candidate.descriptor.name: candidate for candidate in project
         }
@@ -2099,14 +2224,20 @@ class PluginResolver:
         builtin_by_name = {
             candidate.descriptor.name: candidate for candidate in builtin
         }
+        remote_by_name = {candidate.descriptor.name: candidate for candidate in remote}
         return [
             project_by_name[name]
             if name in project_by_name
             else user_by_name[name]
             if name in user_by_name
             else builtin_by_name[name]
+            if name in builtin_by_name
+            else remote_by_name[name]
             for name in sorted(
-                project_by_name.keys() | user_by_name.keys() | builtin_by_name.keys()
+                project_by_name.keys()
+                | user_by_name.keys()
+                | builtin_by_name.keys()
+                | remote_by_name.keys()
             )
         ]
 
@@ -2231,6 +2362,13 @@ def _render_generated_skill(definition: AdaptedSkill) -> str:
         lines.append(f"{DISABLE_MODEL_INVOCATION_FIELD}: true")
     lines.extend(["---", "", definition.prompt, ""])
     return "\n".join(lines)
+
+
+def _reserved_namespaces(scope: SkillScope) -> frozenset[str]:
+    """Vibe's own built-in plugin may use ``vibe``; nothing else may."""
+    if scope is SkillScope.BUILTIN:
+        return _RESERVED_NAMESPACES - {"vibe"}
+    return _RESERVED_NAMESPACES
 
 
 def _typescript_identifier(value: str) -> str:

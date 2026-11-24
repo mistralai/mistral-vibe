@@ -293,6 +293,7 @@ pub(crate) fn config() -> HarnessConfig {
                 },
                 model_facts: test_model_facts(),
                 compaction_model_input_modalities: None,
+                compaction_model_window: None,
                 instructions: Default::default(),
             },
             tools: ToolSettings {

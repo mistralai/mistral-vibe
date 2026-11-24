@@ -150,7 +150,7 @@ async def test_admin_global_compaction_threshold_overrides_a_declared_window() -
             "models": [
                 {
                     "name": "m",
-                    "provider": "p",
+                    "provider": "mistral",
                     "alias": "m",
                     "max_context_length": 262_144,
                 }
@@ -230,6 +230,25 @@ async def test_admin_enable_pr_monitoring_false_shadows_lower_layers() -> None:
     # A lower-layer write cannot turn monitoring back on.
     await orchestrator.set_field("/enable_pr_monitoring", True)
     assert orchestrator.config.enable_pr_monitoring is False
+
+
+@pytest.mark.asyncio
+async def test_admin_enable_model_catalog_false_shadows_lower_layers() -> None:
+    defaults = DefaultConfigLayer(schema=VibeConfigSchema)
+    overrides = OverridesLayer(data={"enable_model_catalog": True})
+    admin = AdminConfigLayer()
+    admin.load_managed_toml("enable_model_catalog = false\n")
+
+    orchestrator = await ConfigOrchestrator.create(
+        schema=VibeConfigSchema,
+        layers=[defaults, overrides, admin],
+        default_layer_resolver=lambda: overrides,
+    )
+
+    assert orchestrator.config.enable_model_catalog is False
+
+    await orchestrator.set_field("/enable_model_catalog", True)
+    assert orchestrator.config.enable_model_catalog is False
 
 
 @pytest.mark.asyncio

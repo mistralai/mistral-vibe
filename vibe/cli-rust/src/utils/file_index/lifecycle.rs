@@ -44,6 +44,9 @@ impl FileIndexAction {
         next: &crate::utils::startup_cache::StartupConfig,
         session_cwd: Option<&str>,
     ) -> Option<Self> {
+        if handle.held {
+            return None;
+        }
         let enabled = next.enable_file_autocomplete;
         let watcher = next.file_watcher_for_autocomplete;
         if handle.running() {
@@ -90,6 +93,8 @@ pub struct FileIndexHandle {
     /// The last version the UI applied; a handle outlives its thread, so the
     /// final bump must count after the feed's sender is dropped.
     seen: AtomicU64,
+    /// A parked root no config apply may start (a folder too broad to index).
+    held: bool,
 }
 
 impl Default for FileIndexHandle {
@@ -106,6 +111,7 @@ impl Default for FileIndexHandle {
             watcher: false,
             root: None,
             seen: AtomicU64::new(0),
+            held: false,
         }
     }
 }
@@ -143,6 +149,7 @@ impl FileIndexHandle {
             watcher,
             root: Some(root),
             seen: AtomicU64::new(0),
+            held: false,
         }
     }
     /// A handle holding the root to build once a start lands, with no thread.
@@ -156,6 +163,16 @@ impl FileIndexHandle {
     /// Remember where a not-yet-started index should build.
     pub fn park(&mut self, root: PathBuf) {
         self.parked_root = Some(root);
+    }
+
+    /// Keep this parked handle from ever starting.
+    pub fn hold(&mut self) {
+        self.held = true;
+    }
+
+    /// Whether `hold` keeps this handle parked.
+    pub fn held(&self) -> bool {
+        self.held
     }
 
     /// Ask the thread to end; it exits within one drain window.

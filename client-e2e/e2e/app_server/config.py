@@ -28,7 +28,17 @@ WHATS_NEW_HISTORY_FIXTURE = E2E_DIR / "fixtures" / "whats_new_history"
 WHATS_NEW_LINK_FIXTURE = E2E_DIR / "fixtures" / "whats_new_link"
 # The client's working directory: a small tree, so startup indexing stays cheap.
 WORKSPACE_DIR = E2E_DIR / "fixtures" / "workspace"
-CLIENT_BIN = VIBE_DIR / "vibe" / "cli-rust" / "target" / "release" / "vibe-rs"
+_TARGET_DIR = VIBE_DIR / "vibe" / "cli-rust" / "target"
+
+
+def _client_bin() -> Path:
+    release = _TARGET_DIR / "release" / "vibe-rs"
+    debug = _TARGET_DIR / "debug" / "vibe-rs"
+    # Local runs can skip the slow release build; CI always has the release one.
+    return debug if debug.exists() and not release.exists() else release
+
+
+CLIENT_BIN = _client_bin()
 REPLAY_BIN = CLIENT_BIN.with_name("vibe-replay")
 
 MINIMAL_HOME_CONFIG = """\

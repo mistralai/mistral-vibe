@@ -174,7 +174,7 @@ pub(super) fn title_of(app: &App, id: &str) -> String {
                 .find(|row| row.session.session_id == id)
                 .map(|row| row.title().to_owned())
         })
-        .unwrap_or_else(|| crate::resume_picker::short_id(id).to_owned())
+        .unwrap_or_else(|| crate::sessions_page::short_id(id).to_owned())
 }
 
 pub(super) fn status(app: &mut App, text: &str) {

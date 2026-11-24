@@ -79,6 +79,15 @@ class TurnState(SessionModel):
             "the host does not record it."
         ),
     )
+    terminated_event_id: EventId | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "The id of the Session event that ended this Turn: its turn_terminated event. Reading "
+            "the Session's events after it gives the events after the Turn's end. Absent while "
+            "the Turn runs, and when the host does not record it."
+        ),
+    )
 
     @model_validator(mode="after")
     def validate_termination(self) -> Self:
@@ -89,6 +98,8 @@ class TurnState(SessionModel):
             raise ValueError("A terminated turn requires termination details")
         if self.status != "terminated" and self.termination is not None:
             raise ValueError("A non-terminal turn cannot have termination details")
+        if self.status != "terminated" and self.terminated_event_id is not None:
+            raise ValueError("A non-terminal turn cannot have an end event id")
         return self
 
 

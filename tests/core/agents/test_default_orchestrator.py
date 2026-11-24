@@ -565,7 +565,7 @@ async def test_build_default_orchestrator_merges_sparse_local_over_complete_defi
         'active_model = "local"\n\n'
         "[[models]]\n"
         'name = "my-gguf"\n'
-        'provider = "my-llamacpp"\n'
+        'provider = "llamacpp"\n'
         'alias = "local"\n',
         encoding="utf-8",
     )
@@ -579,7 +579,7 @@ async def test_build_default_orchestrator_merges_sparse_local_over_complete_defi
     model = orchestrator.config.get_active_model()
     assert model.alias == "local"
     assert model.name == "my-gguf"
-    assert model.provider == "my-llamacpp"
+    assert model.provider == "llamacpp"
     assert model.thinking == "low"
 
 

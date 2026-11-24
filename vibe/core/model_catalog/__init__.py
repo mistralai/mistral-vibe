@@ -20,8 +20,8 @@ from vibe.core.model_catalog.models import (
     parse_model_catalog_response,
 )
 from vibe.core.model_catalog.wait import (
-    ModelCatalogWait,
     model_catalog_pending,
+    model_catalog_wait,
     model_catalog_wait_needed,
 )
 
@@ -30,9 +30,9 @@ __all__ = [
     "ModelCatalogEntry",
     "ModelCatalogParameters",
     "ModelCatalogResponse",
-    "ModelCatalogWait",
     "load_cached_model_catalog",
     "model_catalog_pending",
+    "model_catalog_wait",
     "model_catalog_wait_needed",
     "parse_model_catalog_response",
     "store_cached_model_catalog",

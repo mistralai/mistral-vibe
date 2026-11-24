@@ -47,6 +47,10 @@ mod callback_kinds;
 mod callback_routing;
 #[path = "units/caret_focus.rs"]
 mod caret_focus;
+#[path = "units/cd_answers.rs"]
+mod cd_answers;
+#[path = "units/cd_resolve.rs"]
+mod cd_resolve;
 #[path = "units/check_upgrade_flags.rs"]
 mod check_upgrade_flags;
 #[path = "units/clear_history.rs"]
@@ -125,8 +129,16 @@ mod credentials;
 mod cron_effect;
 #[path = "units/crossterm_keys.rs"]
 mod crossterm_keys;
+#[path = "units/cwd_follow.rs"]
+mod cwd_follow;
 #[path = "units/debug_console.rs"]
 mod debug_console;
+#[path = "units/dir_complete.rs"]
+mod dir_complete;
+#[path = "units/dir_completion.rs"]
+mod dir_completion;
+#[path = "units/dir_listings.rs"]
+mod dir_listings;
 #[path = "units/dotenv.rs"]
 mod dotenv;
 #[path = "units/double_escape.rs"]
@@ -185,6 +197,8 @@ mod goal_panels;
 mod goal_turn_end;
 #[path = "units/headless_cli_flags.rs"]
 mod headless_cli_flags;
+#[path = "units/headless_final_answer.rs"]
+mod headless_final_answer;
 #[path = "units/headless_logic.rs"]
 mod headless_logic;
 #[path = "units/headless_model.rs"]
@@ -223,6 +237,8 @@ mod input_mode_edges;
 mod input_modes;
 #[path = "units/interactive_agent_config.rs"]
 mod interactive_agent_config;
+#[path = "units/interrupt_retry_hint.rs"]
+mod interrupt_retry_hint;
 #[path = "units/jump_to_bottom.rs"]
 mod jump_to_bottom;
 #[path = "units/key_burst.rs"]
@@ -241,16 +257,18 @@ mod list_scroll;
 mod literal_image_paste;
 #[path = "units/loading_frames.rs"]
 mod loading_frames;
-#[path = "units/loading_startup.rs"]
-mod loading_startup;
 #[path = "units/long_paste.rs"]
 mod long_paste;
 #[path = "units/loop_routing.rs"]
 mod loop_routing;
 #[path = "units/loops.rs"]
 mod loops;
+#[path = "units/loops_edit.rs"]
+mod loops_edit;
 #[path = "units/loops_form.rs"]
 mod loops_form;
+#[path = "units/loops_run.rs"]
+mod loops_run;
 #[path = "units/markdown_cache.rs"]
 mod markdown_cache;
 #[path = "units/markdown_links.rs"]
@@ -355,6 +373,8 @@ mod paste_path;
 mod paste_path_list;
 #[path = "units/paste_probe.rs"]
 mod paste_probe;
+#[path = "units/paused_queue_commands.rs"]
+mod paused_queue_commands;
 #[path = "units/pending_commands.rs"]
 mod pending_commands;
 #[path = "units/plugins.rs"]
@@ -419,20 +439,6 @@ mod rename_usage;
 mod replay_drained;
 #[path = "units/resume_agent_config.rs"]
 mod resume_agent_config;
-#[path = "units/resume_attempts.rs"]
-mod resume_attempts;
-#[path = "units/resume_lease_lock.rs"]
-mod resume_lease_lock;
-#[path = "units/resume_picker_delete.rs"]
-mod resume_picker_delete;
-#[path = "units/resume_picker_exits.rs"]
-mod resume_picker_exits;
-#[path = "units/resume_picker_list.rs"]
-mod resume_picker_list;
-#[path = "units/resume_picker_outcomes.rs"]
-mod resume_picker_outcomes;
-#[path = "units/resume_picker_resuming.rs"]
-mod resume_picker_resuming;
 #[path = "units/resync_backend.rs"]
 mod resync_backend;
 #[path = "units/retry_presentation.rs"]
@@ -477,6 +483,30 @@ mod selection_spans;
 mod server_deadline;
 #[path = "units/server_notices.rs"]
 mod server_notices;
+#[path = "units/sessions_page_actions.rs"]
+mod sessions_page_actions;
+#[path = "units/sessions_page_folders.rs"]
+mod sessions_page_folders;
+#[path = "units/sessions_page_highlight.rs"]
+mod sessions_page_highlight;
+#[path = "units/sessions_page_leases.rs"]
+mod sessions_page_leases;
+#[path = "units/sessions_page_model.rs"]
+mod sessions_page_model;
+#[path = "units/sessions_page_outcomes.rs"]
+mod sessions_page_outcomes;
+#[path = "units/sessions_page_preview.rs"]
+mod sessions_page_preview;
+#[path = "units/sessions_page_rename.rs"]
+mod sessions_page_rename;
+#[path = "units/sessions_page_render.rs"]
+mod sessions_page_render;
+#[path = "units/sessions_page_reopen.rs"]
+mod sessions_page_reopen;
+#[path = "units/sessions_page_selection.rs"]
+mod sessions_page_selection;
+#[path = "units/sessions_page_trigger.rs"]
+mod sessions_page_trigger;
 #[path = "units/settle.rs"]
 mod settle;
 #[path = "units/setup_entrypoint.rs"]
@@ -634,6 +664,8 @@ mod transcript_images;
 mod transcript_patch;
 #[path = "units/transcript_tool_group.rs"]
 mod transcript_tool_group;
+#[path = "units/trust_gate.rs"]
+mod trust_gate;
 #[path = "units/trusted_folders_add.rs"]
 mod trusted_folders_add;
 #[path = "units/tts_request.rs"]
@@ -669,6 +701,8 @@ mod rail_prs;
 mod rail_spacing;
 #[path = "units/rail_switching.rs"]
 mod rail_switching;
+#[path = "units/rail_task_output.rs"]
+mod rail_task_output;
 #[path = "units/rail_tasks.rs"]
 mod rail_tasks;
 #[path = "units/rail_windows.rs"]

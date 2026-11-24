@@ -9,7 +9,7 @@ use vibe_rs::input::handle_key;
 use vibe_rs::server::{notification, Client};
 use vibe_rs::ui;
 
-use crate::support::{key, notify, render, rows};
+use crate::support::{ctrl, key, notify, press, queued, render, rows, send_key};
 
 fn wait_entry(status: &str) -> Value {
     json!({
@@ -90,7 +90,90 @@ fn a_wait_names_the_subagents_and_background_tasks_still_running() {
         let screen = screen(&mut app);
         assert!(screen.contains(expected), "{expected}\n{screen}");
         assert!(screen.contains("Esc/Ctrl+C to interrupt"), "{screen}");
-        assert!(screen.contains("send a message to steer"), "{screen}");
+        assert!(!screen.contains("· send a message"), "{screen}");
+        assert!(screen.contains("> Send a message to steer"), "{screen}");
+    }
+}
+
+#[test]
+fn a_narrow_waiting_line_shortens_its_label_then_drops_its_hints_then_its_timer_before_the_chips_shrink(
+) {
+    let waiting = || {
+        waiting_app(
+            vec![wait_entry("running")],
+            json!([child("a", "running")]),
+            json!([process("p", "running")]),
+        )
+    };
+    let cases = [
+        (
+            100,
+            "1 background task… (0s Esc/Ctrl+C to interrupt)",
+            "◐ 1 agent · ▪ 1 task",
+        ),
+        (
+            80,
+            "◷ Waiting… (0s Esc/Ctrl+C to interrupt)",
+            "◐ 1 agent · ▪ 1 task",
+        ),
+        (40, "◷ Waiting… (0s)", "◐ 1 agent · ▪ 1 task"),
+        (34, "◷ Waiting…  ", "◐ 1 agent · ▪ 1 task"),
+        (25, "◷ Waiting…  ", "◐ 1 · ▪ 1"),
+    ];
+    for (width, line, rail) in cases {
+        let mut app = waiting();
+        let screen = rows(&render(width, 12, |frame| ui::draw(&mut app, frame))).join("\n");
+        assert!(screen.contains(line), "{width}: {line}\n{screen}");
+        assert!(screen.contains(rail), "{width}: {rail}\n{screen}");
+    }
+    let mut tiny = waiting();
+    let screen = rows(&render(12, 12, |frame| ui::draw(&mut tiny, frame))).join("\n");
+    assert!(
+        screen.contains("◷ Waiting…") && !screen.contains("(0s"),
+        "{screen}"
+    );
+    let app = waiting();
+    assert!((1..120).all(|width| ui::loading::rows(&app, width) == 1));
+}
+
+#[test]
+fn a_shortened_waiting_line_keeps_its_typing_note() {
+    let mut app = waiting_app(
+        vec![wait_entry("running")],
+        json!([child("a", "running")]),
+        json!([process("p", "running")]),
+    );
+    let approval: vibe_rs::server::ApprovalCallback =
+        serde_json::from_value(json!({"callbackId": "a", "detail": {"kind": "approval"}})).unwrap();
+    app.approval.enqueue(approval).unwrap();
+    let screen = rows(&render(95, 12, |frame| ui::draw(&mut app, frame))).join("\n");
+    assert!(
+        screen.contains("◷ Waiting… (0s Esc/Ctrl+C to interrupt) typing detected, waiting…"),
+        "{screen}"
+    );
+}
+
+#[test]
+fn the_steer_placeholder_hides_while_keys_go_to_the_queue_or_reverse_search() {
+    let waiting = || waiting_app(vec![wait_entry("running")], json!([]), json!([]));
+    let mut selecting = waiting();
+    selecting.queue.items = vec![queued("m1", "queued prompt")];
+    press(&mut selecting, KeyCode::Up);
+    assert!(selecting.queue.selected.is_some());
+    let mut editing = waiting();
+    editing.queue.items = vec![queued("m1", "queued prompt")];
+    press(&mut editing, KeyCode::Up);
+    press(&mut editing, KeyCode::Enter);
+    for _ in 0.."queued prompt".len() {
+        press(&mut editing, KeyCode::Backspace);
+    }
+    assert!(editing.queue.editing);
+    let mut searching = waiting();
+    send_key(&mut searching, ctrl('r'));
+    assert!(searching.reverse_search.is_some());
+    for mut app in [selecting, editing, searching] {
+        let screen = screen(&mut app);
+        assert!(!screen.contains("Send a message to steer"), "{screen}");
     }
 }
 

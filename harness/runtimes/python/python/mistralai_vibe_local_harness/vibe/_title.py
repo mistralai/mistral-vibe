@@ -23,7 +23,10 @@ from mistralai_vibe_local_harness.vibe._credentials import (
     ProviderCredentialResult,
     ProviderCredentialSnapshot,
 )
-from mistralai_vibe_local_harness.vibe._projection import SKIPPED_USER_MESSAGE_OUTCOME
+from mistralai_vibe_local_harness.vibe._projection import (
+    SKIPPED_USER_MESSAGE_OUTCOME,
+    effect_output_text,
+)
 from mistralai_vibe_local_harness.vibe._runtime_config import LocalRuntimeAdapterConfig
 from mistralai_vibe_local_harness.vibe._utility_completion import (
     UtilityCompletionError,
@@ -203,6 +206,7 @@ def _title_completion_config(
         credentials=route.credentials,
         reasoning_field_name=route.reasoning_field_name,
         emits_finish_reason=route.emits_finish_reason,
+        tool_result_images=route.tool_result_images,
         extra_headers=dict(route.extra_headers),
         project_id=route.project_id,
         region=route.region,
@@ -313,8 +317,8 @@ def count_model_steps(entries: Sequence[JsonValue]) -> int:
         state = entry.get("state")
         if not isinstance(state, dict):
             continue
-        output = state.get("outputText")
-        if isinstance(output, str) and output.strip():
+        output = effect_output_text(state)
+        if output.strip():
             steps += 1
     return steps
 
@@ -410,8 +414,8 @@ def _tool_block(entry: JsonObject, *, policy: TitlePolicy) -> str | None:
             lines.append(f"tool({name}): {call_text[: policy.max_tool_chars]}")
     state = entry.get("state")
     if isinstance(state, dict):
-        output = state.get("outputText")
-        if isinstance(output, str) and output.strip():
+        output = effect_output_text(state)
+        if output.strip():
             lines.append(
                 f"tool result({name}): {output.strip()[: policy.max_tool_chars]}"
             )

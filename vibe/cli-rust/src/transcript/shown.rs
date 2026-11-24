@@ -6,6 +6,11 @@ use super::{FiredLoop, Transcript};
 use crate::server::{HistoryEntry, MessageEntry};
 
 impl Transcript {
+    /// Whether reasoning entries are shown (`show_thinking_nodes`).
+    pub fn shows_reasoning(&self) -> bool {
+        self.show_reasoning
+    }
+
     /// The last shown row above the queued prompts and the pinned banner.
     pub fn last_shown_row(&self) -> Option<&Value> {
         self.entries

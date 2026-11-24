@@ -17,11 +17,13 @@ from vibe.app_server._background_worker import BackgroundWorker
 from vibe.app_server._config_changes import ConfigChanges
 from vibe.app_server._experiments_service import ExperimentsService
 from vibe.app_server._keep_awake import KeepAwake
+from vibe.app_server._left_turns import LeftTurns
 from vibe.app_server._mcp_discovery_service import MCPDiscoveryService
 from vibe.app_server._missing_model_warnings import MissingModelWarnings
 from vibe.app_server._model_catalog_service import ModelCatalogService
 from vibe.app_server._open_sessions import OpenSessions
 from vibe.app_server._org_config_service import OrgConfigService
+from vibe.app_server._platform_credential_lenders import PlatformCredentialLenders
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._skill_shadows import ShadowWarnings
 from vibe.app_server._skill_store_cleanup import SkillStoreCleanup
@@ -143,27 +145,30 @@ def fake_process_services(
     model_catalog_server: FakeModelCatalogServer | None = None,
     clock: Callable[[], float] = time.time,
     keep_awake: KeepAwake | None = None,
+    background: BackgroundWorker | None = None,
     **org_config: Any,
 ) -> ProcessServices:
     """``org_config`` goes to ``OrgConfigService`` (policy, first wait...), as
-    does ``clock``. The
+    does ``clock``, which also drives the experiments service (unless given)
+    and the model catalog. The
     connector catalog fetches from the bootstrap endpoint unless given: tests
     mock it with ``respx``, and connectors are off by default. So does the
     experiments service: the shared test config keeps telemetry off, so a test
     about experiments turns it on and mocks the eval endpoint. The model
-    catalog fetches from ``model_catalog_server``, offline unless given, and
-    ages what it holds by ``clock`` too.
+    catalog fetches from ``model_catalog_server``, offline unless given. The
+    background jobs run in a worker process of their own unless
+    ``background`` is given.
     """
     server = org_server or FakeOrgConfigServer()
     catalog_server = model_catalog_server or FakeModelCatalogServer()
-    background = BackgroundWorker()
+    background = BackgroundWorker() if background is None else background
     return ProcessServices(
         org_config=OrgConfigService(fetch=server.fetch, clock=clock, **org_config),
         connector_catalog=connector_catalog or SharedConnectorCatalog(),
         oidc_tenants=OidcTenantResolver(),
         background=background,
         worktrees=WorktreeHousekeeping(background),
-        experiments=experiments or ExperimentsService(),
+        experiments=experiments or ExperimentsService(clock=clock),
         mcp_discovery=MCPDiscoveryService(),
         skill_shadows=ShadowWarnings(),
         missing_models=MissingModelWarnings(),
@@ -176,6 +181,8 @@ def fake_process_services(
         vibe_bot_sessions=VibeBotLocalSessions(
             client_id_file=VIBE_HOME.path / VIBE_BOT_CLIENT_ID_FILE
         ),
+        platform_credential_lenders=PlatformCredentialLenders(),
+        left_turns=LeftTurns(),
         # Looked up per fetch, so a test can patch the server's answers.
         model_catalog=ModelCatalogService(
             fetch=lambda api_base, credentials: catalog_server.fetch(

@@ -16,56 +16,50 @@ pub fn clean_output(content: &str) -> String {
         .join("\n")
 }
 
-/// Drop CSI, OSC, and other ESC-prefixed sequences.
+/// Drop every ECMA-48 escape sequence, 7-bit (`ESC x`) or 8-bit (C1).
 fn strip_ansi(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut at = 0;
     while at < chars.len() {
-        if chars[at] != '\x1b' {
-            out.push(chars[at]);
-            at += 1;
-            continue;
-        }
-        match chars.get(at + 1) {
-            // OSC: through BEL or the ESC `\` string terminator; unterminated,
-            // the two-byte form still eats the `ESC ]` pair.
-            Some(']') => match osc_end(&chars, at + 2) {
-                Some(end) => at = end,
-                None => at += 2,
-            },
-            // CSI: parameter bytes, intermediate bytes, then one final byte.
-            Some('[') => {
-                let params = skip_range(&chars, at + 2, '\u{30}', '\u{3f}');
-                let intermediates = skip_range(&chars, params, '\u{20}', '\u{2f}');
-                if matches!(chars.get(intermediates), Some(&c) if ('\u{40}'..='\u{7e}').contains(&c))
-                {
-                    at = intermediates + 1;
-                } else {
-                    out.push('\x1b');
-                    at += 1;
-                }
-            }
-            // Two-byte ESC sequences; `[` (0x5b) is excluded.
-            Some(&c)
-                if ('\u{40}'..='\u{5a}').contains(&c) || ('\u{5c}'..='\u{5f}').contains(&c) =>
-            {
-                at += 2;
-            }
-            _ => {
-                out.push('\x1b');
+        // A C1 control is the 8-bit form of `ESC` plus `c - 0x40`.
+        let (kind, body) = match (chars[at], chars.get(at + 1)) {
+            ('\x1b', Some(&next)) => (next, at + 2),
+            (c @ '\u{80}'..='\u{9f}', _) => (char::from(c as u8 - 0x40), at + 1),
+            (c, _) => {
+                out.push(c);
                 at += 1;
+                continue;
             }
-        }
+        };
+        // A sequence without its final byte drops only its introducer.
+        let end = match kind {
+            '[' => final_after(
+                &chars,
+                skip_range(&chars, body, '\u{30}', '\u{3f}'),
+                '\u{40}',
+            ),
+            '\u{20}'..='\u{2f}' => final_after(&chars, body, '\u{30}'),
+            ']' | 'P' | 'X' | '^' | '_' => Some(string_end(&chars, body).unwrap_or(body)),
+            '\u{30}'..='\u{7e}' => Some(body),
+            _ => None,
+        };
+        at = end.unwrap_or(at + 1);
     }
     out
 }
 
-/// Index just past an OSC body starting at `at`, or `None` when unterminated.
-fn osc_end(chars: &[char], mut at: usize) -> Option<usize> {
+/// Index just past the final byte (`lo..=~`) that ends intermediates from `at`.
+fn final_after(chars: &[char], at: usize, lo: char) -> Option<usize> {
+    let end = skip_range(chars, at, '\u{20}', '\u{2f}');
+    matches!(chars.get(end), Some(&c) if (lo..='~').contains(&c)).then_some(end + 1)
+}
+
+/// Index just past a string body (OSC, DCS, SOS, PM, APC) starting at `at`, or `None` when unterminated.
+fn string_end(chars: &[char], mut at: usize) -> Option<usize> {
     loop {
         match chars.get(at) {
-            Some('\x07') => return Some(at + 1),
+            Some('\x07' | '\u{9c}') => return Some(at + 1),
             Some('\x1b') => return (chars.get(at + 1) == Some(&'\\')).then_some(at + 2),
             Some(_) => at += 1,
             None => return None,
@@ -84,7 +78,7 @@ fn skip_range(chars: &[char], mut at: usize, lo: char, hi: char) -> usize {
 /// Control bytes except tab, dropped.
 fn strip_control(text: &str) -> String {
     text.chars()
-        .filter(|c| !matches!(c, '\u{0}'..='\u{8}' | '\u{b}'..='\u{1f}' | '\u{7f}'))
+        .filter(|&c| c == '\t' || !c.is_control())
         .collect()
 }
 

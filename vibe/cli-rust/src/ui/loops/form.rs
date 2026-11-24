@@ -1,4 +1,4 @@
-//! The add form: a label and an input per field, the focused label in the primary color; the instructions wrap over several rows.
+//! The add or edit form: a label and an input per field, the focused label in the primary color; the instructions wrap over several rows.
 
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::super::tab_cells::cells;
 use crate::app::App;
-use crate::loops::{Form, FormField, INSTRUCTIONS_ROWS};
+use crate::loops::{FieldArea, Form, FormField, INSTRUCTIONS_ROWS};
 use crate::ui::theme;
 
 /// Rows the form takes: one per one-line field, and the instructions' wrapped rows.
@@ -20,12 +20,14 @@ pub(super) fn height(form: &Form, width: u16) -> u16 {
 }
 
 pub(super) fn draw(app: &mut App, f: &mut Frame, body: Rect) {
+    crate::mouse::register_region(app, body, crate::mouse::MouseTarget::LoopsForm);
     let cursor_on = app.view.cursor_on;
     let Some(form) = app.loops.form.as_mut() else {
         return;
     };
     let muted = theme::muted_style().bg(theme::background());
     let focused_field = form.focused_field();
+    form.areas.clear();
     let mut y = body.y;
     for which in FormField::ALL {
         let focused = which == focused_field;
@@ -40,9 +42,26 @@ pub(super) fn draw(app: &mut App, f: &mut Frame, body: Rect) {
         let input = Rect::new(body.right() - width, y, width, 1);
         if which == FormField::Instructions && !form.instructions.text.is_empty() {
             form.width = text_width(width);
-            y += draw_instructions(f, form, input, focused && cursor_on);
+            let rows = draw_instructions(f, form, input, focused && cursor_on);
+            let row = Rect::new(body.x, y, body.width, rows);
+            let input = Rect {
+                height: rows,
+                ..input
+            };
+            form.areas.push(FieldArea {
+                field: which,
+                row,
+                input,
+            });
+            y += rows;
             continue;
         }
+        let row = Rect::new(body.x, y, body.width, 1);
+        form.areas.push(FieldArea {
+            field: which,
+            row,
+            input,
+        });
         let field = form.field(which);
         let placeholder = which.placeholder();
         crate::ui::proxy_setup::draw_field_or_placeholder(

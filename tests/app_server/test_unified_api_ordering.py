@@ -435,7 +435,7 @@ async def test_a_split_tool_read_keeps_the_call_when_the_session_moves_on(
         limit = len(entries) - result
         transport = api_transport(adapter)
         read_with_extensions = transport.read_with_extensions
-        runtime = adapter._session._runtime
+        runtime = harness.runtime_session._runtime
         assert runtime is not None
         appended = False
 

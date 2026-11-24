@@ -3,7 +3,9 @@
 A read gives a page of Session API entries; events then add, patch or
 complete one entry at a time. This module projects each API entry into the
 Vibe public entries it feeds, so an event recomputes only those entries
-instead of diffing the whole state.
+instead of diffing the whole state. The public history is kept as one list
+that an event splices, and an entry that did not change stays the same object,
+so the app server's later steps can skip what they saw already.
 
 An API entry feeds Vibe entries through the runtime's own record format, which
 ``_raw_entry`` rebuilds from the entry and its ``vibe.*`` annotations: a tool
@@ -58,6 +60,8 @@ class EntryChange:
 
     raw: JsonObject | None
     """The runtime-format record the entry came from, for per-entry telemetry."""
+    entry: PublicHistoryEntry
+    """The public entry as it is now."""
 
 
 @dataclass(slots=True)
@@ -80,6 +84,11 @@ class ApiHistoryProjection:
         self._slots: dict[str, _Slot] = {}
         self._results: dict[str, ToolResultHistoryEntry] = {}
         self._calls: dict[str, str] = {}
+        # Every slot's entries, in order: what ``history`` returns.
+        self._history: list[PublicHistoryEntry] = []
+        # How many leading entries of ``_history`` no event replaced since
+        # ``take_history`` last returned it.
+        self._unchanged = 0
 
     @property
     def raw_entries(self) -> list[JsonObject]:
@@ -92,11 +101,16 @@ class ApiHistoryProjection:
 
     @property
     def history(self) -> list[PublicHistoryEntry]:
-        return [
-            entry
-            for _, entry_id in self._order
-            for entry in self._slots[entry_id].history
-        ]
+        return list(self._history)
+
+    def take_history(self) -> tuple[list[PublicHistoryEntry], int]:
+        """The public history, and how many of its leading entries are the
+        objects the previous ``take_history`` returned there.
+
+        One reader takes it, to redo only what changed since its last turn.
+        """
+        unchanged, self._unchanged = self._unchanged, len(self._history)
+        return list(self._history), unchanged
 
     def reset(self, entries: Sequence[HistoryEntry]) -> list[PublicHistoryEntry]:
         """Replace everything from a read's page of API entries; return the public history."""
@@ -117,6 +131,8 @@ class ApiHistoryProjection:
                 self._calls[entry.tool_call_id] = entry.id
             self._order.append((entry.index, entry.id))
             self._slots[entry.id] = self._project(entry)
+        self._history = self._flattened()
+        self._unchanged = 0
         return self.history
 
     def apply(self, payload: HistoryEvent) -> list[EntryChange]:
@@ -153,10 +169,37 @@ class ApiHistoryProjection:
             changes.extend(
                 self._replace(entry_id, _Slot(slot.raw, self._public(slot.raw)))
             )
+        self._history = self._flattened()
+        self._unchanged = 0
         return changes
 
+    def _flattened(self) -> list[PublicHistoryEntry]:
+        return [
+            entry
+            for _, entry_id in self._order
+            for entry in self._slots[entry_id].history
+        ]
+
+    def _span(self, entry_id: str) -> tuple[int, int]:
+        """Where ``entry_id``'s slot is in ``history``; empty for a new slot.
+
+        Counted from the end, since events change the latest entries: the cost
+        is the number of slots after this one, not the length of the history.
+        """
+        end = len(self._history)
+        for _, other_id in reversed(self._order):
+            if other_id == entry_id:
+                break
+            end -= len(self._slots[other_id].history)
+        slot = self._slots.get(entry_id)
+        return end - (len(slot.history) if slot is not None else 0), end
+
     def _reproject(self, entry: HistoryEntry) -> list[EntryChange]:
-        return self._replace(entry.id, self._project(entry))
+        start, end = self._span(entry.id)
+        changes = self._replace(entry.id, self._project(entry))
+        self._history[start:end] = self._slots[entry.id].history
+        self._unchanged = min(self._unchanged, start)
+        return changes
 
     def _project(self, entry: HistoryEntry) -> _Slot:
         result = None
@@ -185,7 +228,7 @@ class ApiHistoryProjection:
                 # Keep the old object so callers can skip it by identity.
                 history.append(old)
                 continue
-            changes.append(EntryChange(slot.raw))
+            changes.append(EntryChange(slot.raw, entry))
             history.append(entry)
         self._slots[entry_id] = _Slot(slot.raw, history)
         return changes

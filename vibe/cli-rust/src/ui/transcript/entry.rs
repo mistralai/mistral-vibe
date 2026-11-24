@@ -133,7 +133,7 @@ fn render_entry(
                 cache,
             );
         }
-        H::Interrupt(_) => push_interrupt(&mut content),
+        H::Interrupt(marker) => push_interrupt(&mut content, marker.retryable),
         H::Callback(_) => {}
         H::Notice(notice) => push_notice(
             &mut content,
@@ -145,6 +145,7 @@ fn render_entry(
         H::Checkpoint(checkpoint) => push_checkpoint(
             &mut content,
             checkpoint,
+            content_width,
             entry.local,
             in_progress,
             pulse_frame,
@@ -190,14 +191,18 @@ fn push_group_gap(lines: &mut LinkedLines, grouped: bool) {
     }
 }
 
-fn push_interrupt(lines: &mut LinkedLines) {
-    lines.push(Line::from(vec![
+fn push_interrupt(lines: &mut LinkedLines, retryable: bool) {
+    let mut spans = vec![
         inset_prefix(theme::text(theme::foreground())),
         Span::styled(
             "Interrupted · What should Vibe do instead?",
             theme::text(theme::warning()),
         ),
-    ]));
+    ];
+    if retryable {
+        spans.push(Span::styled(" Or /retry to resume.", theme::muted_style()));
+    }
+    lines.push(Line::from(spans));
 }
 
 pub(super) fn expand_marker(expanded: bool) -> &'static str {

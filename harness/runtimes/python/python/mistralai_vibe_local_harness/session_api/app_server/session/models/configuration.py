@@ -22,6 +22,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from ....session_values import (
+    EXPERIMENTAL,
     INSTRUCTIONS_CONTENT_PATTERN,
     INSTRUCTIONS_KEY_MAX_LENGTH,
     INSTRUCTIONS_KEY_PATTERN,
@@ -736,6 +737,24 @@ class AgentConfig(SessionModel):
 
     completion: dict[str, JsonValue] = Field(
         default_factory=lambda: {"type": "mistral", "model": "mistral-small-latest"}
+    )
+    # Null is left out of the wire, so a server that predates the field accepts a
+    # configuration without a compaction model.
+    compaction_completion: dict[str, JsonValue] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra=EXPERIMENTAL,
+        description=(
+            "Experimental: a minor release may change or remove it. The model that writes "
+            "compaction summaries, with the same shape as `completion`. Null or omitted "
+            "compacts with `completion`. A summary request is sized to this model's context "
+            "window and an image reaches it only when its `input_modalities` include images. "
+            "Its `max_tokens` caps the output of every compaction request, manual or "
+            "automatic, and is sent as written. When this model's context window is known, a "
+            "summary request leaves room for it in that window. A config write may change the "
+            "keys a write may change in `completion`, and add a compaction model that differs "
+            "from `completion` only in those keys; it cannot remove it."
+        ),
     )
     name: str = "sdk_agent"
     max_iterations: Annotated[int | None, Field(gt=0)] = None

@@ -1,0 +1,8 @@
+[
+ {
+  "method": "workspace/trust/status",
+  "params": {
+   "cwd": "/tmp/vibe_e2e_fixtures/cd"
+  }
+ }
+]

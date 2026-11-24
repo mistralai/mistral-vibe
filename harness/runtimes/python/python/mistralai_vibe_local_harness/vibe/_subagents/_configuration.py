@@ -375,6 +375,7 @@ class _CompletionOverlay(TypedDict, total=False):
     credentials: ProviderCredentialProvider
     reasoning_field_name: str
     emits_finish_reason: bool
+    tool_result_images: bool
     extra_headers: dict[str, str]
     project_id: str
     region: str
@@ -413,6 +414,7 @@ def _completion_overlay(
             "credentials": provider.credentials,
             "reasoning_field_name": provider.reasoning_field_name,
             "emits_finish_reason": provider.emits_finish_reason,
+            "tool_result_images": provider.tool_result_images,
             "extra_headers": dict(provider.extra_headers),
             "project_id": provider.project_id,
             "region": provider.region,
@@ -432,6 +434,7 @@ def _destination(adapter: LocalRuntimeAdapterConfig) -> LocalProviderRoute:
         credentials=adapter.credentials,
         reasoning_field_name=adapter.reasoning_field_name,
         emits_finish_reason=adapter.emits_finish_reason,
+        tool_result_images=adapter.tool_result_images,
         extra_headers=dict(adapter.extra_headers),
         project_id=adapter.project_id,
         region=adapter.region,

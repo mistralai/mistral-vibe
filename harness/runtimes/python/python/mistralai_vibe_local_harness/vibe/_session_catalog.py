@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from mistralai_vibe_local_harness.session_protocol import PublicSession
 from mistralai_vibe_local_harness.vibe._projection import with_session_preview
 from mistralai_vibe_local_harness.vibe._storage import (
-    STORE_FORMAT_MINOR,
+    READABLE_STORE_FORMAT_MINOR,
     CurrentPointerV1,
     HeldGeneration,
     ImportProvenanceV1,
@@ -335,7 +335,7 @@ class UnifiedSessionCatalog:
         current = CurrentPointerV1.model_validate(current_value)
         if current.session_id != session_id:
             raise ValueError("CURRENT names another session")
-        if current.store_format_minor > STORE_FORMAT_MINOR:
+        if current.store_format_minor > READABLE_STORE_FORMAT_MINOR:
             raise ValueError("CURRENT requires a newer store reader")
         digest = _PointerDigest(
             signature=signature,

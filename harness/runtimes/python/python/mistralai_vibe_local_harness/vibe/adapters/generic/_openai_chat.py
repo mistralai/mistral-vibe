@@ -13,8 +13,10 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._base import (
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic._image import to_data_uri
 from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
+    REASONING_BLOCK_TYPES,
     AvailableTool,
     FunctionCall,
+    ImageAttachment,
     LLMChunk,
     LLMMessage,
     Role,
@@ -30,17 +32,88 @@ from mistralai_vibe_local_harness.vibe.completion_profile import (
 
 TOOL_RESULT_IMAGE_PLACEHOLDER = "[Image]"
 
+# LiteLLM signs the thinking of models without signed reasoning with this
+# placeholder. Such a block repeats `reasoning_content`, and Anthropic models
+# reject its signature.
+_PLACEHOLDER_SIGNATURE = "mistral"
+
 
 def _tool_result_text(msg: LLMMessage) -> str:
-    """A tool result's content as Chat Completions takes it: text only.
+    """A tool result's content as text, for a provider without tool-result images.
 
-    The format takes images on user messages only, so a tool result is sent as
-    to a model without image input: each image becomes `[Image]`, after the
-    result's text, and the turn goes on. Resources are text already.
+    Each image becomes `[Image]` after the result's text, as for a model
+    without image input, and the turn goes on. Resources are text already.
     """
     parts = [msg.content] if msg.content else []
     parts.extend(TOOL_RESULT_IMAGE_PLACEHOLDER for _ in msg.images or ())
     return "\n\n".join(parts)
+
+
+def _tool_result_content(
+    msg: LLMMessage, provider: ProviderView
+) -> str | list[dict[str, Any]]:
+    """A tool result's content: its text then its images, as content parts.
+
+    The images stay in the tool message, never in a user message: content a
+    tool returns must not reach the model with the user's authority. Unless the
+    provider sets `tool_result_images` (the Chat Completions spec allows only
+    text in a tool message), each image becomes `[Image]`.
+    """
+    if not msg.images or not provider.tool_result_images:
+        return _tool_result_text(msg)
+    return _text_and_image_parts(msg.content, msg.images)
+
+
+def _text_and_image_parts(
+    text: str | None, images: Sequence[ImageAttachment]
+) -> list[dict[str, Any]]:
+    """Chat Completions content parts: ``text``, when there is some, then ``images``."""
+    parts: list[dict[str, Any]] = []
+    if text:
+        parts.append({"type": "text", "text": text})
+    parts.extend(
+        {"type": "image_url", "image_url": {"url": to_data_uri(att)}} for att in images
+    )
+    return parts
+
+
+def _replays_thinking_blocks(model_name: str) -> bool:
+    """Whether the model reads signed `thinking_blocks` on assistant messages.
+
+    Only Anthropic models can use them, and some OpenAI-compatible APIs reject
+    unknown message fields, so no other model is sent the field.
+    """
+    return "claude" in model_name.rsplit("/", 1)[-1].lower()
+
+
+def _signed_thinking_blocks(
+    fragments: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The complete, replayable thinking blocks of a reply's `thinking_blocks`.
+
+    Anthropic models through LiteLLM-style gateways stream a thinking block as
+    text fragments followed by a fragment carrying its `signature`, which closes
+    the block. A reply that is not streamed carries complete blocks. Thinking
+    without a real signature cannot be sent back and is dropped: its text stays
+    in `reasoning_content`.
+    """
+    blocks: list[dict[str, Any]] = []
+    text = ""
+    for fragment in fragments:
+        match fragment.get("type"):
+            case "redacted_thinking" if fragment.get("data"):
+                blocks.append({"type": "redacted_thinking", "data": fragment["data"]})
+            case "thinking":
+                text += fragment.get("thinking") or ""
+                signature = fragment.get("signature")
+                if signature and signature != _PLACEHOLDER_SIGNATURE:
+                    blocks.append({
+                        "type": "thinking",
+                        "thinking": text,
+                        "signature": signature,
+                    })
+                    text = ""
+    return blocks
 
 
 class OpenAIAdapter(APIAdapter):
@@ -58,42 +131,62 @@ class OpenAIAdapter(APIAdapter):
     ) -> dict[str, Any]:
         if field_name != "reasoning_content" and field_name in msg_dict:
             msg_dict["reasoning_content"] = msg_dict.pop(field_name)
+        if thinking_blocks := msg_dict.pop("thinking_blocks", None):
+            msg_dict["reasoning_payloads"] = thinking_blocks
         return msg_dict
 
-    def _user_with_images_to_parts(
-        self, msg_dict: dict[str, Any], source: LLMMessage
+    def _with_images(
+        self, msg_dict: dict[str, Any], source: LLMMessage, provider: ProviderView
     ) -> dict[str, Any]:
-        if source.role == Role.tool and source.images:
-            msg_dict["content"] = _tool_result_text(source)
+        """Put the images of a user message or a tool result into its content."""
+        if not source.images:
             return msg_dict
-        if source.role != Role.user or not source.images:
-            return msg_dict
-        parts: list[dict[str, Any]] = []
-        text = msg_dict.get("content")
-        if isinstance(text, str) and text:
-            parts.append({"type": "text", "text": text})
-        parts.extend(
-            {"type": "image_url", "image_url": {"url": to_data_uri(att)}}
-            for att in source.images
+        match source.role:
+            case Role.user:
+                msg_dict["content"] = _text_and_image_parts(
+                    source.content, source.images
+                )
+            case Role.tool:
+                msg_dict["content"] = _tool_result_content(source, provider)
+            case _:
+                pass
+        return msg_dict
+
+    def _convert_message(
+        self, msg: LLMMessage, provider: ProviderView, *, replay_thinking: bool
+    ) -> dict[str, Any]:
+        msg_dict = self._with_images(
+            self._reasoning_to_api(
+                msg.model_dump(
+                    exclude_none=True,
+                    exclude={"reasoning_payloads": True, "images": True},
+                ),
+                provider.reasoning_field_name,
+            ),
+            msg,
+            provider,
         )
-        msg_dict["content"] = parts
+        # Anthropic models accept earlier thinking back only as signed blocks.
+        if (
+            replay_thinking
+            and msg.role == Role.assistant
+            and (
+                thinking_blocks := [
+                    block
+                    for block in msg.reasoning_payloads or []
+                    if block.get("type") in REASONING_BLOCK_TYPES
+                ]
+            )
+        ):
+            msg_dict["thinking_blocks"] = thinking_blocks
         return msg_dict
 
     def _convert_messages(
-        self, messages: Sequence[LLMMessage], provider: ProviderView
+        self, messages: Sequence[LLMMessage], provider: ProviderView, model_name: str
     ) -> list[dict[str, Any]]:
-        field_name = provider.reasoning_field_name
+        replay_thinking = _replays_thinking_blocks(model_name)
         return [
-            self._user_with_images_to_parts(
-                self._reasoning_to_api(
-                    msg.model_dump(
-                        exclude_none=True,
-                        exclude={"reasoning_payloads": True, "images": True},
-                    ),
-                    field_name,
-                ),
-                msg,
-            )
+            self._convert_message(msg, provider, replay_thinking=replay_thinking)
             for msg in messages
         ]
 
@@ -113,7 +206,7 @@ class OpenAIAdapter(APIAdapter):
         top_p: float | None = None,
         reasoning_support: ReasoningSupport | None = None,
     ) -> PreparedRequest:
-        converted_messages = self._convert_messages(messages, provider)
+        converted_messages = self._convert_messages(messages, provider, model_name)
 
         payload = build_chat_payload(
             model_name=model_name,
@@ -177,33 +270,42 @@ class OpenAIAdapter(APIAdapter):
 
         return LLMChunk(message=message, stop=stop)
 
+    def finish_message(self, message: LLMMessage) -> LLMMessage:
+        # A streamed thinking block is complete only once its signature arrives.
+        return message.model_copy(
+            update={
+                "reasoning_payloads": _signed_thinking_blocks(
+                    message.reasoning_payloads or []
+                )
+                or None
+            }
+        )
+
 
 class ReasoningAdapter(APIAdapter):
     """OpenAI-compatible adapter for providers that emit structured thinking blocks."""
 
     endpoint: ClassVar[str] = "/chat/completions"
 
-    def _convert_message(self, msg: LLMMessage) -> dict[str, Any]:
+    def _convert_message(
+        self, msg: LLMMessage, provider: ProviderView
+    ) -> dict[str, Any]:
         match msg.role:
             case Role.system:
                 return {"role": "system", "content": msg.content or ""}
             case Role.user:
                 if msg.images:
-                    parts: list[dict[str, Any]] = []
-                    if msg.content:
-                        parts.append({"type": "text", "text": msg.content})
-                    parts.extend(
-                        {"type": "image_url", "image_url": {"url": to_data_uri(att)}}
-                        for att in msg.images
-                    )
-                    return {"role": "user", "content": parts}
+                    return {
+                        "role": "user",
+                        "content": _text_and_image_parts(msg.content, msg.images),
+                    }
                 return {"role": "user", "content": msg.content or ""}
             case Role.assistant:
                 return self._convert_assistant_message(msg)
             case Role.tool:
                 result: dict[str, Any] = {
                     "role": "tool",
-                    "content": _tool_result_text(msg),
+                    "content": _tool_result_content(msg, provider),
                     "tool_call_id": msg.tool_call_id,
                 }
                 if msg.name:
@@ -258,7 +360,7 @@ class ReasoningAdapter(APIAdapter):
         top_p: float | None = None,
         reasoning_support: ReasoningSupport | None = None,
     ) -> PreparedRequest:
-        converted_messages = [self._convert_message(msg) for msg in messages]
+        converted_messages = [self._convert_message(msg, provider) for msg in messages]
 
         payload = build_chat_payload(
             model_name=model_name,

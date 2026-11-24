@@ -1,5 +1,6 @@
 //! Transcript reducer: raw JSON and its typed render projection, kept in sync by id.
 
+mod folds;
 mod goal_notice;
 pub(crate) mod grouping;
 mod hook_anchor;
@@ -97,6 +98,8 @@ pub struct TranscriptEntry<'a> {
     pub follows_user: bool,
     /// The next user prompt is visually packed against this prompt.
     pub followed_by_user: bool,
+    /// A message the user steered into the running turn.
+    pub steer: bool,
     /// Opens the queued run, so it paints the `» Queued` header above itself.
     pub queue_header: bool,
     /// What's-new body mounted below history.
@@ -555,6 +558,7 @@ impl Transcript {
             pending: stored.pending,
             follows_user: stored.follows_user,
             followed_by_user: stored.followed_by_user,
+            steer: crate::server::is_steer(&stored.raw),
             queue_header: stored.pending && !self.previous_is_pending(index),
             after_history: stored.after_history,
             stream_delta: stored.stream_delta.as_deref(),

@@ -313,12 +313,10 @@ async def test_a_vibe_home_windows_denies_is_named_and_not_reported(
 def _harness_error(code: str) -> SessionBackendError:
     pytest.importorskip("mistralai_vibe_local_harness")
     from mistralai_vibe_local_harness.vibe import HarnessSessionError
-    from vibe.app_server._unified_harness_backend_adapter import (
-        _raise_session_backend_error,
-    )
+    from vibe.app_server._harness_errors import raise_session_backend_error
 
     with pytest.raises(SessionBackendError) as raised:
-        _raise_session_backend_error(HarnessSessionError(code, f"{code} in session 1"))
+        raise_session_backend_error(HarnessSessionError(code, f"{code} in session 1"))
     return raised.value
 
 

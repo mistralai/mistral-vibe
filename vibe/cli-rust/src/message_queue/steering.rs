@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use super::QueueEvent;
 use crate::app::{App, Status};
-use crate::server::{method, Client, TurnQueueSteerParams};
+use crate::server::{is_steer, method, Client, TurnQueueSteerParams};
 
 pub fn is_active(app: &App) -> bool {
     app.queue.steering.is_some()
@@ -115,7 +115,7 @@ pub(crate) fn settled(
 /// The server also steers the queue head on its own into a turn that only waits.
 pub fn history_added(app: &mut App, client: &Arc<Client>, params: &serde_json::Value) -> bool {
     let entry = &params["entry"];
-    if entry["type"] != "message" || entry["role"] != "user" || entry["source"] != "turn_steer" {
+    if entry["type"] != "message" || entry["role"] != "user" || !is_steer(entry) {
         return false;
     }
     let Some(entry_id) = entry["id"].as_str() else {
@@ -165,9 +165,7 @@ pub fn reconcile_snapshot(
     let steered = server_message_id.as_deref().is_some_and(|message_id| {
         state.history.as_ref().is_some_and(|history| {
             history.iter().any(|entry| {
-                entry["id"] == message_id
-                    && entry["role"] == "user"
-                    && entry["source"] == "turn_steer"
+                entry["id"] == message_id && entry["role"] == "user" && is_steer(entry)
             })
         })
     });

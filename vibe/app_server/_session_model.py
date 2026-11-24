@@ -128,7 +128,7 @@ _DEFAULT_LEVEL_LAYERS = frozenset({
 async def model_default_thinking(
     orchestrator: ConfigOrchestrator[VibeConfigSchema], alias: str
 ) -> str | None:
-    """The level this model runs on when no one chose one: the GrowthBook
+    """The level this model runs on when no one chose one: the catalog
     filter's when it sets one, else the catalog's or the built-in one.
 
     None when none of those layers sets a level for it, as for a model only the
@@ -174,8 +174,7 @@ async def set_session_reasoning_effort_override(
 
     Through the same translation a ``config/write`` uses: a model that no
     durable layer declares is materialized with its identity fields, except
-    one the catalog or GrowthBook layer defines, which keeps a settings-only
-    entry.
+    one the catalog layer defines, which keeps a settings-only entry.
     """
     alias = orchestrator.config.get_active_model().alias
     if not model_thinking_is_session_writable(orchestrator, alias):

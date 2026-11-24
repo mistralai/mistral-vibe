@@ -153,6 +153,42 @@ pub fn session_branched(app: &App, source_session_id: &str, new_session_id: &str
     );
 }
 
+/// A `/cd` ended. `status` is success, cancelled or error; `reason` says why it
+/// did not move: refused_busy, trust_declined, not_a_directory or error. Never a path.
+pub fn session_relocation_done(app: &App, status: &str, reason: Option<&str>) {
+    record(
+        app,
+        event::SESSION_RELOCATION_DONE,
+        bmap(json!({"status": status, "reason": reason})),
+    );
+}
+
+/// The session list opened; `trigger` is left, sessions_command, resume_command or startup.
+pub fn session_search_opened(app: &App, trigger: &str) {
+    record(
+        app,
+        event::SESSION_SEARCH_OPENED,
+        bmap(json!({"trigger": trigger})),
+    );
+}
+
+/// One action on a session of the list; never a path, title or search text.
+pub fn session_search_selected(
+    app: &App,
+    action: &str,
+    position: Option<usize>,
+    search_active: bool,
+    same_project: Option<bool>,
+) {
+    let properties = json!({
+        "action": action,
+        "position": position,
+        "search_active": search_active,
+        "same_project": same_project,
+    });
+    record(app, event::SESSION_SEARCH_SELECTED, bmap(properties));
+}
+
 /// A `/trusted-folders` change the server stored; the path never leaves the machine.
 pub fn trusted_folder_updated(app: &App, action: &str) {
     record(
@@ -269,4 +305,10 @@ pub mod event {
     pub const READ_ALOUD_REQUESTED: &str = "vibe.read_aloud.requested";
     pub const READ_ALOUD_PLAY_STARTED: &str = "vibe.read_aloud.play_started";
     pub const READ_ALOUD_ENDED: &str = "vibe.read_aloud.ended";
+    /// A `/cd` ended: `status` success, cancelled or error, with a `reason` when it did not move.
+    pub const SESSION_RELOCATION_DONE: &str = "vibe.session_relocation.done";
+    /// The Sessions page, the list of every session, opened.
+    pub const SESSION_SEARCH_OPENED: &str = "vibe.session_search.opened";
+    /// An action on a session row of that list (open, new, archive, rename, filters).
+    pub const SESSION_SEARCH_SELECTED: &str = "vibe.session_search.selected";
 }

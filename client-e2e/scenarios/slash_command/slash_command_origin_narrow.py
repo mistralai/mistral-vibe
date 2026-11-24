@@ -27,4 +27,4 @@ handshake = {"runtime/read": {"runtime": {"skills": _SKILLS}}}
 
 screen_contains = ("project · Summarize", "user · Apply the")
 
-timeline: Timeline = ["/c", resize(30, 32)]
+timeline: Timeline = ["/c-s", resize(30, 32)]

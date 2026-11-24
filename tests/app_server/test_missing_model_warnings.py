@@ -7,9 +7,7 @@ import tomllib
 import pytest
 import tomli_w
 
-from tests.stubs.experiment_responses import routing_eval_response
 from tests.stubs.local_sandbox import build_trusted_project
-from vibe.app_server import _cached_layers as cached_layers_module
 from vibe.app_server.local import LocalHarnessHost, LocalHarnessOptions
 from vibe.app_server.protocol import SessionOptions
 from vibe.core.agents.models import ApprovalPolicyName
@@ -20,8 +18,6 @@ pytestmark = [
         sys.platform == "win32", reason="shares the POSIX sandbox test fixtures"
     ),
 ]
-
-_ROUTED = "routed-model"
 
 
 def _write_user_config(config_dir: Path, **values: object) -> None:
@@ -34,14 +30,7 @@ def _write_user_config(config_dir: Path, **values: object) -> None:
 async def _log_of_two_sessions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> str:
-    """Open two sessions in one process, the GrowthBook eval cached as at a
-    warm start: the routing experiment serves ``_ROUTED``.
-    """
-    monkeypatch.setattr(
-        cached_layers_module,
-        "load_cached_eval_response",
-        lambda _config, _credentials=None: routing_eval_response(_ROUTED),
-    )
+    """Open two sessions in one process."""
     project = build_trusted_project(tmp_path / "project", monkeypatch)
     options = LocalHarnessOptions(
         session_options=SessionOptions(
@@ -60,25 +49,6 @@ async def _log_of_two_sessions(
     finally:
         await host.close()
     return caplog.text
-
-
-@pytest.mark.asyncio
-async def test_a_pin_the_cached_experiment_serves_is_not_logged_missing(
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    _write_user_config(
-        config_dir,
-        active_model=_ROUTED,
-        models=[{"alias": _ROUTED, "thinking": "high"}],
-    )
-
-    log = await _log_of_two_sessions(tmp_path, monkeypatch, caplog)
-
-    assert "is not available" not in log
-    assert "are ignored" not in log
 
 
 @pytest.mark.asyncio

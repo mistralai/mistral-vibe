@@ -37,7 +37,11 @@ from mistralai_vibe_local_harness.session_api.app_server.session.models import (
     Event,
     SessionEvent,
 )
-from mistralai_vibe_local_harness.vibe import _local_actions, create_harness_host
+from mistralai_vibe_local_harness.vibe import (
+    UnifiedHarnessSessionBackend,
+    _local_actions,
+    create_harness_host,
+)
 from mistralai_vibe_local_harness.vibe._session_api_extensions import (
     StreamBatch,
     VibeExtensionEvent,
@@ -78,6 +82,9 @@ class ApiAdapter:
     adapter: UnifiedHarnessBackendAdapter
     subscription: SessionEventSubscription
     events: AsyncIterator[SessionBackendEvent]
+    # The local runtime's Session behind the adapter, for tests that drive its
+    # internals; the adapter itself only knows it as a ``RuntimeSessionPort``.
+    runtime_session: UnifiedHarnessSessionBackend
 
 
 async def api_host(
@@ -142,7 +149,13 @@ async def api_adapter(
     )
     events = cast(AsyncIterator[SessionBackendEvent], subscription.events)
     try:
-        yield ApiAdapter(host, adapter, subscription, events)
+        yield ApiAdapter(
+            host,
+            adapter,
+            subscription,
+            events,
+            cast(UnifiedHarnessSessionBackend, adapter._session),
+        )
     finally:
         await cast(Any, subscription.events).aclose()
         await host.shutdown()

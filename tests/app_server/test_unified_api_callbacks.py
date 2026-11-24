@@ -317,7 +317,7 @@ async def test_a_rejected_delivery_closes_the_approval_through_the_session_api(
                 session_id=adapter.session_id, message=[TextContentBlock(text="Go")]
             )
         )
-        session = adapter._session
+        session = harness.runtime_session
         turn_id = session.active_turn_id
         assert turn_id is not None
         approval = asyncio.create_task(
@@ -392,7 +392,7 @@ async def test_open_approvals_for_a_reconnect_come_from_the_session_api(
                 session_id=adapter.session_id, message=[TextContentBlock(text="Go")]
             )
         )
-        session = adapter._session
+        session = harness.runtime_session
         turn_id = session.active_turn_id
         assert turn_id is not None
         approval = asyncio.create_task(
@@ -696,7 +696,7 @@ async def test_an_approval_the_stream_has_not_brought_is_sent_live_not_on_reconn
                 session_id=adapter.session_id, message=[TextContentBlock(text="Go")]
             )
         )
-        session = adapter._session
+        session = harness.runtime_session
         turn_id = session.active_turn_id
         assert turn_id is not None
         monkeypatch.setattr(SessionApiPath, "_batch_events", held)
@@ -769,7 +769,7 @@ async def test_open_callbacks_read_without_a_stream_come_from_a_read_of_the_root
                 session_id=adapter.session_id, message=[TextContentBlock(text="Go")]
             )
         )
-        session = adapter._session
+        session = harness.runtime_session
         turn_id = session.active_turn_id
         assert turn_id is not None
         approval = asyncio.create_task(
@@ -835,7 +835,7 @@ async def test_a_read_gives_an_open_approval_the_time_its_live_event_gave_it(
                 session_id=adapter.session_id, message=[TextContentBlock(text="Go")]
             )
         )
-        session = adapter._session
+        session = harness.runtime_session
         turn_id = session.active_turn_id
         assert turn_id is not None
         await asyncio.sleep(0.05)

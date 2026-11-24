@@ -2,6 +2,11 @@
 
 A plugin is addressed by its manifest name, which is also what
 ``disabled_plugins`` lists.
+
+The user's AI Registry plugins are listed too, as the ``remote`` scope
+(``vibe.core.plugins.remote``): those that are on resolve from their download,
+those that are off from the last synced list. Their switch writes to le-chat,
+the choice Vibe Work reads, rather than to ``disabled_plugins``.
 """
 
 from __future__ import annotations
@@ -9,11 +14,12 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence, Set as AbstractSet
 from dataclasses import replace
+import json
 import logging
 from pathlib import Path
 from typing import Any, cast
 
-from pydantic import ValidationError
+from pydantic import JsonValue, ValidationError
 
 from vibe.app_server._dispatch import RequestFailure, method_not_found
 from vibe.app_server._model import ProtocolModel, validate_wire
@@ -29,6 +35,7 @@ from vibe.app_server.protocol import (
     LocalPluginConnector,
     LocalPluginConnectorStatus,
     LocalPluginIssue,
+    LocalPluginStarterPrompt,
     LocalPluginSummary,
     LocalSkillRefusalData,
     PluginsLocalListParams,
@@ -36,15 +43,18 @@ from vibe.app_server.protocol import (
     PluginsLocalSetEnabledParams,
     PluginsLocalSetEnabledResponse,
     ProtocolErrorCode,
+    RemoteRegistryPluginRef,
 )
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.config.models import MCPServer, MCPStdio
 from vibe.core.config.orchestrator import ConfigOrchestrator
 from vibe.core.paths import VIBE_HOME
+from vibe.core.platform_auth import PlatformCredentialFactory
 from vibe.core.plugins import (
     InstalledPlugin,
     InstalledPluginStatus,
+    PluginDescriptor,
     PluginResolver,
     PluginToggles,
     ResolvedPluginSet,
@@ -52,6 +62,21 @@ from vibe.core.plugins import (
     set_plugin_enabled,
     user_facing_issues,
 )
+from vibe.core.plugins._compatibility import typescript_identifier
+from vibe.core.plugins.remote import (
+    RemotePlugin,
+    RemotePluginsError,
+    RemotePluginsState,
+    current_remote_plugins_state,
+    refresh_remote_plugins,
+    remote_plugin_for_root,
+    remote_plugin_pending,
+    remote_plugins_read_error,
+    remote_plugins_syncing,
+    set_remote_plugin_enabled,
+)
+from vibe.core.plugins.unsupported import unsupported_parts
+from vibe.core.plugins.views import plugin_views
 from vibe.core.skills.models import SkillScope
 
 __all__ = ["LOCAL_PLUGIN_METHODS", "ConnectorCatalogReader", "LocalPluginsController"]
@@ -78,12 +103,14 @@ class LocalPluginsController:
         load_orchestrator: OrchestratorLoader,
         builtin_plugin_roots: Callable[[], Sequence[Path]],
         connector_catalog: ConnectorCatalogReader | None = None,
+        credentials: PlatformCredentialFactory | None = None,
     ) -> None:
         """``session_files(None)`` is the user's own config, the one toggles write."""
         self._session_files = session_files
         self._load_orchestrator = load_orchestrator
         self._builtin_plugin_roots = builtin_plugin_roots
         self._connector_catalog = connector_catalog
+        self._credentials = credentials
 
     async def dispatch(self, method: str, raw_params: dict[str, Any]) -> ProtocolModel:
         try:
@@ -103,19 +130,60 @@ class LocalPluginsController:
 
     async def _list(self, params: PluginsLocalListParams) -> PluginsLocalListResponse:
         project_root = _project_root(params.project_root)
+        user = await self._load_orchestrator(self._session_files(None))
+        # Remote plugins are the user's, not a checkout's: synced once, on the
+        # user's own listing. Not while a sync runs: the page polls the list
+        # during a download, and each read must answer at once, not queue
+        # another sync behind it.
+        if project_root is None and not remote_plugins_syncing():
+            await refresh_remote_plugins(
+                user.config, self._credentials, trigger="plugins_page"
+            )
         orchestrator, resolution = await self._read(
             project_root, params.trust_workspace
         )
         toggles = _toggles(orchestrator)
+        remote = current_remote_plugins_state(user.config, self._credentials)
         catalog = await self._read_connector_catalog(orchestrator)
+        listed = _listed(resolution, project_root)
         return PluginsLocalListResponse(
+            remote_syncing=project_root is None and remote_plugins_syncing(),
             plugins=[
-                _summary(plugin, resolution, toggles, catalog)
-                for plugin in _listed(resolution, project_root)
+                *(
+                    _summary(plugin, resolution, toggles, remote, catalog)
+                    for plugin in listed
+                ),
+                *(
+                    _unloaded_remote_summary(plugin, remote)
+                    for plugin in _unloaded_remote(listed, remote, project_root)
+                ),
             ],
             issues=[
-                LocalPluginIssue(file=str(issue.file), message=issue.message)
-                for issue in user_facing_issues(resolution.issues)
+                *(
+                    LocalPluginIssue(file=str(issue.file), message=issue.message)
+                    for issue in user_facing_issues(resolution.issues)
+                ),
+                # A name means one plugin on the page, so a library plugin
+                # another of its name hides is reported rather than listed.
+                *(
+                    LocalPluginIssue(
+                        # Not a path: the library plugin's ID, unique per row.
+                        file=f"remote:{plugin.id}",
+                        message=(
+                            f"{plugin.title or plugin.name} is not loaded: "
+                            f"another plugin in your library is named "
+                            f"{plugin.name!r}"
+                        ),
+                    )
+                    for plugin in (remote.shadowed if project_root is None else [])
+                ),
+                *(
+                    _library_read_issue(read_error)
+                    for read_error in [
+                        remote_plugins_read_error(user.config, self._credentials)
+                    ]
+                    if read_error is not None and project_root is None
+                ),
             ],
         )
 
@@ -123,6 +191,16 @@ class LocalPluginsController:
         self, params: PluginsLocalSetEnabledParams
     ) -> PluginsLocalSetEnabledResponse:
         project_root = _project_root(params.project_root)
+        user = await self._load_orchestrator(self._session_files(None))
+        remote = current_remote_plugins_state(user.config, self._credentials)
+        remote_plugin = next((p for p in remote.plugins if p.name == params.name), None)
+        if remote_plugin is not None and params.name in await self._builtin_names():
+            # A built-in keeps its name: the switch is the built-in's.
+            remote_plugin = None
+        if remote_plugin is not None:
+            if params.enabled:
+                await self._refuse_remote_collision(remote_plugin)
+            return await self._set_remote_enabled(remote_plugin, params.enabled)
         orchestrator, resolution = await self._read(
             project_root, params.trust_workspace
         )
@@ -162,9 +240,90 @@ class LocalPluginsController:
         catalog = await self._read_connector_catalog(orchestrator)
         return PluginsLocalSetEnabledResponse(
             plugin=_summary(
-                replace(plugin, status=status), resolution, toggles, catalog
+                replace(plugin, status=status), resolution, toggles, remote, catalog
             ),
             turned_off=[rival.descriptor.name for rival in turn_off],
+        )
+
+    async def _builtin_names(self) -> set[str]:
+        """The names Vibe's built-in plugins hold, which no library plugin takes."""
+        _, resolution = await self._read(None, False)
+        return {
+            p.descriptor.name
+            for p in resolution.installed
+            if p.descriptor.scope is SkillScope.BUILTIN
+        }
+
+    async def _refuse_remote_collision(self, plugin: RemotePlugin) -> None:
+        """Turning a library plugin on must not make a plugin that loads drop out.
+
+        Its namespace is the one its name gives, unless its package (not on
+        disk yet when it is off) names another: that rarer clash shows on its
+        row once it is downloaded.
+        """
+        _, resolution = await self._read(None, False)
+        namespace = typescript_identifier(plugin.name)
+        rivals = sorted(
+            other.descriptor.name
+            for other in resolution.installed
+            if other.descriptor.namespace == namespace
+            and other.descriptor.name != plugin.name
+            and other.status != "disabled"
+        )
+        if rivals:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                f"{plugin.name!r} shares the namespace {namespace!r} with "
+                f"{rivals[0]!r}, which is on: turn {rivals[0]!r} off first",
+                LocalSkillRefusalData(
+                    reason="namespace_collision", collides_with=rivals
+                ).model_dump(mode="json"),
+            )
+
+    async def _set_remote_enabled(
+        self, plugin: RemotePlugin, enabled: bool
+    ) -> PluginsLocalSetEnabledResponse:
+        """Written to le-chat, then synced, so the download follows the switch."""
+        if not plugin.can_toggle:
+            raise RequestFailure(
+                ProtocolErrorCode.INVALID_PARAMS,
+                f"{plugin.name!r} is turned on for everyone by a workspace admin",
+                LocalSkillRefusalData(reason="locked").model_dump(mode="json"),
+            )
+        user = await self._load_orchestrator(self._session_files(None))
+        try:
+            state = await set_remote_plugin_enabled(
+                user.config, plugin.id, enabled, self._credentials
+            )
+        except RemotePluginsError as exc:
+            raise RequestFailure(
+                ProtocolErrorCode.INTERNAL_ERROR,
+                f"Could not turn {plugin.name!r} {'on' if enabled else 'off'}: "
+                f"{exc.reason}",
+            ) from exc
+        updated = next((p for p in state.plugins if p.id == plugin.id), None)
+        if updated is None or updated.enabled != enabled:
+            # le-chat took the write, but the list it gave back since says
+            # otherwise (or failed): report what was asked.
+            updated = plugin.model_copy(update={"enabled": enabled})
+        _, resolution = await self._read(None, False)
+        loaded = next(
+            (
+                p
+                for p in resolution.installed
+                if p.descriptor.scope is SkillScope.REMOTE
+                and p.descriptor.name == updated.name
+            ),
+            None,
+        )
+        if loaded is not None:
+            toggles = PluginToggles(config=user.config, own_disabled=[])
+            catalog = await self._read_connector_catalog(user)
+            return PluginsLocalSetEnabledResponse(
+                plugin=_summary(loaded, resolution, toggles, state, catalog)
+            )
+        return PluginsLocalSetEnabledResponse(
+            plugin=_unloaded_remote_summary(updated, state)
         )
 
     async def _read_connector_catalog(
@@ -194,13 +353,20 @@ class LocalPluginsController:
         if project_root is not None and trust_workspace:
             files = files.trusting(project_root)
         orchestrator = await self._load_orchestrator(files)
-        resolver = PluginResolver.from_harness_files(
-            files,
-            builtin_roots=self._builtin_plugin_roots(),
-            data_root_base=VIBE_HOME.path / "plugin-data",
-            config_orchestrator=orchestrator,
-        )
-        return orchestrator, await asyncio.to_thread(resolver.resolve)
+        builtin_roots = self._builtin_plugin_roots()
+
+        def resolve() -> ResolvedPluginSet:
+            # Off the event loop: building the resolver checks every library
+            # package's digest, which reads its whole tree.
+            return PluginResolver.from_harness_files(
+                files,
+                builtin_roots=builtin_roots,
+                data_root_base=VIBE_HOME.path / "plugin-data",
+                config_orchestrator=orchestrator,
+                credentials=self._credentials,
+            ).resolve()
+
+        return orchestrator, await asyncio.to_thread(resolve)
 
 
 def _rival_plugins(
@@ -209,13 +375,17 @@ def _rival_plugins(
     """The plugins on under its namespace that config can turn off.
 
     Vibe's own plugin stays on whatever config says, so it stays a rival and
-    the toggle is refused. Another locked plugin is off, so it is no rival.
+    the toggle is refused. Another locked plugin is off, so it is no rival. A
+    library plugin is turned off in le-chat, not in config, so it stays a
+    rival too: the user turns it off from its own row.
     """
     rivals = set(_namespace_rivals(plugin, resolution))
     return [
         p
         for p in resolution.installed
-        if p.descriptor.name in rivals and not is_required_plugin(p.descriptor)
+        if p.descriptor.name in rivals
+        and not is_required_plugin(p.descriptor)
+        and p.descriptor.scope is not SkillScope.REMOTE
     ]
 
 
@@ -264,6 +434,18 @@ def _toggles(orchestrator: ConfigOrchestrator[VibeConfigSchema]) -> PluginToggle
     )
 
 
+def _library_read_issue(error: str) -> LocalPluginIssue:
+    """The library could not be read: say so, not an empty library."""
+    return LocalPluginIssue(
+        # Not a path: one row for the library as a whole.
+        file="remote:library",
+        message=(
+            f"Your plugin library could not be read ({error}). The plugins "
+            "synced before, if any, still load; the list refreshes on its own."
+        ),
+    )
+
+
 def _listed(
     resolution: ResolvedPluginSet, project_root: Path | None
 ) -> list[InstalledPlugin]:
@@ -296,9 +478,14 @@ def _summary(
     plugin: InstalledPlugin,
     resolution: ResolvedPluginSet,
     toggles: PluginToggles,
+    remote: RemotePluginsState,
     catalog: ResolvedConnectorCatalog | None,
 ) -> LocalPluginSummary:
     descriptor = plugin.descriptor
+    if descriptor.scope is SkillScope.REMOTE:
+        listed = remote_plugin_for_root(descriptor.root, remote)
+        if listed is not None:
+            return _remote_summary(plugin, resolution, listed, remote, catalog)
     return LocalPluginSummary(
         name=descriptor.name,
         display_name=descriptor.display_name,
@@ -309,6 +496,9 @@ def _summary(
         source_format=descriptor.source_format.value,
         root=str(descriptor.root),
         components=_components(plugin),
+        icon=_icon(descriptor.root),
+        unsupported_parts=unsupported_parts(descriptor),
+        starter_prompt=_starter_prompt(descriptor),
         enabled=plugin.status != "disabled",
         locked=toggles.locked(descriptor),
         required=is_required_plugin(descriptor),
@@ -316,6 +506,100 @@ def _summary(
         if plugin.status == "collides"
         else [],
         connectors=_connectors(plugin, catalog),
+    )
+
+
+def _starter_prompt(descriptor: PluginDescriptor) -> LocalPluginStarterPrompt | None:
+    declared = descriptor.starter_prompt
+    if declared is None:
+        return None
+    return LocalPluginStarterPrompt(
+        prompt=dict(declared.prompt) if declared.prompt is not None else None,
+        submit=declared.submit,
+    )
+
+
+def _remote_summary(
+    plugin: InstalledPlugin,
+    resolution: ResolvedPluginSet,
+    listed: RemotePlugin,
+    remote: RemotePluginsState,
+    catalog: ResolvedConnectorCatalog | None,
+) -> LocalPluginSummary:
+    """A downloaded remote plugin: on/off and its lock come from le-chat."""
+    descriptor = plugin.descriptor
+    return LocalPluginSummary(
+        name=descriptor.name,
+        display_name=descriptor.display_name or listed.title,
+        description=descriptor.description,
+        version=descriptor.version,
+        author=descriptor.author,
+        scope="remote",
+        source_format=descriptor.source_format.value,
+        root=str(descriptor.root),
+        components=_components(plugin),
+        icon=_icon(descriptor.root),
+        unsupported_parts=unsupported_parts(descriptor),
+        starter_prompt=_starter_prompt(descriptor),
+        enabled=listed.enabled,
+        locked=not listed.can_toggle,
+        required=False,
+        collides_with=_namespace_rivals(plugin, resolution)
+        if plugin.status == "collides"
+        else [],
+        remote=_remote_ref(listed, remote),
+        connectors=_connectors(plugin, catalog),
+    )
+
+
+def _unloaded_remote(
+    listed: Sequence[InstalledPlugin],
+    remote: RemotePluginsState,
+    project_root: Path | None,
+) -> list[RemotePlugin]:
+    """Remote plugins with no download to resolve: those that are off, or failed."""
+    if project_root is not None:
+        return []
+    # A library plugin named like one listed here that is not its own (a
+    # built-in keeps its name) is not shown: the name is the other's row.
+    taken = {p.descriptor.name for p in listed}
+    return sorted(
+        (p for p in remote.plugins if p.name not in taken), key=lambda p: p.name
+    )
+
+
+def _unloaded_remote_summary(
+    plugin: RemotePlugin, remote: RemotePluginsState
+) -> LocalPluginSummary:
+    return LocalPluginSummary(
+        name=plugin.name,
+        display_name=plugin.title,
+        description=plugin.description or "",
+        version=str(plugin.version),
+        author=None,
+        scope="remote",
+        source_format="agent_plugins_1_0",
+        root="",
+        components=[],
+        icon=plugin.icon,
+        enabled=plugin.enabled,
+        locked=not plugin.can_toggle,
+        required=False,
+        remote=_remote_ref(plugin, remote),
+    )
+
+
+def _remote_ref(
+    plugin: RemotePlugin, remote: RemotePluginsState
+) -> RemoteRegistryPluginRef:
+    return RemoteRegistryPluginRef(
+        plugin_id=plugin.id,
+        version=plugin.version,
+        title=plugin.title,
+        owned_by_user=plugin.owned_by_user,
+        sharing_scope=plugin.sharing_scope,
+        error=remote.errors.get(plugin.id),
+        pending=remote_plugin_pending(plugin.id),
     )
 
 
@@ -331,15 +615,13 @@ def _connectors(
     return [
         LocalPluginConnector(
             id=definition.source_id,
-            display_name=(
-                found.display_name
-                if (found := by_alias.get(definition.source_id)) is not None
-                else None
-            ),
+            display_name=found.display_name if found is not None else None,
+            connector_id=found.raw_id if found is not None else None,
             status=("unknown" if catalog is None else _connector_status(found)),
             tools=list(definition.tools),
         )
         for definition in plugin.connectors
+        for found in (by_alias.get(definition.source_id),)
     ]
 
 
@@ -400,7 +682,27 @@ def _components(plugin: InstalledPlugin) -> list[LocalPluginComponent]:
             component("connector", connector.source_id, ", ".join(connector.tools))
             for connector in plugin.connectors
         ),
+        *(
+            component("view", name, description)
+            for name, description in plugin_views(plugin.descriptor.root)
+        ),
     ]
+
+
+_ICON_PATH = Path("ai.mistral.vibe") / "icon.json"
+# As Le Chat caps it (`PLUGIN_ICON_MAX_BYTES`): a drawn icon is under 1 KiB.
+_ICON_MAX_BYTES = 4 * 1024
+
+
+def _icon(root: Path) -> JsonValue:
+    """The plugin's ``icon.json``, or None. Only drawn: the page validates it."""
+    try:
+        path = root / _ICON_PATH
+        if path.stat().st_size > _ICON_MAX_BYTES:
+            return None
+        return cast(JsonValue, json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return None
 
 
 def _server_address(server: MCPServer) -> str:

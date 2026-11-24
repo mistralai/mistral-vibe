@@ -1,4 +1,4 @@
-"""`--resume <id>` on a session still waiting for background work shows the waiting loader."""
+"""`--resume <id>` on a session still waiting for background work shows the waiting loader and the steer placeholder."""
 
 from __future__ import annotations
 
@@ -36,5 +36,5 @@ timeline: Timeline = [take_snapshot()]
 screen_contains = (
     "◷ Waiting for background work…",
     "Esc/Ctrl+C to interrupt",
-    "send a message to steer",
+    "> Send a message to steer",
 )

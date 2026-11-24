@@ -3,6 +3,14 @@
 use crate::app::App;
 use crate::server::PublicSessionState;
 
+/// Move onto `state`'s session with the background processes, loops and subagents it owns.
+pub fn adopt_session(app: &mut App, state: &PublicSessionState) {
+    app.set_session_id(state.session.id.clone());
+    app.subagents.seed_snapshot(state.child_sessions.clone());
+    adopt_state(app, state);
+    crate::loops::adopt_state(app, state);
+}
+
 /// Follow the running background processes a session state reports, and what
 /// a running wait waits for.
 pub fn adopt_state(app: &mut App, state: &PublicSessionState) {
@@ -50,4 +58,22 @@ fn wait_target(app: &App) -> Option<String> {
 /// Keep what a running `wait` waits for, so the loader reads it without counting per frame.
 pub fn sync_wait_target(app: &mut App) {
     app.session.wait_target = wait_target(app);
+}
+
+/// Whether the running turn only waits for its background work; a program's sleep does not count.
+pub fn only_waiting(app: &App) -> bool {
+    app.session.shell_operation_id.is_none()
+        && app
+            .session
+            .active_turn_id
+            .as_deref()
+            .is_some_and(|turn| app.view.transcript.only_model_waiting(turn))
+}
+
+/// Whether a message sent now steers an agent that only waits, so the empty composer says so; a selected queued prompt (editing implies it) takes the keys instead.
+pub fn steerable(app: &App) -> bool {
+    only_waiting(app)
+        && !app.queue.paused
+        && app.queue.selected.is_none()
+        && crate::input::composer_reachable(app)
 }

@@ -4,16 +4,12 @@ from collections.abc import Callable, Mapping
 import json
 from typing import Any, Final
 
-from pydantic import ValidationError
-
 from vibe.core.agents.models import ApprovalPolicyName
 from vibe.core.config._catalog_filter import CATALOG_FILTER_KEY, parse_catalog_filter
 from vibe.core.config.fingerprint import create_dict_fingerprint
 from vibe.core.config.layer import ConfigLayer, RawConfig
-from vibe.core.config.models import ModelRequirement, parse_routed_model_payload
 from vibe.core.config.types import EMPTY_CONFIG_SNAPSHOT, LayerConfigSnapshot
 from vibe.core.experiments.active import ExperimentName
-from vibe.observability.logging import logger
 
 type GrowthbookConfigMapper = Callable[[object], str | bool | None]
 
@@ -73,54 +69,12 @@ def _as_json_value(value: object) -> object:
     return value
 
 
-def _map_default_routing_model(value: object) -> str | None:
-    payload = _as_json_value(value)
-    if not isinstance(payload, dict):
-        return None
-    active_model = payload.get("active_model")
-    return active_model if isinstance(active_model, str) and active_model else None
-
-
-def _map_routed_model_config(value: object) -> str | None:
-    payload = _as_json_value(value)
-    if not isinstance(payload, dict):
-        return None
-    model_config = payload.get("model_config")
-    if not isinstance(model_config, dict):
-        return None
-    return json.dumps(model_config)
-
-
-def _map_routed_extra_models(value: object) -> str | None:
-    """Extract the extra-models list from the exposure payload.
-
-    Accepts a bare list of model definitions or an object with a ``models``
-    array. Returns a JSON-array string, or None when there are no models.
-    """
-    payload = _as_json_value(value)
-    if isinstance(payload, dict):
-        payload = payload.get("models")
-    if not isinstance(payload, list):
-        return None
-    models = [model for model in payload if isinstance(model, dict)]
-    if not models:
-        return None
-    return json.dumps(models)
-
-
 GROWTHBOOK_CONFIG_MAPPINGS: Final[
     dict[ExperimentName, tuple[tuple[str, GrowthbookConfigMapper], ...]]
 ] = {
     ExperimentName.SYSTEM_PROMPT: (("system_prompt_id", _map_system_prompt_variant),),
     ExperimentName.SYSTEM_PROMPT_BEHAVIOR: (
         ("system_prompt_behavior", _map_system_prompt_behavior),
-    ),
-    ExperimentName.CLI_MODEL_ROUTING: (
-        ("routed_default_model", _map_default_routing_model),
-        ("routed_model_config", _map_routed_model_config),
-    ),
-    ExperimentName.CLI_EXTRA_MODELS: (
-        ("routed_extra_models", _map_routed_extra_models),
     ),
     ExperimentName.MANAGED_SHELL_TOOLS: (
         (
@@ -142,18 +96,8 @@ GROWTHBOOK_CONFIG_MAPPINGS: Final[
     ExperimentName.MISTRAL_MCP_CONNECTOR: (
         ("experimental_enable_mistral_mcp_connector", _map_on),
     ),
-    ExperimentName.MODEL_CATALOG: (("experimental_enable_model_catalog", _map_on),),
     ExperimentName.STORAGE_USAGE: (("experimental_enable_storage_usage", _map_on),),
 }
-
-
-# The model catalog replaces these: their models and default would duplicate or
-# override the catalog's. Keyed on the flag, not on whether the catalog loaded,
-# so this layer depends on no other layer's state.
-_CATALOG_REPLACED_EXPERIMENTS: Final = frozenset({
-    ExperimentName.CLI_MODEL_ROUTING,
-    ExperimentName.CLI_EXTRA_MODELS,
-})
 
 
 class GrowthbookLayer(ConfigLayer[RawConfig]):
@@ -187,13 +131,8 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
         if not self._variants:
             return EMPTY_CONFIG_SNAPSHOT
 
-        catalog_on = (
-            _map_on(self._variants.get(ExperimentName.MODEL_CATALOG.value)) is True
-        )
         data: dict[str, Any] = {}
         for experiment_name, field_mappers in GROWTHBOOK_CONFIG_MAPPINGS.items():
-            if catalog_on and experiment_name in _CATALOG_REPLACED_EXPERIMENTS:
-                continue
             variant = self._variants.get(experiment_name.value)
             if variant is None:
                 continue
@@ -205,14 +144,6 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
         if self._catalog_filter:
             data[CATALOG_FILTER_KEY] = self._catalog_filter
 
-        models = _routed_models(data)
-        if models:
-            # Expose routed models through the canonical deep-merged field as
-            # well as the compatibility routing fields. Higher-priority user
-            # layers can then override them sparsely, and config provenance can
-            # address their fields like every other model.
-            data["models"] = models
-
         if not data:
             return EMPTY_CONFIG_SNAPSHOT
 
@@ -222,39 +153,3 @@ class GrowthbookLayer(ConfigLayer[RawConfig]):
 
     async def _save_to_store(self, _next_config: RawConfig) -> str:
         raise NotImplementedError("GrowthbookLayer is read-only")
-
-
-def _routed_models(data: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
-    models: dict[str, dict[str, Any]] = {}
-    for value in (data.get("routed_model_config"), data.get("routed_extra_models")):
-        if not isinstance(value, str):
-            continue
-        decoded = json.loads(value)
-        entries = decoded if isinstance(decoded, list) else [decoded]
-        for entry in entries:
-            model = parse_routed_model_payload(entry)
-            if model is None and _unknown_requirement(entry):
-                # Like a catalog entry: a requirement this client cannot upsell
-                # hides the model rather than letting a turn fail on it.
-                logger.info(
-                    "GrowthBook model '%s' skipped: requires %r",
-                    entry.get("alias") or entry.get("name"),
-                    entry["requires"],
-                )
-            if model is None or not model.alias:
-                continue
-            models[model.alias] = entry
-    return models
-
-
-def _unknown_requirement(entry: object) -> bool:
-    """Whether a routed-model payload is locked in a way this client cannot
-    upsell, as opposed to invalid for another reason.
-    """
-    if not isinstance(entry, dict) or entry.get("requires") is None:
-        return False
-    try:
-        ModelRequirement.model_validate(entry["requires"])
-    except ValidationError:
-        return True
-    return False

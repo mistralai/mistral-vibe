@@ -60,7 +60,7 @@ pub(super) fn length_completion(action: &Value, text: &str) -> Value {
         "result": {
             "parts": [{"type": "text", "text": text}],
             "finish_reason": "length",
-            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+            "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -93,7 +93,7 @@ pub(super) fn reasoning_only_completion(action: &Value) -> Value {
                 "content": [{"type": "text", "text": "internal reasoning"}],
             }],
             "finish_reason": "stop",
-            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+            "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -108,7 +108,7 @@ pub(super) fn summary_with_tool_call_completion(action: &Value, summary: &str) -
                 tool_call("unexpected-tool", "read_file", json!({"path": "notes.txt"})),
             ],
             "finish_reason": "tool_call",
-            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+            "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -129,7 +129,7 @@ pub(super) fn context_compacted(turn_id: &str, action: &Value, summary: &str) ->
         "attempt": action["attempt"],
         "trigger": "automatic",
         "summary": summary,
-        "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+        "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
     })
 }
 

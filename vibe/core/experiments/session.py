@@ -17,7 +17,6 @@ from vibe.core.identity import IdentityResult, fetch_identity
 from vibe.core.platform_auth import PlatformCredentialFactory
 from vibe.core.platform_auth._mistral import mistral_credentials, resolve_principal
 from vibe.core.utils import get_platform_id
-from vibe.core.utils.fetch_wait import FetchFailures
 from vibe.observability.logging import logger
 from vibe.setup.auth.whoami import (
     NO_PLAN_DATA,
@@ -143,7 +142,6 @@ async def initialize_experiments(
     manager: ExperimentManager,
     launch_context: LaunchContext | None,
     harness: ExperimentSurface,
-    failures: FetchFailures,
     resolve_identity: IdentityResolver | None = None,
     resolve_whoami: WhoAmIResolver | None = None,
     experiment_system_prompt_id: str | None = None,
@@ -185,14 +183,10 @@ async def initialize_experiments(
         # Remote eval failed (network / 4xx-5xx / invalid payload). The manager
         # is fail-open and stayed empty, so nothing changed — don't trigger a
         # prompt refresh. We still surface user_plan for early telemetry events.
-        failures.mark()
         return False, user_plan
-    if attributes.userId is None:
-        # Without the hash attribute the response carries no assignment:
-        # caching it would overwrite a good entry, and a later session gains
-        # nothing by waiting for another one.
-        failures.mark()
-    else:
+    # Without the hash attribute the response carries no assignment: caching
+    # it would overwrite a good entry.
+    if attributes.userId is not None:
         try:
             store_cached_eval_response(
                 config, state, fetched_for=cache_key, credentials=credentials

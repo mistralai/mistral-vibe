@@ -41,6 +41,13 @@ impl FileIndex {
         };
         file_match::matching(&paths, query, limit)
     }
+
+    /// Whether `path` (no trailing `/`) is an indexed directory.
+    pub fn is_dir(&self, path: &str) -> bool {
+        self.paths
+            .read()
+            .is_ok_and(|paths| paths.get(path) == Some(&true))
+    }
 }
 
 // One full rebuild per drained burst, not one per event.

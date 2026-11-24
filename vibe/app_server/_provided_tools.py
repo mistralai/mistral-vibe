@@ -94,6 +94,8 @@ from vibe.app_server._session_peers import (
     MARK_SESSIONS_SEEN_TOOL_NAME,
     READ_SESSION_TOOL_DESCRIPTION,
     READ_SESSION_TOOL_NAME,
+    RENAME_SESSION_TOOL_DESCRIPTION,
+    RENAME_SESSION_TOOL_NAME,
     RESTORE_SESSIONS_TOOL_DESCRIPTION,
     RESTORE_SESSIONS_TOOL_NAME,
     SEND_TO_SESSION_TOOL_DESCRIPTION,
@@ -104,6 +106,7 @@ from vibe.app_server._session_peers import (
     MarkSessionsSeenArgs,
     PeerContext,
     ReadSessionArgs,
+    RenameSessionArgs,
     RestoreSessionsArgs,
     SenderOf,
     SendToSessionArgs,
@@ -115,6 +118,7 @@ from vibe.app_server._session_peers import (
     run_list_sessions,
     run_mark_sessions_seen,
     run_read_session,
+    run_rename_session,
     run_restore_sessions,
     run_send_to_session,
 )
@@ -147,6 +151,7 @@ from vibe.app_server.protocol import (
     SessionPeerListResponse,
     SessionPeerMarkSeenResponse,
     SessionPeerReadResponse,
+    SessionPeerRenameResponse,
     SessionPeerRestoreResponse,
     SessionPeerSendResponse,
 )
@@ -174,6 +179,7 @@ VIBE_PROVIDED_TOOL_NAMES = {
     f"{VIBE_TOOL_GROUP}.{START_SESSION_TOOL_NAME}": START_SESSION_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{LIST_SESSIONS_TOOL_NAME}": LIST_SESSIONS_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{READ_SESSION_TOOL_NAME}": READ_SESSION_TOOL_NAME,
+    f"{VIBE_TOOL_GROUP}.{RENAME_SESSION_TOOL_NAME}": RENAME_SESSION_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{SEND_TO_SESSION_TOOL_NAME}": SEND_TO_SESSION_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{ARCHIVE_SESSIONS_TOOL_NAME}": ARCHIVE_SESSIONS_TOOL_NAME,
     f"{VIBE_TOOL_GROUP}.{RESTORE_SESSIONS_TOOL_NAME}": RESTORE_SESSIONS_TOOL_NAME,
@@ -186,8 +192,8 @@ VIBE_PROVIDED_TOOL_NAMES = {
 
 # "ask" routes through Vibe's permission resolver. Cron defaults to allowed there,
 # while explicit config and session permission overrides still take precedence.
-# Starting, messaging, archiving or restoring sessions acts on real work, so they
-# keep the resolver's default: ask. Listing, reading and marking sessions seen
+# Starting, messaging, archiving or restoring sessions keeps the resolver's
+# default: ask. Listing, reading, marking sessions seen and renaming sessions
 # default to allowed there.
 # Scratchpad writes only inside the session's own storage and is pinned allowed.
 VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
@@ -196,6 +202,7 @@ VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
     START_SESSION_TOOL_NAME: "ask",
     LIST_SESSIONS_TOOL_NAME: "ask",
     READ_SESSION_TOOL_NAME: "ask",
+    RENAME_SESSION_TOOL_NAME: "ask",
     SEND_TO_SESSION_TOOL_NAME: "ask",
     ARCHIVE_SESSIONS_TOOL_NAME: "ask",
     RESTORE_SESSIONS_TOOL_NAME: "ask",
@@ -212,7 +219,7 @@ VIBE_PROVIDED_TOOL_MODES: dict[str, ToolApprovalMode] = {
 }
 
 
-def vibe_tool_groups(
+def vibe_tool_groups(  # noqa: PLR0913 - independent optional client capabilities
     available_tools: Container[str],
     *,
     enabled_tools: Sequence[str] = (),
@@ -220,6 +227,7 @@ def vibe_tool_groups(
     session_spawn: Sequence[SpawnModel] | None = None,
     session_peers: bool = False,
     session_peer_restore: bool = False,
+    session_peer_rename: bool = False,
     goals: bool = False,
     session_peer_mark_seen: bool = False,
     enter_worktree: bool = False,
@@ -326,15 +334,23 @@ def vibe_tool_groups(
                 SessionPeerRestoreResponse,
             ),
             (
+                RENAME_SESSION_TOOL_NAME,
+                RENAME_SESSION_TOOL_DESCRIPTION,
+                RenameSessionArgs,
+                SessionPeerRenameResponse,
+            ),
+            (
                 MARK_SESSIONS_SEEN_TOOL_NAME,
                 MARK_SESSIONS_SEEN_TOOL_DESCRIPTION,
                 MarkSessionsSeenArgs,
                 SessionPeerMarkSeenResponse,
             ),
         ):
-            if name == RESTORE_SESSIONS_TOOL_NAME and not session_peer_restore:
-                continue
-            if name == MARK_SESSIONS_SEEN_TOOL_NAME and not session_peer_mark_seen:
+            if not {
+                RENAME_SESSION_TOOL_NAME: session_peer_rename,
+                RESTORE_SESSIONS_TOOL_NAME: session_peer_restore,
+                MARK_SESSIONS_SEEN_TOOL_NAME: session_peer_mark_seen,
+            }.get(name, True):
                 continue
             if _passes_tool_filters(
                 name, enabled=enabled_tools, disabled=disabled_tools
@@ -346,7 +362,7 @@ def vibe_tool_groups(
                         input_schema=args.model_json_schema(),
                         output_schema=result.model_json_schema(by_alias=False),
                         # A program can filter sessions on any field; what acts
-                        # on them stays a direct call, so each is asked about.
+                        # on them stays a direct call, honoring per-tool policy.
                         exposure="direct_and_programmatic"
                         if name in _PEER_READ_TOOL_NAMES
                         else "direct",
@@ -634,6 +650,13 @@ _PEER_TOOLS: dict[str, _PeerToolRunner] = {
     RESTORE_SESSIONS_TOOL_NAME: lambda action, session_id, peers, _peer: (
         run_restore_sessions(
             RestoreSessionsArgs.model_validate(action.call.arguments),
+            session_id=session_id,
+            peers=peers,
+        )
+    ),
+    RENAME_SESSION_TOOL_NAME: lambda action, session_id, peers, _peer: (
+        run_rename_session(
+            RenameSessionArgs.model_validate(action.call.arguments),
             session_id=session_id,
             peers=peers,
         )

@@ -13,6 +13,7 @@ from vibe.app_server._session_peers import SessionPeerError
 from vibe.app_server._session_spawn import SessionSpawnError
 from vibe.app_server.protocol import (
     SESSION_PEER_READ_METHOD,
+    SESSION_PEER_RENAME_METHOD,
     SESSION_PEER_SEND_METHOD,
     SESSION_SPAWN_METHOD,
     ClientCapabilities,
@@ -24,6 +25,8 @@ from vibe.app_server.protocol import (
     SessionPeerMarkSeenParams,
     SessionPeerReadParams,
     SessionPeerReadResponse,
+    SessionPeerRenameParams,
+    SessionPeerRenameResponse,
     SessionPeerRestoreParams,
     SessionPeerSendParams,
     SessionSpawnNewWorktree,
@@ -50,12 +53,14 @@ def _attached_server(
     *,
     session_spawn: bool = True,
     session_peers: bool = False,
+    session_peer_rename: bool = False,
     process_services: ProcessServices,
 ) -> tuple[AppServer, AsyncIterator[dict[str, Any]]]:
     client_transport, server_transport = memory_transport_pair()
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
@@ -67,7 +72,9 @@ def _attached_server(
     )
     # A session is attached and its client finished the handshake.
     server._client_capabilities = ClientCapabilities(
-        session_spawn=session_spawn, session_peers=session_peers
+        session_spawn=session_spawn,
+        session_peers=session_peers,
+        session_peer_rename=session_peer_rename,
     )
     server._connection_attached = True
     return server, _messages(client_transport)
@@ -367,3 +374,150 @@ async def test_a_pending_send_fails_as_unknown_when_the_client_goes_away(
 
     with pytest.raises(SessionPeerError, match="may or may not have been sent"):
         await sending
+
+
+@pytest.mark.asyncio
+async def test_a_send_the_client_refused_past_its_deadline_is_reported_as_not_sent(
+    process_services: ProcessServices,
+) -> None:
+    server, messages = _attached_server(
+        session_peers=True, process_services=process_services
+    )
+
+    sending = asyncio.create_task(
+        server.send_to_peer_session(
+            _SEND.model_copy(update={"deliver_within_ms": 20_000})
+        )
+    )
+    request = await _next(messages)
+    assert request["params"]["deliverWithinMs"] == 20_000
+    await server._handle_response(
+        JsonRpcErrorResponse(
+            id=request["id"],
+            error=ProtocolError(
+                code=ProtocolErrorCode.CONFLICT,
+                message="Not delivered in time",
+                data={"reason": "not_delivered_in_time"},
+            ),
+        )
+    )
+
+    with pytest.raises(SessionPeerError, match="was not sent") as refused:
+        await sending
+    assert refused.value.reason == "not_delivered_in_time"
+    assert "may or may not" not in str(refused.value)
+
+
+_RENAME = SessionPeerRenameParams(session_id="other", title=" New title ")
+
+
+@pytest.mark.asyncio
+async def test_peer_rename_wire_contract_returns_the_authoritative_title(
+    process_services: ProcessServices,
+) -> None:
+    server, messages = _attached_server(
+        session_peers=True, session_peer_rename=True, process_services=process_services
+    )
+    renaming = asyncio.create_task(server.rename_peer_session(_RENAME))
+    request = await _next(messages)
+    assert request["method"] == SESSION_PEER_RENAME_METHOD
+    assert request["params"] == {"sessionId": "other", "title": "New title"}
+    await server._handle_response(
+        JsonRpcSuccessResponse(
+            id=request["id"],
+            result={
+                "sessionId": "other",
+                "title": "Authoritative title",
+                "url": "/code/other",
+            },
+        )
+    )
+    assert await renaming == SessionPeerRenameResponse(
+        session_id="other", title="Authoritative title", url="/code/other"
+    )
+    assert server._client_requests == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("peers", "rename", "error"),
+    [(True, False, "cannot rename"), (False, True, "cannot reach")],
+)
+async def test_peer_rename_requires_both_client_capabilities(
+    process_services: ProcessServices, peers: bool, rename: bool, error: str
+) -> None:
+    server, _ = _attached_server(
+        session_peers=peers,
+        session_peer_rename=rename,
+        process_services=process_services,
+    )
+    with pytest.raises(SessionPeerError, match=error):
+        await server.rename_peer_session(_RENAME)
+    assert server._client_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_peer_rename_refusal_preserves_the_connection(
+    process_services: ProcessServices,
+) -> None:
+    server, messages = _attached_server(
+        session_peers=True, session_peer_rename=True, process_services=process_services
+    )
+    renaming = asyncio.create_task(server.rename_peer_session(_RENAME))
+    request = await _next(messages)
+    await server._handle_response(
+        JsonRpcErrorResponse(
+            id=request["id"],
+            error=ProtocolError(
+                code=ProtocolErrorCode.INVALID_PARAMS,
+                message="No session other in this project",
+            ),
+        )
+    )
+    with pytest.raises(SessionPeerError, match="No session other"):
+        await renaming
+    assert server._connection_attached and server._client_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_a_pending_rename_has_unknown_outcome_on_disconnect(
+    process_services: ProcessServices,
+) -> None:
+    server, messages = _attached_server(
+        session_peers=True, session_peer_rename=True, process_services=process_services
+    )
+    renaming = asyncio.create_task(server.rename_peer_session(_RENAME))
+    await _next(messages)
+    server._abandon_client_requests("The client disconnected")
+    with pytest.raises(
+        SessionPeerError, match="before confirming; the rename may have been applied"
+    ):
+        await renaming
+    assert server._client_requests == {}
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_rename_response_fails_only_the_request(
+    process_services: ProcessServices,
+) -> None:
+    server, messages = _attached_server(
+        session_peers=True, session_peer_rename=True, process_services=process_services
+    )
+    renaming = asyncio.create_task(server.rename_peer_session(_RENAME))
+    request = await _next(messages)
+    await server._handle_response(
+        JsonRpcSuccessResponse(id=request["id"], result={"sessionId": "other"})
+    )
+    with pytest.raises(SessionPeerError):
+        await renaming
+    assert server._connection_attached and server._client_requests == {}
+
+
+def test_old_clients_do_not_advertise_peer_rename() -> None:
+    assert not ClientCapabilities.model_validate({
+        "sessionPeers": True
+    }).session_peer_rename
+    assert ClientCapabilities.model_validate({
+        "sessionPeers": True,
+        "sessionPeerRename": True,
+    }).session_peer_rename

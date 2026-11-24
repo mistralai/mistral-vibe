@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 
 import pexpect
 import pytest
@@ -149,7 +150,6 @@ def test_spawned_subagent_returns_result_to_parent_model(
 
 WAITING_PARENT_PROMPT = "Delegate exploration and wait"
 WAIT_TOOL_CALL_ID = "call_wait_for_subagent"
-CHILD_PAUSE_CALL_ID = "call_child_pause"
 
 # The parent spawns without polling, then calls the direct ``wait`` tool.
 SPAWN_ONLY_CODE = (
@@ -159,10 +159,7 @@ SPAWN_ONLY_CODE = (
     f"message: '{SUBAGENT_SPAWN_MESSAGE}' }});\n"
     "}"
 )
-# The child pauses first, so the parent is already waiting when it finishes.
-CHILD_PAUSE_CODE = (
-    "async function main() {\n  await tools.self.sleep({ seconds: 1 });\n}"
-)
+_parent_asked_to_wait = threading.Event()
 
 
 def _is_waiting_parent_request(payload: ChatCompletionsRequestPayload) -> bool:
@@ -186,15 +183,10 @@ def _waiting_parent_factory(
 ) -> list[dict[str, object]]:
     answered = _tool_call_ids(payload)
     if not _is_waiting_parent_request(payload):
-        if CHILD_PAUSE_CALL_ID not in answered:
-            return single_tool_call_chunks(
-                call_id=CHILD_PAUSE_CALL_ID,
-                tool_name="run_typescript",
-                arguments={"code": CHILD_PAUSE_CODE},
-                created=95,
-            )
+        _parent_asked_to_wait.wait(timeout=30)
         return assistant_text_chunks(SUBAGENT_ANSWER, created=100)
     if SUBAGENT_TOOL_CALL_ID not in answered:
+        _parent_asked_to_wait.clear()
         return single_tool_call_chunks(
             call_id=SUBAGENT_TOOL_CALL_ID,
             tool_name="run_typescript",
@@ -202,6 +194,7 @@ def _waiting_parent_factory(
             created=90,
         )
     if WAIT_TOOL_CALL_ID not in answered:
+        _parent_asked_to_wait.set()
         return single_tool_call_chunks(
             call_id=WAIT_TOOL_CALL_ID,
             tool_name="wait",
@@ -233,7 +226,7 @@ def test_subagent_result_wakes_a_waiting_parent_model(
             child,
             captured,
             lambda: len(streaming_mock_server.requests),
-            expected_count=5,
+            expected_count=4,
             timeout=30,
         )
         wait_for_rendered_text(child, captured, needle=PARENT_ANSWER, timeout=10)

@@ -1,5 +1,6 @@
 """The ``list_sessions``, ``read_session``, ``send_to_session``,
-``archive_sessions``, ``restore_sessions`` and ``mark_sessions_seen`` tools:
+``archive_sessions``, ``restore_sessions``, ``rename_session`` and
+``mark_sessions_seen`` tools:
 the attached client reaches the other sessions it hosts in the caller's
 project.
 """
@@ -18,15 +19,18 @@ from pydantic_core import to_json
 
 from vibe.app_server._session_spawn import MAX_SESSION_HOPS, MAX_TURN_STARTED_SESSIONS
 from vibe.app_server.protocol import (
+    PEER_SEND_NOT_DELIVERED_IN_TIME,
     SESSION_LIMIT_HOPS,
     SESSION_LIMIT_STARTED_SESSIONS,
     ClientCapabilities,
     PeerDelivery,
+    PeerSendRefusal,
     PeerSessionNotArchived,
     PeerSessionNotMarkedSeen,
     PeerSessionNotRestored,
     PeerSessionStatus,
     PeerSessionSummary,
+    PeerSessionTitle,
     SessionLimitRefusal,
     SessionMessageSender,
     SessionPeerArchiveParams,
@@ -37,6 +41,8 @@ from vibe.app_server.protocol import (
     SessionPeerMarkSeenResponse,
     SessionPeerReadParams,
     SessionPeerReadResponse,
+    SessionPeerRenameParams,
+    SessionPeerRenameResponse,
     SessionPeerRestoreParams,
     SessionPeerRestoreResponse,
     SessionPeerSendParams,
@@ -55,6 +61,7 @@ READ_SESSION_TOOL_NAME = "read_session"
 SEND_TO_SESSION_TOOL_NAME = "send_to_session"
 ARCHIVE_SESSIONS_TOOL_NAME = "archive_sessions"
 RESTORE_SESSIONS_TOOL_NAME = "restore_sessions"
+RENAME_SESSION_TOOL_NAME = "rename_session"
 MARK_SESSIONS_SEEN_TOOL_NAME = "mark_sessions_seen"
 
 LIST_SESSIONS_TOOL_DESCRIPTION = """\
@@ -124,6 +131,12 @@ session unread when the user should see it for themselves. A session that is \
 working or waits for the user is not marked; a marked session turns unread \
 again when it next finishes a turn. {SESSION_REFERENCE}"""
 
+RENAME_SESSION_TOOL_DESCRIPTION = f"""\
+Rename another session in this project, including busy or archived sessions. \
+Choose a short, descriptive title. Sets a manual \
+title that automatic naming will not overwrite. Returns the authoritative \
+session id and title. Never rename this session itself. {SESSION_REFERENCE}"""
+
 DEFAULT_LIST_LIMIT: Final = 20
 MAX_LIST_LIMIT: Final = 50
 MAX_MESSAGE_CHARS: Final = 4000
@@ -141,6 +154,10 @@ DEFAULT_MESSAGE_LIMIT: Final = 10
 MAX_MESSAGE_LIMIT: Final = 50
 MAX_SESSIONS_PER_CALL: Final = 50
 PEER_REQUEST_TIMEOUT_SECONDS: Final = 30.0
+# The client's deadline to hand a message over; the margin to the server's wait
+# carries its refusal back, so a slow open is a definite "not sent".
+PEER_SEND_DELIVERY_SECONDS: Final = 20.0
+SENDER_READ_SECONDS: Final = 5.0
 SECONDS_PER_SESSION: Final = 5.0
 SHORT_ID_CHARS: Final = 8
 # Bounds a lookup in a project with very many sessions.
@@ -253,6 +270,13 @@ class RestoreSessionsArgs(BaseModel):
     )
 
 
+class RenameSessionArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str = Field(min_length=1, description="The session to rename.")
+    title: PeerSessionTitle = Field(description="The session's new title.")
+
+
 class MarkSessionsSeenArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -265,7 +289,10 @@ class MarkSessionsSeenArgs(BaseModel):
 
 class SessionPeerError(Exception):
     def __init__(
-        self, message: str, *, reason: SessionLimitRefusal | None = None
+        self,
+        message: str,
+        *,
+        reason: SessionLimitRefusal | PeerSendRefusal | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
@@ -293,6 +320,10 @@ class SessionPeers(Protocol):
     async def restore_peer_sessions(
         self, params: SessionPeerRestoreParams
     ) -> SessionPeerRestoreResponse: ...
+
+    async def rename_peer_session(
+        self, params: SessionPeerRenameParams
+    ) -> SessionPeerRenameResponse: ...
 
     async def mark_peer_sessions_seen(
         self, params: SessionPeerMarkSeenParams
@@ -412,35 +443,30 @@ async def run_send_to_session(
             reason=SESSION_LIMIT_STARTED_SESSIONS,
         )
     sender_of = peer.sender_of
-
-    async def send() -> SessionPeerSendResponse:
-        sender = (
-            SessionMessageSender(session_id=session_id)
-            if sender_of is None
-            else await sender_of(session_id)
-        )
-        return await peers.send_to_peer_session(
-            SessionPeerSendParams(
-                target_session_id=target,
-                text=args.message,
-                sender=sender,
-                delivery=args.delivery,
-                hops=hops + 1,
-                idempotency_key=str(
-                    uuid.uuid5(_IDEMPOTENCY_NAMESPACE, f"{session_id}/{invocation_id}")
-                ),
-                bot_to=args.session_id
-                if to_bot and args.session_id != starter
-                else None,
-            )
-        )
-
     if starts_turn:
-        # Counted before the client answers, so sends made at once see each other.
+        # Counted before any await, so sends made at once see each other.
         peer.turn_starts.count(session_id, 1)
     try:
+        sender = await _sender(session_id, sender_of)
         async with asyncio.timeout(PEER_REQUEST_TIMEOUT_SECONDS):
-            return await send()
+            return await peers.send_to_peer_session(
+                SessionPeerSendParams(
+                    target_session_id=target,
+                    text=args.message,
+                    sender=sender,
+                    delivery=args.delivery,
+                    hops=hops + 1,
+                    deliver_within_ms=round(PEER_SEND_DELIVERY_SECONDS * 1000),
+                    idempotency_key=str(
+                        uuid.uuid5(
+                            _IDEMPOTENCY_NAMESPACE, f"{session_id}/{invocation_id}"
+                        )
+                    ),
+                    bot_to=args.session_id
+                    if to_bot and args.session_id != starter
+                    else None,
+                )
+            )
     except TimeoutError as exc:
         # The message may have gone out, so its slot stays taken.
         raise SessionPeerError(
@@ -451,6 +477,21 @@ async def run_send_to_session(
         if starts_turn:
             peer.turn_starts.count(session_id, -1)
         raise
+
+
+async def _sender(session_id: str, sender_of: SenderOf | None) -> SessionMessageSender:
+    """Read before the client's wait starts, so its deadline keeps its margin."""
+    if sender_of is None:
+        return SessionMessageSender(session_id=session_id)
+    try:
+        async with asyncio.timeout(SENDER_READ_SECONDS):
+            return await sender_of(session_id)
+    except TimeoutError as exc:
+        raise SessionPeerError(
+            "This session could not be read in time, so the message was not "
+            "sent. Try again shortly.",
+            reason=PEER_SEND_NOT_DELIVERED_IN_TIME,
+        ) from exc
 
 
 def _starter(session_id: str, peer: PeerContext) -> str:
@@ -504,6 +545,19 @@ async def run_restore_sessions(
         doing="restoring",
     )
     return answer.model_copy(update={"failed": [*answer.failed, *failed]})
+
+
+async def run_rename_session(
+    args: RenameSessionArgs, *, session_id: str, peers: SessionPeers
+) -> SessionPeerRenameResponse:
+    target = await _resolve_one(args.session_id, session_id, peers)
+    return await _within(
+        peers.rename_peer_session(
+            SessionPeerRenameParams(session_id=target, title=args.title)
+        ),
+        PEER_REQUEST_TIMEOUT_SECONDS,
+        unknown_outcome="The client did not confirm in time; the rename may have been applied.",
+    )
 
 
 async def run_mark_sessions_seen(

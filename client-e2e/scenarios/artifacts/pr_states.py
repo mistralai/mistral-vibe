@@ -7,7 +7,9 @@ from e2e.app_server.scenario import Timeline, take_snapshot
 from scenarios.artifacts._rail import OPEN_PRS
 
 
-def _pr(number: int, hour: int, title: str, state: str) -> dict:
+def _pr(
+    number: int, hour: int, title: str, state: str, *, queued: bool = False
+) -> dict:
     pr = artifact(
         f"artifact-pr-{number}",
         number=number,
@@ -16,6 +18,8 @@ def _pr(number: int, hour: int, title: str, state: str) -> dict:
         display_title=title,
     )
     pr["details"] |= {"state": state}
+    if queued:
+        pr["details"]["isInMergeQueue"] = True
     return pr
 
 
@@ -26,6 +30,7 @@ handshake = {
             _pr(123, 9, "Fix the footer", "merged"),
             _pr(124, 10, "Rework the footer", "open"),
             _pr(125, 11, "Draft the docs", "draft"),
+            _pr(126, 12, "Update the tests", "open", queued=True),
         ]
     },
     "artifacts/sync": {},
@@ -33,8 +38,9 @@ handshake = {
 }
 request_methods = {"artifacts/list", "artifacts/sync", "artifacts/markViewed"}
 screen_contains = (
-    "Pull Requests 4",
-    "● 4 PRs",
+    "Pull Requests 5",
+    "● 5 PRs",
+    "● #126  Update the tests   queued",
     "● #125  Draft the docs     draft",
     "● #124  Rework the footer  open",
     "● #123  Fix the footer     merged",

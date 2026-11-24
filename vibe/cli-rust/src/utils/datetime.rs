@@ -11,16 +11,21 @@ pub fn format_local_seconds(ms: u64) -> String {
 }
 
 #[cfg(unix)]
-fn format_local_pattern(ms: u64, with_zone: bool) -> String {
+fn local_tm(ms: u64) -> Option<libc::tm> {
     extern "C" {
         fn tzset();
     }
     let seconds = (ms / 1_000) as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { tzset() };
-    if unsafe { libc::localtime_r(&seconds, &mut tm) }.is_null() {
+    (!unsafe { libc::localtime_r(&seconds, &mut tm) }.is_null()).then_some(tm)
+}
+
+#[cfg(unix)]
+fn format_local_pattern(ms: u64, with_zone: bool) -> String {
+    let Some(tm) = local_tm(ms) else {
         return format_utc_pattern(ms, with_zone);
-    }
+    };
     let pattern = if with_zone {
         c"%Y-%m-%d %H:%M:%S %Z"
     } else {
@@ -39,6 +44,24 @@ fn format_local_pattern(ms: u64, with_zone: bool) -> String {
         return format_utc_pattern(ms, with_zone);
     }
     String::from_utf8_lossy(&buffer[..written]).into_owned()
+}
+
+#[cfg(unix)]
+pub fn local_month_day(ms: u64) -> (u8, u8) {
+    local_tm(ms).map_or_else(
+        || utc_month_day(ms),
+        |tm| ((tm.tm_mon + 1) as u8, tm.tm_mday as u8),
+    )
+}
+
+#[cfg(not(unix))]
+pub fn local_month_day(ms: u64) -> (u8, u8) {
+    utc_month_day(ms)
+}
+
+fn utc_month_day(ms: u64) -> (u8, u8) {
+    let (_, month, day) = civil_from_days((ms / 1_000 / 86_400) as i64);
+    (month as u8, day as u8)
 }
 
 #[cfg(not(unix))]

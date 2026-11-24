@@ -45,9 +45,15 @@ class ClientToolMethod(StrEnum):
 type PlatformCredentialsKind = Literal["oauth_access_token", "oidc_id_token"]
 
 
+# "process": the client keeps this connection open as long as the process
+# runs (Desktop's catalogue), so its account always has a lender.
+type PlatformCredentialsLifetime = Literal["connection", "process"]
+
+
 class PlatformCredentialsCapability(ProtocolModel):
     version: Literal[1]
     kind: PlatformCredentialsKind
+    lifetime: PlatformCredentialsLifetime = "connection"
 
 
 class ClientToolDefinitionParams(ProtocolModel):
@@ -111,6 +117,7 @@ class ClientCapabilities(ProtocolModel):
     session_spawn: bool = False
     session_peers: bool = False
     session_peer_restore: bool = False
+    session_peer_rename: bool = False
     session_peer_mark_seen: bool = False
     agent_worktrees: bool = False
     # The client follows a session's `/project` patch, so the agent may move it.
@@ -124,6 +131,9 @@ class ClientCapabilities(ProtocolModel):
     client_tool_definitions: list[ClientToolDefinitionParams] = Field(
         default_factory=list
     )
+    # The server carries on, by itself, the turns this connection's owner
+    # (``initialize.account``) left mid-flight in an earlier process.
+    resume_left_turns: bool = False
 
 
 class ClientAccount(ProtocolModel):
@@ -140,6 +150,9 @@ class InitializeParams(ProtocolModel):
     # With ``client_info.entrypoint``, the connection's owner: only the owner
     # that last opened a session is offered a turn a stop left running in it.
     account: ClientAccount | None = None
+    # Which client instance this is (Desktop: its profile folder), among those
+    # sharing this Vibe home (see `vibe.app_server._client_instance`).
+    client_instance: str | None = Field(default=None, min_length=1, max_length=4096)
 
 
 class ServerInfo(ProtocolModel):

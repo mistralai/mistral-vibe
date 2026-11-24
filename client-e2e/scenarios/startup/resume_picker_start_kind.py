@@ -1,4 +1,4 @@
-"""`--resume` with the picker starts a normal session: it is the user's own until they pick another."""
+"""`--resume` with no id starts a normal session: it is the user's own until they open another."""
 
 from __future__ import annotations
 

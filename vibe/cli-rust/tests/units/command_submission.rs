@@ -201,18 +201,6 @@ async fn display_settings_run_during_a_turn_and_with_a_paused_queue() {
             assert!(harness.app.chat_input.full_text().is_empty(), "{command}");
             assert_eq!(harness.notice(), None, "{command} is not refused");
         }
-        // The harness refuses MCP, connector and plugin changes during a turn.
-        for command in ["/mcp", "/connectors", "/plugins", "/reload-plugins"] {
-            let mut harness = Harness::ready();
-            make_busy(&mut harness.app);
-
-            assert!(!harness.submit(command));
-
-            assert_eq!(harness.app.chat_input.full_text(), command);
-            assert!(harness
-                .notice()
-                .is_some_and(|text| text.starts_with("Slash commands cannot be queued")));
-        }
         let mut harness = Harness::ready();
         make_busy(&mut harness.app);
         for (command, open) in [
@@ -226,6 +214,25 @@ async fn display_settings_run_during_a_turn_and_with_a_paused_queue() {
             harness.app.log_level_picker.open = false;
             harness.app.voice_app.open = false;
         }
+    }
+}
+
+#[tokio::test]
+async fn integration_changes_wait_for_a_running_turn() {
+    // The harness refuses MCP, connector and plugin changes during a turn.
+    for command in ["/mcp", "/connectors", "/plugins", "/reload-plugins"] {
+        let mut harness = Harness::ready();
+        harness.app.session.active_turn_id = Some("turn".into());
+        harness.app.session.status = Status::Generating {
+            since: vibe_rs::clock::now(),
+        };
+
+        assert!(!harness.submit(command));
+
+        assert_eq!(harness.app.chat_input.full_text(), command);
+        assert!(harness
+            .notice()
+            .is_some_and(|text| text.starts_with("Slash commands cannot be queued")));
     }
 }
 

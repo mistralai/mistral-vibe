@@ -83,6 +83,67 @@ fn a_refit_removes_an_earlier_exchange_with_a_reused_tool_call_id() {
     assert_eq!(messages[messages.len() - 3]["role"], "assistant");
 }
 
+/// *Prepare*: Automatic compaction at 5,000 tokens on an agent model with a
+/// 200,000-token window, and a separate compaction model whose window is
+/// 32,000 tokens. A turn reads a large file and reaches the threshold.
+/// *Do*: Start the compaction, then refuse the summary request as too long.
+/// *Assert*: The summary request fits the compaction model's budget, not the
+/// agent model's, and the refusal is measured against the compaction model's
+/// window.
+#[test]
+fn a_separate_compaction_model_sizes_and_measures_the_summary_request() {
+    let summary_window = 32_000;
+    let summary_budget = 30_000;
+    let mut value = serde_json::to_value(automatic_compaction_config_with_threshold(5_000))
+        .expect("config serializes");
+    value["settings"]["context"]["model_facts"]["compaction_threshold_max"] = json!(176_000);
+    value["settings"]["context"]["model_facts"]["context_window"] = json!(200_000);
+    value["settings"]["context"]["compaction_model_window"] =
+        json!({"context_window": summary_window, "summary_budget": summary_budget});
+    let config: HarnessConfig =
+        serde_json::from_value(value).expect("compaction model window is valid");
+    let mut runtime = SynchronousRuntime::new(config.clone());
+    let turn_id = "turn-separate-compaction-model";
+    let tool_action = read_large_file(&mut runtime, turn_id);
+    let tool_output = format!("large file contents {}", "0123456789abcdef".repeat(2_500));
+    let tool_result = file_read_success(&tool_action, &tool_output);
+    let compaction = runtime
+        .apply(
+            tool_result.clone(),
+            running(turn_id)
+                .dispatch(compaction_call("automatic", 1, 1))
+                .observe_completed_tool_result(&tool_action, &tool_result),
+        )
+        .only_action();
+    let refused_estimate = summary_request_estimate(&runtime.checkpoint_value(), config.clone());
+    assert!(
+        refused_estimate <= summary_budget,
+        "the summary request estimate {refused_estimate} must fit the compaction model's budget"
+    );
+    let correction = grown_correction(1.0, summary_window, refused_estimate);
+
+    runtime.apply(
+        completion_failed(
+            &compaction,
+            "context_overflow",
+            "prompt is too long for the model",
+        ),
+        running(turn_id)
+            .dispatch(compaction_call("automatic", 1, 2))
+            .observe(request_too_long(
+                turn_id,
+                refused_estimate,
+                correction,
+                summary_window,
+            )),
+    );
+
+    assert_eq!(
+        runtime.checkpoint_value()["estimate_correction"],
+        correction
+    );
+}
+
 fn context_overflow_error(retryable: bool) -> Value {
     json!({
         "code": "context_overflow",
@@ -228,7 +289,17 @@ fn agent_request_refused_as_too_long_corrects_the_estimate_and_compacts() {
     // The next accepted reply clears the rebuilt flag and re-measures the
     // correction: its reported input is under the estimate, so it is back to 1
     // and leaves the checkpoint.
-    runtime.finish_turn_with_text(turn_id, &resumed, "done");
+    let usage = json!({"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0});
+    let mut reply = text_completion(&resumed, "done");
+    reply["result"]["usage"] = usage.clone();
+    let mut committed = assistant_text_committed(turn_id, &resumed, "done");
+    committed["candidate"]["usage"] = usage;
+    runtime.apply(
+        reply,
+        completed(turn_id, vec![json!({"type": "text", "text": "done"})])
+            .observe(committed)
+            .observe(turn_completed(turn_id, "done")),
+    );
     let checkpoint = runtime.checkpoint_value();
     assert!(checkpoint.get("rebuilt_since_reply").is_none());
     assert!(checkpoint.get("estimate_correction").is_none());

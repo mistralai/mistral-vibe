@@ -35,6 +35,7 @@ disk, which costs little, and keeps looking every time.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -76,6 +77,17 @@ _WRITE_TOOL_PATH_ARGUMENTS = {
 
 _AGENTS_MD_SECTION = "Contents of {directory}/AGENTS.md (project instructions for this directory):\n\n{content}"
 
+# Each session workspace's access roots, by its cwd and roots: subagents share the workspace.
+_ACCESS_ROOTS: dict[tuple[Path, tuple[Path, ...]], tuple[Path, ...]] = {}
+
+
+def register_access_roots(
+    cwd: Path, roots: Sequence[Path], access_roots: Sequence[Path]
+) -> None:
+    """Keeps the hook from reading AGENTS.md in a workspace's access roots."""
+    if access_roots:
+        _ACCESS_ROOTS[(cwd, tuple(roots))] = tuple(access_roots)
+
 
 def _passthrough(tool_result: RustToolResult) -> RustPostToolCallHookResult:
     return RustPostToolCallHookResult(
@@ -87,7 +99,13 @@ def _session_files(
     harness_files: HarnessFilesManager, context: HookContext
 ) -> HarnessFilesManager:
     workspace = context.config.workspace
-    return session_harness_files(harness_files, workspace.cwd, workspace.roots)
+    access = _ACCESS_ROOTS.get((workspace.cwd, tuple(workspace.roots)), ())
+    return session_harness_files(
+        harness_files,
+        workspace.cwd,
+        [root for root in workspace.roots if root not in access],
+        access,
+    )
 
 
 def _read_file_path(
@@ -262,4 +280,5 @@ __all__ = [
     "agents_md_hook",
     "agents_md_hook_handlers",
     "merge_agents_md_hook",
+    "register_access_roots",
 ]

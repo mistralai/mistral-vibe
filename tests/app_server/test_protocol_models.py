@@ -9,9 +9,11 @@ from pydantic import ValidationError
 import pytest
 
 from vibe.app_server._model import validate_wire
+from vibe.app_server._session_peers import RenameSessionArgs
 from vibe.app_server.models import (
     IdleSessionStatus,
     MCPSourceSummary,
+    PublicError,
     PublicQueuedTurn,
     PublicRetryCategory,
     PublicRetryState,
@@ -22,6 +24,7 @@ from vibe.app_server.models import (
     PublicTurnQueueEditState,
     PublicTurnStatus,
     TextContentBlock,
+    TurnErrorCode,
     validate_history_entry,
 )
 from vibe.app_server.protocol import (
@@ -37,6 +40,7 @@ from vibe.app_server.protocol import (
     InvalidParamsData,
     InvalidParamsIssue,
     LoopsCreateParams,
+    LoopsUpdateParams,
     MessageAnnotations,
     PageRequest,
     ProtocolError,
@@ -46,6 +50,7 @@ from vibe.app_server.protocol import (
     SessionForkResponse,
     SessionHistoryListParams,
     SessionImageContentBlock,
+    SessionPeerRenameParams,
     SessionReadResponse,
     SessionResourceLinkContentBlock,
     SessionResumeResponse,
@@ -144,6 +149,38 @@ def test_feedback_response_serializes_cooldown_and_accepts_legacy_shape() -> Non
     )
 
 
+@pytest.mark.parametrize(
+    ("status", "code", "retryable"),
+    [
+        (PublicTurnStatus.FAILED, TurnErrorCode.BACKEND_ERROR, True),
+        (PublicTurnStatus.FAILED, TurnErrorCode.RATE_LIMIT, True),
+        (PublicTurnStatus.FAILED, TurnErrorCode.RESPONSE_TOO_LONG, True),
+        (PublicTurnStatus.FAILED, TurnErrorCode.INCOMPLETE_STREAM, True),
+        (PublicTurnStatus.FAILED, TurnErrorCode.CONTEXT_TOO_LONG, False),
+        (PublicTurnStatus.FAILED, TurnErrorCode.INVALID_API_KEY, False),
+        (PublicTurnStatus.FAILED, None, False),
+        (PublicTurnStatus.INTERRUPTED, None, True),
+        (PublicTurnStatus.COMPLETED, None, False),
+        (PublicTurnStatus.IN_PROGRESS, None, False),
+    ],
+)
+def test_public_turn_is_retryable_from_its_status_and_error_code(
+    status: PublicTurnStatus, code: TurnErrorCode | None, retryable: bool
+) -> None:
+    error = PublicError(message="failed", code=code) if code else None
+
+    turn = PublicTurn(
+        id="turn-1", session_id="session-1", status=status, started_at=1, error=error
+    )
+    from_wire = validate_wire(
+        PublicTurn, {**turn.model_dump(mode="json"), "retryable": not retryable}
+    )
+
+    assert turn.retryable is retryable
+    assert turn.model_dump(mode="json")["retryable"] is retryable
+    assert from_wire.retryable is retryable
+
+
 def test_public_session_state_carries_optional_retry_state() -> None:
     session = PublicSession(
         id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
@@ -189,6 +226,34 @@ def test_public_session_harness_field_defaults_to_none() -> None:
 
     assert session.harness is None
     assert session.model_dump(mode="json")["harness"] is None
+
+
+def test_public_session_says_only_a_missing_folder_is_missing() -> None:
+    bare = PublicSession(
+        id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+    gone = bare.model_copy(update={"cwd_missing": True})
+
+    assert "cwdMissing" not in bare.model_dump(mode="json", by_alias=True)
+    assert gone.model_dump(mode="json", by_alias=True)["cwdMissing"] is True
+
+
+def test_public_session_leaves_out_an_unknown_repository_root() -> None:
+    bare = PublicSession(
+        id="session-1", status=IdleSessionStatus(), created_at=1, updated_at=1
+    )
+    grouped = bare.model_copy(update={"repository_root": "/work/repository"})
+
+    assert "repositoryRoot" not in bare.model_dump(mode="json", by_alias=True)
+    assert grouped.model_dump(mode="json", by_alias=True)["repositoryRoot"] == (
+        "/work/repository"
+    )
+    assert (
+        PublicSession.model_validate(
+            bare.model_dump(mode="json", by_alias=True)
+        ).repository_root
+        is None
+    )
 
 
 def test_public_session_serializes_nullable_bumped_at() -> None:
@@ -264,14 +329,30 @@ def test_agent_config_carries_app_server_and_vibe_launch_fields() -> None:
     assert config.tools[0].input_schema == {"type": "object"}
 
 
-@pytest.mark.parametrize(
-    "project", [{"kind": "local"}, {"kind": "cloud", "id": ""}, {"kind": "none"}]
-)
+@pytest.mark.parametrize("project", [{"kind": "local"}, {"kind": "cloud", "id": ""}])
 def test_session_start_rejects_a_project_stamp_without_a_project(
     project: dict[str, str],
 ) -> None:
     with pytest.raises(ValidationError):
         validate_wire(SessionStartParams, {"project": project})
+
+
+def test_session_start_takes_no_project() -> None:
+    params = validate_wire(SessionStartParams, {"project": {"kind": "none"}})
+
+    assert params.project is not None
+    assert params.project.kind == "none"
+
+
+def test_a_session_start_without_a_project_refuses_a_worktree() -> None:
+    with pytest.raises(ValidationError):
+        validate_wire(
+            SessionStartParams,
+            {
+                "project": {"kind": "none"},
+                "agentConfig": {"worktree": {"kind": "auto"}},
+            },
+        )
 
 
 def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
@@ -289,6 +370,7 @@ def test_session_start_wraps_vibe_configuration_in_agent_config() -> None:
             "hooks": [],
             "cwd": "/workspace",
             "workspaceRoots": [],
+            "accessRoots": [],
             "worktree": None,
             "agent": None,
             "approvalPolicy": None,
@@ -339,6 +421,20 @@ def test_initialize_accepts_the_desktop_entrypoint_off_the_wire() -> None:
 
     assert params.client_info.entrypoint == "desktop"
     assert params.client_info.name == "vibe_desktop"
+
+
+def test_initialize_takes_the_client_instance_desktop_reports() -> None:
+    params = validate_wire(
+        InitializeParams,
+        {
+            "clientInfo": {"name": "vibe_desktop", "version": "1.2.3"},
+            "clientInstance": "/Users/me/Library/Application Support/le-chat-desktop",
+        },
+    )
+
+    assert params.client_instance == (
+        "/Users/me/Library/Application Support/le-chat-desktop"
+    )
 
 
 def test_initialize_ignores_capabilities_this_server_does_not_know() -> None:
@@ -1044,6 +1140,22 @@ def test_cumulative_budgets_validate_values_in_every_mode() -> None:
 def test_loops_create_takes_exactly_one_schedule(schedule: dict[str, str]) -> None:
     with pytest.raises(ValidationError, match="Exactly one of interval or cron"):
         LoopsCreateParams.model_validate({"sessionId": "s", "prompt": "p", **schedule})
+    with pytest.raises(ValidationError, match="Exactly one of interval or cron"):
+        LoopsUpdateParams.model_validate({
+            "sessionId": "s",
+            "loopId": "l",
+            "prompt": "p",
+            **schedule,
+        })
+
+
+def test_loops_update_requires_the_loop_id() -> None:
+    with pytest.raises(ValidationError, match="loopId"):
+        LoopsUpdateParams.model_validate({
+            "sessionId": "s",
+            "interval": "30s",
+            "prompt": "p",
+        })
 
 
 def test_loops_create_keeps_an_interval_only_payload_unchanged() -> None:
@@ -1054,3 +1166,109 @@ def test_loops_create_keeps_an_interval_only_payload_unchanged() -> None:
         "interval": "30s",
         "prompt": "p",
     }
+
+
+# Desktop's UpdateSessionInputSchema (code-server-contract/src/session/types.ts)
+# uses String.trim via Zod: ECMA-262 WhiteSpace + LineTerminator, not str.strip.
+_JS_TRIM_CHARACTERS = tuple(
+    map(
+        chr,
+        [
+            0x0009,
+            0x000A,
+            0x000B,
+            0x000C,
+            0x000D,
+            0x0020,
+            0x00A0,
+            0x1680,
+            0x2000,
+            0x2001,
+            0x2002,
+            0x2003,
+            0x2004,
+            0x2005,
+            0x2006,
+            0x2007,
+            0x2008,
+            0x2009,
+            0x200A,
+            0x2028,
+            0x2029,
+            0x202F,
+            0x205F,
+            0x3000,
+            0xFEFF,
+        ],
+    )
+)
+_JS_NONTRIM_CHARACTERS = tuple(
+    map(chr, [0x001C, 0x001D, 0x001E, 0x001F, 0x0085, 0x180E, 0x200B, 0x2060])
+)
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+@pytest.mark.parametrize("whitespace", _JS_TRIM_CHARACTERS, ids=ascii)
+@pytest.mark.parametrize(
+    "title", ["x" * 255, "😀" * 127 + "a"], ids=["ascii-255", "emoji-255"]
+)
+def test_peer_rename_trims_each_ecmascript_whitespace_before_length_checks(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams],
+    whitespace: str,
+    title: str,
+) -> None:
+    params = model.model_validate({
+        "session_id": "other",
+        "title": f"{whitespace}{title}{whitespace}",
+    })
+    assert params.title == title
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+@pytest.mark.parametrize("whitespace", _JS_TRIM_CHARACTERS, ids=ascii)
+@pytest.mark.parametrize(
+    "title", ["", "x" * 256, "😀" * 128], ids=["empty", "ascii-256", "emoji-256"]
+)
+def test_peer_rename_rejects_empty_and_256_units_after_ecmascript_trimming(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams],
+    whitespace: str,
+    title: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({
+            "session_id": "other",
+            "title": f"{whitespace}{title}{whitespace}",
+        })
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+@pytest.mark.parametrize("character", _JS_NONTRIM_CHARACTERS, ids=ascii)
+def test_peer_rename_preserves_non_ecmascript_whitespace_and_counts_it(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams], character: str
+) -> None:
+    assert model(session_id="other", title=character).title == character
+    boundary = character + "x" * 253 + character
+    assert model(session_id="other", title=f" \ufeff{boundary}\n").title == boundary
+    with pytest.raises(ValidationError):
+        model(session_id="other", title=character + "x" * 254 + character)
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+@pytest.mark.parametrize("title", [None, 12, {}, []])
+def test_peer_rename_trimming_leaves_non_string_validation_to_pydantic(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams], title: object
+) -> None:
+    with pytest.raises(ValidationError):
+        model.model_validate({"session_id": "other", "title": title})
+
+
+@pytest.mark.parametrize("model", [RenameSessionArgs, SessionPeerRenameParams])
+def test_peer_rename_trims_mixed_ecmascript_whitespace_only_at_the_ends(
+    model: type[RenameSessionArgs] | type[SessionPeerRenameParams],
+) -> None:
+    whitespace = "".join(_JS_TRIM_CHARACTERS)
+    title = f"First{whitespace}second"
+    params = model(session_id="other", title=f"{whitespace}{title}{whitespace}")
+    assert params.title == title
+    with pytest.raises(ValidationError):
+        model(session_id="other", title=whitespace)

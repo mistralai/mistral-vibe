@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 import copy
 import json
 from pathlib import Path
-from typing import Any
+import threading
+from typing import Any, cast
 
 import httpx2
 import pytest
@@ -14,19 +16,22 @@ from vibe.app_server._connection_protocol import ClientCapabilities
 from vibe.app_server._session_peers import SessionPeerError
 from vibe.app_server._session_reply import ReplyRoute, send_reply
 from vibe.app_server._vibe_bot import (
-    VibeBotCallHeld,
     VibeBotCallRefused,
     VibeBotClient,
     VibeBotController,
+    VibeBotLocalSessionGone,
     VibeBotLocalSessions,
+    _bot_thread_of_sender,
     bot_sender_id,
 )
 from vibe.app_server._vibe_bot_tools import LocalTools
 from vibe.app_server.protocol import (
+    ProtocolErrorCode,
     SessionMessageSender,
     SessionPeerSendParams,
     SessionPeerSendResponse,
 )
+from vibe.app_server.server import _ClientRequestFailed, _VibeBotClientRequests
 from vibe.core.platform_auth import ApiKeyPlatformCredentialProvider
 from vibe.core.types import OwedReply
 
@@ -111,10 +116,10 @@ class _FakeClient(VibeBotClient):
         self,
         *,
         duplicate: bool = False,
-        claim_taken: bool = False,
         claim_refused: str | None = None,
-        claim_held: dict[str, Any] | None = None,
+        session_peers: bool = True,
     ) -> None:
+        self.session_peers = session_peers
         self.started: list[dict[str, Any]] = []
         self.sent: list[dict[str, Any]] = []
         self.stopped: list[str] = []
@@ -122,13 +127,13 @@ class _FakeClient(VibeBotClient):
         self.reports: list[dict[str, Any]] = []
         self.report_bots: list[str] = []
         self.duplicate = duplicate
-        self.claim_taken = claim_taken
         self.claim_refused = claim_refused
-        self.claim_held = claim_held
-        self.refused_claims: dict[str, str] = {}
-        self.failing_claims: set[str] = set()
+        self.failing_starts = 0
         self.failing_sends = 0
         self.failing_reports: list[Exception] = []
+
+    def session_tools(self) -> bool:
+        return self.session_peers
 
     async def start_local(
         self,
@@ -142,6 +147,9 @@ class _FakeClient(VibeBotClient):
         model: str | None = None,
         approval_policy: str | None = None,
     ) -> tuple[str, str | None]:
+        if self.failing_starts:
+            self.failing_starts -= 1
+            raise RuntimeError("the model `nope` is not in this computer's Vibe config")
         self.started.append({
             "bot": bot,
             "key": idempotency_key,
@@ -190,16 +198,8 @@ class _FakeClient(VibeBotClient):
             raise self.failing_reports.pop(0)
         self.reports.append(event)
         self.report_bots.append(bot)
-        if event["kind"] == "claimed" and event["requestId"] in self.failing_claims:
-            raise RuntimeError("the bot could not be reached")
-        if event["kind"] == "claimed" and event["requestId"] in self.refused_claims:
-            raise VibeBotCallRefused(self.refused_claims[event["requestId"]])
-        if event["kind"] in {"claimed", "message"} and self.claim_refused is not None:
+        if event["kind"] == "message" and self.claim_refused is not None:
             raise VibeBotCallRefused(self.claim_refused)
-        if event["kind"] == "claimed" and self.claim_held is not None:
-            raise VibeBotCallHeld(self.claim_held)
-        if event["kind"] == "claimed":
-            return self.claim_taken
         return self.duplicate and event["kind"] == "accepted"
 
 
@@ -215,6 +215,7 @@ def _controller(
     max_reconnect_seconds: float = 0.01,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     local_tools: LocalTools | None = None,
+    instance: str | None = None,
 ) -> VibeBotController:
     credentials = ApiKeyPlatformCredentialProvider.from_api_key("test-key")
 
@@ -236,6 +237,7 @@ def _controller(
         max_reconnect_seconds=max_reconnect_seconds,
         not_yet_retry_seconds=0.01,
         local_tools=local_tools,
+        client_instance=lambda: instance,
     )
     controller.sleep = sleep
     return controller
@@ -270,301 +272,6 @@ async def _follow(
         },
     )
     return str(response.model_dump(by_alias=True)["clientId"])
-
-
-@pytest.mark.asyncio
-async def test_a_start_call_starts_one_local_session_reports_it_and_is_answered_once(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    api = _FakeSessionApi([
-        _call(
-            "cb-1",
-            "start_local_session",
-            {"handle": "run-tests", "brief": "Run the tests.", "link": "attached"},
-        ),
-        _call("cb-2", "other_tool", {}),
-    ])
-    client = _FakeClient()
-    controller = _controller(api, client, sessions)
-    try:
-        client_id = await _follow(controller)
-        await _until(lambda: bool(api.answers))
-        await asyncio.sleep(0.05)
-
-        [started] = client.started
-        assert started["thread"] == "local_cb-1" and started["key"] == "cb-1"
-        assert started["bot"] == BOT and client.report_bots == [BOT]
-        assert "Run the tests." in started["prompt"] and started["title"] == "run-tests"
-        # Benjamin's review: a peer's message is a request, and the cloud threads cannot read this computer's files.
-        assert 'relation="peer"' in started["prompt"]
-        assert "can't read files on this computer" in started["prompt"]
-        assert "`send_to_session` with `session_id`" in started["prompt"]
-        assert client.reports == [
-            {
-                "kind": "accepted",
-                "clientId": client_id,
-                "requestId": "cb-1",
-                "threadId": "local_cb-1",
-                "localSessionId": "ls-1",
-                "turnId": "turn-first",
-                "call": {
-                    "kind": "start",
-                    "callerSessionId": ORCH,
-                    "handle": "run-tests",
-                    "title": "run-tests",
-                    "link": "attached",
-                },
-            }
-        ]
-        assert api.answers == [
-            {
-                "callbackId": "cb-1",
-                "output": {
-                    "sessionId": "ls-1",
-                    "handle": "run-tests",
-                    "title": "run-tests",
-                },
-            }
-        ]
-        assert [c["callback"]["id"] for c in api.callbacks] == ["cb-2"]
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_start_asks_for_the_model_and_approval_policy_the_bot_picked(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    """The app server's start caps the policy at this machine's Vibebot ceiling."""
-    api = _FakeSessionApi([
-        _call(
-            "cb-1",
-            "start_local_session",
-            {
-                "handle": "run-tests",
-                "brief": "Run the tests.",
-                "model": "glm-5-latest-short",
-                "approvalPolicy": "smart-approve",
-            },
-        ),
-        _call("cb-2", "start_local_session", {"handle": "other", "brief": "x"}),
-    ])
-    client = _FakeClient()
-    controller = _controller(api, client, sessions)
-    try:
-        await _follow(controller)
-        await _until(lambda: len(api.answers) == 2)
-
-        picks = {
-            started["thread"]: (started["model"], started["approval_policy"])
-            for started in client.started
-        }
-        assert picks == {
-            "local_cb-1": ("glm-5-latest-short", "smart-approve"),
-            "local_cb-2": (None, None),
-        }
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "folder",
-    ["/Users/ada/dev/app", "/Users/ada/dev/app/packages/web", "/Users/ada/dev/app/"],
-)
-async def test_a_start_runs_in_a_local_project_or_a_folder_inside_one(
-    sessions: VibeBotLocalSessions, folder: str
-) -> None:
-    api = _FakeSessionApi([
-        _call(
-            "cb-1",
-            "start_local_session",
-            {
-                "handle": "run-tests",
-                "brief": "x",
-                "checkout": {"kind": "directory", "path": folder},
-            },
-        )
-    ])
-    client = _FakeClient()
-    controller = _controller(
-        api, client, sessions, project_roots=["/Users/ada/dev/app"]
-    )
-    try:
-        await _follow(controller)
-        await _until(lambda: bool(api.answers))
-
-        assert [s["checkout"]["path"] for s in client.started] == [folder]
-        assert "output" in api.answers[0]
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "checkout",
-    [
-        {
-            "kind": "new_worktree",
-            "repository": "/Users/ada",
-            "path": "/Users/ada/dev/app",
-        },
-        {"kind": "directory", "path": "/Users/ada", "repository": "/Users/ada/dev/app"},
-        {"kind": "new_worktree", "repository": "", "path": ""},
-        {"kind": "elsewhere", "path": "/Users/ada/dev/app"},
-    ],
-)
-async def test_a_start_checks_the_folder_its_checkout_kind_names(
-    sessions: VibeBotLocalSessions, checkout: dict[str, str]
-) -> None:
-    """Benjamin's review: Desktop runs in the field the kind names, so that field is the one checked."""
-    api = _FakeSessionApi([
-        _call(
-            "cb-1",
-            "start_local_session",
-            {"handle": "run-tests", "brief": "x", "checkout": checkout},
-        )
-    ])
-    client = _FakeClient()
-    controller = _controller(
-        api, client, sessions, project_roots=["/Users/ada/dev/app"]
-    )
-    try:
-        await _follow(controller)
-        await _until(lambda: bool(api.answers))
-
-        assert client.started == []
-        assert api.answers[0]["error"]["code"] == "callback_failed"
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_new_worktree_of_a_local_project_starts(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    checkout = {"kind": "new_worktree", "repository": "/Users/ada/dev/app"}
-    api = _FakeSessionApi([
-        _call(
-            "cb-1",
-            "start_local_session",
-            {"handle": "run-tests", "brief": "x", "checkout": checkout},
-        )
-    ])
-    client = _FakeClient()
-    controller = _controller(
-        api, client, sessions, project_roots=["/Users/ada/dev/app"]
-    )
-    try:
-        await _follow(controller)
-        await _until(lambda: bool(api.answers))
-
-        assert [s["checkout"] for s in client.started] == [checkout]
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_start_through_a_symlink_that_leaves_the_project_is_refused(
-    sessions: VibeBotLocalSessions, tmp_path: Path
-) -> None:
-    """Gabriel's review: a link inside a project to a folder outside it does not make that folder a project."""
-    project = tmp_path / "app"
-    secrets = tmp_path / "secrets"
-    project.mkdir()
-    secrets.mkdir()
-    (project / "escape").symlink_to(secrets)
-    api = _FakeSessionApi([
-        _call(
-            "cb-1",
-            "start_local_session",
-            {
-                "handle": "run-tests",
-                "brief": "x",
-                "checkout": {"kind": "directory", "path": str(project / "escape")},
-            },
-        )
-    ])
-    client = _FakeClient()
-    controller = _controller(api, client, sessions, project_roots=[str(project)])
-    try:
-        await _follow(controller)
-        await _until(lambda: bool(api.answers))
-
-        assert client.started == []
-        assert (
-            "not one of the user's local projects" in api.answers[0]["error"]["message"]
-        )
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_start_in_a_project_reached_through_a_symlinked_root_runs(
-    sessions: VibeBotLocalSessions, tmp_path: Path
-) -> None:
-    real = tmp_path / "real" / "app"
-    real.mkdir(parents=True)
-    (tmp_path / "linked").symlink_to(tmp_path / "real")
-    folder = str(real / ".")
-    api = _FakeSessionApi([
-        _call(
-            "cb-1",
-            "start_local_session",
-            {
-                "handle": "run-tests",
-                "brief": "x",
-                "checkout": {"kind": "directory", "path": folder},
-            },
-        )
-    ])
-    client = _FakeClient()
-    controller = _controller(
-        api, client, sessions, project_roots=[str(tmp_path / "linked" / "app")]
-    )
-    try:
-        await _follow(controller)
-        await _until(lambda: bool(api.answers))
-
-        assert "output" in api.answers[0]
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "folder",
-    ["/Users/ada", "/Users/ada/dev/application", "/Users/ada/dev/app/../secrets", "~"],
-)
-async def test_a_start_outside_the_users_local_projects_is_refused_before_it_starts(
-    sessions: VibeBotLocalSessions, folder: str
-) -> None:
-    """A trigger's payload must not pick any folder on the computer (review B1)."""
-    api = _FakeSessionApi([
-        _call(
-            "cb-1",
-            "start_local_session",
-            {
-                "handle": "run-tests",
-                "brief": "x",
-                "checkout": {"kind": "directory", "path": folder},
-            },
-        )
-    ])
-    client = _FakeClient()
-    controller = _controller(
-        api, client, sessions, project_roots=["/Users/ada/dev/app"]
-    )
-    try:
-        await _follow(controller)
-        await _until(lambda: bool(api.answers))
-
-        assert client.started == [] and client.reports == []
-        [answer] = api.answers
-        assert answer["error"]["code"] == "callback_failed"
-        assert "not one of the user's local projects" in answer["error"]["message"]
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -627,102 +334,75 @@ async def test_the_bots_calls_are_read_on_the_api_of_the_signed_in_account(
 
 
 @pytest.mark.asyncio
-async def test_a_second_desktop_archives_its_copy_and_leaves_the_call_to_the_first(
+async def test_a_reply_reaches_a_thread_whose_id_has_colons(
     sessions: VibeBotLocalSessions,
 ) -> None:
-    api = _FakeSessionApi([
-        _call("cb-1", "start_local_session", {"handle": "run-tests", "brief": "x"})
-    ])
-    client = _FakeClient(duplicate=True)
-    controller = _controller(api, client, sessions)
+    """Staging QA of #83140: a `code_local` thread is named after its tool call (`local_typescript:146:x:0:tool:0`)."""
+    thread_id = "local_typescript:146:hJrPQ7EqO:0:tool:0"
+    client = _FakeClient()
+    controller = _controller(_FakeSessionApi([]), client, sessions)
     try:
-        await _follow(controller)
-        await _until(lambda: bool(client.archived))
-        await asyncio.sleep(0.05)
+        await _follow(
+            controller,
+            [{"threadId": thread_id, "handle": "run-tests", "localSessionId": "ls-1"}],
+        )
 
-        assert client.archived == ["ls-1"]
-        assert api.answers == []
+        await sessions.deliver_reply(
+            SessionPeerSendParams(
+                target_session_id=bot_sender_id(BOT, thread_id),
+                text="All green.",
+                idempotency_key="k",
+                sender=SessionMessageSender(session_id="ls-1"),
+                reply=True,
+                reply_turn_id="turn-7",
+            )
+        )
+
+        assert client.report_bots == [BOT]
+        assert client.reports[0]["threadId"] == thread_id
     finally:
         await asyncio.gather(*controller.close(), return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_a_deferred_send_is_queued_into_the_session_and_reported_as_a_steer(
-    sessions: VibeBotLocalSessions,
+@pytest.mark.parametrize(
+    ("failure", "final"),
+    [(VibeBotCallRefused("no such thread"), True), (RuntimeError("offline"), False)],
+)
+async def test_a_reply_the_bot_refuses_is_final_and_a_lost_one_is_not(
+    sessions: VibeBotLocalSessions, failure: Exception, final: bool
 ) -> None:
-    """VIB2-163: Desktop's queue joins a running turn, or waits in the session's
-    context for its next one; it never starts a turn.
+    """A refused turn end never lands, so the session stops sending it; one that
+    did not reach the bot is sent again (`send_reply` reads which).
     """
-    thread = {"threadId": "local_cb-1", "handle": "run-tests", "localSessionId": "ls-1"}
-    api = _FakeSessionApi([
-        _call(
-            "cb-2",
-            "send_to_local_session",
-            {"session": "run-tests", "text": "FYI: CI is red", "delivery": "deferred"},
-        )
-    ])
     client = _FakeClient()
-    controller = _controller(api, client, sessions)
+    controller = _controller(_FakeSessionApi([]), client, sessions)
     try:
-        client_id = await _follow(controller, [thread])
-        await _until(lambda: len(api.answers) == 1)
-
-        assert client.sent == [
-            {
-                "bot": BOT,
-                "session": "ls-1",
-                "thread": "local_cb-1",
-                "text": "FYI: CI is red",
-                "key": "cb-2",
-                "delivery": "queue",
-            }
-        ]
-        assert client.reports == [
-            {
-                "kind": "claimed",
-                "clientId": client_id,
-                "requestId": "cb-2",
-                "threadId": "local_cb-1",
-                "callerSessionId": ORCH,
-            },
-            {
-                "kind": "accepted",
-                "clientId": client_id,
-                "requestId": "cb-2",
-                "threadId": "local_cb-1",
-                "localSessionId": "ls-1",
-                "turnId": "turn-cb-2",
-                "call": {
-                    "kind": "send",
-                    "callerSessionId": ORCH,
-                    "text": "FYI: CI is red",
-                    "delivery": "deferred",
-                },
-            },
-        ]
-        assert api.answers[0]["output"] == {"sessionId": "ls-1", "delivered": "queued"}
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_send_to_an_unknown_session_fails_the_call(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    api = _FakeSessionApi([
-        _call("cb-2", "send_to_local_session", {"session": "nope", "text": "x"})
-    ])
-    client = _FakeClient()
-    controller = _controller(api, client, sessions)
-    try:
-        await _follow(controller)
-        await _until(lambda: bool(api.answers))
-
-        [answer] = api.answers
-        assert (
-            answer["error"]["code"] == "callback_failed"
-            and "nope" in answer["error"]["message"]
+        await _follow(
+            controller,
+            [
+                {
+                    "threadId": "local_cb-1",
+                    "handle": "run-tests",
+                    "localSessionId": "ls-1",
+                }
+            ],
         )
+        client.failing_reports.append(failure)
+
+        with pytest.raises(Exception) as raised:
+            await sessions.deliver_reply(
+                SessionPeerSendParams(
+                    target_session_id=bot_sender_id(BOT, "local_cb-1"),
+                    text="All green.",
+                    idempotency_key="k",
+                    sender=SessionMessageSender(session_id="ls-1"),
+                    reply=True,
+                    reply_turn_id="turn-7",
+                )
+            )
+
+        assert isinstance(raised.value, SessionPeerError) is final
     finally:
         await asyncio.gather(*controller.close(), return_exceptions=True)
 
@@ -787,6 +467,525 @@ WAKE = {
     "localSessionId": "ls-1",
     "text": "rerun them",
 }
+
+
+START = {
+    "kind": "start",
+    "requestId": "start-call-1",
+    "threadId": "local_call-1",
+    "handle": "run-tests",
+    "title": "Run the tests",
+    "brief": "Run the tests.",
+}
+
+
+@pytest.mark.asyncio
+async def test_a_start_delivery_starts_one_local_session_under_its_key_and_reports_it(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    client = _FakeClient()
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        client_id = await _follow(controller)
+
+        await _deliver(
+            controller,
+            [
+                {
+                    **START,
+                    "model": "glm-5-latest-short",
+                    "approvalPolicy": "smart-approve",
+                }
+            ],
+        )
+
+        [started] = client.started
+        assert (started["bot"], started["key"], started["thread"]) == (
+            BOT,
+            "start-call-1",
+            "local_call-1",
+        )
+        assert (
+            started["title"] == "Run the tests"
+            and "Run the tests." in started["prompt"]
+        )
+        assert (started["model"], started["approval_policy"]) == (
+            "glm-5-latest-short",
+            "smart-approve",
+        )
+        # Benjamin's review: a peer's message is a request, and the cloud threads cannot read this computer's files.
+        assert 'relation="peer"' in started["prompt"]
+        assert "can't read files on this computer" in started["prompt"]
+        assert "`send_to_session` with `session_id`" in started["prompt"]
+        assert client.reports == [
+            {
+                "kind": "accepted",
+                "clientId": client_id,
+                "requestId": "start-call-1",
+                "threadId": "local_call-1",
+                "localSessionId": "ls-1",
+                "turnId": "turn-first",
+            }
+        ]
+        assert sessions.of(BOT).find("run-tests") is not None
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_follow_says_this_server_starts_local_threads(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    controller = _controller(_FakeSessionApi([]), _FakeClient(), sessions)
+    try:
+        response = await controller.dispatch(
+            "vibebot/follow",
+            {"botWorkflowId": BOT, "sessionIds": [], "localSessions": []},
+        )
+
+        assert response.model_dump(by_alias=True)["startsLocal"] is True
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+def _local(thread: str, session: str, client_id: str) -> dict[str, Any]:
+    return {
+        "threadId": thread,
+        "handle": thread,
+        "localSessionId": session,
+        "clientId": client_id,
+    }
+
+
+async def _archived(
+    controller: VibeBotController, local_sessions: list[dict[str, Any]]
+) -> dict[str, Any]:
+    response = await controller.dispatch(
+        "vibebot/follow",
+        {
+            "botWorkflowId": BOT,
+            "sessionIds": [],
+            "localSessions": local_sessions,
+            "ended": "archived",
+        },
+    )
+    return response.model_dump(by_alias=True)
+
+
+@pytest.mark.asyncio
+async def test_a_followed_bot_is_still_followed(sessions: VibeBotLocalSessions) -> None:
+    controller = _controller(_FakeSessionApi([]), _FakeClient(), sessions)
+    try:
+        response = await controller.dispatch(
+            "vibebot/follow",
+            {"botWorkflowId": BOT, "sessionIds": [], "localSessions": []},
+        )
+
+        assert response.model_dump(by_alias=True)["following"] is True
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_an_archived_bot_is_no_longer_followed_and_its_sessions_here_stop(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """VIB2-330: the bot's run ended without this machine taking its stops
+    (offline then); the client relays why, and the server decides.
+    """
+    client = _FakeClient()
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        here = await _follow(controller)
+        live = [_local("local_a", "ls-a", here), _local("local_b", "ls-b", "desk-2")]
+        await _follow(controller, live)
+
+        answer = await _archived(controller, live)
+
+        assert answer["following"] is False
+        assert client.stopped == ["ls-a"]
+        assert not any(key[0] == BOT for key in controller._followers)
+        assert sessions.of(BOT).threads == {}
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_an_archived_bot_this_server_never_followed_still_stops_its_sessions(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """After a restart the server holds none of the bot's sessions: the
+    ones the client relays, from the bot's last state, are stopped.
+    """
+    client = _FakeClient()
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        here = sessions.client_id(BOT)
+
+        answer = await _archived(controller, [_local("local_a", "ls-a", here)])
+
+        assert answer["following"] is False
+        assert client.stopped == ["ls-a"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_an_archived_bot_stops_the_sessions_of_this_desktop_profile(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    client = _FakeClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, instance="/profiles/dev"
+    )
+    try:
+        here = controller.client_id(BOT)
+        other = sessions.client_id(BOT, instance="/profiles/dev-port-5182")
+        live = [_local("local_a", "ls-a", here), _local("local_b", "ls-b", other)]
+
+        answer = await _archived(controller, live)
+
+        assert answer["clientId"] == here
+        assert client.stopped == ["ls-a"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_an_archived_bot_whose_stop_failed_is_followed_until_it_stops(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """A stop that failed is tried again on the next follow, so the client
+    keeps asking.
+    """
+    client = _FakeClient()
+    failing = [RuntimeError("the session is busy")]
+
+    async def stop_local(
+        *, bot: str, local_session_id: str, idempotency_key: str
+    ) -> None:
+        if failing:
+            raise failing.pop()
+        client.stopped.append(local_session_id)
+
+    client.stop_local = stop_local  # type: ignore[method-assign]
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        local = [_local("local_a", "ls-a", sessions.client_id(BOT))]
+
+        first = await _archived(controller, local)
+        second = await _archived(controller, local)
+
+        assert (first["following"], second["following"]) == (True, False)
+        assert client.stopped == ["ls-a"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_an_archived_bot_whose_session_is_gone_counts_it_stopped(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """A session the user deleted has nothing to stop: the client stops
+    asking, rather than every 5 s for good.
+    """
+    client = _FakeClient()
+
+    async def stop_local(
+        *, bot: str, local_session_id: str, idempotency_key: str
+    ) -> None:
+        raise VibeBotLocalSessionGone(local_session_id)
+
+    client.stop_local = stop_local  # type: ignore[method-assign]
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        local = [_local("local_a", "ls-a", sessions.client_id(BOT))]
+
+        answer = await _archived(controller, local)
+
+        assert answer["following"] is False
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_bot_that_stopped_otherwise_is_unfollowed_and_keeps_its_local_threads(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Its run ended (not archived): nothing to follow until the user starts
+    it again, and nothing is stopped or sent again meanwhile.
+    """
+    client = _FakeClient()
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        here = await _follow(controller)
+        live = [_local("local_a", "ls-a", here)]
+        await _follow(controller, live)
+
+        response = await controller.dispatch(
+            "vibebot/follow",
+            {
+                "botWorkflowId": BOT,
+                "sessionIds": [],
+                "localSessions": [],
+                "ended": "stopped",
+            },
+        )
+
+        assert response.model_dump(by_alias=True)["following"] is True
+        assert not any(key[0] == BOT for key in controller._followers)
+        assert set(sessions.of(BOT).threads) == {"local_a"}
+        assert client.stopped == []
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_start_names_no_session_tool_the_session_will_not_have(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Staging QA of #83140: without `sessionPeers`, a local session has no
+    `send_to_session`; its task must not tell it to call that tool.
+    """
+    client = _FakeClient(session_peers=False)
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        await _follow(controller)
+
+        await _deliver(controller, [START])
+
+        [started] = client.started
+        assert "send_to_session" not in started["prompt"]
+        assert "can't read files on this computer" in started["prompt"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_start_that_fails_here_is_refused_with_its_reason(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    client = _FakeClient()
+    client.failing_starts = 1
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        client_id = await _follow(controller)
+
+        await _deliver(controller, [START])
+
+        assert client.reports == [
+            {
+                "kind": "refused",
+                "clientId": client_id,
+                "requestId": "start-call-1",
+                "threadId": "local_call-1",
+                "error": "the model `nope` is not in this computer's Vibe config",
+            }
+        ]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_start_the_bot_no_longer_waits_for_archives_its_session(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Stopped, archived, or another machine's meanwhile: no session it does not know of keeps running."""
+    client = _FakeClient(duplicate=True)
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        await _follow(controller)
+
+        await _deliver(controller, [START])
+
+        assert client.archived == ["ls-1"] and sessions.of(BOT).threads == {}
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "folder",
+    ["/Users/ada/dev/app", "/Users/ada/dev/app/packages/web", "/Users/ada/dev/app/"],
+)
+async def test_a_start_runs_in_a_local_project_or_a_folder_inside_one(
+    sessions: VibeBotLocalSessions, folder: str
+) -> None:
+    client = _FakeClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, project_roots=["/Users/ada/dev/app"]
+    )
+    try:
+        await _follow(controller)
+
+        await _deliver(
+            controller, [{**START, "checkout": {"kind": "directory", "path": folder}}]
+        )
+
+        assert [s["checkout"]["path"] for s in client.started] == [folder]
+        assert [r["kind"] for r in client.reports] == ["accepted"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "checkout",
+    [
+        {
+            "kind": "new_worktree",
+            "repository": "/Users/ada",
+            "path": "/Users/ada/dev/app",
+        },
+        {"kind": "directory", "path": "/Users/ada", "repository": "/Users/ada/dev/app"},
+        {"kind": "new_worktree", "repository": "", "path": ""},
+        {"kind": "elsewhere", "path": "/Users/ada/dev/app"},
+    ],
+)
+async def test_a_start_checks_the_folder_its_checkout_kind_names(
+    sessions: VibeBotLocalSessions, checkout: dict[str, str]
+) -> None:
+    """Benjamin's review: Desktop runs in the field the kind names, so that field is the one checked."""
+    client = _FakeClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, project_roots=["/Users/ada/dev/app"]
+    )
+    try:
+        await _follow(controller)
+
+        await _deliver(controller, [{**START, "checkout": checkout}])
+
+        assert client.started == []
+        assert [r["kind"] for r in client.reports] == ["refused"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_new_worktree_of_a_local_project_starts(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    checkout = {"kind": "new_worktree", "repository": "/Users/ada/dev/app"}
+    client = _FakeClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, project_roots=["/Users/ada/dev/app"]
+    )
+    try:
+        await _follow(controller)
+
+        await _deliver(controller, [{**START, "checkout": checkout}])
+
+        assert [s["checkout"] for s in client.started] == [checkout]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_start_through_a_symlink_that_leaves_the_project_is_refused(
+    sessions: VibeBotLocalSessions, tmp_path: Path
+) -> None:
+    """Gabriel's review: a link inside a project to a folder outside it does not make that folder a project."""
+    project = tmp_path / "app"
+    secrets = tmp_path / "secrets"
+    project.mkdir()
+    secrets.mkdir()
+    (project / "escape").symlink_to(secrets)
+    client = _FakeClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, project_roots=[str(project)]
+    )
+    try:
+        await _follow(controller)
+
+        await _deliver(
+            controller,
+            [
+                {
+                    **START,
+                    "checkout": {"kind": "directory", "path": str(project / "escape")},
+                }
+            ],
+        )
+
+        assert client.started == []
+        [refused] = client.reports
+        assert "not one of the user's local projects" in refused["error"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_start_in_a_project_reached_through_a_symlinked_root_runs(
+    sessions: VibeBotLocalSessions, tmp_path: Path
+) -> None:
+    real = tmp_path / "real" / "app"
+    real.mkdir(parents=True)
+    (tmp_path / "linked").symlink_to(tmp_path / "real")
+    client = _FakeClient()
+    controller = _controller(
+        _FakeSessionApi([]),
+        client,
+        sessions,
+        project_roots=[str(tmp_path / "linked" / "app")],
+    )
+    try:
+        await _follow(controller)
+
+        await _deliver(
+            controller,
+            [{**START, "checkout": {"kind": "directory", "path": str(real / ".")}}],
+        )
+
+        assert [r["kind"] for r in client.reports] == ["accepted"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "folder",
+    ["/Users/ada", "/Users/ada/dev/application", "/Users/ada/dev/app/../secrets", "~"],
+)
+async def test_a_start_outside_the_users_local_projects_is_refused_before_it_starts(
+    sessions: VibeBotLocalSessions, folder: str
+) -> None:
+    """A trigger's payload must not pick any folder on the computer (review B1)."""
+    client = _FakeClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, project_roots=["/Users/ada/dev/app"]
+    )
+    try:
+        await _follow(controller)
+
+        await _deliver(
+            controller, [{**START, "checkout": {"kind": "directory", "path": folder}}]
+        )
+
+        assert client.started == []
+        [refused] = client.reports
+        assert refused["kind"] == "refused"
+        assert "not one of the user's local projects" in refused["error"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_start_handed_back_after_a_lost_report_starts_under_the_same_key(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    client = _FakeClient()
+    client.failing_reports = [RuntimeError("the BFF is down")]
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        await _follow(controller)
+
+        await _deliver(controller, [START])
+        await _deliver(controller, [START])
+
+        assert [s["key"] for s in client.started] == ["start-call-1", "start-call-1"]
+        assert [r["kind"] for r in client.reports] == ["accepted"]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -887,6 +1086,234 @@ def test_each_bot_gets_its_own_client_id_kept_across_restarts(tmp_path: Path) ->
 
     assert len(set(ids.values())) == 2
     assert {bot: again.client_id(bot) for bot in ids} == ids
+
+
+def test_two_desktops_on_one_vibe_home_get_their_own_ids_kept_across_restarts(
+    tmp_path: Path,
+) -> None:
+    """Two dev Desktops share the dev Vibe home: one id would make the bot take
+    them for one Desktop, each taking the other's starts and tool calls.
+    """
+    one = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+    other = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+    first = one.client_id(BOT, instance="/profiles/dev")
+    second = other.client_id(BOT, instance="/profiles/dev-port-5182")
+    again = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+
+    assert first != second
+    assert again.client_id(BOT, instance="/profiles/dev") == first
+    assert again.client_id(BOT, instance="/profiles/dev-port-5182") == second
+
+
+def test_the_first_desktop_after_the_upgrade_keeps_the_machines_ids(
+    tmp_path: Path,
+) -> None:
+    """Its open start cards and local tool rules are keyed on the id it had."""
+    legacy = tmp_path / "vibe_bot_client_id"
+    legacy.write_text(json.dumps({BOT: "d2f98138", "vibe-bot--u1--work": "w-1"}))
+    sessions = VibeBotLocalSessions(client_id_file=legacy)
+
+    assert sessions.client_id(BOT, instance="/profiles/installed") == "d2f98138"
+    assert sessions.client_id(BOT, instance="/profiles/dev") != "d2f98138"
+    reopened = VibeBotLocalSessions(client_id_file=legacy)
+    assert reopened.client_id(BOT, instance="/profiles/installed") == "d2f98138"
+    assert (
+        reopened.client_id("vibe-bot--u1--work", instance="/profiles/installed")
+        == "w-1"
+    )
+    assert reopened.client_id(BOT, instance="/profiles/dev") != "d2f98138"
+
+
+def test_a_side_by_side_copy_never_takes_the_machines_ids_from_its_desktop(
+    tmp_path: Path,
+) -> None:
+    """Bugbot on #83930: a dev Desktop's Vibe home is inside its profile, and a
+    per-port copy of that profile is deleted on quit. The copy asking first must
+    not keep the ids the Desktop's open start cards and tool rules are keyed on.
+    """
+    profile = tmp_path / "le-chat-desktop-dev"
+    legacy = profile / "vibe" / "vibe_bot_client_id"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({BOT: "d2f98138"}))
+    sessions = VibeBotLocalSessions(client_id_file=legacy)
+
+    copy = sessions.client_id(
+        BOT, instance=str(tmp_path / "le-chat-desktop-dev-port-5182")
+    )
+    reopened = VibeBotLocalSessions(client_id_file=legacy)
+
+    assert copy != "d2f98138"
+    assert reopened.client_id(BOT, instance=str(profile)) == "d2f98138"
+
+
+def test_a_side_by_side_copy_on_a_shared_vibe_home_never_adopts(tmp_path: Path) -> None:
+    """Felix on #83930: a dev build run with `VIBE_HOME=~/.vibe` beside the
+    installed app; its per-port copy must not keep the installed app's ids.
+    """
+    legacy = tmp_path / "home" / ".vibe" / "vibe_bot_client_id"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps({BOT: "d2f98138"}))
+    app_data = tmp_path / "Application Support"
+    sessions = VibeBotLocalSessions(client_id_file=legacy)
+
+    copy = sessions.client_id(
+        BOT, instance=str(app_data / "le-chat-desktop-dev-port-5182")
+    )
+    installed = VibeBotLocalSessions(client_id_file=legacy).client_id(
+        BOT, instance=str(app_data / "le-chat-desktop")
+    )
+
+    assert copy != "d2f98138"
+    assert installed == "d2f98138"
+
+
+def test_app_servers_of_one_desktop_share_its_id_for_a_new_bot(tmp_path: Path) -> None:
+    """A multiplexed Desktop runs several app servers: each must report under
+    the id the bot knows this Desktop by, whichever minted it first.
+    """
+    one = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+    two = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+    one.client_id("vibe-bot--u1--other", instance="/profiles/dev")
+    two.client_id("vibe-bot--u1--other", instance="/profiles/dev")
+
+    assert one.client_id(BOT, instance="/profiles/dev") == two.client_id(
+        BOT, instance="/profiles/dev"
+    )
+
+
+@pytest.mark.asyncio
+async def test_each_desktop_reports_its_deliveries_under_its_own_id(
+    tmp_path: Path,
+) -> None:
+    sessions = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+    client = _FakeClient()
+    here = _controller(
+        _FakeSessionApi([]), client, sessions, instance="/profiles/dev-port-5182"
+    )
+    try:
+        followed = await _follow(here, session_ids=[])
+        await _deliver(here, [START])
+
+        assert followed == sessions.client_id(BOT, instance="/profiles/dev-port-5182")
+        assert followed != sessions.client_id(BOT, instance="/profiles/dev")
+        assert [r["clientId"] for r in client.reports] == [followed]
+        assert sessions.of(BOT).find("run-tests").client_id == followed  # type: ignore[union-attr]
+    finally:
+        await asyncio.gather(*here.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_the_desktops_profile_path_never_leaves_this_computer(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """It names the OS user: the bot only ever sees the id minted from it."""
+    profile = "/Users/someone/Library/Application Support/le-chat-desktop-dev"
+    client = _FakeClient()
+    controller = _controller(_FakeSessionApi([]), client, sessions, instance=profile)
+    try:
+        followed = await controller.dispatch(
+            "vibebot/follow",
+            {"botWorkflowId": BOT, "sessionIds": [], "localSessions": []},
+        )
+        await _deliver(controller, [START, {**WAKE, "localSessionId": "ls-1"}])
+
+        sent = json.dumps([followed.model_dump(by_alias=True), *client.reports])
+        assert client.reports
+        assert "someone" not in sent and "le-chat-desktop" not in sent
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_local_sessions_message_to_its_bot_carries_its_desktops_id(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    client = _FakeClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, instance="/profiles/dev-port-5182"
+    )
+    try:
+        client_id = await _follow(controller, session_ids=[])
+
+        await sessions.deliver_reply(
+            SessionPeerSendParams(
+                target_session_id=bot_sender_id(BOT, "local_cb-1"),
+                text="Done?",
+                idempotency_key="k-1",
+                sender=SessionMessageSender(session_id="ls-1"),
+            ),
+            instance="/profiles/dev-port-5182",
+        )
+
+        assert client.reports[-1]["clientId"] == client_id
+        assert client_id != sessions.client_id(BOT)
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_reply_goes_under_the_id_of_the_desktop_that_runs_its_session(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """The reply may leave on a connection with no Desktop instance (a new
+    channel, a reconnect): the session's own Desktop still names it.
+    """
+    client = _FakeClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, instance="/profiles/dev-port-5182"
+    )
+    try:
+        client_id = await _follow(
+            controller,
+            [
+                {
+                    "threadId": "local_cb-1",
+                    "handle": "run-tests",
+                    "localSessionId": "ls-1",
+                    "clientId": "desk-of-the-session",
+                }
+            ],
+            session_ids=[],
+        )
+
+        await sessions.deliver_reply(
+            SessionPeerSendParams(
+                target_session_id=bot_sender_id(BOT, "local_cb-1"),
+                text="Done.",
+                idempotency_key="k-1",
+                sender=SessionMessageSender(session_id="ls-1"),
+                reply=True,
+            )
+        )
+
+        assert client.reports[-1]["clientId"] == "desk-of-the-session"
+        assert client_id != "desk-of-the-session"
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+def test_desktops_minting_at_once_agree_on_one_id(tmp_path: Path) -> None:
+    """A multiplexed Desktop's app servers can mint its id at the same time."""
+    barrier = threading.Barrier(8)
+
+    def mint() -> str:
+        sessions = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+        barrier.wait()
+        return sessions.client_id(BOT, instance="/profiles/dev")
+
+    with ThreadPoolExecutor(8) as pool:
+        ids = list(pool.map(lambda _: mint(), range(8)))
+
+    assert len(set(ids)) == 1
+
+
+def test_a_first_desktop_with_no_machine_ids_mints_its_own(tmp_path: Path) -> None:
+    sessions = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+
+    mine = sessions.client_id(BOT, instance="/profiles/dev")
+
+    assert mine != sessions.client_id(BOT, instance="/profiles/dev-port-5182")
+    assert not (tmp_path / "vibe_bot_client_id").exists()
 
 
 class _Peers:
@@ -1023,102 +1450,6 @@ async def test_a_message_the_bot_refuses_fails_the_send_with_its_reason(
 
 
 OTHER_BOT = "vibe-bot--u1--work"
-OTHER_ORCH = "01a1e9c9-0000-7000-8000-00000000000b"
-
-
-class _TwoBotsApi(_FakeSessionApi):
-    """Two bots of one user, each with its orchestrator's open calls."""
-
-    def __init__(self, calls: dict[str, list[dict[str, Any]]]) -> None:
-        super().__init__([])
-        self.by_session = calls
-
-    def handler(self, request: httpx2.Request) -> httpx2.Response:
-        url = str(request.url)
-        for session_id, calls in self.by_session.items():
-            if request.method == "GET" and url == f"{BASE}/{session_id}/callbacks":
-                return httpx2.Response(200, json={"callbacks": calls})
-            if (
-                request.method == "GET"
-                and url == f"{BASE}/{session_id}/callbacks/stream"
-            ):
-                return _callbacks_stream(
-                    lambda session_id=session_id: self.by_session[session_id]
-                )
-            if (
-                request.method == "POST"
-                and url == f"{BASE}/{session_id}/callback/result"
-            ):
-                result = json.loads(request.content)["result"]
-                self.answers.append(result)
-                self.by_session[session_id] = [
-                    c for c in calls if c["callback"]["id"] != result["callbackId"]
-                ]
-                return httpx2.Response(200, json={})
-        return httpx2.Response(404)
-
-
-def _call_of(
-    session_id: str, callback_id: str, tool: str, tool_input: dict[str, Any]
-) -> dict[str, Any]:
-    return {**_call(callback_id, tool, tool_input), "sessionId": session_id}
-
-
-@pytest.mark.asyncio
-async def test_two_bots_of_one_user_are_followed_and_reported_apart(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    api = _TwoBotsApi({
-        ORCH: [
-            _call_of(
-                ORCH,
-                "cb-a",
-                "start_local_session",
-                {"handle": "run-tests", "brief": "a"},
-            )
-        ],
-        OTHER_ORCH: [
-            _call_of(
-                OTHER_ORCH,
-                "cb-b",
-                "start_local_session",
-                {"handle": "run-tests", "brief": "b"},
-            )
-        ],
-    })
-    client = _FakeClient()
-    controller = _controller(api, client, sessions)
-    try:
-        await _follow(controller, bot=BOT, session_ids=[ORCH])
-        await _follow(controller, bot=OTHER_BOT, session_ids=[OTHER_ORCH])
-        await _until(lambda: len(api.answers) == 2)
-
-        assert sorted((s["bot"], s["key"]) for s in client.started) == [
-            (BOT, "cb-a"),
-            (OTHER_BOT, "cb-b"),
-        ]
-        assert sorted(
-            zip(
-                client.report_bots,
-                [r["requestId"] for r in client.reports],
-                strict=True,
-            )
-        ) == [(BOT, "cb-a"), (OTHER_BOT, "cb-b")]
-
-        # Following one bot again leaves the other bot's sessions followed.
-        await _follow(controller, bot=BOT, session_ids=[ORCH])
-        api.by_session[OTHER_ORCH] = [
-            _call_of(
-                OTHER_ORCH,
-                "cb-c",
-                "send_to_local_session",
-                {"session": "run-tests", "text": "more"},
-            )
-        ]
-        await _until(lambda: len(api.answers) == 3)
-        assert client.sent[-1]["bot"] == OTHER_BOT
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1145,90 +1476,36 @@ def test_a_local_sessions_starter_names_its_bot_and_thread() -> None:
     )
 
 
-class _FlakyResultApi(_FakeSessionApi):
-    """Fails the first answer of each call with a 500, as a Session API blip."""
-
-    def __init__(self, callbacks: list[dict[str, Any]]) -> None:
-        super().__init__(callbacks)
-        self.failed: set[str] = set()
-
-    def handler(self, request: httpx2.Request) -> httpx2.Response:
-        if request.method == "POST":
-            callback_id = json.loads(request.content)["result"]["callbackId"]
-            if callback_id not in self.failed:
-                self.failed.add(callback_id)
-                return httpx2.Response(500)
-        return super().handler(request)
-
-
-RUN_TESTS = {"threadId": "local_cb-1", "handle": "run-tests", "localSessionId": "ls-1"}
+@pytest.mark.parametrize(
+    "thread_id", ["local_cb-1", "local_typescript:146:hJrPQ7EqO:0:tool:0"]
+)
+def test_a_local_sessions_starter_reads_back_as_its_bot_and_thread(
+    thread_id: str,
+) -> None:
+    assert _bot_thread_of_sender(bot_sender_id(BOT, thread_id)) == (BOT, thread_id)
 
 
 @pytest.mark.asyncio
-async def test_a_send_to_a_session_another_desktop_runs_is_left_to_that_desktop(
-    sessions: VibeBotLocalSessions,
+@pytest.mark.parametrize("tool", ["start_local_session", "send_to_local_session"])
+async def test_a_call_of_a_retired_local_session_tool_is_answered_with_what_replaced_it(
+    sessions: VibeBotLocalSessions, tool: str
 ) -> None:
+    """A bot session from before `spawn_thread(kind: "code_local")` may still call one: it must not hang."""
     api = _FakeSessionApi([
-        _call("cb-2", "send_to_local_session", {"session": "run-tests", "text": "x"})
+        _call("cb-old", tool, {"handle": "run-tests", "brief": "x"})
     ])
     client = _FakeClient()
-    controller = _controller(api, client, sessions)
-    try:
-        controller.not_yet_grace_seconds = 60
-        await _follow(controller, [{**RUN_TESTS, "clientId": "other-desktop"}])
-        await asyncio.sleep(0.1)
-
-        assert api.answers == [] and client.sent == []
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_start_the_bot_refuses_archives_its_session_and_fails_the_call(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    api = _FakeSessionApi([
-        _call("cb-1", "start_local_session", {"handle": "run-tests", "brief": "x"})
-    ])
-    client = _FakeClient()
-    client.failing_reports = [RuntimeError("`run-tests` is taken; pick another handle")]
     controller = _controller(api, client, sessions)
     try:
         await _follow(controller)
         await _until(lambda: bool(api.answers))
 
-        assert client.archived == ["ls-1"]
-        assert "is taken" in api.answers[0]["error"]["message"]
-        assert sessions.of(BOT).threads == {}
+        [answer] = api.answers
+        assert answer["callbackId"] == "cb-old"
+        assert 'spawn_thread(kind: "code_local")' in answer["error"]["message"]
+        assert client.started == [] and client.sent == [] and client.reports == []
     finally:
         await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_send_to_an_archived_session_fails_without_reaching_it(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    api = _FakeSessionApi([])
-    client = _FakeClient()
-    controller = _controller(api, client, sessions)
-    try:
-        await _follow(controller, [RUN_TESTS])
-        # The bot archived it: Desktop's next follow no longer lists it.
-        await _follow(controller, [])
-        api.callbacks.append(
-            _call(
-                "cb-2", "send_to_local_session", {"session": "run-tests", "text": "x"}
-            )
-        )
-        await _until(lambda: bool(api.answers))
-
-        assert "error" in api.answers[0]
-        assert client.sent == [] and client.reports == []
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-START_RUN_TESTS = {"handle": "run-tests", "brief": "Run the tests."}
 
 
 @pytest.mark.asyncio
@@ -1240,7 +1517,7 @@ async def test_a_call_the_stream_shows_is_answered_without_reading_the_calls_aga
     try:
         await _follow(controller)
         await _until(lambda: api.stream_opens == 1)
-        api.callbacks.append(_call("cb-1", "start_local_session", START_RUN_TESTS))
+        api.callbacks.append(_call("cb-1", "list_local_tools", {}))
         await _until(lambda: bool(api.answers))
 
         assert api.answers[0]["callbackId"] == "cb-1"
@@ -1279,7 +1556,7 @@ async def test_a_stream_that_closes_is_opened_again_after_reading_the_calls(
     try:
         await _follow(controller)
         await _until(lambda: bool(slept))
-        api.callbacks.append(_call("cb-1", "start_local_session", START_RUN_TESTS))
+        api.callbacks.append(_call("cb-1", "list_local_tools", {}))
         reads = api.reads
         resume.set()
         await _until(lambda: bool(api.answers))
@@ -1346,33 +1623,10 @@ async def test_a_failing_stream_is_retried_with_a_growing_wait(
     try:
         await _follow(controller)
         await _until(lambda: api.stream_opens == 4)
-        api.callbacks.append(_call("cb-1", "start_local_session", START_RUN_TESTS))
+        api.callbacks.append(_call("cb-1", "list_local_tools", {}))
         await _until(lambda: bool(api.answers))
 
         assert slept == [1, 2, 3]
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_call_this_machine_cannot_serve_yet_is_tried_again_without_a_new_frame(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    api = _FakeSessionApi([
-        _call("cb-2", "send_to_local_session", {"session": "run-tests", "text": "x"})
-    ])
-    client = _FakeClient()
-    controller = _controller(api, client, sessions, not_yet_grace_seconds=60)
-    try:
-        await _follow(controller)
-        await asyncio.sleep(0.05)
-        assert api.answers == []
-        # The session another machine started shows up here; no call changed.
-        await _follow(controller, [RUN_TESTS])
-        await _until(lambda: bool(api.answers))
-
-        assert api.answers[0]["output"]["sessionId"] == "ls-1"
-        assert [s["key"] for s in client.sent] == ["cb-2"]
     finally:
         await asyncio.gather(*controller.close(), return_exceptions=True)
 
@@ -1396,199 +1650,6 @@ def test_a_failed_client_id_save_keeps_the_ids_already_saved(
     assert (
         VibeBotLocalSessions(client_id_file=client_id_file).client_id("bot-a") == first
     )
-
-
-@pytest.mark.asyncio
-async def test_texts_an_older_build_held_are_queued_into_their_session_then_the_file_goes(
-    tmp_path: Path,
-) -> None:
-    """gabriel/vb-review: on the upgrade, a deferred text an older build kept in
-    `vibe_bot_held.json` reaches its session (queued, never a turn), not dropped.
-    """
-    stale = tmp_path / "vibe_bot_held.json"
-    stale.write_text(json.dumps({BOT: {"ls-1": {"cb-2": "FYI: CI is red"}}}))
-    sessions = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
-    client = _FakeClient()
-    controller = _controller(_FakeSessionApi([]), client, sessions)
-    try:
-        await _follow(controller, [RUN_TESTS])
-        await _until(lambda: bool(client.sent))
-
-        assert [(s["session"], s["text"], s["delivery"]) for s in client.sent] == [
-            ("ls-1", "FYI: CI is red", "queue")
-        ]
-        assert not stale.exists()
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-def test_texts_an_older_build_held_outlive_a_restart_before_they_are_queued(
-    tmp_path: Path,
-) -> None:
-    """Felix and Bugbot on 5c3eb641: the file stays until its texts are queued."""
-    held = tmp_path / "vibe_bot_held.json"
-    held.write_text(json.dumps({BOT: {"ls-1": {"cb-2": "FYI: CI is red"}}}))
-
-    VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
-    VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
-
-    assert json.loads(held.read_text()) == {BOT: {"ls-1": {"cb-2": "FYI: CI is red"}}}
-
-
-@pytest.mark.asyncio
-async def test_a_held_text_whose_queueing_fails_stays_for_the_next_follow(
-    tmp_path: Path,
-) -> None:
-    held = tmp_path / "vibe_bot_held.json"
-    held.write_text(json.dumps({BOT: {"ls-1": {"cb-2": "FYI: CI is red"}}}))
-    sessions = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
-    client = _FakeClient()
-    client.failing_sends = 1
-    controller = _controller(_FakeSessionApi([]), client, sessions)
-    try:
-        await _follow(controller, [RUN_TESTS])
-        await asyncio.sleep(0.05)
-        assert client.sent == [] and held.exists()
-
-        await _follow(controller, [RUN_TESTS])
-        await _until(lambda: bool(client.sent))
-        await _until(lambda: not held.exists())
-
-        assert [s["text"] for s in client.sent] == ["FYI: CI is red"]
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-WORKER = "01a1e9c9-0000-7000-8000-00000000000c"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("tool", "tool_input"),
-    [
-        ("send_to_local_session", {"session": "run-tests", "text": "x"}),
-        ("start_local_session", START_RUN_TESTS),
-    ],
-)
-async def test_a_workers_local_session_call_is_refused_before_it_reaches_a_session(
-    sessions: VibeBotLocalSessions, tool: str, tool_input: dict[str, Any]
-) -> None:
-    """Only the orchestrator drives local sessions: a worker's call fails
-    without starting or messaging one, so its retry cannot deliver twice.
-    """
-    api = _TwoBotsApi({ORCH: [], WORKER: [_call_of(WORKER, "cb-w", tool, tool_input)]})
-    client = _FakeClient()
-    controller = _controller(api, client, sessions)
-    try:
-        await controller.dispatch(
-            "vibebot/follow",
-            {
-                "botWorkflowId": BOT,
-                "sessionIds": [ORCH, WORKER],
-                "orchestratorSessionId": ORCH,
-                "localSessions": [RUN_TESTS],
-            },
-        )
-        await _until(lambda: bool(api.answers))
-
-        [answer] = api.answers
-        assert "only the orchestrator" in answer["error"]["message"]
-        assert client.sent == [] and client.started == [] and client.reports == []
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_send_the_bot_already_answered_is_not_delivered_again(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    """Bugbot on #80995: the bot held the message while this Desktop was
-    away; delivering it too would send it twice.
-    """
-    api = _FakeSessionApi([
-        _call("cb-3", "send_to_local_session", {"session": "ls-1", "text": "go"})
-    ])
-    client = _FakeClient(claim_taken=True)
-    controller = _controller(api, client, sessions)
-    try:
-        await _follow(controller, [RUN_TESTS])
-        await _until(lambda: bool(client.reports))
-        await asyncio.sleep(0.05)
-
-        assert [r["kind"] for r in client.reports] == ["claimed"]
-        assert client.sent == [] and api.answers == []
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_send_whose_claim_does_not_reach_the_bot_is_not_delivered_until_it_does(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    api = _FakeSessionApi([
-        _call("cb-3", "send_to_local_session", {"session": "ls-1", "text": "go"})
-    ])
-    client = _FakeClient()
-    client.failing_reports = [RuntimeError("the BFF is down")]
-    controller = _controller(api, client, sessions, not_yet_grace_seconds=60)
-    try:
-        await _follow(controller, [RUN_TESTS])
-        await _until(lambda: bool(api.answers))
-
-        assert [r["kind"] for r in client.reports] == ["claimed", "accepted"]
-        assert [s["key"] for s in client.sent] == ["cb-3"]
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_send_that_fails_gives_its_claim_back_before_it_is_tried_again(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    api = _FakeSessionApi([
-        _call("cb-3", "send_to_local_session", {"session": "ls-1", "text": "go"})
-    ])
-    client = _FakeClient()
-    client.failing_sends = 1
-    controller = _controller(api, client, sessions, not_yet_grace_seconds=60)
-    try:
-        await _follow(controller, [RUN_TESTS])
-        await _until(lambda: bool(api.answers))
-
-        kinds = [(r["kind"], r["requestId"]) for r in client.reports]
-        assert kinds == [
-            ("claimed", "cb-3"),
-            ("refused", "cb-3"),
-            ("claimed", "cb-3"),
-            ("accepted", "cb-3"),
-        ]
-        assert [s["key"] for s in client.sent] == ["cb-3"]
-        assert api.answers[0]["output"]["delivered"] == "started_or_joined_turn"
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
-
-
-@pytest.mark.asyncio
-async def test_a_send_the_bot_refuses_to_claim_fails_at_once(
-    sessions: VibeBotLocalSessions,
-) -> None:
-    """Bugbot on #81759: a hop-limit refusal was retried as if the bot were
-    unreachable, so a later user message could still let it through.
-    """
-    api = _FakeSessionApi([
-        _call("cb-3", "send_to_local_session", {"session": "ls-1", "text": "go"})
-    ])
-    client = _FakeClient(claim_refused="hops_exceeded: stop and tell the user")
-    controller = _controller(api, client, sessions, not_yet_grace_seconds=60)
-    try:
-        await _follow(controller, [RUN_TESTS])
-        await _until(lambda: bool(api.answers))
-
-        [answer] = api.answers
-        assert answer["error"]["message"].startswith("hops_exceeded")
-        assert client.sent == []
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -1617,58 +1678,39 @@ async def test_a_question_the_bot_refuses_fails_the_local_sessions_send(
 
 
 @pytest.mark.asyncio
-async def test_a_send_the_bot_held_for_this_machine_is_answered_with_it_and_not_delivered(
+async def test_a_start_whose_report_did_not_reach_the_bot_keeps_its_session_for_the_retry(
     sessions: VibeBotLocalSessions,
 ) -> None:
-    """The bot held the message while this machine was away: the call gets that answer, and the heartbeat brings
-    the held copy, the only one.
-    """
-    api = _FakeSessionApi([
-        _call("cb-3", "send_to_local_session", {"session": "ls-1", "text": "go"})
-    ])
-    held = {"sessionId": "ls-1", "delivered": "held_until_reconnect"}
-    client = _FakeClient(claim_held=held)
-    controller = _controller(api, client, sessions)
+    """The bot hands the start back under the same key, which finds this session: archiving it would lose it."""
+    client = _FakeClient()
+    client.failing_reports = [RuntimeError("the BFF is down")]
+    controller = _controller(_FakeSessionApi([]), client, sessions)
     try:
-        await _follow(controller, [RUN_TESTS])
-        await _until(lambda: bool(api.answers))
+        await _follow(controller)
 
-        assert api.answers == [{"callbackId": "cb-3", "output": held}]
-        assert client.sent == []
+        await _deliver(controller, [START])
+
+        assert client.archived == []
     finally:
         await asyncio.gather(*controller.close(), return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_a_held_text_the_bot_answered_since_is_dropped_and_the_others_queued(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("code", "raised"),
+    [
+        (ProtocolErrorCode.NOT_FOUND, VibeBotLocalSessionGone),
+        (ProtocolErrorCode.INTERNAL_ERROR, RuntimeError),
+    ],
+)
+async def test_a_session_the_client_no_longer_has_is_gone_and_any_other_failure_is_not(
+    code: ProtocolErrorCode, raised: type[Exception]
 ) -> None:
-    """A text #81759's build held with its caller is claimed again before it
-    is queued: one the bot failed meanwhile is dropped, not delivered.
-    """
-    held = tmp_path / "vibe_bot_held.json"
-    held.write_text(
-        json.dumps({
-            BOT: {
-                "ls-1": {
-                    "cb-2": {"text": "FYI: CI is red", "caller": ORCH},
-                    "cb-4": {"text": "stale", "caller": ORCH},
-                    "cb-5": "from an even older build",
-                }
-            }
-        })
-    )
-    sessions = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
-    client = _FakeClient()
-    client.refused_claims["cb-4"] = "local_host_unreachable: it may already have"
-    controller = _controller(_FakeSessionApi([]), client, sessions)
-    try:
-        await _follow(controller, [RUN_TESTS])
-        await _until(lambda: not held.exists())
+    class _Server:
+        async def _request_client(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise _ClientRequestFailed("No session ls-9", code)
 
-        [sent] = client.sent
-        assert sent["delivery"] == "queue"
-        assert sent["text"] == "FYI: CI is red\n\nfrom an even older build"
-        assert [r["requestId"] for r in client.reports] == ["cb-2", "cb-4"]
-    finally:
-        await asyncio.gather(*controller.close(), return_exceptions=True)
+    client = _VibeBotClientRequests(cast(Any, _Server()))
+
+    with pytest.raises(raised):
+        await client.stop_local(bot=BOT, local_session_id="ls-9", idempotency_key="k")

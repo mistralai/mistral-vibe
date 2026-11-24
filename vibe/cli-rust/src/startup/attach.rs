@@ -7,12 +7,11 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use super::Attach;
-use crate::cli::StartupResume;
+use crate::cli::{StartModel, StartupResume};
 use crate::server::{
     method, request_error::resume_failure_message, AgentConfig, Client, Notification,
     RequestFailure, RpcError, SessionStartParams, HISTORY_LIMIT,
 };
-use crate::startup::StartupEvent;
 use crate::worktree::WorktreeInfo;
 
 /// Why `session/start` failed, for the handshake to classify.
@@ -32,10 +31,10 @@ pub(super) async fn attach_session(
     client: &Arc<Client>,
     resume: StartupResume,
     agent_config: AgentConfig,
-    list_error: Option<String>,
+    start_model: &StartModel,
 ) -> Result<(Value, Attach), StartError> {
-    let started = start_session(client, agent_config.clone(), &resume).await?;
-    rebind(client, started, resume, &agent_config, list_error)
+    let started = start_session(client, agent_config.clone(), &resume, start_model).await?;
+    rebind(client, started, resume, &agent_config)
         .await
         .map_err(StartError::Other)
 }
@@ -49,13 +48,14 @@ pub(super) async fn start_session(
     client: &Arc<Client>,
     agent_config: AgentConfig,
     resume: &StartupResume,
+    start_model: &StartModel,
 ) -> Result<Value, StartError> {
     let start = SessionStartParams {
         agent_config,
         history_limit: HISTORY_LIMIT,
-        model: None,
-        reasoning_effort: None,
-        session_only: false,
+        model: start_model.model.clone(),
+        reasoning_effort: start_model.thinking.clone(),
+        session_only: *start_model != StartModel::default(),
         kind: start_kind(resume),
     };
     let params = serde_json::to_value(&start).map_err(|e| StartError::Other(e.into()))?;
@@ -96,17 +96,11 @@ pub(super) async fn rebind(
     started: Value,
     resume: StartupResume,
     agent_config: &AgentConfig,
-    list_error: Option<String>,
 ) -> Result<(Value, Attach)> {
-    let (method, params) = match (resume, list_error) {
-        (_, Some(error)) => return Ok((started, Attach::Failed(error))),
-        (StartupResume::ById(id), None) => {
-            (method::SESSION_RESUME, resume_params(&id, agent_config))
-        }
+    let (method, params) = match resume {
+        StartupResume::ById(id) => (method::SESSION_RESUME, resume_params(&id, agent_config)),
         // The server picks the session: this terminal's last one in the folder, else the latest.
-        (StartupResume::Continue, None) => {
-            (method::SESSION_CONTINUE, continue_params(agent_config))
-        }
+        StartupResume::Continue => (method::SESSION_CONTINUE, continue_params(agent_config)),
         _ => return Ok((started, Attach::Started)),
     };
     // The full agent config rides on resume too, so flags survive the rebind.
@@ -181,11 +175,9 @@ async fn state_of(client: &Arc<Client>, method: &str, params: Value) -> Result<V
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn settle_worktree_session(
     client: &Arc<Client>,
-    event_tx: &mpsc::Sender<StartupEvent>,
     notifications: Option<(mpsc::Receiver<Notification>, mpsc::Sender<Notification>)>,
     resume: &StartupResume,
     agent_config: &AgentConfig,
-    mut list_error: Option<String>,
     state: Value,
 ) -> Result<(
     Value,
@@ -212,25 +204,12 @@ pub(super) async fn settle_worktree_session(
             }
         }
     });
-    if matches!(resume, StartupResume::Picker) {
-        match client
-            .request(method::SESSION_LIST, json!({ "cwd": settled }))
-            .await
-        {
-            Ok(value) => event_tx
-                .send(StartupEvent::Sessions(Box::new(value)))
-                .await
-                .context("startup event receiver closed")?,
-            Err(error) => list_error = Some(format!("Failed to list sessions: {error}")),
-        }
-    }
     // The rebind's agentConfig names the worktree directory, not the checkout
     // the run started in; the settled cwd is that directory.
     let mut rebound_config = agent_config.clone();
     if let Some(settled) = settled.as_ref() {
         rebound_config.cwd = Some(settled.clone());
     }
-    let (state, attach) =
-        rebind(client, state, resume.clone(), &rebound_config, list_error).await?;
+    let (state, attach) = rebind(client, state, resume.clone(), &rebound_config).await?;
     Ok((state, attach, settled, prepared, absorbed))
 }

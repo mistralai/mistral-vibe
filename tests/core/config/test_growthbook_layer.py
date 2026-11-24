@@ -1,18 +1,14 @@
 from __future__ import annotations
 
-import json
-import logging
 from pathlib import Path
-import tomllib
 from typing import Any
 
 import pytest
-import tomli_w
 
 from vibe.core.config import ConfigLayer, RawConfig, build_default_orchestrator
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.overrides import OverridesLayer
-from vibe.core.config.models import ModelRequirement
+from vibe.core.config.vibe_schema import DEFAULT_MODELS
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.experiments.client import RemoteEvalClient
 from vibe.core.experiments.manager import (
@@ -20,35 +16,6 @@ from vibe.core.experiments.manager import (
     config_variants_from_response,
 )
 from vibe.core.experiments.models import EvalResponse, ExperimentAttributes
-
-_ROUTED_TEST_ALIAS = "target-testing-model-alias"
-_ROUTING_MODEL_CONFIG = {
-    "name": "target-testing-model-name",
-    "provider": "mistral",
-    "alias": _ROUTED_TEST_ALIAS,
-    "input_price": "0.0",
-    "output_price": "0.0",
-    "supports_images": False,
-}
-
-
-_LOCAL_MODEL = {"name": "my-local-model", "provider": "llamacpp", "alias": "my-local"}
-
-
-async def _config_with_variants(
-    config_dir: Path, variants: ExperimentManager, **user_fields: Any
-) -> Any:
-    config_path = config_dir / "config.toml"
-    config = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    config.pop("models", None)
-    config["active_model"] = ""
-    config.update(user_fields)
-    config_path.write_text(tomli_w.dumps(config), encoding="utf-8")
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants(variants.config_variants())
-    await orchestrator.reload()
-    return orchestrator.config
 
 
 class _StubClient(RemoteEvalClient):
@@ -189,83 +156,9 @@ def _response_with_default_value(variant: str) -> EvalResponse:
     })
 
 
-def _routing_response(payload: dict[str, Any], *, in_experiment: bool) -> EvalResponse:
-    return EvalResponse.model_validate({
-        "features": {
-            ExperimentName.CLI_MODEL_ROUTING.value: {
-                "defaultValue": {},
-                "rules": [
-                    {
-                        "force": payload,
-                        "tracks": [
-                            {
-                                "experiment": {
-                                    "key": ExperimentName.CLI_MODEL_ROUTING.value
-                                },
-                                "result": {
-                                    "key": "1",
-                                    "variationId": 1,
-                                    "value": payload,
-                                    "inExperiment": in_experiment,
-                                },
-                            }
-                        ],
-                    }
-                ],
-            }
-        }
-    })
-
-
 def _manager_with_variant(variant: str) -> ExperimentManager:
     manager = ExperimentManager(client=_StubClient(None))
     manager.hydrate(_response_forcing(variant))
-    return manager
-
-
-def _manager_with_routing(
-    payload: dict[str, Any], *, in_experiment: bool = True
-) -> ExperimentManager:
-    manager = ExperimentManager(client=_StubClient(None))
-    manager.hydrate(_routing_response(payload, in_experiment=in_experiment))
-    return manager
-
-
-def _extra_models_response(
-    payload: dict[str, Any] | list[Any], *, in_experiment: bool
-) -> EvalResponse:
-    return EvalResponse.model_validate({
-        "features": {
-            ExperimentName.CLI_EXTRA_MODELS.value: {
-                "defaultValue": {},
-                "rules": [
-                    {
-                        "force": payload,
-                        "tracks": [
-                            {
-                                "experiment": {
-                                    "key": ExperimentName.CLI_EXTRA_MODELS.value
-                                },
-                                "result": {
-                                    "key": "1",
-                                    "variationId": 1,
-                                    "value": payload,
-                                    "inExperiment": in_experiment,
-                                },
-                            }
-                        ],
-                    }
-                ],
-            }
-        }
-    })
-
-
-def _manager_with_extra_models(
-    payload: dict[str, Any] | list[Any], *, in_experiment: bool = True
-) -> ExperimentManager:
-    manager = ExperimentManager(client=_StubClient(None))
-    manager.hydrate(_extra_models_response(payload, in_experiment=in_experiment))
     return manager
 
 
@@ -467,36 +360,6 @@ async def test_default_value_rollout_sets_smart_approve_end_to_end() -> None:
 
 
 @pytest.mark.asyncio
-async def test_object_default_value_applies_routing_end_to_end() -> None:
-    routing = {
-        "active_model": "glm-5-2",
-        "model_config": {
-            "name": "zai-glm-5-2",
-            "provider": "mistral",
-            "alias": "glm-5-2",
-            "input_price": "1.4",
-            "output_price": "4.4",
-            "supports_images": False,
-        },
-    }
-    response = EvalResponse.model_validate({
-        "features": {
-            ExperimentName.CLI_MODEL_ROUTING.value: {
-                "defaultValue": routing,
-                "rules": [],
-            }
-        }
-    })
-    layer = GrowthbookLayer()
-    layer.set_variants(config_variants_from_response(response))
-
-    data = (await layer.load()).model_dump()
-
-    assert data["routed_default_model"] == "glm-5-2"
-    assert "glm-5-2" in data["models"]
-
-
-@pytest.mark.asyncio
 async def test_maps_registry_skills_experiment_to_config_field() -> None:
     layer = GrowthbookLayer()
     layer.set_variants(_manager_with_registry_skills_variant("on").config_variants())
@@ -514,73 +377,6 @@ async def test_ignores_registry_skills_off_variant() -> None:
     data = await layer.load()
 
     assert data.model_dump() == {}
-
-
-@pytest.mark.asyncio
-async def test_selected_toml_disables_the_growthbook_model_catalog(
-    config_dir: Path,
-) -> None:
-    config_path = config_dir / "config.toml"
-    config_path.write_text(
-        "experimental_enable_model_catalog = false\n", encoding="utf-8"
-    )
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants({ExperimentName.MODEL_CATALOG.value: True})
-
-    await orchestrator.reload()
-
-    assert orchestrator.config.experimental_enable_model_catalog is False
-
-
-@pytest.mark.asyncio
-async def test_growthbook_enables_the_model_catalog() -> None:
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants({ExperimentName.MODEL_CATALOG.value: True})
-
-    await orchestrator.reload()
-
-    assert orchestrator.config.experimental_enable_model_catalog is True
-
-
-def _model_experiments(catalog_variant: object) -> dict[str, object]:
-    return {
-        ExperimentName.CLI_MODEL_ROUTING.value: json.dumps({"active_model": "glm-5-2"}),
-        ExperimentName.CLI_EXTRA_MODELS.value: json.dumps([
-            {"name": "glm-5-3", "provider": "mistral", "alias": "glm-5-3"}
-        ]),
-        ExperimentName.REGISTRY_SKILLS.value: True,
-        ExperimentName.MODEL_CATALOG.value: catalog_variant,
-    }
-
-
-@pytest.mark.parametrize("variant", [True, "on"])
-@pytest.mark.asyncio
-async def test_catalog_flag_drops_only_the_model_experiments(variant: object) -> None:
-    layer = GrowthbookLayer()
-    layer.set_variants(_model_experiments(variant))
-
-    data = await layer.load()
-
-    assert data.model_dump() == {
-        "experimental_enable_model_catalog": True,
-        "experimental_enable_registry_skills": True,
-    }
-
-
-@pytest.mark.parametrize("variant", [False, "off"])
-@pytest.mark.asyncio
-async def test_catalog_flag_off_keeps_the_model_experiments(variant: object) -> None:
-    layer = GrowthbookLayer()
-    layer.set_variants(_model_experiments(variant))
-
-    data = await layer.load()
-
-    dumped = data.model_dump()
-    assert dumped["routed_default_model"] == "glm-5-2"
-    assert "glm-5-3" in dumped["models"]
-    assert "experimental_enable_model_catalog" not in dumped
 
 
 @pytest.mark.asyncio
@@ -762,389 +558,6 @@ async def test_runtime_overrides_win_over_growthbook_layer() -> None:
 
 
 @pytest.mark.asyncio
-async def test_maps_routing_experiment_to_routed_default_model() -> None:
-    layer = GrowthbookLayer()
-    layer.set_variants(
-        _manager_with_routing({
-            "active_model": _ROUTED_TEST_ALIAS,
-            "fallbacks": {"multimodal": "mistral-medium-3.5"},
-        }).config_variants()
-    )
-
-    data = await layer.load()
-
-    assert data.model_dump() == {"routed_default_model": _ROUTED_TEST_ALIAS}
-
-
-@pytest.mark.asyncio
-async def test_maps_routing_payload_model_config() -> None:
-    layer = GrowthbookLayer()
-    layer.set_variants(
-        _manager_with_routing({
-            "active_model": _ROUTED_TEST_ALIAS,
-            "fallbacks": {"multimodal": "mistral-medium-3.5"},
-            "model_config": _ROUTING_MODEL_CONFIG,
-        }).config_variants()
-    )
-
-    data = await layer.load()
-
-    # The model definition is carried as a flat JSON string, like every other
-    # growthbook-mapped config value.
-    dumped = data.model_dump()
-    assert dumped["routed_default_model"] == _ROUTED_TEST_ALIAS
-    assert json.loads(dumped["routed_model_config"]) == _ROUTING_MODEL_CONFIG
-
-
-@pytest.mark.asyncio
-async def test_maps_forced_routing_payload_without_experiment() -> None:
-    # A 100%-forced rollout (not experiment-bucketed) still routes.
-    layer = GrowthbookLayer()
-    layer.set_variants(
-        _manager_with_routing(
-            {"active_model": _ROUTED_TEST_ALIAS}, in_experiment=False
-        ).config_variants()
-    )
-
-    data = await layer.load()
-
-    assert data.model_dump() == {"routed_default_model": _ROUTED_TEST_ALIAS}
-
-
-@pytest.mark.asyncio
-async def test_ignores_routing_payload_without_active_model() -> None:
-    layer = GrowthbookLayer()
-    layer.set_variants(
-        _manager_with_routing({"fallbacks": {"multimodal": "x"}}).config_variants()
-    )
-
-    data = await layer.load()
-
-    assert data.model_dump() == {}
-
-
-@pytest.mark.asyncio
-async def test_routing_experiment_sets_default_for_unpinned_user(
-    config_dir: Path,
-) -> None:
-    (config_dir / "config.toml").write_text("", encoding="utf-8")
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants(
-        _manager_with_routing({
-            "active_model": _ROUTED_TEST_ALIAS,
-            "model_config": _ROUTING_MODEL_CONFIG,
-        }).config_variants()
-    )
-
-    await orchestrator.reload()
-
-    config = orchestrator.config
-    assert config.active_model == ""  # unpinned
-    assert config.resolve_default_model_alias() == _ROUTED_TEST_ALIAS
-    active = config.get_active_model()
-    assert active.alias == _ROUTED_TEST_ALIAS
-    assert active.name == "target-testing-model-name"
-    assert active.input_price == 0.0  # string price coerced to float
-
-
-@pytest.mark.asyncio
-async def test_routing_experiment_does_not_override_pinned_model(
-    config_dir: Path,
-) -> None:
-    config = await _config_with_variants(
-        config_dir,
-        _manager_with_routing({
-            "active_model": _ROUTED_TEST_ALIAS,
-            "model_config": _ROUTING_MODEL_CONFIG,
-        }),
-        active_model="my-local",
-        models=[_LOCAL_MODEL],
-    )
-
-    assert config.active_model == "my-local"
-    assert config.get_active_model().alias == "my-local"
-    assert _ROUTED_TEST_ALIAS in config.models
-
-
-@pytest.mark.asyncio
-async def test_routing_experiment_honors_manual_selection_of_routed_model(
-    config_dir: Path,
-) -> None:
-    config_path = config_dir / "config.toml"
-    config_path.write_text(f'active_model = "{_ROUTED_TEST_ALIAS}"\n', encoding="utf-8")
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants(
-        _manager_with_routing({
-            "active_model": _ROUTED_TEST_ALIAS,
-            "model_config": _ROUTING_MODEL_CONFIG,
-        }).config_variants()
-    )
-
-    await orchestrator.reload()
-
-    config = orchestrator.config
-    assert config.active_model == _ROUTED_TEST_ALIAS
-    assert _ROUTED_TEST_ALIAS in config.models
-    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
-
-
-@pytest.mark.asyncio
-async def test_maps_extra_models_experiment_to_routed_extra_models() -> None:
-    layer = GrowthbookLayer()
-    layer.set_variants(
-        _manager_with_extra_models({
-            "models": [_ROUTING_MODEL_CONFIG]
-        }).config_variants()
-    )
-
-    data = await layer.load()
-
-    dumped = data.model_dump()
-    assert json.loads(dumped["routed_extra_models"]) == [_ROUTING_MODEL_CONFIG]
-    # Add-only: the exposure experiment never sets the routed default.
-    assert "routed_default_model" not in dumped
-
-
-@pytest.mark.asyncio
-async def test_maps_extra_models_from_bare_list_payload() -> None:
-    layer = GrowthbookLayer()
-    layer.set_variants(
-        _manager_with_extra_models([_ROUTING_MODEL_CONFIG]).config_variants()
-    )
-
-    data = await layer.load()
-
-    assert json.loads(data.model_dump()["routed_extra_models"]) == [
-        _ROUTING_MODEL_CONFIG
-    ]
-
-
-@pytest.mark.asyncio
-async def test_ignores_extra_models_payload_without_models() -> None:
-    layer = GrowthbookLayer()
-    layer.set_variants(_manager_with_extra_models({"other": "value"}).config_variants())
-
-    data = await layer.load()
-
-    assert data.model_dump() == {}
-
-
-@pytest.mark.parametrize(
-    ("experiment", "payload"),
-    [
-        (
-            ExperimentName.CLI_MODEL_ROUTING,
-            {"active_model": "incomplete", "model_config": {"alias": "incomplete"}},
-        ),
-        (ExperimentName.CLI_EXTRA_MODELS, [{"alias": "incomplete"}]),
-    ],
-)
-@pytest.mark.asyncio
-async def test_incomplete_growthbook_model_does_not_break_reload(
-    experiment: ExperimentName, payload: object
-) -> None:
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    default_alias = orchestrator.config.get_active_model().alias
-    layer.set_variants({experiment.value: payload})
-
-    await orchestrator.reload()
-
-    assert "incomplete" not in orchestrator.config.models
-    assert orchestrator.config.get_active_model().alias == default_alias
-
-
-@pytest.mark.parametrize(
-    ("experiment", "payload"),
-    [
-        (
-            ExperimentName.CLI_MODEL_ROUTING,
-            {
-                "active_model": "",
-                "model_config": {"name": "empty", "provider": "mistral", "alias": ""},
-            },
-        ),
-        (
-            ExperimentName.CLI_EXTRA_MODELS,
-            [{"name": "empty", "provider": "mistral", "alias": ""}],
-        ),
-    ],
-)
-@pytest.mark.asyncio
-async def test_empty_alias_growthbook_model_does_not_break_reload(
-    experiment: ExperimentName, payload: object
-) -> None:
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    default_alias = orchestrator.config.get_active_model().alias
-    layer.set_variants({experiment.value: payload})
-
-    await orchestrator.reload()
-
-    assert "" not in orchestrator.config.models
-    assert orchestrator.config.get_active_model().alias == default_alias
-
-
-@pytest.mark.asyncio
-async def test_extra_models_experiment_adds_to_dropdown_without_default(
-    config_dir: Path,
-) -> None:
-    (config_dir / "config.toml").write_text("", encoding="utf-8")
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants(
-        _manager_with_extra_models({
-            "models": [_ROUTING_MODEL_CONFIG]
-        }).config_variants()
-    )
-
-    await orchestrator.reload()
-
-    config = orchestrator.config
-    assert config.active_model == ""  # unpinned
-    assert _ROUTED_TEST_ALIAS in config.models
-    assert _ROUTED_TEST_ALIAS in config.available_models()
-    assert config.routed_default_model == ""
-    assert config.get_active_model().alias == _ROUTED_TEST_ALIAS
-
-
-_LOCKED = {"kind": "higher_plan"}
-
-
-@pytest.mark.asyncio
-async def test_extra_models_experiment_lists_a_locked_model_without_default(
-    config_dir: Path,
-) -> None:
-    config = await _config_with_variants(
-        config_dir,
-        _manager_with_extra_models({
-            "models": [{**_ROUTING_MODEL_CONFIG, "requires": _LOCKED}]
-        }),
-        models=[_LOCAL_MODEL],
-    )
-
-    assert config.available_models()[_ROUTED_TEST_ALIAS].requires == ModelRequirement(
-        kind="higher_plan"
-    )
-    assert config.resolve_default_model_alias() == "my-local"
-
-
-@pytest.mark.asyncio
-async def test_routing_experiment_never_defaults_to_a_locked_model(
-    config_dir: Path,
-) -> None:
-    config = await _config_with_variants(
-        config_dir,
-        _manager_with_routing({
-            "active_model": _ROUTED_TEST_ALIAS,
-            "model_config": {**_ROUTING_MODEL_CONFIG, "requires": _LOCKED},
-        }),
-        models=[_LOCAL_MODEL],
-    )
-
-    assert config.models[_ROUTED_TEST_ALIAS].requires is not None
-    assert config.resolve_default_model_alias() == "my-local"
-    assert config.get_active_model().alias == "my-local"
-
-
-@pytest.mark.parametrize(
-    "requires", [{"kind": "unknown_kind"}, "yes", {}, [], False, True]
-)
-@pytest.mark.asyncio
-async def test_extra_models_experiment_hides_a_model_it_cannot_upsell(
-    config_dir: Path, requires: object, caplog: pytest.LogCaptureFixture
-) -> None:
-    (config_dir / "config.toml").write_text("", encoding="utf-8")
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants(
-        _manager_with_extra_models({
-            "models": [{**_ROUTING_MODEL_CONFIG, "requires": requires}]
-        }).config_variants()
-    )
-
-    with caplog.at_level(logging.INFO):
-        await orchestrator.reload()
-
-    assert _ROUTED_TEST_ALIAS not in orchestrator.config.models
-    assert (
-        f"GrowthBook model '{_ROUTED_TEST_ALIAS}' skipped: requires {requires!r}"
-        in caplog.messages
-    )
-
-
-@pytest.mark.asyncio
-async def test_an_invalid_locked_model_is_not_blamed_on_its_requirement(
-    config_dir: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    (config_dir / "config.toml").write_text("", encoding="utf-8")
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    invalid = {**_ROUTING_MODEL_CONFIG, "temperature": "hot", "requires": _LOCKED}
-    layer.set_variants(
-        _manager_with_extra_models({"models": [invalid]}).config_variants()
-    )
-
-    with caplog.at_level(logging.INFO):
-        await orchestrator.reload()
-
-    assert _ROUTED_TEST_ALIAS not in orchestrator.config.models
-    assert not any("skipped: requires" in message for message in caplog.messages)
-
-
-@pytest.mark.asyncio
-async def test_extra_models_experiment_ignores_the_requires_upgrade_flag(
-    config_dir: Path,
-) -> None:
-    (config_dir / "config.toml").write_text("", encoding="utf-8")
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants(
-        _manager_with_extra_models({
-            "models": [{**_ROUTING_MODEL_CONFIG, "requires_upgrade": True}]
-        }).config_variants()
-    )
-
-    await orchestrator.reload()
-
-    assert orchestrator.config.models[_ROUTED_TEST_ALIAS].requires is None
-
-
-@pytest.mark.parametrize(
-    "user_requires", [None, _LOCKED, {"kind": "unknown_kind"}], ids=str
-)
-@pytest.mark.asyncio
-async def test_a_user_config_neither_sets_nor_lifts_a_lock(
-    config_dir: Path, user_requires: object
-) -> None:
-    locked = {**_ROUTING_MODEL_CONFIG, "requires": _LOCKED}
-    free = {**_ROUTING_MODEL_CONFIG, "alias": "free-model", "name": "free-model"}
-    user_entry: dict[str, Any] = {"temperature": 0.5}
-    if user_requires is not None:
-        user_entry["requires"] = user_requires
-    (config_dir / "config.toml").write_text(
-        tomli_w.dumps({
-            "models": {_ROUTED_TEST_ALIAS: user_entry, "free-model": user_entry}
-        }),
-        encoding="utf-8",
-    )
-    orchestrator = await build_default_orchestrator()
-    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
-    layer.set_variants(
-        _manager_with_extra_models({"models": [locked, free]}).config_variants()
-    )
-
-    await orchestrator.reload()
-
-    models = orchestrator.config.models
-    assert models[_ROUTED_TEST_ALIAS].requires == ModelRequirement(kind="higher_plan")
-    assert models[_ROUTED_TEST_ALIAS].temperature == 0.5
-    assert models["free-model"].requires is None
-
-
-@pytest.mark.asyncio
 async def test_copied_orchestrator_keeps_growthbook_variant_after_reload() -> None:
     orchestrator = await build_default_orchestrator()
     layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
@@ -1162,20 +575,6 @@ async def test_copied_orchestrator_keeps_growthbook_variant_after_reload() -> No
 
     assert failures == []
     assert copied.config.system_prompt_id == "tests"
-
-
-@pytest.mark.asyncio
-async def test_routing_accepts_json_string_variant() -> None:
-    # A GrowthBook "string"-typed feature serves its value as JSON text; the
-    # routing mappers must accept that as well as a native object.
-    layer = GrowthbookLayer()
-    layer.set_variants({
-        ExperimentName.CLI_MODEL_ROUTING.value: '{"active_model": "routed-x"}'
-    })
-
-    data = await layer.load()
-
-    assert data.model_dump()["routed_default_model"] == "routed-x"
 
 
 _SESSION_API_ENV = "VIBE_EXPERIMENTAL_LOCAL_RUNTIME_SESSION_API"
@@ -1294,99 +693,45 @@ async def test_default_orchestrator_applies_growthbook_behavior() -> None:
     )
 
 
-_LARGE_4_EXTRA = {
-    "name": "mistral-large-4-0",
-    "display_name": "Mistral Large 4",
-    "provider": "mistral",
-    "alias": "mistral-large-4-0-3",
-    "temperature": "1",
-    "auto_compact_threshold": 400000,
-    "thinking_levels": ["low", "medium", "high"],
-    "supports_images": True,
-    "thinking": "high",
+# Flags Vibe used to read for its models: GrowthBook may still serve them.
+_RETIRED_MODEL_FLAGS: dict[str, object] = {
+    "vibe_cli_extra_models": {
+        "models": [{"name": "glm-5-3", "provider": "mistral", "alias": "glm-5-3"}]
+    },
+    "vibe_cli_default_routing_model": {
+        "active_model": "glm-5-2",
+        "model_config": {
+            "name": "zai-glm-5-2",
+            "provider": "mistral",
+            "alias": "glm-5-2",
+        },
+    },
+    "vibe_cli_model_catalog": True,
 }
-_FLASH_EXTRA = {
-    "name": "zai-glm-5-3-flash-vibe-free",
-    "provider": "mistral",
-    "alias": "zai-glm-5-3-flash",
-}
-
-
-async def _config_with_extra_models(
-    config_dir: Path, extra: list[dict[str, Any]], **user_fields: Any
-) -> Any:
-    return await _config_with_variants(
-        config_dir, _manager_with_extra_models({"models": extra}), **user_fields
-    )
 
 
 @pytest.mark.asyncio
-async def test_growthbook_models_replace_the_built_in_models(config_dir: Path) -> None:
-    config = await _config_with_extra_models(config_dir, [_LARGE_4_EXTRA])
+async def test_the_retired_model_flags_map_nothing() -> None:
+    layer = GrowthbookLayer()
+    layer.set_variants(_RETIRED_MODEL_FLAGS)
 
-    assert list(config.available_models()) == ["mistral-large-4-0-3"]
-    assert config.get_active_model().alias == "mistral-large-4-0-3"
-    assert config.validation_warnings == ()
+    data = await layer.load()
+
+    assert data.model_dump() == {}
 
 
 @pytest.mark.asyncio
-async def test_growthbook_large_4_under_the_built_in_alias_is_one_row(
+async def test_the_retired_model_flags_keep_the_built_in_models(
     config_dir: Path,
 ) -> None:
-    flag_model = {**_LARGE_4_EXTRA, "alias": "mistral-large-4-0"}
+    (config_dir / "config.toml").write_text("", encoding="utf-8")
+    orchestrator = await build_default_orchestrator()
+    layer = _require_growthbook_layer(orchestrator.get_layer(GrowthbookLayer.NAME))
+    layer.set_variants(_RETIRED_MODEL_FLAGS)
 
-    config = await _config_with_extra_models(config_dir, [flag_model])
+    await orchestrator.reload()
 
-    assert list(config.available_models()) == ["mistral-large-4-0"]
-    assert config.models["mistral-large-4-0"].input_price == 0.0
-
-
-@pytest.mark.asyncio
-async def test_a_pin_on_the_old_large_4_alias_runs_the_growthbook_model(
-    config_dir: Path,
-) -> None:
-    config = await _config_with_extra_models(
-        config_dir, [_FLASH_EXTRA, _LARGE_4_EXTRA], active_model="mistral-large-4-0-3"
-    )
-
-    assert config.get_active_model().alias == "mistral-large-4-0-3"
-    assert config.validation_warnings == ()
-
-
-@pytest.mark.asyncio
-async def test_a_pin_on_a_built_in_model_falls_back_while_growthbook_lists_models(
-    config_dir: Path,
-) -> None:
-    config = await _config_with_extra_models(
-        config_dir, [_FLASH_EXTRA], active_model="mistral-medium-3.5"
-    )
-
-    assert config.get_active_model().alias == "zai-glm-5-3-flash"
-    assert any(
-        "Model 'mistral-medium-3.5' is not available" in warning
-        for warning in config.validation_warnings
-    )
-
-
-@pytest.mark.asyncio
-async def test_growthbook_models_leave_user_models_available(config_dir: Path) -> None:
-    config = await _config_with_extra_models(
-        config_dir, [_LARGE_4_EXTRA], models=[_LOCAL_MODEL]
-    )
-
-    assert set(config.available_models()) == {"mistral-large-4-0-3", "my-local"}
-
-
-@pytest.mark.asyncio
-async def test_a_routed_default_alone_replaces_the_built_in_models(
-    config_dir: Path,
-) -> None:
-    config = await _config_with_variants(
-        config_dir,
-        _manager_with_routing({
-            "active_model": _ROUTED_TEST_ALIAS,
-            "model_config": _ROUTING_MODEL_CONFIG,
-        }),
-    )
-
-    assert list(config.available_models()) == [_ROUTED_TEST_ALIAS]
+    config = orchestrator.config
+    assert list(config.available_models()) == [model.alias for model in DEFAULT_MODELS]
+    assert config.get_active_model().alias == DEFAULT_MODELS[0].alias
+    assert config.origin_of("enable_model_catalog") != GrowthbookLayer.NAME

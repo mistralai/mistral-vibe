@@ -2,11 +2,12 @@
 
 use std::collections::BTreeMap;
 
+use unicode_width::UnicodeWidthStr;
 use vibe_rs::app::App;
 use vibe_rs::completion_manager;
 use vibe_rs::utils::file_match::matching;
 use vibe_rs::utils::fuzzy::score;
-use vibe_rs::utils::text::{ellipsize, multi_line, single_line, wrap_hard};
+use vibe_rs::utils::text::{ellipsize, multi_line, single_line, wrap_hard, wrap_ranges};
 
 fn paths(entries: &[(&str, bool)]) -> BTreeMap<String, bool> {
     entries
@@ -239,4 +240,26 @@ fn wrap_hard_hangs_continuations_and_cuts_unbreakable_runs() {
         vec!["/some/", "long/p", "ath"]
     );
     assert_eq!(wrap_hard("日本語です", 4), vec!["日本", "語で", "す"]);
+}
+
+#[test]
+fn wrap_hard_folds_a_long_unbroken_run_into_full_rows() {
+    let rows = wrap_hard(&"x".repeat(200_000), 76);
+    assert_eq!(rows.len(), 200_000_usize.div_ceil(76));
+    assert!(rows[..rows.len() - 1].iter().all(|row| row.len() == 76));
+    let ligatures = wrap_hard("لالالالاxxx", 4);
+    assert!(
+        ligatures.iter().all(|row| row.width() <= 4),
+        "{ligatures:?}"
+    );
+}
+
+#[test]
+fn wrap_ranges_skip_the_space_a_fold_drops_and_keep_leading_ones() {
+    assert_eq!(wrap_ranges("ab cd ef", 5), [0..5, 6..8]);
+    assert_eq!(
+        wrap_ranges("  a b", 9),
+        [std::ops::Range { start: 0, end: 5 }]
+    );
+    assert_eq!(wrap_ranges("abcdefg hi", 3), [0..3, 3..6, 6..7, 8..10]);
 }

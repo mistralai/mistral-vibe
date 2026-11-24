@@ -110,12 +110,18 @@ pub fn track_state(app: &mut App, state: &PublicSessionState) -> bool {
     let Some(info) = info else {
         return false;
     };
+    // A session that `/cd` took out of its worktree keeps the effect in its
+    // history: the worktree is left behind, not the session's any more.
+    let left = |cwd: &String| !std::path::Path::new(cwd).starts_with(&info.path);
+    if state.session.cwd.as_ref().is_some_and(left) {
+        return false;
+    }
     let moved = track(app, info);
     // Applied inside the worktree arm only, never on its own: a snapshot
     // from before the move (session still in the checkout, no worktree
     // in the history page) must not drag the footer back.
     if let Some(cwd) = &state.session.cwd {
-        app.session.cwd = Some(cwd.clone());
+        set_cwd(app, cwd.clone());
     }
     moved
 }
@@ -154,7 +160,7 @@ pub fn track_patch(app: &mut App, patch: &Value) {
         }
     }
     if let Some(cwd) = cwd {
-        app.session.cwd = Some(cwd);
+        set_cwd(app, cwd);
     }
 }
 
@@ -172,7 +178,15 @@ pub fn track(app: &mut App, info: WorktreeInfo) -> bool {
         branch = info.branch,
         "session worktree tracked"
     );
-    app.session.cwd = Some(info.path.clone());
+    set_cwd(app, info.path.clone());
     app.session.worktree = Some(info);
     true
+}
+
+/// The session runs in `cwd` now: the footer and the config a later resume or
+/// `/cd` sends move together, or `/cd` back to the checkout would find nothing
+/// to move.
+fn set_cwd(app: &mut App, cwd: String) {
+    app.session.agent_config.cwd = Some(cwd.clone());
+    app.session.cwd = Some(cwd);
 }

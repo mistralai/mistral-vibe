@@ -1,4 +1,4 @@
-"""A failed `/resume` restores the current transcript on an inline notice a key clears once read; prompts still send."""
+"""A failed open keeps the current session; after Esc, prompts still go to it."""
 
 from __future__ import annotations
 
@@ -11,13 +11,14 @@ handshake = {
     "session/resume": {"error": {"code": "internal_error", "message": "Resume failed"}}
 }
 request_methods = {"session/resume"}
-# Up previews the saved session, Enter fails to resume it; once the notice has been read, a prompt clears it.
+# Up highlights the saved session, Enter fails to resume it, Esc leaves the page.
 timeline: Timeline = [
     "/resume",
     "\r",
     _UP,
     "\r",
     advance(1500),
+    "\x1b[27u",
     "hi\r",
     turn_started(),
     user_msg("hi"),

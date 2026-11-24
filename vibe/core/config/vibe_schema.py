@@ -4,7 +4,6 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 import copy
 from enum import StrEnum
 import functools
-import json
 import os
 from pathlib import Path
 import tomllib
@@ -20,7 +19,6 @@ from pydantic import (
     BeforeValidator,
     Field,
     PrivateAttr,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -68,7 +66,6 @@ from vibe.core.config._telemetry_off_only import (
 )
 from vibe.core.config.harness_files import get_harness_files_manager
 from vibe.core.config.layers.admin import AdminConfigLayer
-from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.models import (
     ACTIVE_MODEL_SELECTOR,
     THINKING_LEVELS,
@@ -115,6 +112,7 @@ from vibe.core.prompts import (
     load_prompt,
     load_system_prompt,
 )
+from vibe.core.tools.models import ToolPermission
 from vibe.core.types import Backend
 from vibe.core.utils.matching import name_matches
 from vibe.observability.logging import logger
@@ -510,38 +508,21 @@ def _reject_invalid_shell_timeouts(
     return tools
 
 
-def _coerce_routed_model_config(v: str) -> ModelConfig | None:
-    try:
-        return ModelConfig.model_validate_json(v)
-    except ValidationError:
-        return None
-
-
-def _coerce_routed_extra_models(v: Any) -> list[ModelConfig]:
-    """Parse the GrowthBook-supplied extra-models payload, failing open.
-
-    The value arrives as a JSON-array string (like every other GrowthBook-mapped
-    config value). Invalid entries are dropped rather than raising so a malformed
-    A/B payload can never brick config loading.
-    """
-    if isinstance(v, str):
-        try:
-            v = json.loads(v)
-        except (json.JSONDecodeError, TypeError):
-            return []
-    if not isinstance(v, list):
-        return []
-    coerced: list[ModelConfig] = []
-    for item in v:
-        try:
-            coerced.append(
-                item
-                if isinstance(item, ModelConfig)
-                else ModelConfig.model_validate(item)
-            )
-        except ValidationError:
+def _reject_unknown_tool_permissions(
+    tools: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Tool settings are otherwise only validated when a session builds them."""
+    for name, settings in tools.items():
+        if "permission" not in settings:
             continue
-    return coerced
+        permission = settings["permission"]
+        if isinstance(permission, str) and permission in ToolPermission:
+            continue
+        allowed = ", ".join(repr(member.value) for member in ToolPermission)
+        raise ValueError(
+            f"tools.{name}: permission {permission!r} is not one of {allowed}."
+        )
+    return tools
 
 
 _LOG_LEVELS = frozenset({"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"})
@@ -580,7 +561,7 @@ def _mistral_thinking_levels() -> list[str]:
 
 # The layers that may lock a model (``ModelConfig.requires``): the lock follows
 # the user's plan, which a user or project file must neither set nor lift.
-_REQUIREMENT_LAYERS: frozenset[str] = frozenset({CATALOG_LAYER, GrowthbookLayer.NAME})
+_REQUIREMENT_LAYERS: frozenset[str] = frozenset({CATALOG_LAYER})
 
 
 VIBE_BOT_CEILING_KEY: Final = "vibe_bot_max_approval_policy"
@@ -692,9 +673,6 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         "catalog_model_aliases",
         "catalog_recommended_model",
         "managed_shell_tools_enabled",
-        "routed_default_model",
-        "routed_model_config",
-        "routed_extra_models",
         "smart_approve_available",
         "system_prompt_behavior",
     })
@@ -707,6 +685,9 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
     # The pin the fallback replaced, so validate_merged can skip the orphan
     # notice for the same alias.
     _missing_pin: str = PrivateAttr(default="")
+    # Models left out because no layer defines their provider (alias ->
+    # provider), so the missing-pin notice can name the cause it knows.
+    _unconfigured_providers: dict[str, str] = PrivateAttr(default_factory=dict)
     _alias_targets: dict[str, str] = PrivateAttr(default_factory=dict)
 
     @property
@@ -925,41 +906,29 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
             and config.allowed_models
             and not config.available_models()
         ):
+            left_out = "".join(
+                f" Model '{alias}' was left out: provider '{provider}' is not"
+                " configured."
+                for alias, provider in config._unconfigured_providers.items()
+            )
             raise ValueError(
-                "Admin allowed_models matches none of the configured models."
+                "Admin allowed_models matches none of the configured models." + left_out
             )
         return config
 
     # Models
     active_model: Annotated[str, WithReplaceMerge()] = UNPINNED_ACTIVE_MODEL
-    # Experiment-routed default model alias, populated at runtime by the
-    # GrowthBook layer. It only takes effect when ``active_model`` is unpinned.
-    routed_default_model: Annotated[str, WithReplaceMerge()] = ""
-    # Full definition of ``routed_default_model``, also supplied at runtime by the GrowthBook layer.
-    routed_model_config: Annotated[
-        ModelConfig | None,
-        WithReplaceMerge(),
-        BeforeValidator(_coerce_routed_model_config),
-    ] = None
     # Other names for catalog models (model ID -> names), populated at runtime
     # by the model catalog layer: a pin on one of them selects that model.
     catalog_model_aliases: Annotated[dict[str, list[str]], WithReplaceMerge()] = Field(
         default_factory=dict
     )
     # The catalog's recommended model ID, populated at runtime by the model
-    # catalog layer: the default below a live GrowthBook routed default.
+    # catalog layer: the default below the catalog filter's.
     catalog_recommended_model: Annotated[str, WithReplaceMerge()] = ""
     # The default GrowthBook picks among the catalog's models, populated at
     # runtime by the catalog filter: the default above the recommendation.
     catalog_default_model: Annotated[str, WithReplaceMerge()] = ""
-    # Extra models injected into the dropdown at runtime by the GrowthBook layer,
-    # for exposure/rollout without changing the default. Unlike
-    # ``routed_model_config``, these never influence ``resolve_default_model_alias``.
-    routed_extra_models: Annotated[
-        list[ModelConfig],
-        WithReplaceMerge(),
-        BeforeValidator(_coerce_routed_extra_models),
-    ] = Field(default_factory=list)
     providers: Annotated[list[ProviderConfig], WithUnionMerge(merge_key="name")] = (
         Field(default_factory=lambda: list(DEFAULT_PROVIDERS))
     )
@@ -1039,6 +1008,7 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         WithDeepMerge(),
         BeforeValidator(_normalize_tool_configs),
         AfterValidator(_reject_invalid_shell_timeouts),
+        AfterValidator(_reject_unknown_tool_permissions),
     ] = Field(default_factory=dict)
     outside_workdir: Annotated[OutsideWorkdirPolicy, WithReplaceMerge()] = Field(
         default=OutsideWorkdirPolicy.ASK,
@@ -1240,6 +1210,13 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
             " installed but contributes nothing to sessions."
         ),
     )
+    experimental_enable_remote_plugins: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Experimental: sync the plugins that are on in your Mistral plugin"
+            " library onto this machine, and load them in sessions."
+        ),
+    )
     experimental_enable_registry_skills: Annotated[bool, WithReplaceMerge()] = Field(
         default=False,
         description=(
@@ -1251,13 +1228,23 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
             " are named vibe:<name>, so they never collide."
         ),
     )
-    experimental_enable_model_catalog: Annotated[bool, WithReplaceMerge()] = Field(
-        default=False,
+    enable_model_catalog: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
         description=(
-            "Experimental: fetch the curated model catalog from the Mistral"
-            " provider at session start and cache it per user on disk. Requires"
-            " a Mistral provider and API key; any failure silently falls back"
-            " to local config."
+            "List the models of Mistral's model catalog, fetched from the"
+            " Mistral provider and cached per account on disk. Requires a"
+            " Mistral provider and API key; without them, or when the fetch"
+            " fails, Vibe uses the built-in models."
+        ),
+    )
+    enable_builtin_models: Annotated[bool, WithReplaceMerge()] = Field(
+        default=True,
+        description=(
+            "Offer the built-in models, Mistral Large 4 and Mistral Medium 3.5,"
+            " when the model catalog lists none. Turn off for a self-hosted"
+            " Mistral deployment that does not serve them, and define the"
+            " models it serves under [[models]]: with no model left, the"
+            " config is refused."
         ),
     )
     experimental_enable_storage_usage: Annotated[bool, WithReplaceMerge()] = Field(
@@ -1458,7 +1445,7 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         description=(
             "Maximum number of subagents that can be alive at once; a spawn "
             "beyond this closes the subagent that has waited longest, and fails "
-            "while none is waiting. A session starts at most 128 subagents."
+            "while none is waiting."
         ),
     )
     max_concurrent_subagents: Annotated[int, WithReplaceMerge()] = Field(
@@ -1617,8 +1604,6 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
         # When every model is locked, one of them is the default anyway: its
         # turn is refused with the upsell, where no default fails the config.
         available = self.runnable_models() or self.available_models()
-        if self.routed_default_model and self.routed_default_model in available:
-            return self.routed_default_model
         if self.catalog_default_model in available:
             return self.catalog_default_model
         if self.catalog_recommended_model in available:
@@ -1867,57 +1852,39 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
             builtins={"session_title": UtilityPrompt.SESSION_TITLE.path},
         )
 
-    @model_validator(mode="after")
-    def _inject_routed_model(self) -> VibeConfigSchema:
-        alias = self.routed_default_model
-        model = self.routed_model_config
-        if not (alias and model is not None and model.alias == alias):
-            return self
-
-        existing = self.models.get(alias)
-        if existing is None:
-            object.__setattr__(self, "models", {**self.models, alias: model})
-        else:
-            user_overrides = {
-                field: getattr(existing, field) for field in existing.model_fields_set
-            }
-            object.__setattr__(
-                self,
-                "models",
-                {**self.models, alias: model.model_copy(update=user_overrides)},
-            )
-        return self
-
-    @model_validator(mode="after")
-    def _inject_routed_extra_models(self) -> VibeConfigSchema:
-        # Adds models to the dropdown without touching ``routed_default_model``,
-        # so exposure/rollout never changes the resolved default. Composes with
-        # ``_inject_routed_model``: if ``routed_default_model`` names an alias
-        # added here, ``resolve_default_model_alias`` still promotes it to default.
-        if not self.routed_extra_models:
-            return self
-        models = dict(self.models)
-        for model in self.routed_extra_models:
-            # An empty alias collides with the unpinned ``active_model`` sentinel
-            # (""), so a malformed payload could hijack the resolved default. Skip
-            # it: injection must never touch the default.
-            if not model.alias:
-                continue
-            existing = models.get(model.alias)
-            if existing is None:
-                models[model.alias] = model
-                continue
-            # A user-defined entry for the same alias always wins over injection.
-            user_overrides = {
-                field: getattr(existing, field) for field in existing.model_fields_set
-            }
-            models[model.alias] = model.model_copy(update=user_overrides)
-        object.__setattr__(self, "models", models)
-        return self
-
     _refuse_zero_threshold = field_validator("auto_compact_threshold", mode="before")(
         refuse_zero_auto_compact_threshold
     )
+
+    @model_validator(mode="after")
+    def _leave_out_models_without_provider(self) -> VibeConfigSchema:
+        # Such a model cannot run, and a pin on it would stop every session from
+        # starting: leave it out like a missing model until its provider
+        # returns. Runs before the validators that read the models.
+        names = {provider.name for provider in self.providers}
+        unconfigured = {
+            alias: model.provider
+            for alias, model in self.models.items()
+            if model.provider not in names
+        }
+        # With every model left out the config has nothing to run and fails to
+        # load; keeping them fails only the session that picks one.
+        if not unconfigured or len(unconfigured) == len(self.models):
+            return self
+        # Logged once per process by whoever reads the missing-model notices:
+        # every config build repeats them.
+        self._missing_model_warnings.extend(
+            f"Model '{alias}' left out: provider '{provider}' is not configured"
+            for alias, provider in unconfigured.items()
+        )
+        models = {
+            alias: model
+            for alias, model in self.models.items()
+            if alias not in unconfigured
+        }
+        object.__setattr__(self, "models", models)
+        object.__setattr__(self, "_unconfigured_providers", unconfigured)
+        return self
 
     @model_validator(mode="after")
     def _apply_auto_compact_threshold(self) -> VibeConfigSchema:
@@ -1944,7 +1911,9 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
                 for model_id, aliases in self.catalog_model_aliases.items()
                 if model_id in self.models
             },
-            set(self.models),
+            # A model left out for its provider still holds its name: a pin on
+            # it gets the missing-provider notice, not a catalog model's alias.
+            set(self.models) | set(self._unconfigured_providers),
         )
         for alias, reason in index.dropped.items():
             warn_ignored_alias(alias, reason)
@@ -1972,10 +1941,13 @@ class VibeConfigSchema(ConfigSchema):  # noqa: PLR0904 - the effective config re
             fallback_model = self.models.get(fallback)
             label = fallback_model.display_name if fallback_model else None
             # States what was observed, never a cause: a retired catalog model,
-            # an unreachable catalog and a typo all look the same from here.
+            # an unreachable catalog and a typo all look the same from here. A
+            # missing provider is the one cause known for sure.
+            provider = self._unconfigured_providers.get(unknown)
+            cause = f": provider '{provider}' is not configured" if provider else ""
             message = (
-                f"Model '{unknown}' is not available — running '{label or fallback}'. "
-                "Pick another model to stop this notice."
+                f"Model '{unknown}' is not available{cause} — running "
+                f"'{label or fallback}'. Pick another model to stop this notice."
             )
             self._validation_warnings.append(message)
             self._missing_model_warnings.append(message)

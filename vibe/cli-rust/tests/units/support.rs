@@ -11,11 +11,11 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use vibe_rs::app::{App, Status};
 use vibe_rs::message_queue::QueueItem;
-use vibe_rs::resume_picker::Session;
 use vibe_rs::selection::Region;
 use vibe_rs::server::{
     Client, HistoryEntry, MessageContent, Notification, QuestionChoice, UserQuestion,
 };
+use vibe_rs::sessions_page::Session;
 use vibe_rs::transcript::Transcript;
 
 pub fn stub() -> Arc<Client> {
@@ -147,16 +147,16 @@ pub fn question_region(x: u16, y: u16, width: u16, height: u16) -> Region {
     }
 }
 
-/// An app with the resume picker open on one highlighted saved session, "busy".
-pub fn with_picker() -> App {
+/// An app with the Sessions page open on one highlighted saved session, "busy".
+pub fn with_page() -> App {
     let mut app = App::default();
-    app.resume_picker.open = true;
-    app.resume_picker.sessions = vec![Session {
+    app.sessions_page.open = true;
+    app.sessions_page.sessions = vec![Session {
         id: "busy".into(),
         title: "Saved implementation".into(),
         ..Default::default()
     }];
-    app.resume_picker.list.highlight(0);
+    vibe_rs::sessions_page::relayout(&mut app);
     app
 }
 
@@ -304,4 +304,11 @@ pub fn message(id: &str, role: &str, text: &str) -> Value {
         "content": [{"type": "text", "text": text}],
         "generationStatus": "completed",
     })
+}
+
+/// An app with a picker open in the box's place (the theme picker).
+pub fn with_picker() -> App {
+    let mut app = App::default();
+    vibe_rs::theme_picker::open(&mut app);
+    app
 }

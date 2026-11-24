@@ -427,6 +427,7 @@ def _classifier_completion_config(
         credentials=route.credentials,
         reasoning_field_name=route.reasoning_field_name,
         emits_finish_reason=route.emits_finish_reason,
+        tool_result_images=route.tool_result_images,
         extra_headers=dict(route.extra_headers),
         project_id=route.project_id,
         region=route.region,

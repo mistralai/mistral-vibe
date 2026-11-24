@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import tomllib
 
 from pydantic import JsonValue
 import pytest
+import tomli_w
 
 from mistralai_vibe_local_harness.protocol import (
     RustProvidedToolCall,
@@ -15,7 +17,9 @@ from mistralai_vibe_local_harness.protocol import (
 from tests.conftest import build_test_vibe_config
 from tests.stubs.fake_config_orchestrator import FakeConfigOrchestrator
 from vibe.app_server import _session_peers
+from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._provided_tools import (
+    VIBE_PROVIDED_TOOL_MODES,
     VIBE_PROVIDED_TOOL_NAMES,
     VIBE_TOOL_GROUP,
     VibeProvidedTools,
@@ -26,19 +30,23 @@ from vibe.app_server._session_peers import (
     LIST_SESSIONS_TOOL_NAME,
     MARK_SESSIONS_SEEN_TOOL_NAME,
     READ_SESSION_TOOL_NAME,
+    RENAME_SESSION_TOOL_NAME,
     RESTORE_SESSIONS_TOOL_NAME,
     SEND_TO_SESSION_TOOL_NAME,
+    SenderOf,
     SessionPeerError,
     TurnStarts,
 )
 from vibe.app_server._session_spawn import MAX_SESSION_HOPS, MAX_TURN_STARTED_SESSIONS
 from vibe.app_server._unified_permissions import UnifiedPermissionResolver
 from vibe.app_server.protocol import (
+    PEER_SEND_NOT_DELIVERED_IN_TIME,
     ClientCapabilities,
     PeerSessionArchived,
     PeerSessionMarkedSeen,
     PeerSessionMessage,
     PeerSessionRestored,
+    PeerSessionStatus,
     PeerSessionSummary,
     SessionMessageSender,
     SessionPeerArchiveParams,
@@ -49,6 +57,8 @@ from vibe.app_server.protocol import (
     SessionPeerMarkSeenResponse,
     SessionPeerReadParams,
     SessionPeerReadResponse,
+    SessionPeerRenameParams,
+    SessionPeerRenameResponse,
     SessionPeerRestoreParams,
     SessionPeerRestoreResponse,
     SessionPeerSendParams,
@@ -62,6 +72,7 @@ from vibe.core.tools.permissions import PermissionStore
 _PEER_TOOLS = [
     LIST_SESSIONS_TOOL_NAME,
     READ_SESSION_TOOL_NAME,
+    RENAME_SESSION_TOOL_NAME,
     SEND_TO_SESSION_TOOL_NAME,
     ARCHIVE_SESSIONS_TOOL_NAME,
     RESTORE_SESSIONS_TOOL_NAME,
@@ -92,12 +103,16 @@ class _FakePeers:
         self.sends: list[SessionPeerSendParams] = []
         self.archives: list[SessionPeerArchiveParams] = []
         self.restores: list[SessionPeerRestoreParams] = []
+        self.renames: list[SessionPeerRenameParams] = []
         self.marks: list[SessionPeerMarkSeenParams] = []
         self.hang = False
 
     def client_capabilities(self) -> ClientCapabilities:
         return ClientCapabilities(
-            session_peers=True, session_peer_restore=True, session_peer_mark_seen=True
+            session_peers=True,
+            session_peer_restore=True,
+            session_peer_mark_seen=True,
+            session_peer_rename=True,
         )
 
     async def list_peer_sessions(
@@ -159,6 +174,16 @@ class _FakePeers:
             ]
         )
 
+    async def rename_peer_session(
+        self, params: SessionPeerRenameParams
+    ) -> SessionPeerRenameResponse:
+        self.renames.append(params)
+        if self.hang:
+            await asyncio.Event().wait()
+        return SessionPeerRenameResponse(
+            session_id=params.session_id, title=params.title, url="/code/other"
+        )
+
     async def mark_peer_sessions_seen(
         self, params: SessionPeerMarkSeenParams
     ) -> SessionPeerMarkSeenResponse:
@@ -179,8 +204,9 @@ def _executor(
     started_by: str | None = None,
     session_id: str = "me",
     turn_starts: list[int] | None = None,
+    sender_of: SenderOf | None = None,
 ):
-    async def sender_of(caller: str) -> SessionMessageSender:
+    async def fix_ci(caller: str) -> SessionMessageSender:
         return SessionMessageSender(session_id=caller, title="Fix CI")
 
     starts = turn_starts if turn_starts is not None else [0]
@@ -193,7 +219,7 @@ def _executor(
         max_todos=lambda: 10,
         session_peers=peers,
         hops_of=lambda _session_id: hops,
-        sender_of=sender_of,
+        sender_of=sender_of or fix_ci,
         starter_of=lambda _session_id: started_by,
         turn_starts=TurnStarts(
             of=lambda _session_id: starts[0], count=count_turn_start
@@ -230,6 +256,7 @@ def test_the_peer_tools_are_offered_only_to_a_client_that_hosts_peers() -> None:
                 {"bash"},
                 session_peers=True,
                 session_peer_restore=True,
+                session_peer_rename=True,
                 session_peer_mark_seen=True,
             )
         )
@@ -237,6 +264,7 @@ def test_the_peer_tools_are_offered_only_to_a_client_that_hosts_peers() -> None:
     basic = names(vibe_tool_groups({"bash"}, session_peers=True))
     assert RESTORE_SESSIONS_TOOL_NAME not in basic
     assert MARK_SESSIONS_SEEN_TOOL_NAME not in basic
+    assert RENAME_SESSION_TOOL_NAME not in basic
     filtered = vibe_tool_groups(
         {"bash"}, session_peers=True, disabled_tools=[SEND_TO_SESSION_TOOL_NAME]
     )
@@ -345,6 +373,7 @@ def test_list_and_read_can_run_from_a_program_but_acting_cannot() -> None:
             {"bash"},
             session_peers=True,
             session_peer_restore=True,
+            session_peer_rename=True,
             session_peer_mark_seen=True,
         )
         for tool in group.tools
@@ -356,6 +385,8 @@ def test_list_and_read_can_run_from_a_program_but_acting_cannot() -> None:
     assert exposures[ARCHIVE_SESSIONS_TOOL_NAME] == "direct"
     assert exposures[RESTORE_SESSIONS_TOOL_NAME] == "direct"
     assert exposures[MARK_SESSIONS_SEEN_TOOL_NAME] == "direct"
+    assert exposures[RENAME_SESSION_TOOL_NAME] == "direct"
+    assert VIBE_PROVIDED_TOOL_MODES[RENAME_SESSION_TOOL_NAME] == "ask"
 
 
 @pytest.mark.asyncio
@@ -855,6 +886,43 @@ async def test_a_message_that_may_start_a_turn_counts_against_the_turn_cap(
 
 
 @pytest.mark.asyncio
+async def test_sends_made_at_once_see_each_other_against_the_turn_cap(
+    tmp_path: Path,
+) -> None:
+    """Reading the sender takes a while, yet the second send made meanwhile
+    still sees the first one's start counted.
+    """
+
+    async def slow_sender(caller: str) -> SessionMessageSender:
+        await asyncio.sleep(0.05)
+        return SessionMessageSender(session_id=caller)
+
+    peers = _FakePeers()
+    starts = [MAX_TURN_STARTED_SESSIONS - 1]
+    execute = _executor(tmp_path, peers, turn_starts=starts, sender_of=slow_sender)
+
+    first, second = await asyncio.gather(
+        *(
+            execute(
+                _call(
+                    action_id,
+                    SEND_TO_SESSION_TOOL_NAME,
+                    session_id="other",
+                    message="Fix it",
+                    delivery="start_turn",
+                )
+            )
+            for action_id in ("first", "second")
+        )
+    )
+
+    assert isinstance(first, RustToolSucceededEvent)
+    assert isinstance(second, RustToolFailedEvent)
+    assert second.result.error.details == {"reason": "started_sessions"}
+    assert starts == [MAX_TURN_STARTED_SESSIONS]
+
+
+@pytest.mark.asyncio
 async def test_any_session_can_archive_restore_and_mark_sessions_seen(
     tmp_path: Path,
 ) -> None:
@@ -927,6 +995,85 @@ async def test_an_unconfirmed_message_is_reported_as_maybe_sent(
 
 
 @pytest.mark.asyncio
+async def test_a_send_the_client_could_not_deliver_in_time_is_reported_as_not_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The client gets a delivery deadline shorter than the server's wait and
+    refuses once it passes, so the model learns nothing went out, never
+    "may or may not".
+    """
+    monkeypatch.setattr(_session_peers, "PEER_REQUEST_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(_session_peers, "PEER_SEND_DELIVERY_SECONDS", 0.05)
+
+    async def slow_sender(caller: str) -> SessionMessageSender:
+        await asyncio.sleep(0.5)
+        return SessionMessageSender(session_id=caller)
+
+    class SlowToOpen(_FakePeers):
+        async def send_to_peer_session(
+            self, params: SessionPeerSendParams
+        ) -> SessionPeerSendResponse:
+            self.sends.append(params)
+            assert params.deliver_within_ms is not None
+            await asyncio.sleep(params.deliver_within_ms / 1000)
+            raise SessionPeerError("late", reason=PEER_SEND_NOT_DELIVERED_IN_TIME)
+
+    peers = SlowToOpen()
+    starts = [0]
+
+    refused = await _executor(
+        tmp_path, peers, turn_starts=starts, sender_of=slow_sender
+    )(
+        _call(
+            "send",
+            SEND_TO_SESSION_TOOL_NAME,
+            session_id="other",
+            message="Hi",
+            delivery="start_turn",
+        )
+    )
+
+    assert isinstance(refused, RustToolFailedEvent)
+    assert refused.result.error.details == {"reason": "not_delivered_in_time"}
+    assert "may or may not" not in _failure(refused)
+    assert [send.deliver_within_ms for send in peers.sends] == [50]
+    # Nothing was sent, so it does not count against the turn.
+    assert starts == [0]
+
+
+@pytest.mark.asyncio
+async def test_a_send_whose_sender_cannot_be_read_is_reported_as_not_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_session_peers, "SENDER_READ_SECONDS", 0.01)
+
+    async def stuck_sender(_caller: str) -> SessionMessageSender:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    peers = _FakePeers()
+    starts = [0]
+
+    refused = await asyncio.wait_for(
+        _executor(tmp_path, peers, turn_starts=starts, sender_of=stuck_sender)(
+            _call(
+                "send",
+                SEND_TO_SESSION_TOOL_NAME,
+                session_id="other",
+                message="Hi",
+                delivery="start_turn",
+            )
+        ),
+        timeout=5,
+    )
+
+    assert isinstance(refused, RustToolFailedEvent)
+    assert refused.result.error.details == {"reason": "not_delivered_in_time"}
+    assert peers.sends == []
+    assert starts == [0]
+
+
+@pytest.mark.asyncio
 async def test_a_client_refusal_reaches_the_model(tmp_path: Path) -> None:
     class Refusing(_FakePeers):
         async def read_peer_session(
@@ -958,13 +1105,14 @@ async def test_peer_tools_are_unavailable_without_a_client_that_hosts_peers(
     [
         (LIST_SESSIONS_TOOL_NAME, "allow"),
         (READ_SESSION_TOOL_NAME, "allow"),
+        (RENAME_SESSION_TOOL_NAME, "allow"),
         (SEND_TO_SESSION_TOOL_NAME, "ask"),
         (ARCHIVE_SESSIONS_TOOL_NAME, "ask"),
         (RESTORE_SESSIONS_TOOL_NAME, "ask"),
         (MARK_SESSIONS_SEEN_TOOL_NAME, "allow"),
     ],
 )
-async def test_only_what_acts_on_sessions_asks_by_default(
+async def test_peer_tools_default_permissions_and_session_overrides(
     tmp_path: Path, tool_name: str, decision: str
 ) -> None:
     orchestrator = FakeConfigOrchestrator(build_test_vibe_config())
@@ -981,6 +1129,10 @@ async def test_only_what_acts_on_sessions_asks_by_default(
 
     outcome = await resolver.resolve(f"{VIBE_TOOL_GROUP}.{tool_name}", {})
     assert outcome.decision == decision
+
+    store.set_tool_permission(tool_name, ToolPermission.ALWAYS)
+    outcome = await resolver.resolve(f"{VIBE_TOOL_GROUP}.{tool_name}", {})
+    assert outcome.decision == "allow"
 
     store.set_tool_permission(tool_name, ToolPermission.NEVER)
     outcome = await resolver.resolve(f"{VIBE_TOOL_GROUP}.{tool_name}", {})
@@ -1037,3 +1189,313 @@ async def test_a_vibebot_session_answering_the_starter_id_asks_the_thread_it_wor
 
     [send] = peers.sends
     assert send.target_session_id == starter and send.bot_to is None
+
+
+def test_rename_tool_filters_apply_after_capability_gating() -> None:
+    def names(**filters) -> set[str]:
+        return {
+            tool.name
+            for group in vibe_tool_groups(
+                {"bash"}, session_peers=True, session_peer_rename=True, **filters
+            )
+            for tool in group.tools
+        }
+
+    assert RENAME_SESSION_TOOL_NAME in names(enabled_tools=["rename_*"])
+    assert RENAME_SESSION_TOOL_NAME not in names(enabled_tools=["read_session"])
+    assert RENAME_SESSION_TOOL_NAME not in names(disabled_tools=["rename_*"])
+    assert RENAME_SESSION_TOOL_NAME not in names(
+        enabled_tools=["rename_*"], disabled_tools=[RENAME_SESSION_TOOL_NAME]
+    )
+    assert not any(
+        tool.name == RENAME_SESSION_TOOL_NAME
+        for group in vibe_tool_groups({"bash"}, session_peer_rename=True)
+        for tool in group.tools
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reference", [_PARENT_ID, "c07d9946", "Find articles", " find ARTICLES "]
+)
+async def test_rename_resolves_references_and_returns_the_clients_title(
+    tmp_path: Path, reference: str
+) -> None:
+    class CanonicalTitle(_FakePeers):
+        async def rename_peer_session(
+            self, params: SessionPeerRenameParams
+        ) -> SessionPeerRenameResponse:
+            self.renames.append(params)
+            return SessionPeerRenameResponse(
+                session_id=params.session_id, title="Authoritative title"
+            )
+
+    peers = CanonicalTitle(_PROJECT)
+    result = await _executor(tmp_path, peers)(
+        _call(
+            "rename",
+            RENAME_SESSION_TOOL_NAME,
+            session_id=reference,
+            title=" New title ",
+        )
+    )
+    assert isinstance(result, RustToolSucceededEvent)
+    assert peers.renames == [
+        SessionPeerRenameParams(session_id=_PARENT_ID, title="New title")
+    ]
+    answer = SessionPeerRenameResponse.model_validate(result.result.structured_content)
+    assert answer.session_id == _PARENT_ID
+    assert answer.title == "Authoritative title" and answer.url is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status", ["working", "idle", "waiting_for_user", "failed", "archived"]
+)
+async def test_rename_can_manage_any_peer_without_starting_work(
+    tmp_path: Path, status: PeerSessionStatus
+) -> None:
+    peers = _FakePeers([PeerSessionSummary(session_id="other", status=status)])
+    starts = [MAX_TURN_STARTED_SESSIONS]
+    result = await _executor(
+        tmp_path, peers, hops=MAX_SESSION_HOPS, started_by="parent", turn_starts=starts
+    )(
+        _call(
+            "rename",
+            RENAME_SESSION_TOOL_NAME,
+            session_id="other",
+            title="Descriptive title",
+        )
+    )
+    assert isinstance(result, RustToolSucceededEvent)
+    assert peers.renames == [
+        SessionPeerRenameParams(session_id="other", title="Descriptive title")
+    ]
+    assert starts == [MAX_TURN_STARTED_SESSIONS]
+    assert peers.sends == []
+
+
+@pytest.mark.asyncio
+async def test_rename_finds_a_full_id_outside_the_resolver_pages(
+    tmp_path: Path,
+) -> None:
+    peers = _FakePeers(_PROJECT)
+    far = "0f0f0f0f-0000-4000-8000-00000000beef"
+    peers.unlisted = [PeerSessionSummary(session_id=far, status="archived")]
+    result = await _executor(tmp_path, peers)(
+        _call("rename", RENAME_SESSION_TOOL_NAME, session_id=far, title="New title")
+    )
+    assert isinstance(result, RustToolSucceededEvent)
+    assert peers.renames[0].session_id == far
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reference", "error"),
+    [
+        (" me ", "itself"),
+        ("c07d9946", "names 2 sessions"),
+        ("missing", "list_sessions"),
+    ],
+)
+async def test_rename_rejects_self_unknown_and_ambiguous_references(
+    tmp_path: Path, reference: str, error: str
+) -> None:
+    peers = _FakePeers([
+        PeerSessionSummary(session_id=_PARENT_ID, title="First", status="idle"),
+        PeerSessionSummary(
+            session_id="c07d9946-0000-4000-8000-00000000beef",
+            title="Second",
+            status="idle",
+        ),
+    ])
+    result = await _executor(tmp_path, peers)(
+        _call(
+            "rename", RENAME_SESSION_TOOL_NAME, session_id=reference, title="New title"
+        )
+    )
+    assert error in _failure(result)
+    assert peers.renames == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "title", ["", " \t\n ", "\ufeff", "x" * 256, "😀" * 128, 12, None]
+)
+async def test_rename_validates_titles_before_any_client_request(
+    tmp_path: Path, title: JsonValue
+) -> None:
+    peers = _FakePeers()
+    result = await _executor(tmp_path, peers)(
+        _call("rename", RENAME_SESSION_TOOL_NAME, session_id="other", title=title)
+    )
+    assert "title" in _failure(result)
+    assert peers.resolves == 0 and peers.renames == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("title", ["é" * 255, "😀" * 127 + "a"])
+async def test_rename_validates_length_after_trimming(
+    tmp_path: Path, title: str
+) -> None:
+    peers = _FakePeers()
+    result = await _executor(tmp_path, peers)(
+        _call(
+            "rename",
+            RENAME_SESSION_TOOL_NAME,
+            session_id="other",
+            title=f" \t\ufeff{title}\ufeff\n ",
+        )
+    )
+    assert isinstance(result, RustToolSucceededEvent)
+    assert peers.renames[0].title == title
+
+
+@pytest.mark.asyncio
+async def test_an_unconfirmed_rename_is_reported_as_possibly_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    peers = _FakePeers()
+    peers.hang = True
+    monkeypatch.setattr(_session_peers, "PEER_REQUEST_TIMEOUT_SECONDS", 0.01)
+    result = await _executor(tmp_path, peers)(
+        _call("rename", RENAME_SESSION_TOOL_NAME, session_id="other", title="New title")
+    )
+    assert _failure(result) == (
+        "The client did not confirm in time; the rename may have been applied."
+    )
+    assert len(peers.renames) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_rename_refusal_reaches_the_model(tmp_path: Path) -> None:
+    class Refusing(_FakePeers):
+        async def rename_peer_session(
+            self, params: SessionPeerRenameParams
+        ) -> SessionPeerRenameResponse:
+            raise SessionPeerError("The session no longer belongs to this project")
+
+    result = await _executor(tmp_path, Refusing())(
+        _call("rename", RENAME_SESSION_TOOL_NAME, session_id="other", title="New title")
+    )
+    assert _failure(result) == "The session no longer belongs to this project"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("hosts_peers", "can_rename"), [(False, True), (True, False), (True, True)]
+)
+async def test_runtime_derivation_gates_peer_rename_on_client_capabilities(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    hosts_peers: bool,
+    can_rename: bool,
+) -> None:
+    from tests.stubs.app_server import FakeSessionBackendServices
+    from vibe.app_server import _runtime
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+    from vibe.app_server.host import SessionOptions
+
+    class Services(FakeSessionBackendServices):
+        def client_capabilities(self) -> ClientCapabilities:
+            return ClientCapabilities(
+                session_peers=hosts_peers, session_peer_rename=can_rename
+            )
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    services = Services()
+    process = _runtime.HarnessProcess(services=process_services)
+    try:
+        context = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path)),
+            session_peers=_runtime.session_peers_for(services),
+        )
+        derived = context.derive(UnifiedSessionSettings())
+        names = {
+            tool.name
+            for group in derived.core_config.capabilities.tool_groups
+            for tool in group.tools
+        }
+        assert (RENAME_SESSION_TOOL_NAME in names) is (hosts_peers and can_rename)
+    finally:
+        await process.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["ask", "accept-edits"])
+@pytest.mark.parametrize(
+    ("permission", "prompted", "renamed"),
+    [(None, False, True), ("ask", True, True), ("never", False, False)],
+)
+async def test_peer_rename_execution_honors_default_and_explicit_permissions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path,
+    process_services: ProcessServices,
+    policy: str,
+    permission: str | None,
+    prompted: bool,
+    renamed: bool,
+) -> None:
+    from mistralai_vibe_local_harness.vibe._local_actions import (
+        ApprovalGrant,
+        build_local_action_executor,
+    )
+    from vibe.app_server import _runtime
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+    from vibe.app_server.host import SessionOptions
+
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    if permission is not None:
+        config_file = config_dir / "config.toml"
+        config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+        config.setdefault("tools", {})[RENAME_SESSION_TOOL_NAME] = {
+            "permission": permission
+        }
+        config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    peers = _FakePeers()
+    prompts = []
+
+    async def request_approval(action, _reason, _required):
+        prompts.append(action)
+        return ApprovalGrant.ONCE
+
+    process = _runtime.HarnessProcess(services=process_services)
+    try:
+        context = await process.build_unified_session_context(
+            SessionOptions(cwd=str(tmp_path), approval_policy=policy),
+            session_peers=peers,
+        )
+        context.provided_names.register(VIBE_TOOL_GROUP, VIBE_PROVIDED_TOOL_NAMES)
+        derived = context.derive(UnifiedSessionSettings())
+        assert derived.runtime.active_approval_policy.name == policy
+        assert derived.adapter_config.provided_tool_mode == "ask"
+        execute = build_local_action_executor(
+            derived.adapter_config,
+            request_approval=request_approval,
+            provided_tool_executor=_executor(tmp_path, peers),
+            provided_tool_modes={VIBE_TOOL_GROUP: VIBE_PROVIDED_TOOL_MODES},
+        )
+
+        result = await execute(
+            _call(
+                "rename",
+                RENAME_SESSION_TOOL_NAME,
+                session_id="other",
+                title="Short title",
+            )
+        )
+
+        assert bool(prompts) is prompted
+        assert bool(peers.renames) is renamed
+        if renamed:
+            assert isinstance(result, RustToolSucceededEvent)
+            assert peers.renames == [
+                SessionPeerRenameParams(session_id="other", title="Short title")
+            ]
+        else:
+            assert isinstance(result, RustToolFailedEvent)
+            assert result.result.error.code == "tool_denied"
+    finally:
+        await process.close()

@@ -17,6 +17,7 @@ proto  ── serde types for the SUBSET of methods/notifications we use
 - Aim for very good performance: startup, typing, scrolling and pickers must stay responsive in long sessions.
 - Aim for simplicity and low number of lines, this is very important
 - Server-owned behavior (session, config and persistence, tools, network) belongs behind an app-server method or notification (ADR 0002, ADR 0009); the client only renders it. Never duplicate server logic in Rust.
+- Gate a command on a runtime flag with `Feature` and `.requires(...)` in `src/commands/commands.rs` (see `Feature::PrMonitoring`), not a process-global static (ADR 0016).
 - Add protocol types only for the wire operations actually used.
 - Keep the reducer pure: `Action -> reduce -> Vec<Effect>`, with I/O only in effects.
 - Spawn with `work::spawn` when the task hands a result to the event loop (the replay ack waits for it), `work::spawn_daemon` for long-lived pumps and poll loops, and `work::spawn_blocking` for blocking calls; clippy bans tokio's raw spawns.

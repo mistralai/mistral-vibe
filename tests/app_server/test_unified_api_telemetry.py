@@ -39,7 +39,8 @@ from vibe.app_server._process_services import ProcessServices
 from vibe.app_server._unified_harness_backend_adapter import (
     UnifiedHarnessBackendAdapter,
 )
-from vibe.app_server.events import HistoryEntryUpdated, ServerWarning
+from vibe.app_server.events import HistoryEntryUpdated, ServerWarning, unchanged_prefix
+from vibe.app_server.models import PublicSessionState
 from vibe.app_server.protocol import (
     AgentStatsSnapshot,
     PageRequest,
@@ -231,6 +232,84 @@ async def test_streamed_text_sends_only_the_changed_entry_as_an_append(
             for op in updates[0].patch
             if op.path == "/content/0/text"
         ] == [("append", "/content/0/text", " there")]
+
+
+@pytest.mark.asyncio
+async def test_a_live_update_on_a_long_history_redoes_only_what_changed(
+    tmp_path: Path, process_services: ProcessServices, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A real adapter whose Session holds 300 messages, the entries
+        it links MCP apps on recorded and copied, as linking copies a tool call
+        that has an MCP app.
+    *Do*: Publish two live updates: a started answer, then text appended to it.
+    *Assert*: After each update, every earlier entry of the client's history is
+        the same object as before, and each update links only the answer: its
+        cost follows what changed, not the length of the history.
+    """
+    # Prepare
+    async with api_adapter(tmp_path, process_services=process_services) as harness:
+        adapter = harness.adapter
+        batches = StreamBatches(adapter.session_id)
+        roles = ("user", "assistant")
+        await publish(
+            adapter,
+            batches.batch(
+                *(
+                    HistoryEntryAddedEvent(
+                        entry=_message(
+                            f"message-{index}", index, roles[index % 2], "Hi"
+                        )
+                    )
+                    for index in range(300)
+                )
+            ),
+        )
+        linked: list[list[str]] = []
+        apps = adapter._mcp_apps
+        link = apps.apply
+
+        def recording_link(history: Any) -> Any:
+            linked.append([entry.id for entry in history])
+            return [entry.model_copy() for entry in link(history)]
+
+        monkeypatch.setattr(apps, "apply", recording_link)
+        before = cast(PublicSessionState, adapter._translated_state).history or []
+
+        # Do
+        await publish(
+            adapter,
+            batches.batch(
+                HistoryEntryAddedEvent(
+                    entry=_message("answer", 300, "assistant", "Hi", generating=True)
+                )
+            ),
+        )
+        started = cast(PublicSessionState, adapter._translated_state).history or []
+        await publish(
+            adapter,
+            batches.batch(
+                HistoryEntryPatchedEvent(
+                    entry_id="answer",
+                    entry_index=300,
+                    patches=[
+                        JsonPatchAppendOperation(path="/content/0/text", value=" there")
+                    ],
+                )
+            ),
+        )
+        streamed = cast(PublicSessionState, adapter._translated_state).history or []
+
+        # Assert
+        assert len(before) == 300
+        assert [len(started), len(streamed)] == [301, 301]
+        shared = [
+            unchanged_prefix(before, started),
+            unchanged_prefix(started, streamed),
+        ]
+        assert shared == [300, 300], "unchanged entries should stay the same objects"
+        assert linked == [["answer"], ["answer"]], (
+            "each live update should link MCP apps on the changed entry only"
+        )
 
 
 @pytest.mark.asyncio

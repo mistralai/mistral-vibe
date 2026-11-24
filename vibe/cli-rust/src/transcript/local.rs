@@ -1,9 +1,11 @@
 //! Client-owned transcript messages preserved until the server supersedes them.
 
 mod fork;
+mod interrupt;
 mod positions;
 
 pub use fork::add_rewind_fork;
+pub use interrupt::{add_interrupt, is_interrupt, set_interrupt_retryable};
 pub(super) use positions::preserve_file_image_links;
 pub use positions::{preserve, restore, restore_positions};
 
@@ -188,20 +190,6 @@ pub fn add_notice(transcript: &mut Transcript, id: &str, message: &str) {
             "type": "notice",
             "level": "error",
             "message": message,
-            "local": true,
-        }
-    }));
-}
-
-/// Mount the local interrupt marker, shown after a
-/// turn is cancelled with Escape. It is client-owned and preserved across
-/// snapshots like other local entries.
-pub fn add_interrupt(transcript: &mut Transcript, id: &str) {
-    transcript.add(&serde_json::json!({
-        "entry": {
-            "id": id,
-            "type": "interrupt",
-            "generationStatus": "completed",
             "local": true,
         }
     }));

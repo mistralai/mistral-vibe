@@ -999,7 +999,7 @@ wheels = [
 
 [[package]]
 name = "mistral-vibe"
-version = "3.1.4"
+version = "3.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "agent-client-protocol" },

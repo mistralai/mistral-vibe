@@ -387,8 +387,8 @@ def test_a_corrupt_claim_is_kept_as_an_error_and_the_rest_still_goes(
 
 def _cargo_like(root: Path, crates: int) -> int:
     """A build tree shaped like a cargo ``target``: per crate a build script
-    folder, an ``out`` folder and incremental session folders, a few files
-    each. The number of folders made.
+    folder, an ``out`` folder and incremental session folders. Folders only:
+    the freshness check never reads a file. The number of folders made.
     """
     made = 0
     for crate in range(crates):
@@ -399,7 +399,6 @@ def _cargo_like(root: Path, crates: int) -> int:
             root / "debug" / ".fingerprint" / f"crate{crate}-0123456789abcdef",
         ):
             folder.mkdir(parents=True, exist_ok=True)
-            (folder / "dep-graph.bin").write_bytes(b"x")
             made += 1
     (root / "debug" / "deps").mkdir(parents=True, exist_ok=True)
     return made
@@ -495,18 +494,30 @@ def test_an_old_build_folder_of_thousands_of_folders_is_checked_and_removed(
     folder = tree.worktrees_root / _BUCKET / ".cargo-target"
     made = _cargo_like(folder, 1_500)
     age(folder, 3600)
-    started = time.monotonic()
+    checks: list[tuple[cleanup.Freshness, float]] = []
+    real_freshness = cleanup.freshness
+
+    def freshness(path: Path, now_s: float, **kwargs: object) -> cleanup.Freshness:
+        started = time.monotonic()
+        result = real_freshness(path, now_s, **kwargs)  # type: ignore[arg-type]
+        checks.append((result, time.monotonic() - started))
+        return result
+
+    monkeypatch.setattr(cleanup, "freshness", freshness)
+    monkeypatch.setattr(
+        cleanup.ManagedWorktree, "empty_trash", staticmethod(lambda: None)
+    )
 
     # Do
-    fresh = cleanup.recently_changed(folder, time.time())
-    elapsed = time.monotonic() - started
     response = clean(_request(tree, folders=(f"{_BUCKET}/.cargo-target",)))
 
     # Assert
     assert made >= 6_000
-    assert fresh is False
+    [(fresh, elapsed)] = checks
+    assert fresh is cleanup.Freshness.UNCHANGED
     assert elapsed < cleanup.FRESH_CHECK_BUDGET_S / 2, f"{elapsed:.2f} s"
     assert response.removed == [f"{_BUCKET}/.cargo-target"]
+    assert not folder.exists()
 
 
 def test_a_new_worktree_no_session_joined_yet_is_kept(

@@ -70,6 +70,8 @@ class GoalChange(BaseModel):
     action: Literal["set", "edit", "pause", "resume", "clear", "complete", "block"]
     previous: PublicGoal | None
     goal: PublicGoal | None
+    # The turn whose tool call made a model change, when known.
+    turn_id: str | None = None
 
 
 class GoalHost(Protocol):
@@ -303,7 +305,9 @@ class GoalController:
                 )
             case "create_goal":
                 return await self._create_by_model(
-                    CreateGoalArgs.model_validate(arguments), call_id=call_id
+                    CreateGoalArgs.model_validate(arguments),
+                    call_id=call_id,
+                    turn_id=turn_id,
                 )
             case "update_goal":
                 return await self._update_by_model(
@@ -315,7 +319,7 @@ class GoalController:
                 raise GoalError("invalid", f"Unknown goal tool: {tool_name}")
 
     async def _create_by_model(
-        self, args: CreateGoalArgs, *, call_id: str
+        self, args: CreateGoalArgs, *, call_id: str, turn_id: str | None
     ) -> GoalToolResult:
         changes: list[GoalChange] = []
         max_budget = self._host.max_token_budget()
@@ -327,8 +331,8 @@ class GoalController:
                 raise GoalError(
                     "conflict",
                     "An unfinished goal already exists. Only the user can replace it: "
-                    "ask them to run /goal with the new objective. Do not mark the "
-                    "existing goal complete, blocked or paused to make room.",
+                    "ask them to replace the goal with the new objective. Do not mark "
+                    "the existing goal complete, blocked or paused to make room.",
                 )
             goal = create_goal(
                 args.objective,
@@ -337,7 +341,13 @@ class GoalController:
                 now_ms=now_ms(),
             )
             changes.append(
-                GoalChange(source="model", action="set", previous=current, goal=goal)
+                GoalChange(
+                    source="model",
+                    action="set",
+                    previous=current,
+                    goal=goal,
+                    turn_id=turn_id,
+                )
             )
             return goal, GoalAccounting()
 

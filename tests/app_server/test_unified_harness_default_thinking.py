@@ -79,8 +79,7 @@ async def _adapter(
         growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
         assert isinstance(growthbook, GrowthbookLayer)
         growthbook.set_variants({
-            ExperimentName.MODEL_CATALOG.value: True,
-            ExperimentName.MODEL_CATALOG_FILTER.value: catalog_filter,
+            ExperimentName.MODEL_CATALOG_FILTER.value: catalog_filter
         })
     catalog = parse_model_catalog_response({
         "models": [

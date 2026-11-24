@@ -102,6 +102,8 @@ def test_a_failed_turn_is_failed() -> None:
 class _FakeGoalHooks:
     def __init__(self) -> None:
         self.notices: list[GoalNotice] = []
+        # The turn each notice was recorded under, in order.
+        self.notice_turns: list[str | None] = []
         self.events: list[tuple[str, dict[str, Any]]] = []
         self.on_notice: Callable[[GoalNotice], Awaitable[None]] | None = None
 
@@ -125,6 +127,7 @@ class _FakeGoalHooks:
 
     async def record_goal_notice(self, notice: GoalNotice, turn_id: str | None) -> None:
         self.notices.append(notice)
+        self.notice_turns.append(turn_id)
         if self.on_notice is not None:
             await self.on_notice(notice)
 
@@ -327,6 +330,54 @@ async def test_a_goal_completed_then_replaced_in_one_turn_still_shows_complete(
     ]
     assert goal.goal is not None
     assert goal.goal.objective == "Second"
+
+
+@pytest.mark.asyncio
+async def test_a_goal_the_model_sets_names_its_turn_in_the_notice_detail(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: No goal, and a running turn.
+    *Do*: The model creates a goal from that turn.
+    *Assert*: The "Goal set" notice names the turn in its detail, and is still
+    recorded without a turn, so the history places it by its time.
+    """
+    # Prepare
+    hooks = _FakeGoalHooks()
+    goal = _session_goal(tmp_path, hooks)
+    await goal.restore()
+
+    # Do
+    await goal.controller.run_tool(
+        "create_goal", {"objective": "Ship it"}, call_id="call-1", turn_id="t-1"
+    )
+    await goal.flush_notices()
+
+    # Assert
+    assert [notice.detail.event for notice in hooks.notices] == ["set"]
+    assert hooks.notices[0].detail.turn_id == "t-1"
+    assert hooks.notices[0].detail.model_dump(by_alias=True)["turnId"] == "t-1"
+    assert hooks.notice_turns == [None]
+
+
+@pytest.mark.asyncio
+async def test_a_goal_the_user_sets_names_no_turn(tmp_path: Path) -> None:
+    """*Prepare*: A session with a running turn.
+    *Do*: The user sets a goal.
+    *Assert*: Its notice names no turn, in its detail or as its own.
+    """
+    # Prepare
+    hooks = _FakeGoalHooks()
+    goal = _session_goal(tmp_path, hooks)
+    await goal.restore()
+    await goal.turn_started("t-1", TurnOrigin.USER)
+
+    # Do
+    await _set_goal(goal, objective="Ship it")
+    await goal.flush_notices()
+
+    # Assert
+    assert [notice.detail.turn_id for notice in hooks.notices] == [None]
+    assert hooks.notice_turns == [None]
 
 
 @pytest.mark.asyncio

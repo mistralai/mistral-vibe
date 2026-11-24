@@ -24,7 +24,6 @@ from vibe.core.platform_auth import (
 )
 from vibe.core.platform_auth._mistral import MistralCredentials
 from vibe.core.telemetry.types import LaunchContext, TerminalEmulator
-from vibe.core.utils.fetch_wait import FetchFailures
 from vibe.setup.auth.whoami import WhoAmIResult
 
 
@@ -77,11 +76,9 @@ def _make_config(
 async def test_initialize_returns_false_when_telemetry_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(enable_telemetry=False),
         manager=manager,
@@ -98,7 +95,6 @@ async def test_initialize_returns_false_when_telemetry_disabled(
 async def test_initialize_clears_eval_cache_when_opted_out(
     monkeypatch: pytest.MonkeyPatch, enable_telemetry: bool, enable_experiments: bool
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -107,7 +103,6 @@ async def test_initialize_clears_eval_cache_when_opted_out(
     cache_path.write_text('{"key": {"stored_at_timestamp": 1, "payload": {}}}')
 
     await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(
             enable_telemetry=enable_telemetry, enable_experiments=enable_experiments
@@ -123,7 +118,6 @@ async def test_initialize_clears_eval_cache_when_opted_out(
 async def test_initialize_fetches_telemetry_but_skips_growthbook_when_experiments_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     # `experiments.enable=False` is the A/B opt-out, NOT a telemetry opt-out.
     # With telemetry on we still fetch /whoami + identity and populate the
     # attribute snapshot + user_plan for segmentation — we only avoid the
@@ -148,7 +142,6 @@ async def test_initialize_fetches_telemetry_but_skips_growthbook_when_experiment
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(enable_experiments=False),
         manager=manager,
@@ -172,7 +165,6 @@ async def test_initialize_fetches_telemetry_but_skips_growthbook_when_experiment
 async def test_initialize_returns_no_plan_data_when_no_mistral_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     # No Mistral provider configured at all — not our user. Expected absence,
     # so the NO_PLAN_DATA sentinel is returned (distinct from null). The active
     # backend is irrelevant to this: the gate is credential presence.
@@ -185,7 +177,6 @@ async def test_initialize_returns_no_plan_data_when_no_mistral_provider(
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=config,
         manager=manager,
@@ -206,7 +197,6 @@ async def test_initialize_returns_no_plan_data_when_no_mistral_provider(
 async def test_initialize_returns_none_when_mistral_provider_but_no_api_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     # A Mistral provider is configured but no API key resolvable — "tried but
     # failed", not "not our user", so user_plan is None (not the sentinel) and
     # no attribute snapshot is stamped.
@@ -221,7 +211,6 @@ async def test_initialize_returns_none_when_mistral_provider_but_no_api_key(
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=config,
         manager=manager,
@@ -237,7 +226,6 @@ async def test_initialize_returns_none_when_mistral_provider_but_no_api_key(
 async def test_initialize_fetches_plan_when_mistral_key_but_non_mistral_active(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     # The whole point of the change: a third-party active model that still has
     # a Mistral provider/key must report its REAL plan for telemetry, not the
     # NO_PLAN_DATA sentinel. The active backend gates only the UI, never the
@@ -263,7 +251,6 @@ async def test_initialize_fetches_plan_when_mistral_key_but_non_mistral_active(
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=config,
         manager=manager,
@@ -282,7 +269,6 @@ async def test_initialize_fetches_plan_when_mistral_key_but_non_mistral_active(
 async def test_initialize_returns_false_when_remote_eval_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     # Regression: even if telemetry is enabled and a Mistral key is set,
     # a failed remote eval (returns None) leaves manager state empty —
     # the helper must NOT report success, so the caller skips the
@@ -304,7 +290,6 @@ async def test_initialize_returns_false_when_remote_eval_fails(
     manager = ExperimentManager(client=_StubClient(None))
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -315,14 +300,12 @@ async def test_initialize_returns_false_when_remote_eval_fails(
     # whoami stub returns None (autouse fixture), so user_plan is None —
     # this is the "tried but failed" case, distinct from "NO_PLAN_DATA".
     assert result[1] is None
-    assert failures.failed is True
 
 
 @pytest.mark.asyncio
 async def test_initialize_returns_true_when_remote_eval_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -343,7 +326,6 @@ async def test_initialize_returns_true_when_remote_eval_succeeds(
     manager = ExperimentManager(client=_StubClient(response))
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -351,16 +333,14 @@ async def test_initialize_returns_true_when_remote_eval_succeeds(
     )
 
     assert result[0] is True
-    assert failures.failed is False
 
 
 @pytest.mark.asyncio
-async def test_an_eval_without_a_user_id_stops_later_waits(
+async def test_an_eval_without_a_user_id_is_not_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
-    # No hash attribute: the response assigns nothing and is not cached, so a
-    # later session would wait for another eval that cannot route it either.
+    # No hash attribute: the response assigns nothing, so caching it would
+    # overwrite a good entry.
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -370,7 +350,6 @@ async def test_an_eval_without_a_user_id_stops_later_waits(
     })
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.UNIFIED,
         config=_make_config(),
         manager=ExperimentManager(client=_StubClient(response)),
@@ -378,7 +357,6 @@ async def test_an_eval_without_a_user_id_stops_later_waits(
     )
 
     assert result[0] is True
-    assert failures.failed is True
     assert not EXPERIMENT_EVAL_CACHE_FILE.path.exists()
 
 
@@ -386,7 +364,6 @@ async def test_an_eval_without_a_user_id_stops_later_waits(
 async def test_initialize_uses_provided_terminal_emulator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -398,7 +375,6 @@ async def test_initialize_uses_provided_terminal_emulator(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -420,7 +396,6 @@ async def test_initialize_uses_provided_terminal_emulator(
 async def test_initialize_includes_organization_id_from_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     provider = MagicMock(
         api_base="https://api.mistral.ai/v1", api_key_env_var="MISTRAL_API_KEY"
     )
@@ -447,7 +422,6 @@ async def test_initialize_includes_organization_id_from_identity(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -473,7 +447,6 @@ async def test_initialize_includes_organization_id_from_identity(
 async def test_initialize_omits_organization_id_when_identity_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     # Fail-open: identity fetch returns None (stubbed by the autouse fixture),
     # so experiment init still succeeds with organization_id absent.
     monkeypatch.setattr(
@@ -487,7 +460,6 @@ async def test_initialize_omits_organization_id_when_identity_unavailable(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -504,7 +476,6 @@ async def test_initialize_omits_organization_id_when_identity_unavailable(
 async def test_initialize_includes_organization_kind_from_whoami(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -527,7 +498,6 @@ async def test_initialize_includes_organization_kind_from_whoami(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -543,7 +513,6 @@ async def test_initialize_includes_organization_kind_from_whoami(
 async def test_initialize_includes_plan_from_whoami(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -566,7 +535,6 @@ async def test_initialize_includes_plan_from_whoami(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -584,7 +552,6 @@ async def test_initialize_includes_plan_from_whoami(
 async def test_initialize_omits_plan_when_whoami_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -597,7 +564,6 @@ async def test_initialize_omits_plan_when_whoami_unavailable(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -614,7 +580,6 @@ async def test_initialize_omits_plan_when_whoami_unavailable(
 async def test_initialize_omits_organization_kind_when_whoami_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -627,7 +592,6 @@ async def test_initialize_omits_organization_kind_when_whoami_unavailable(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -643,7 +607,6 @@ async def test_initialize_omits_organization_kind_when_whoami_unavailable(
 async def test_initialize_includes_workspace_id_from_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -664,7 +627,6 @@ async def test_initialize_includes_workspace_id_from_identity(
     manager = ExperimentManager(client=client)
 
     result = await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -680,7 +642,6 @@ async def test_initialize_includes_workspace_id_from_identity(
 async def test_initialize_uses_resolve_whoami_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -699,7 +660,6 @@ async def test_initialize_uses_resolve_whoami_override(
     manager = ExperimentManager(client=client)
 
     await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.LEGACY,
         config=_make_config(),
         manager=manager,
@@ -717,7 +677,6 @@ async def test_initialize_uses_resolve_whoami_override(
 async def test_initialize_reports_the_serving_backend_to_growthbook(
     monkeypatch: pytest.MonkeyPatch, harness: ExperimentSurface
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -726,11 +685,7 @@ async def test_initialize_reports_the_serving_backend_to_growthbook(
     manager = ExperimentManager(client=client)
 
     await initialize_experiments(
-        failures=failures,
-        harness=harness,
-        config=_make_config(),
-        manager=manager,
-        launch_context=None,
+        harness=harness, config=_make_config(), manager=manager, launch_context=None
     )
 
     assert client.attributes is not None
@@ -741,7 +696,6 @@ async def test_initialize_reports_the_serving_backend_to_growthbook(
 async def test_initialize_caches_the_eval_response_once_bucketing_resolved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     monkeypatch.setattr(
         "vibe.core.experiments.session.mistral_credentials",
         lambda _config, _credentials=None: _mistral(MagicMock()),
@@ -767,7 +721,6 @@ async def test_initialize_caches_the_eval_response_once_bucketing_resolved(
     manager = ExperimentManager(client=_StubClient(response))
 
     await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.UNIFIED,
         config=_make_config(),
         manager=manager,
@@ -781,7 +734,6 @@ async def test_initialize_caches_the_eval_response_once_bucketing_resolved(
 async def test_initialize_keeps_the_cache_when_bucketing_never_resolved(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    failures = FetchFailures()
     # Without the hash attribute the response carries no assignment, and caching
     # it would overwrite a good entry.
     monkeypatch.setattr(
@@ -808,7 +760,6 @@ async def test_initialize_keeps_the_cache_when_bucketing_never_resolved(
     )
 
     await initialize_experiments(
-        failures=failures,
         harness=ExperimentSurface.UNIFIED,
         config=_make_config(),
         manager=manager,

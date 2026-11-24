@@ -177,8 +177,8 @@ def apply_model_status(
         raise GoalError(
             "conflict",
             f"The goal is {current.status.value}, not active: only the user can "
-            "change it now. To continue working on it, ask the user to run "
-            "/goal resume.",
+            "change it now. To continue working on it, ask the user to resume "
+            "the goal.",
         )
     new_status = {
         "complete": GoalStatus.COMPLETE,

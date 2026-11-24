@@ -29,6 +29,8 @@ from vibe.app_server._effect_models import (
     FileWriteEffectOutput as FileWriteEffectOutput,
     GenericEffectDetail as GenericEffectDetail,
     McpAppReference as McpAppReference,
+    McpServerAppReference as McpServerAppReference,
+    PluginMcpAppReference as PluginMcpAppReference,
     ProcessEffectDetail as ProcessEffectDetail,
     ScratchpadEffectDetail as ScratchpadEffectDetail,
     ScratchpadEffectInput as ScratchpadEffectInput,
@@ -555,7 +557,7 @@ class SkillSummary(ProtocolModel):
     prompt: str
     user_invocable: bool = True
     source: Literal["builtin", "local", "registry", "plugin"] = "local"
-    scope: Literal["builtin", "global", "project", "session"] = "global"
+    scope: Literal["builtin", "global", "project", "session", "remote"] = "global"
     registry: RegistryRefView | None = None
     enabled: bool = True
     locked: bool = False
@@ -617,6 +619,7 @@ type PluginComponentKind = Literal[
     "agent",
     "subagent",
     "tool",
+    "view",
     "unknown",
 ]
 
@@ -644,7 +647,7 @@ type PluginSourceFormat = Literal[
     "agent_plugins_1_0", "claude_code", "codex", "kimi_code", "opencode"
 ]
 type PluginRouteStatus = Literal["live", "stale", "unavailable"]
-type PluginScope = Literal["builtin", "global", "project"]
+type PluginScope = Literal["builtin", "global", "project", "remote"]
 
 
 # The Vibe-owned catalogue behind /plugins. It carries no component config, so
@@ -1047,6 +1050,10 @@ class GoalNoticeDetail(ProtocolModel):
     # The turn error that stopped the goal, bounded, on ``blocked`` by a
     # failed turn.
     error: str | None = None
+    # The turn whose tool call set the goal, on a ``set`` the model made. The
+    # notice entry itself stays without a turn, placed by its time; the user's
+    # own changes name no turn.
+    turn_id: str | None = None
 
 
 NoticeDetail = Annotated[
@@ -1186,6 +1193,20 @@ class PublicSession(ProtocolModel):
     archived_at: int | None = None
     is_unseen: bool = False
     cwd: str | None = None
+    # The main checkout of the git repository holding ``cwd``, a linked
+    # worktree's included; set by `session/list`, omitted outside a repository
+    # so old clients and old servers keep working (ADR 0014).
+    repository_root: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # The checkout holding ``cwd``: ``repository_root`` itself, or the linked
+    # worktree; recorded with ``repository_root``, omitted when unknown.
+    checkout_root: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # ``cwd`` is gone from disk, such as a removed worktree; set by
+    # `session/list`, omitted otherwise (ADR 0014).
+    cwd_missing: bool = Field(default=False, exclude_if=lambda value: not value)
     workspace_roots: list[str] = Field(default_factory=list)
     # The managed worktree the session runs in, when it does; the additive
     # default keeps old clients and old servers working (ADR 0014).
@@ -1295,6 +1316,39 @@ class PublicTurn(ProtocolModel):
     # Why a hook rejected the Turn's answer (strict post_llm).
     reject_reason: str | None = Field(
         default=None, exclude_if=lambda value: value is None
+    )
+    # The text of the answer that ended a completed Turn, as the runtime reports
+    # it: a draft a hook sent back for a retry is never it. Set only when the
+    # runtime reports one, so a reader falls back to the history without it.
+    final_answer: str | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    retryable: bool = False
+
+    @model_validator(mode="after")
+    def _derive_retryable(self) -> Self:
+        self.retryable = turn_retryable(self)
+        return self
+
+
+# Keep in sync with RETRYABLE_ERROR_CODES in cli-rust/src/event_handler.rs.
+_RETRYABLE_ERROR_CODES: frozenset[str] = frozenset({
+    TurnErrorCode.BACKEND_ERROR,
+    TurnErrorCode.RATE_LIMIT,
+    TurnErrorCode.RESPONSE_TOO_LONG,
+    TurnErrorCode.INCOMPLETE_STREAM,
+})
+
+
+def turn_retryable(turn: PublicTurn | None) -> bool:
+    if turn is None:
+        return False
+    if turn.status is PublicTurnStatus.INTERRUPTED:
+        return True
+    return (
+        turn.status is PublicTurnStatus.FAILED
+        and turn.error is not None
+        and turn.error.code in _RETRYABLE_ERROR_CODES
     )
 
 

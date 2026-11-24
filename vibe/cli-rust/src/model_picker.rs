@@ -19,6 +19,9 @@ use crate::server::Client;
 use crate::thinking_picker::{self, ModelPick, THINKING_LEVELS};
 use crate::utils::fuzzy;
 
+mod catalog_check;
+pub use catalog_check::CHECKING_LABEL;
+
 /// Alias persisted for the Default (unpinned) row.
 pub const UNPINNED_ACTIVE_MODEL: &str = "";
 
@@ -50,6 +53,8 @@ pub enum Event {
     Written(Value),
     /// The write failed; the message names the field and the server's reason.
     Failed(String),
+    /// The catalog check opening the picker answered, whatever its outcome.
+    Checked,
 }
 
 /// Apply the server's answer.
@@ -57,6 +62,9 @@ pub fn apply_event(app: &mut App, event: Event) {
     match event {
         Event::Written(runtime) => event_handler::apply_runtime_value(app, &runtime),
         Event::Failed(message) => crate::notices::inline(app, Severity::Error, &message),
+        Event::Checked => {
+            app.model_picker.checks_in_flight = app.model_picker.checks_in_flight.saturating_sub(1);
+        }
     }
 }
 
@@ -95,12 +103,14 @@ pub fn select(app: &mut App, client: &Arc<Client>, scope: Scope) {
     thinking_picker::open_for_model(app, pick, thinking, levels);
 }
 
-/// Open the picker highlighted on the current choice.
-pub fn open(app: &mut App) {
+/// Open the picker highlighted on the current choice, and check the catalog
+/// for models a plan upgrade unlocked.
+pub fn open(app: &mut App, client: &Arc<Client>) {
     app.model_picker.search = search_field::Search::default();
     app.model_picker.list = crate::option_list::OptionList::new(current_index(app));
     app.model_picker.open = true;
     crate::model_selection::opened(app, crate::model_selection::Picker::Model);
+    catalog_check::start(app, client);
 }
 
 /// Pre-selected row: the current choice's row, else `0` (Default).
@@ -235,6 +245,8 @@ pub fn apply_runtime(app: &mut App, response: &Value) {
     let Some(config) = crate::server::RuntimeSnapshot::config(response) else {
         return;
     };
+    let highlighted = app.model_picker.open.then(|| selected_alias(app)).flatten();
+    app.model_picker.has_locked_models = config.models.iter().any(|m| m.requires.is_some());
     let models: Vec<ModelOption> = config.models.into_iter().filter_map(model_option).collect();
     let alias = config.default_model_alias;
     app.model_picker.default_display_name = models
@@ -246,10 +258,25 @@ pub fn apply_runtime(app: &mut App, response: &Value) {
     app.model_picker.is_pinned = config.active_model_pinned;
     app.model_picker.default_alias = alias;
     if app.model_picker.open {
-        let len = rows(app).len();
-        if app.model_picker.list.selected() >= len {
-            app.model_picker.list.select(len.saturating_sub(1));
+        keep_highlight(app, highlighted.as_deref());
+    }
+}
+
+/// After the list changed under the open picker, highlight the row that was highlighted, or the nearest one.
+fn keep_highlight(app: &mut App, alias: Option<&str>) {
+    let rows = rows(app);
+    let index = rows.iter().position(|row| match row {
+        Row::Default => alias == Some(UNPINNED_ACTIVE_MODEL),
+        Row::Model(i) => alias == Some(app.model_picker.models[*i].alias.as_str()),
+        Row::Note => false,
+    });
+    let selected = app.model_picker.list.selected();
+    match index {
+        Some(index) => app.model_picker.list.highlight(index),
+        None if selected >= rows.len() => {
+            app.model_picker.list.select(rows.len().saturating_sub(1))
         }
+        None => {}
     }
 }
 

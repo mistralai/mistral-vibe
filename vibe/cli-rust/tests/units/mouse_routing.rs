@@ -35,16 +35,16 @@ fn a_left_button_gesture_keeps_its_starting_owner() {
 }
 
 #[test]
-fn resume_picker_ignores_wheel_while_loading() {
+fn sessions_page_ignores_wheel_while_loading() {
     let mut app = App::default();
-    mouse::register_region(&mut app, Rect::new(0, 0, 20, 10), MouseTarget::ResumePicker);
+    mouse::register_region(&mut app, Rect::new(0, 0, 20, 10), MouseTarget::SessionsPage);
 
     assert_eq!(
         mouse::route(&mut app, mouse(MouseEventKind::ScrollDown, 5, 5)),
         None
     );
-    assert_eq!(app.resume_picker.list.scroll(), 0);
-    assert!(!app.resume_picker.list.free_scroll());
+    assert_eq!(app.sessions_page.browse.list.scroll(), 0);
+    assert!(!app.sessions_page.browse.list.free_scroll());
 }
 
 #[test]

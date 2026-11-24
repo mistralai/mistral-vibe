@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
 
+from mistralai_vibe_local_harness.vibe._projection import effect_output_text
 from vibe.app_server._approval_permissions import available_path_scopes
 from vibe.app_server._effect_output_cap import capped_effect_entry
 from vibe.app_server._loop_prompt import project_loop_message
@@ -61,7 +62,7 @@ def project_raw_history_entry(
 def project_history_entry(
     value: object, display_roots: Sequence[Path]
 ) -> PublicHistoryEntry:
-    source = with_approval_display(validate_history_entry(value))
+    source = with_approval_display(validate_history_entry(_with_output_text(value)))
     category = unified_tool_category(source)
     projected = project_unified_history_entry(source, display_roots)
     if category is not None:
@@ -81,6 +82,21 @@ def project_history_entry(
             )
         )
     )
+
+
+def _with_output_text(value: object) -> object:
+    # A settled entry may keep its text only in output.content; clients render
+    # outputText.
+    if not isinstance(value, Mapping) or value.get("type") != "effect":
+        return value
+    state = value.get("state")
+    if (
+        not isinstance(state, Mapping)
+        or state.get("status") not in {"completed", "failed"}
+        or "outputText" in state
+    ):
+        return value
+    return {**value, "state": {**state, "outputText": effect_output_text(state)}}
 
 
 def approval_call_display(tool_name: str) -> EffectCallDisplay:

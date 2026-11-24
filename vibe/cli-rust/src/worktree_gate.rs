@@ -12,7 +12,7 @@ use tokio::time::Instant;
 
 use serde_json::Value;
 
-use crate::cli::StartupResume;
+use crate::cli::{StartModel, StartupResume};
 use crate::server::signal::ShutdownSignal;
 use crate::server::{AgentConfig, ChildHandle, Client, Launch, Notification, WorktreeInput};
 use crate::startup::{handshake, StartupEvent};
@@ -190,6 +190,7 @@ pub async fn early_start(
     show_unready_config: bool,
     startup_resume: StartupResume,
     agent_config: AgentConfig,
+    start_model: StartModel,
     shutdown: &mut ShutdownSignal,
 ) -> Result<EarlyWorktreeStart> {
     print_preparing(agent_config.worktree.as_ref());
@@ -216,6 +217,7 @@ pub async fn early_start(
             show_unready_config,
             resume: startup_resume,
             agent_config,
+            start_model,
             notifications: Some((notifications, bridge_tx)),
             // The gate's child was spawned for this handshake: it runs the
             // `initialize` itself.

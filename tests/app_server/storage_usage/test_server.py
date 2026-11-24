@@ -186,6 +186,7 @@ async def test_archive_and_delete_touch_the_stale_marker(
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(
             SessionBackendHost, _ArchivingHost()
         ),
@@ -339,6 +340,7 @@ async def test_storage_sessions_delete_deletes_each_and_answers_what_it_freed(
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(
             SessionBackendHost, _DeletingHost(tree.sessions_root, {"refused"})
         ),
@@ -384,6 +386,7 @@ def _storage_server(
     return AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, host),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),

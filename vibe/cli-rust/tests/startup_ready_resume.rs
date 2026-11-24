@@ -13,8 +13,8 @@ use vibe_rs::cli::StartupResume;
 use vibe_rs::commands::submission;
 use vibe_rs::config;
 use vibe_rs::event_handler::{apply_startup_event, show_dangerous_directory_warning};
-use vibe_rs::resume_picker;
 use vibe_rs::server::{Client, HistoryEntry, MessageContent};
+use vibe_rs::sessions_page;
 use vibe_rs::startup::{Attach, ConfigRead, Ready, StartupEvent};
 use vibe_rs::utils::startup_cache::StartupConfig;
 
@@ -172,82 +172,35 @@ async fn resuming_in_the_home_folder_keeps_both_the_warning_and_the_history() {
 }
 
 #[tokio::test]
-async fn a_picker_resume_before_ready_keeps_its_running_turn() {
+async fn resume_without_an_id_opens_the_sessions_page_once_ready_and_holds_the_prompt() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-    let home = isolated_dir("picker-before-ready-running");
+    let home = isolated_dir("page-at-ready");
     let client = Arc::new(Client::stub_answering().0);
     let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
     let mut app = App::default();
     app.session.startup_resume = StartupResume::Picker;
+    app.session.initial_prompt = Some("continue".into());
     apply_startup_event(
         &mut app,
         &client,
         &config_tx,
         StartupEvent::Attached("fresh".into()),
     );
-    resume_picker::open(&mut app, &client);
-    app.resume_picker.resuming = true;
-    let saved = json!({"eventId": 1, "history": [],
-        "session": {"id": SAVED, "status": {"type": "running", "activeTurnId": "turn-1"}}});
-    let resumed = resume_picker::Event::Resumed {
-        id: SAVED.into(),
-        state: serde_json::from_value(saved).unwrap(),
-    };
-    resume_picker::apply_event(&mut app, &client, resumed);
-    assert!(matches!(app.session.status, Status::Generating { .. }));
-
+    assert!(!app.sessions_page.open, "the page waits for the session");
     apply_startup_event(
         &mut app,
         &client,
         &config_tx,
         ready("fresh", Vec::new(), Attach::Started),
     );
-
-    // The discarded fresh session's handshake must not drop the resumed turn.
-    assert!(matches!(app.session.status, Status::Generating { .. }));
-    assert_eq!(app.session.active_turn_id.as_deref(), Some("turn-1"));
-    let _ = std::fs::remove_dir_all(home);
-}
-
-#[tokio::test]
-async fn a_picker_resume_before_ready_keeps_the_adopted_paused_queue() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-    let home = isolated_dir("picker-before-ready");
-    let client = Arc::new(Client::stub_answering().0);
-    let (config_tx, _config_rx) = mpsc::channel::<config::Loaded>(1);
-    let mut app = App::default();
-    app.session.startup_resume = StartupResume::Picker;
-    apply_startup_event(
-        &mut app,
-        &client,
-        &config_tx,
-        StartupEvent::Attached("fresh".into()),
-    );
-    resume_picker::open(&mut app, &client);
-    app.resume_picker.resuming = true;
-    let saved = json!({"eventId": 1, "session": {"id": SAVED}, "history": [],
-        "turnQueue": {"paused": true, "items": [{"id": "queue-1", "createdAt": 1,
-            "entries": [{"entryId": "queued-1", "role": "user", "annotations": {},
-                "content": [{"type": "text", "text": "Queued in the saved session"}]}]}]}});
-    let state = serde_json::from_value(saved).unwrap();
-    let resumed = resume_picker::Event::Resumed {
-        id: SAVED.into(),
-        state,
-    };
-    resume_picker::apply_event(&mut app, &client, resumed);
-    assert!(app.queue.paused && app.queue.len() == 1);
-
-    let mut fresh = ready("fresh", Vec::new(), Attach::Started);
-    if let StartupEvent::Ready(ready) = &mut fresh {
-        ready.state["turnQueue"] = json!({"paused": false, "items": []});
-    }
-    apply_startup_event(&mut app, &client, &config_tx, fresh);
-
-    assert_eq!(app.session.session_id.as_deref(), Some(SAVED));
-    assert_eq!(app.queue.len(), 1);
-    assert!(
-        app.queue.paused,
-        "the discarded fresh session's queue must not unpause it"
+    assert!(app.sessions_page.open);
+    assert!(app.session.resume_picker_shown);
+    assert_eq!(app.session.initial_prompt.as_deref(), Some("continue"));
+    assert!(app.queue.is_empty());
+    sessions_page::close(&mut app);
+    assert_eq!(
+        app.session.initial_prompt, None,
+        "leaving the page drops it"
     );
     let _ = std::fs::remove_dir_all(home);
 }

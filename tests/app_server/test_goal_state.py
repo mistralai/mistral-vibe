@@ -271,7 +271,10 @@ def test_the_model_cannot_move_a_goal_the_user_stopped() -> None:
     with pytest.raises(GoalError) as error:
         apply_model_status(_goal(GoalStatus.PAUSED), "complete", now_ms=_NOW)
     assert error.value.kind == "conflict"
-    assert "ask the user to run /goal resume" in str(error.value)
+    # Every client has its own resume control: the CLI's /goal resume, a
+    # button in Vibe Desktop. The model asks for the action, not a command.
+    assert "ask the user to resume the goal" in str(error.value)
+    assert "/goal" not in str(error.value)
 
 
 @pytest.mark.parametrize(

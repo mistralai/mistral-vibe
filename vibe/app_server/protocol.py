@@ -8,10 +8,13 @@ from typing import Annotated, Any, Final, Literal, Self
 from uuid import UUID
 
 from pydantic import (
+    AfterValidator,
+    BeforeValidator,
     Field,
     JsonValue,
     StrictInt,
     StrictStr,
+    StringConstraints,
     TypeAdapter,
     field_validator,
     model_validator,
@@ -159,6 +162,8 @@ SERVER_METHODS: tuple[str, ...] = (
     "loops/create",
     "loops/delete",
     "loops/list",
+    "loops/run",
+    "loops/update",
     "mcp/add",
     "mcp/login",
     "mcp/logout",
@@ -193,6 +198,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "projects/rename",
     "projects/retireCloud",
     "projects/setCloud",
+    "projects/setRoots",
     "review/approve",
     "review/baseline",
     "review/hunks",
@@ -213,9 +219,14 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/history/clear",
     "session/history/list",
     "session/lease/subscribe",
+    "session/leftTurns/interrupt",
+    "session/leftTurns/read",
     "session/list",
     "session/log/read",
     "session/markAsSeen",
+    "session/markAsUnseen",
+    "session/mcpApp/callTool",
+    "session/mcpApp/readResource",
     "session/move",
     "session/pin",
     "session/archive",
@@ -273,6 +284,11 @@ SERVER_METHODS: tuple[str, ...] = (
     "vibebot/localTools",
     "storage/usage/refresh",
     "telemetry/record",
+    "voice/transcribeStart",
+    "voice/transcribeStop",
+    "voice/transcribeCancel",
+    "voice/narrate",
+    "voice/narrateCancel",
     "session/turn/enqueue",
     "session/turn/queue/edit/cancel",
     "session/turn/queue/edit/abandon",
@@ -284,6 +300,7 @@ SERVER_METHODS: tuple[str, ...] = (
     "session/turn/queue/steer",
     "session/turn/queue/resume",
     "turn/interrupt",
+    "turn/retry",
     "turn/start",
     "turn/steer",
     "workspace/git/checkouts",
@@ -419,6 +436,9 @@ class AgentConfig(ProtocolModel):
     hooks: list[HookDefinition] = Field(default_factory=list)
     cwd: str | None = None
     workspace_roots: list[str] = Field(default_factory=list)
+    # Readable and writable like the cwd, but never opened as projects: their
+    # config, skills, hooks and AGENTS.md are not read.
+    access_roots: list[str] = Field(default_factory=list)
     worktree: WorktreeInput | None = None
     # The agent; a policy name here is read as ``approval_policy``, as it
     # meant before agents and policies split.
@@ -495,11 +515,21 @@ class SessionProjectStamp(ProtocolModel):
     id: str = Field(min_length=1)
 
 
+class SessionNoProject(ProtocolModel):
+    kind: Literal["none"] = "none"
+
+
+type SessionStartProject = Annotated[
+    SessionProjectStamp | SessionNoProject, Field(discriminator="kind")
+]
+
+
 class SessionStartParams(SessionOpenParams):
     idempotency_key: str | None = None
     # Written to the session metadata; forks and replacements inherit their source's.
-    # Absent leaves the session unstamped, as a CLI session is.
-    project: SessionProjectStamp | None = None
+    # Absent leaves the session unstamped, as a CLI session is. "none" without a cwd
+    # runs the session in a new scratch folder.
+    project: SessionStartProject | None = None
     kind: SessionKind = SessionKind.NORMAL
     # Applied before the first turn, as the matching mid-session changes are.
     title: str | None = Field(default=None, min_length=1)
@@ -521,6 +551,15 @@ class SessionStartParams(SessionOpenParams):
     # How many session messages and starts led to first_turn since a user
     # wrote; see `SessionPeerSendParams.hops`.
     hops: int = Field(default=0, ge=0, exclude_if=lambda value: value == 0)
+
+    @model_validator(mode="after")
+    def _projectless_takes_no_worktree(self) -> Self:
+        if (
+            isinstance(self.project, SessionNoProject)
+            and self.agent_config.worktree is not None
+        ):
+            raise ValueError("a session without a project takes no worktree")
+        return self
 
 
 class SessionStartResponse(EventWatermarkResponse):
@@ -675,6 +714,90 @@ class SessionSubagentsInterruptResponse(ProtocolModel):
     results: list[SubagentInterruptResult] = Field(default_factory=list)
 
 
+class LeftTurnsReadParams(ProtocolModel):
+    """The turns this connection's owner left mid-flight in an earlier process
+    that this process is carrying on (``initialize.capabilities.resumeLeftTurns``).
+    """
+
+
+class LeftTurnEntry(ProtocolModel):
+    session_id: str
+    # ``waiting_for_lender``: no process-lifetime channel
+    # (``platformCredentials.lifetime: "process"``) lends its account a
+    # sign-in yet; ``queued``: waiting for its resume; ``resuming``: reopened;
+    # ``running``: carried on with no client attached; ``failed``: its resume
+    # failed or timed out before its turn ran, so the turn is left as it was;
+    # ``running_elsewhere``: another live app-server process holds it open.
+    state: Literal[
+        "waiting_for_lender",
+        "queued",
+        "resuming",
+        "running",
+        "failed",
+        "running_elsewhere",
+    ]
+
+
+# ``not_resuming``: nothing resumes the owner's left turns in this process (it
+# never opted in, or the server resumes none); ``no_account``: the connection sent no ``account``;
+# ``listing``: more may follow; ``listing_failed``: the owner's next
+# ``initialize`` with ``resumeLeftTurns`` lists again; ``listing_timed_out``:
+# the stop gave up waiting for the listing; ``needs_process_lender``: this
+# connection asked for ``resumeLeftTurns`` but lends its sign-in only while it
+# is open (``platformCredentials.lifetime``), so nothing was resumed;
+# ``resumed_elsewhere``: another app-server process on the same store resumes
+# the owner's left turns, and this one resumes none until that one exits.
+LeftTurnsStatus = Literal[
+    "not_resuming",
+    "needs_process_lender",
+    "no_account",
+    "listing",
+    "listed",
+    "listing_failed",
+    "listing_timed_out",
+    "resumed_elsewhere",
+]
+
+
+class LeftTurnsReadResponse(ProtocolModel):
+    status: LeftTurnsStatus
+    turns: list[LeftTurnEntry] = Field(default_factory=list)
+
+
+class LeftTurnsInterruptParams(ProtocolModel):
+    """End every turn of this connection's owner the process is carrying on:
+    a queued one as interrupted without running it, a running one by
+    interrupting it. A session a client has attached since is not touched, nor
+    one another app-server process runs.
+    """
+
+
+class StoppedLeftTurnEntry(ProtocolModel):
+    session_id: str
+    # ``interrupted``: it was running and is now interrupted;
+    # ``ended_before_running``: it never ran, and is now interrupted;
+    # ``still_running``: the interrupt did not end it, and it stays listed;
+    # ``taken_by_client``: a client attached to it since, so it is left alone;
+    # ``already_ended``: its turn ended before the stop;
+    # ``failed``: it could not be resumed or interrupted;
+    # ``running_elsewhere``: another app-server process runs it, so this one
+    # left it alone; the stop sent to that process ends it.
+    outcome: Literal[
+        "interrupted",
+        "ended_before_running",
+        "still_running",
+        "taken_by_client",
+        "already_ended",
+        "failed",
+        "running_elsewhere",
+    ]
+
+
+class LeftTurnsInterruptResponse(ProtocolModel):
+    status: LeftTurnsStatus
+    turns: list[StoppedLeftTurnEntry] = Field(default_factory=list)
+
+
 class SessionSubagentsReadParams(ProtocolModel):
     """Experimental: what each subagent of the session did, in spawn order.
 
@@ -815,6 +938,12 @@ SESSION_LIMIT_DEPTH: Final = "session_depth"
 SESSION_LIMIT_STARTED_SESSIONS: Final = "started_sessions"
 SESSION_LIMIT_HOPS: Final = "session_hops"
 
+# `details.reason` of a `send_to_session` tool error: something the send needed
+# could not be reached in time, so nothing was sent. Also `data.reason` of the
+# client's `session/peer/send` refusal once `deliverWithinMs` runs out.
+type PeerSendRefusal = Literal["not_delivered_in_time"]
+PEER_SEND_NOT_DELIVERED_IN_TIME: Final = "not_delivered_in_time"
+
 # Whether a message another session sends may start a turn on an idle session.
 type PeerDelivery = Literal["queue", "start_turn"]
 
@@ -867,6 +996,10 @@ class SessionPinResponse(ProtocolModel):
 
 
 class SessionMarkAsSeenParams(ProtocolModel):
+    session_id: str
+
+
+class SessionMarkAsUnseenParams(ProtocolModel):
     session_id: str
 
 
@@ -1257,6 +1390,95 @@ class BackgroundProcessStopResponse(ProtocolModel):
     exit_code: int | None = None
 
 
+class McpAppReadResourceParams(ProtocolModel):
+    """Read a resource of an MCP server for its MCP App.
+
+    ``server`` is the name a ``PluginMcpAppReference`` or a
+    ``McpServerAppReference`` carries. ``expected_fingerprint`` is the
+    fingerprint of the user's config server the user consented to; a plugin's
+    server ignores it.
+    """
+
+    session_id: str
+    server: str
+    uri: str
+    expected_fingerprint: str | None = None
+
+
+class McpAppPluginSource(ProtocolModel):
+    """A plugin's own MCP server, named by the plugin's install folder."""
+
+    kind: Literal["plugin"] = "plugin"
+    plugin_name: str
+    plugin_root: str
+
+
+class McpAppServerSource(ProtocolModel):
+    """An MCP server of the user's or the project's Vibe config.
+
+    ``fingerprint`` changes when what runs or where it connects changes, and
+    only then, so a host can ask again for a server that now runs other code.
+    ``command`` (a stdio server's command line as configured, without its
+    environment) or ``url`` (an HTTP server's) is what the host shows the user
+    when it asks.
+    """
+
+    kind: Literal["mcp_server"] = "mcp_server"
+    server: str
+    fingerprint: str
+    command: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    url: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+type McpAppSource = McpAppPluginSource | McpAppServerSource
+
+
+class McpAppReadResourceResponse(ProtocolModel):
+    """The MCP ``resources/read`` result, as the server sent it.
+
+    ``source`` says whose server answered, from the session's own catalogs: a
+    host derives the app's origin from it, never from what its client sent.
+    """
+
+    contents: list[dict[str, JsonValue]]
+    source: Annotated[
+        McpAppPluginSource | McpAppServerSource, Field(discriminator="kind")
+    ]
+    meta: dict[str, JsonValue] | None = Field(
+        default=None, alias="_meta", exclude_if=lambda value: value is None
+    )
+
+
+class McpAppCallToolParams(ProtocolModel):
+    """Call a tool of an MCP server for its MCP App.
+
+    ``expected_fingerprint`` is as for ``McpAppReadResourceParams``.
+    """
+
+    session_id: str
+    server: str
+    tool_name: str
+    arguments: dict[str, JsonValue] = Field(default_factory=dict)
+    expected_fingerprint: str | None = None
+
+
+class McpAppToolResult(ProtocolModel):
+    """The MCP ``tools/call`` result, as the server sent it."""
+
+    content: list[dict[str, JsonValue]]
+    structured_content: dict[str, JsonValue] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    meta: dict[str, JsonValue] | None = Field(
+        default=None, alias="_meta", exclude_if=lambda value: value is None
+    )
+    is_error: bool = False
+
+
+class McpAppCallToolResponse(ProtocolModel):
+    result: McpAppToolResult
+
+
 class BackgroundProcessOutputParams(ProtocolModel):
     session_id: str
     process_id: str
@@ -1473,6 +1695,7 @@ class PublicPullRequestSharedEnrichment(ProtocolModel):
     target_branch: str | None = None
     author: str | None = None
     state: PullRequestLifecycleStateWire | None = None
+    is_in_merge_queue: bool = False
     provider_created_at: str | None = None
     provider_updated_at: str | None = None
     provider_closed_at: str | None = None
@@ -1947,6 +2170,9 @@ class ConfigChangedParams(ProtocolModel):
 class ConfigReadParams(ProtocolModel):
     session_id: str | None = None
     cwd: str | None = None
+    # A model picker opening: fetch a catalog that locks a model now, whatever
+    # its age, and answer once the fetch ends.
+    refresh_model_catalog: bool = False
 
 
 class ConfigReadResponse(ProtocolModel):
@@ -2089,6 +2315,12 @@ class LocalPluginComponent(ProtocolModel):
     description: str | None
 
 
+# Restates ``vibe.core.plugins.unsupported.UnsupportedPart`` rather than
+# importing it: protocol models must not pull in the plugin resolver. A test
+# keeps the two equal (``test_the_catalogue_mirrors_every_closed_set_core_declares``).
+type PluginUnsupportedPart = Literal["view", "mcp_app", "volumes"]
+
+
 type LocalPluginConnectorStatus = Literal[
     "connected", "not_connected", "unavailable", "unknown"
 ]
@@ -2108,9 +2340,20 @@ class LocalPluginConnector(ProtocolModel):
     id: str
     # The catalog's name for it; None when the catalog does not have it.
     display_name: str | None = None
+    # The connector's own id, which its page in Connections opens by (an alias
+    # can differ from the connector's name); None when the catalog lacks it.
+    connector_id: str | None = None
     status: LocalPluginConnectorStatus
     # The tools the plugin uses, as ``connectors.json`` lists them.
     tools: list[str] = Field(default_factory=list)
+
+
+class LocalPluginStarterPrompt(ProtocolModel):
+    # By locale, always with ``en``; None when the plugin is sent with no text
+    # of its own (``submit`` is then true).
+    prompt: dict[str, str] | None = None
+    # Sent at once, rather than put in the composer for the user to finish.
+    submit: bool = False
 
 
 class LocalPluginSummary(ProtocolModel):
@@ -2119,7 +2362,7 @@ class LocalPluginSummary(ProtocolModel):
     description: str
     version: str | None
     author: str | None
-    scope: Literal["builtin", "global", "project"]
+    scope: Literal["builtin", "global", "project", "remote"]
     source_format: str
     root: str
     components: list[LocalPluginComponent]
@@ -2133,6 +2376,30 @@ class LocalPluginSummary(ProtocolModel):
     collides_with: list[str] = Field(default_factory=list)
     # The connectors its ``connectors.json`` needs, in its order.
     connectors: list[LocalPluginConnector] = Field(default_factory=list)
+    # Set for a ``remote`` plugin: the AI Registry plugin it was synced from.
+    remote: RemoteRegistryPluginRef | None = None
+    # ``ai.mistral.vibe/icon.json`` as the plugin ships it; the page validates
+    # and draws it, as Le Chat does.
+    icon: JsonValue = None
+    # The parts it ships that Vibe does not support yet (Views, MCP Apps,
+    # volumes): it loads without them, and the page says so.
+    unsupported_parts: list[PluginUnsupportedPart] = Field(default_factory=list)
+    # The extension's ``starterPrompt``: the plugin's page starts "Try in
+    # chat" with it. None when the plugin declares none.
+    starter_prompt: LocalPluginStarterPrompt | None = None
+
+
+class RemoteRegistryPluginRef(ProtocolModel):
+    plugin_id: str
+    version: int
+    title: str | None = None
+    owned_by_user: bool
+    sharing_scope: str | None = None
+    # Its package could not be downloaded; the plugin is on but not loaded.
+    error: str | None = None
+    # A sync is downloading its package (it is on, not loaded yet, and has no
+    # error) or deleting it (it is off, its package still on this machine).
+    pending: Literal["downloading", "removing"] | None = None
 
 
 class LocalPluginIssue(ProtocolModel):
@@ -2143,6 +2410,9 @@ class LocalPluginIssue(ProtocolModel):
 class PluginsLocalListResponse(ProtocolModel):
     plugins: list[LocalPluginSummary]
     issues: list[LocalPluginIssue]
+    # A library sync of this app server is running: what it will download or
+    # remove may not show in ``remote.pending`` until it has read the list.
+    remote_syncing: bool = False
 
 
 class PluginsLocalSetEnabledParams(ProtocolModel):
@@ -2802,8 +3072,9 @@ class WorkspaceUntrustedConfigResponse(ProtocolModel):
 
 
 type TrustFolderState = Literal["trusted", "untrusted", "undecided"]
-# Why a folder cannot be trusted: it would trust nearly every project on the machine.
-type TrustFolderProblem = Literal["home", "root"]
+# Why a folder cannot be trusted: it would trust nearly every project on the machine,
+# or it is a projectless session's scratch folder, which is never trusted.
+type TrustFolderProblem = Literal["home", "root", "scratch"]
 
 
 class WorkspaceTrustFoldersListParams(ProtocolModel):
@@ -3104,6 +3375,12 @@ class ProjectsRenameParams(ProtocolModel):
     name: str = Field(min_length=1)
 
 
+class ProjectsSetRootsParams(ProtocolModel):
+    id: str = Field(min_length=1)
+    # The first folder becomes the session working folder.
+    root_paths: list[str] = Field(min_length=1)
+
+
 class ProjectsRemoveParams(ProtocolModel):
     id: str = Field(min_length=1)
 
@@ -3191,6 +3468,27 @@ class LoopsCreateResponse(ProtocolModel):
     loop: ScheduledLoop
 
 
+class LoopsUpdateParams(LoopsCreateParams):
+    # Replaces the loop's schedule and prompt; an unchanged schedule keeps its
+    # next run.
+    loop_id: str
+
+
+class LoopsUpdateResponse(ProtocolModel):
+    loop: ScheduledLoop
+
+
+class LoopsRunParams(ProtocolModel):
+    # Makes the loop due now: it runs once the session is idle, then keeps its
+    # schedule.
+    session_id: str
+    loop_id: str
+
+
+class LoopsRunResponse(ProtocolModel):
+    loop: ScheduledLoop
+
+
 class LoopsDeleteParams(ProtocolModel):
     session_id: str
     loop_id: str
@@ -3225,6 +3523,79 @@ class NarrationSummarizeParams(ProtocolModel):
 
 class NarrationSummarizeResponse(ProtocolModel):
     summary: str | None = None
+
+
+class _VoiceCommandParams(ProtocolModel):
+    """Every ``voice/*`` request names the session it runs on."""
+
+    session_id: str
+
+
+class VoiceTranscribeStartParams(_VoiceCommandParams):
+    language: str = "en"
+
+
+class VoiceTranscribeStartResponse(ProtocolModel):
+    ok: bool
+    error: str | None = None
+
+
+class VoiceTranscribeStopParams(_VoiceCommandParams): ...
+
+
+class VoiceTranscribeStopResponse(ProtocolModel):
+    ok: bool
+    text: str = ""
+    error: str | None = None
+
+
+class VoiceTranscribeCancelParams(_VoiceCommandParams): ...
+
+
+class VoiceTranscribeCancelResponse(ProtocolModel):
+    ok: bool
+    error: str | None = None
+
+
+class VoiceNarrateParams(_VoiceCommandParams):
+    user_message: str = ""
+    assistant_text: str = ""
+
+
+class VoiceNarrateResponse(ProtocolModel):
+    ok: bool
+    error: str | None = None
+
+
+class VoiceNarrateCancelParams(_VoiceCommandParams): ...
+
+
+class VoiceNarrateCancelResponse(ProtocolModel):
+    ok: bool
+    error: str | None = None
+
+
+class VoiceTranscriptionDeltaParams(ProtocolModel):
+    text: str | None = None
+    error: str | None = None
+
+
+class VoiceNarrationPrepParams(ProtocolModel):
+    pass
+
+
+class VoiceNarrationDoneParams(ProtocolModel):
+    pass
+
+
+class VoiceNarrationErrorParams(ProtocolModel):
+    error: str
+
+
+VOICE_TRANSCRIPTION_DELTA_METHOD = "voice/transcriptionDelta"
+VOICE_NARRATION_PREP_METHOD = "voice/narrationPrep"
+VOICE_NARRATION_DONE_METHOD = "voice/narrationDone"
+VOICE_NARRATION_ERROR_METHOD = "voice/narrationError"
 
 
 class FeedbackShouldShowParams(ProtocolModel):
@@ -3413,6 +3784,21 @@ class TurnStartResponse(EventWatermarkResponse):
     turn: PublicTurn
 
 
+NOTHING_TO_RETRY_REASON = "nothing_to_retry"
+
+
+class TurnRetryParams(ProtocolModel):
+    idempotency_key: str | None = None
+    session_id: str
+    expected_turn_id: str
+    client_user_message_id: str | None = None
+    instructions: str = ""
+
+
+class TurnRetryResponse(EventWatermarkResponse):
+    turn: PublicTurn
+
+
 class TurnSteerParams(ProtocolModel):
     idempotency_key: str | None = None
     session_id: str
@@ -3523,6 +3909,7 @@ SESSION_PEER_READ_METHOD = "session/peer/read"
 SESSION_PEER_SEND_METHOD = "session/peer/send"
 SESSION_PEER_ARCHIVE_METHOD = "session/peer/archive"
 SESSION_PEER_RESTORE_METHOD = "session/peer/restore"
+SESSION_PEER_RENAME_METHOD = "session/peer/rename"
 SESSION_PEER_MARK_SEEN_METHOD = "session/peer/markSeen"
 """Server requests asking a client that advertised ``sessionPeers`` about the
 other sessions it hosts in the calling session's project. Each arrives on the
@@ -3629,6 +4016,10 @@ class SessionPeerSendParams(ProtocolModel):
     # Session messages and starts in a row since a user wrote, this one
     # included; the server refuses a send or start past its limit.
     hops: int = Field(default=1, ge=1, exclude_if=lambda value: value == 1)
+    # The client hands the message to the target within this many ms of
+    # receiving the request, or sends nothing and refuses with
+    # `PEER_SEND_NOT_DELIVERED_IN_TIME`. Shorter than the server's own wait.
+    deliver_within_ms: int | None = Field(default=None, ge=1)
     # Sent by the server when a turn this session started there ends; the
     # client forwards it on `session/turn/enqueue`.
     reply: bool = Field(default=False, exclude_if=lambda value: not value)
@@ -3686,6 +4077,53 @@ class PeerSessionNotRestored(ProtocolModel):
 class SessionPeerRestoreResponse(ProtocolModel):
     restored: list[PeerSessionRestored]
     failed: list[PeerSessionNotRestored] = Field(default_factory=list)
+
+
+PEER_SESSION_TITLE_MAX_LENGTH: Final = 255
+# ECMA-262 WhiteSpace + LineTerminator, matching Desktop's
+# UpdateSessionInputSchema.trim(), rather than Python's broader str.strip().
+_ECMASCRIPT_TRIM_CHARACTERS: Final = (
+    "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680"
+    "\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _trim_peer_title(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    return value.strip(_ECMASCRIPT_TRIM_CHARACTERS)
+
+
+def _validate_peer_title_length(title: str) -> str:
+    # Desktop's existing title contract counts JavaScript UTF-16 code units.
+    if (
+        len(title.encode("utf-16-le", errors="surrogatepass")) // 2
+        > PEER_SESSION_TITLE_MAX_LENGTH
+    ):
+        raise ValueError(
+            f"Session title must be at most {PEER_SESSION_TITLE_MAX_LENGTH} UTF-16 code units"
+        )
+    return title
+
+
+type PeerSessionTitle = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=PEER_SESSION_TITLE_MAX_LENGTH),
+    BeforeValidator(_trim_peer_title),
+    AfterValidator(_validate_peer_title_length),
+]
+
+
+class SessionPeerRenameParams(ProtocolModel):
+    session_id: str
+    title: PeerSessionTitle
+
+
+class SessionPeerRenameResponse(ProtocolModel):
+    session_id: str
+    title: str
+    url: str | None = None
 
 
 class SessionPeerMarkSeenParams(ProtocolModel):

@@ -253,10 +253,9 @@ async fn a_pr_created_while_the_modal_lists_it_is_seen() {
 #[tokio::test]
 async fn clicking_the_rail_chip_opens_the_list_in_the_composer_place() {
     let mut app = app_with(vec![pr(1, 10, json!({ "prStatus": "mergeable" }))]);
-    let buffer = render(100, 30, |f| app.draw(f));
-    let &(_, x, _) = app
-        .rail
-        .hits
+    render(100, 30, |f| app.draw(f));
+    let hits = app.rail.hits.clone();
+    let &(_, x, _) = hits
         .iter()
         .find(|hit| hit.0 == vibe_rs::rail::Item::Prs)
         .expect("PR chip");
@@ -264,11 +263,7 @@ async fn clicking_the_rail_chip_opens_the_list_in_the_composer_place() {
     click(&mut app, x, rail_y);
     assert!(artifacts_modal::is_open(&app));
     let after = render(100, 30, |f| app.draw(f));
-    assert_eq!(
-        row(&after, rail_y),
-        row(&buffer, rail_y),
-        "the rail stays put"
-    );
+    assert_eq!(app.rail.hits, hits, "the rail stays put");
     let rows = crate::support::rows(&after);
     let title = rows
         .iter()

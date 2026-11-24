@@ -20,7 +20,7 @@ from tests.constants import (
     CONNECTORS_BOOTSTRAP_PATH,
     MISTRAL_BASE_URL,
 )
-from tests.stubs.mistral_responses import mistral_completion
+from tests.stubs.mistral_responses import mistral_completion, mistral_sse_payload
 from vibe.app_server._account import AccountGateway
 from vibe.app_server._identity import IdentityGateway
 from vibe.app_server._process_services import ProcessServices
@@ -288,7 +288,7 @@ def backend_contract_mistral_response() -> Callable[..., httpx.Response]:
         return httpx.Response(
             200,
             stream=httpx.ByteStream(
-                stream=_mistral_sse_payload(
+                stream=mistral_sse_payload(
                     content, tool_calls, finish_reason=finish_reason
                 )
             ),
@@ -306,7 +306,7 @@ def backend_contract_gated_mistral_response() -> Callable[..., httpx.Response]:
         return httpx.Response(
             200,
             stream=_GatedSSEStream(
-                _mistral_sse_payload(content, tool_calls=None), started, release
+                mistral_sse_payload(content, tool_calls=None), started, release
             ),
             headers={"Content-Type": "text/event-stream"},
         )
@@ -358,25 +358,6 @@ def _mistral_sse_terminator() -> bytes:
     _ = choice.pop("message")
     choice["delta"] = {}
     choice["finish_reason"] = "stop"
-    return b"data: " + json.dumps(response).encode() + b"\n\ndata: [DONE]"
-
-
-def _mistral_sse_payload(
-    content: str,
-    tool_calls: list[dict[str, Any]] | None,
-    *,
-    finish_reason: str | None = None,
-) -> bytes:
-    response = mistral_completion(content, tool_calls=tool_calls)
-    response["model"] = "mistral-vibe-cli-latest"
-    response["object"] = "chat.completion.chunk"
-    choice = response["choices"][0]
-    message = choice.pop("message")
-    if tool_calls is None:
-        message.pop("tool_calls")
-    choice["delta"] = message
-    if finish_reason is not None:
-        choice["finish_reason"] = finish_reason
     return b"data: " + json.dumps(response).encode() + b"\n\ndata: [DONE]"
 
 

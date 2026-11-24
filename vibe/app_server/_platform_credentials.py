@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from typing import Any, Literal
@@ -39,6 +40,17 @@ from vibe.setup.auth._oidc_tenant import (
 )
 
 _MINIMUM_VALIDITY_MS = 60_000
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotOwner:
+    revision: str
+    # As the client named it; None when it named none.
+    organization_id: str | None
+    # Issuer, client and subject of the ID token.
+    user: str
+
+
 _SOURCE = "the Desktop OIDC session"
 
 type PlatformCredentialsResolver = Callable[
@@ -62,6 +74,10 @@ class ConnectionPlatformCredentialProvider:
         self._tenants = tenants
         self._generation = 0
         self._principal: str | None = None
+        # The last ID-token snapshot's revision, the organization the client
+        # named with it and the user it names: what another session borrowing
+        # it checks against its own account.
+        self._issued: SnapshotOwner | None = None
         self._user: str | None = None
         # The user a discovery is in flight for, before it is committed to
         # ``_user``. Logout during that wait must be able to drop its result.
@@ -76,8 +92,14 @@ class ConnectionPlatformCredentialProvider:
         }
         self._user = None
         self._discovery_user = None
+        self._issued = None
         for user in stale:
             self._tenants.invalidate(user)
+
+    def owner_of(self, revision: str) -> SnapshotOwner | None:
+        """Who snapshot ``revision`` belongs to, when it is the last one."""
+        issued = self._issued
+        return issued if issued is not None and issued.revision == revision else None
 
     def has_credential(self) -> bool:
         # Desktop owns the session: only a resolution can tell.
@@ -226,6 +248,11 @@ class ConnectionPlatformCredentialProvider:
         ):
             return PlatformCredentialRequired(reason="reauthentication_required")
         self._user = user
+        self._issued = SnapshotOwner(
+            revision=resolved.revision,
+            organization_id=normalized_uuid(resolved.organization_id),
+            user=user,
+        )
         self._principal = tenant_principal(
             issuer=issuer,
             client_id=client_id,
@@ -300,6 +327,15 @@ def _tenant_selection(resolved: PlatformCredentialsSnapshot) -> TenantSelection:
     return TenantSelection(organization_id=organization_id, workspace_id=workspace_id)
 
 
+def normalized_uuid(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(uuid.UUID(value))
+    except ValueError:
+        return value
+
+
 def _unverified_claims(token: str) -> dict[str, Any]:
     """The payload of a JWT Desktop just issued us; it is not a trust decision:
     the platform verifies the token, these claims only key the tenant cache.
@@ -327,4 +363,9 @@ def _audience_from_base_url(base_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
 
 
-__all__ = ["ConnectionPlatformCredentialProvider", "PlatformCredentialsResolver"]
+__all__ = [
+    "ConnectionPlatformCredentialProvider",
+    "PlatformCredentialsResolver",
+    "SnapshotOwner",
+    "normalized_uuid",
+]

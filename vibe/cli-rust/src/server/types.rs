@@ -22,7 +22,6 @@ pub mod method {
     pub const SESSION_STOP: &str = "session/stop";
     pub const SESSION_RESUME: &str = "session/resume";
     pub const SESSION_CONTINUE: &str = "session/continue";
-    pub const SESSION_DELETE: &str = "session/delete";
     /// Archive or unarchive a saved session (app-server `SessionArchiveParams`).
     pub const SESSION_ARCHIVE: &str = "session/archive";
     pub const SESSION_LEASE_SUBSCRIBE: &str = "session/lease/subscribe";
@@ -106,10 +105,15 @@ pub mod method {
     /// Live session logs paged into the `/debug` console.
     pub const DIAGNOSTICS_LOGS_READ: &str = "diagnostics/logs/read";
     pub const SESSION_RENAME: &str = "session/rename";
+    /// Move a session to another folder in place.
+    pub const SESSION_RELOCATE: &str = "session/relocate";
+    pub const SESSION_MARK_AS_SEEN: &str = "session/markAsSeen";
+    pub const PROJECTS_LIST: &str = "projects/list";
     /// Create, replace, edit, pause or resume the session's goal.
     pub const GOAL_SET: &str = "goal/set";
     pub const GOAL_CLEAR: &str = "goal/clear";
     pub const BACKGROUND_PROCESS_STOP: &str = "session/backgroundProcess/stop";
+    pub const BACKGROUND_PROCESS_OUTPUT: &str = "session/backgroundProcess/output";
     pub const IDENTITY_READ: &str = "identity/read";
     pub const ACCOUNT_READ: &str = "account/read";
     /// Redacted active-provider snapshot behind the `/status` section.
@@ -128,6 +132,10 @@ pub mod method {
     pub const CONNECTOR_CONNECT: &str = "connector_catalog/connect";
     /// Schedule a loop from an `interval` or a `cron`.
     pub const LOOPS_CREATE: &str = "loops/create";
+    /// Replace a loop's prompt and schedule, keeping its id.
+    pub const LOOPS_UPDATE: &str = "loops/update";
+    /// Make a loop due now, keeping its schedule.
+    pub const LOOPS_RUN: &str = "loops/run";
     /// Delete one scheduled loop.
     pub const LOOPS_DELETE: &str = "loops/delete";
     pub const MCP_ADD: &str = "mcp_catalog/add";
@@ -678,25 +686,7 @@ pub struct PublicSessionState {
     pub child_sessions: Vec<crate::server::PublicChildSession>,
     /// The session's background processes.
     #[serde(default, deserialize_with = "crate::utils::json::lenient")]
-    pub background_processes: Vec<PublicBackgroundProcess>,
-}
-
-/// `PublicBackgroundProcess`: a process the agent started in the background.
-#[derive(Debug, Clone, Deserialize)]
-pub struct PublicBackgroundProcess {
-    pub status: String,
-    #[serde(rename = "processId")]
-    pub process_id: String,
-    #[serde(default)]
-    pub command: String,
-}
-
-/// Stop one background process; the next session snapshot reports it stopped.
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BackgroundProcessStopParams {
-    pub session_id: String,
-    pub process_id: String,
+    pub background_processes: Vec<crate::server::PublicBackgroundProcess>,
 }
 
 /// A provider retry in progress: which turn, why, and the transport detail.
@@ -796,6 +786,11 @@ pub enum HistoryEntry {
     Interrupt(InterruptEntry),
     #[serde(other)]
     Unknown,
+}
+
+/// Whether a stored entry `Value` is a user message steered into the running turn.
+pub fn is_steer(entry: &Value) -> bool {
+    entry["source"] == "turn_steer"
 }
 
 /// Whether a stored entry `Value` is a draft that never became the answer: one a
@@ -1010,7 +1005,11 @@ pub struct WorkspaceUntrustedConfigResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct InterruptEntry {}
+pub struct InterruptEntry {
+    /// The live `/retry` offer covers this marker.
+    #[serde(default)]
+    pub retryable: bool,
+}
 
 /// `session/start` result envelope.
 #[derive(Debug, Deserialize)]

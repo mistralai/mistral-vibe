@@ -68,6 +68,11 @@ pub fn shape(app: &App) -> Shape {
             Shape::Default
         };
     }
+    if target == crate::mouse::MouseTarget::SessionsPage
+        && crate::sessions_page::preview_view::link_at(app, at).is_some()
+    {
+        return Shape::Pointer;
+    }
     if target == crate::mouse::MouseTarget::Rail && crate::rail::hovered(app).is_some() {
         return Shape::Pointer;
     }

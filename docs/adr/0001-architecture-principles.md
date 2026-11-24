@@ -7,6 +7,10 @@ Keep dependencies explicit and I/O at module boundaries. Add an abstraction
 only when it protects a real boundary, removes duplication or enables required
 testing. Ownership is defined in [0002](0002-core-engine-and-delivery-surfaces.md).
 
+Each behavior has one implementation. Before adding a route, event, listener,
+lock, on-disk format or helper, extend its existing owner: a second path for
+the same mutation, or a second copy of a format, drifts from the first.
+
 ## Rationale
 
 Startup work and broad dependencies affect every user. Small, understandable
@@ -18,8 +22,12 @@ modules limit the cost of changing or replacing an implementation.
 - Keep parsing and decisions independent of I/O where practical.
 - Defer optional imports, discovery and network work until needed.
 - Use existing contracts before adding layers or dependencies.
+- Search for the owner of a mechanism before adding one, and extend it. For
+  example, a file format shared with the harness has one `vibe/core` module.
 
 ## Flag To User When
 
 - A dependency adds substantial startup or per-turn work.
 - A shortcut spreads one behavior across unrelated modules or clients.
+- A change adds a second path for an existing mutation, or a second copy of a
+  format or helper.

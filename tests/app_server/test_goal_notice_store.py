@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -12,10 +13,12 @@ from vibe.app_server._goal_notice_store import (
     read_stored_goal_notices,
     with_goal_notices,
 )
+from vibe.app_server._model import ProtocolModel
 from vibe.app_server.models import (
     GoalNoticeDetail,
     GoalNoticeEvent,
     GoalStatus,
+    GoalStatusReason,
     PublicEntryGenerationStatus,
     PublicHistoryEntry,
     PublicMessageEntry,
@@ -113,6 +116,31 @@ def test_a_notice_without_a_turn_goes_where_its_time_puts_it() -> None:
 
     # Assert
     assert _ids(merged) == ["a", "n", "b"]
+
+
+def test_a_model_set_notice_naming_its_turn_still_goes_where_its_time_puts_it() -> None:
+    """*Prepare*: A running turn, and the model's "Goal set" recorded mid-turn,
+    which names that turn only in its detail.
+    *Do*: Merge the notice.
+    *Assert*: It sits between the turn's entries, where its time puts it, not
+    after the turn's last entry.
+    """
+    # Prepare
+    history = [
+        _message("u1", "user", "t1", 10),
+        _message("a1", "assistant", "t1", 20),
+        _message("a2", "assistant", "t1", 40),
+    ]
+    notice = _notice("n", "set", None, 30)
+    notice = notice.model_copy(
+        update={"detail": notice.detail.model_copy(update={"turn_id": "t1"})}
+    )
+
+    # Do
+    merged = with_goal_notices(history, [notice], complete=True)
+
+    # Assert
+    assert _ids(merged) == ["u1", "a1", "n", "a2"]
 
 
 def test_a_partial_window_takes_only_the_notices_since_its_first_entry() -> None:
@@ -232,6 +260,52 @@ async def test_a_rewind_keeps_the_stop_notice_of_a_turn_it_keeps(
 
     # Assert
     assert [n.id for n in store.notices] == ["set", "t1-done"]
+
+
+class _ReleasedGoalNoticeDetail(ProtocolModel):
+    """``GoalNoticeDetail`` as a released app server (3.1.x) reads it."""
+
+    kind: Literal["goal"] = "goal"
+    event: GoalNoticeEvent
+    goal_id: str
+    objective: str | None = None
+    status: GoalStatus
+    status_reason: GoalStatusReason | None = None
+    continuation: int | None = None
+    tokens_used: int = 0
+    token_budget: int | None = None
+    time_used_seconds: int = 0
+    error: str | None = None
+
+
+@pytest.mark.asyncio
+async def test_the_saved_notices_leave_out_the_turn_a_released_server_cannot_read(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A persistent store, and a "Goal set" the model made, naming
+    its turn in the detail.
+    *Do*: Save it.
+    *Assert*: The file has no ``turnId`` and reads with the released server's
+    detail, which forbids unknown fields; the live notice keeps its turn.
+    """
+    # Prepare
+    store = GoalNoticeStore(tmp_path / GOAL_NOTICES_FILENAME, persistent=lambda: True)
+    notice = _notice("a", "set", None, 10)
+    notice = notice.model_copy(
+        update={"detail": notice.detail.model_copy(update={"turn_id": "t1"})}
+    )
+
+    # Do
+    await store.append(notice)
+
+    # Assert
+    raw = (tmp_path / GOAL_NOTICES_FILENAME).read_text(encoding="utf-8")
+    assert "turnId" not in raw
+    saved = json.loads(raw)["notices"]
+    assert [_ReleasedGoalNoticeDetail.model_validate(n["detail"]) for n in saved]
+    detail = store.notices[0].detail
+    assert isinstance(detail, GoalNoticeDetail)
+    assert detail.turn_id == "t1"
 
 
 def test_a_notice_file_with_non_ascii_text_reads_back(tmp_path: Path) -> None:

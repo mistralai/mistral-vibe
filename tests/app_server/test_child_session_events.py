@@ -35,6 +35,7 @@ def _attached_server(
             model_catalog=process_services.model_catalog,
         ),
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
     )
     # A session is attached and its client finished the handshake.
     server._client_capabilities = ClientCapabilities(

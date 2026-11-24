@@ -8,7 +8,7 @@ use vibe_rs::code_preview::load::{read, Failure};
 use vibe_rs::code_preview::target::{parse, Kind, Location};
 use vibe_rs::ui::{self, highlight};
 
-use crate::resume_picker_outcomes::picking;
+use crate::sessions_page_outcomes::picking;
 use crate::support::render;
 
 fn location(path: &str, lines: Option<(usize, usize)>, kind: Kind) -> Option<Location> {

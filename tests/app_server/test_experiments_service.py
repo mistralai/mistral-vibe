@@ -114,7 +114,7 @@ async def test_another_client_gets_its_own_eval(config_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_failed_eval_backs_off_and_stops_later_waits(config_dir: Path) -> None:
+async def test_a_failed_eval_backs_off_for_later_sessions(config_dir: Path) -> None:
     client = _Client([None, _RESPONSE])
     service = _service(client)
 
@@ -125,7 +125,6 @@ async def test_a_failed_eval_backs_off_and_stops_later_waits(config_dir: Path) -
 
     # One request: the second open waits out the backoff, not the network.
     assert len(client.calls) == 1
-    assert service.failures.failed
     # Telemetry still segments a failed eval by what was resolved for it.
     assert first.value.attributes is not None
     assert first.value.attributes.userId == "user-1"
@@ -262,7 +261,6 @@ async def test_a_fetch_that_lands_within_its_own_timeout_is_not_given_up_on(
     held = await service.evaluate(await _key())
 
     assert held.response == _RESPONSE
-    assert not service.failures.failed
     await service.close()
 
 
@@ -345,7 +343,6 @@ async def test_a_failed_refresh_behind_a_held_eval_keeps_later_sessions_waiting(
 
     assert served.response == _RESPONSE
     assert len(client.calls) == 2
-    assert not service.failures.failed
     await service.close()
 
 

@@ -10,7 +10,7 @@ use crate::server::{
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::{dispatch, is_side_channel, parse, runs, waits_for_jobs};
+use super::{dispatch, drops_queue, is_side_channel, parse, runs, waits_for_jobs};
 use crate::app::{App, QueuedPrompt, Severity, Status};
 use crate::input_modes::{classify_submitted, submitted_value, ClassifiedInput};
 use crate::startup::banners;
@@ -84,7 +84,8 @@ pub fn submit(
 ) -> bool {
     let mode = app.chat_input.mode;
     let value = submitted_value(mode, &app.chat_input.submitted_text());
-    if matches!(app.session.status, Status::Failed) {
+    // The session being opened is not the one shown yet: the draft waits for it.
+    if matches!(app.session.status, Status::Failed) || crate::sessions_page::switching(app) {
         return false;
     }
     // An interrupt taking its prompt back is still rewinding: the input waits for it.
@@ -256,33 +257,48 @@ fn reject_input(app: &mut App, value: &str, message: String) {
 /// Why this slash command cannot run now.
 fn command_hint(app: &App, command: &str) -> Option<&'static str> {
     if !is_side_channel(command) {
-        return reject_hint(app);
+        return idle_hint(app, drops_queue(command));
     }
     let job_running = app.compacting || app.agents.installing;
     (job_running && waits_for_jobs(command)).then_some("wait for the current job to finish.")
+}
+
+/// Why rewind mode, which drops the queue, cannot open now: double-Esc follows typed `/rewind`'s gate.
+pub(crate) fn rewind_hint(app: &App) -> Option<&'static str> {
+    idle_hint(app, true)
 }
 
 /// Whether a typed non-side-channel command such as `/model` would run at once: `submit`'s gates, without deferring or rejecting.
 pub(crate) fn accepts_idle_command(app: &App) -> bool {
     !matches!(app.session.status, Status::Starting | Status::Failed)
         && !shell_in_flight(app)
-        && reject_hint(app).is_none()
+        && idle_hint(app, false).is_none()
 }
 
-/// Why a non-side-channel command cannot run now.
-fn reject_hint(app: &App) -> Option<&'static str> {
-    if app.queue.paused {
-        return Some("clear the queue first or remove this input.");
+/// Why a non-side-channel command cannot run now; a paused queue holds back only those that drop it.
+fn idle_hint(app: &App, drops_queue: bool) -> Option<&'static str> {
+    if app.queue.paused && !drops_queue && !working(app) {
+        return None;
     }
-    // Compaction runs as an agent job, so it counts as busy too.
-    if matches!(app.session.status, Status::Generating { .. })
-        || app.compacting
-        || app.agents.installing
-        || !app.queue.is_empty()
-    {
+    reject_hint(app)
+}
+
+/// Why a non-side-channel command or a shell command cannot run now.
+fn reject_hint(app: &App) -> Option<&'static str> {
+    if working(app) {
         return Some("wait for the current job to finish.");
     }
-    None
+    if app.queue.paused {
+        return Some("send the held prompts with Enter or remove them first.");
+    }
+    (!app.queue.is_empty()).then_some("wait for the current job to finish.")
+}
+
+/// A turn, a compaction or an agent install is running.
+fn working(app: &App) -> bool {
+    matches!(app.session.status, Status::Generating { .. })
+        || app.compacting
+        || app.agents.installing
 }
 
 pub(super) fn clear_and_remember(app: &mut App, value: &str) {

@@ -46,10 +46,17 @@ async def execute_provided_tool_action(
         # Servers may speak a newer MCP; fields we do not know are not an error.
         content = _CONTENT_BLOCKS.validate_python(list(result.content), extra="ignore")
     except failure_type as exc:
+        retry_after_s = getattr(exc, "retry_after_s", None)
         return _failed(
             action,
             code=str(getattr(exc, "code", invalid_result_code)),
             retryable=bool(getattr(exc, "retryable", False)),
+            # The model reads the details: without the wait it retries at once.
+            details=(
+                {"retry_after_s": retry_after_s}
+                if isinstance(retry_after_s, int)
+                else None
+            ),
         )
     except (ValidationError, ValueError, TypeError):
         return _failed(action, code=invalid_result_code, retryable=False)
@@ -89,7 +96,11 @@ def _error_text(content: list[RustContentBlock]) -> str:
 
 
 def _failed(
-    action: RustProvidedToolCallAction, *, code: str, retryable: bool
+    action: RustProvidedToolCallAction,
+    *,
+    code: str,
+    retryable: bool,
+    details: JsonValue = None,
 ) -> RustToolFailedEvent:
     return RustToolFailedEvent(
         action_id=action.action_id,
@@ -99,7 +110,7 @@ def _failed(
                 code=code,
                 message="The provided tool call failed",
                 retryable=retryable,
-                details=None,
+                details=details,
             )
         ),
     )

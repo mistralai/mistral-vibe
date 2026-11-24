@@ -29,7 +29,7 @@ fn select(app: &mut App, scope: Scope) {
 fn app_on(row: usize) -> App {
     let mut app = App::default();
     vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime());
-    model_picker::open(&mut app);
+    model_picker::open(&mut app, &stub());
     app.model_picker.list.highlight(row);
     app
 }
@@ -110,7 +110,7 @@ fn unresolved_default_skips_the_thinking_picker() {
         .remove("defaultModelAlias");
     let mut app = App::default();
     vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime);
-    model_picker::open(&mut app);
+    model_picker::open(&mut app, &stub());
     app.model_picker.list.highlight(0);
     select(&mut app, Scope::Saved);
     assert!(!app.model_picker.open);
@@ -126,7 +126,7 @@ fn a_pinned_model_opens_highlighted_and_marked_current() {
     let mut app = App::default();
     vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime);
 
-    model_picker::open(&mut app);
+    model_picker::open(&mut app, &stub());
 
     assert_eq!(app.model_picker.list.selected(), 2);
     assert_eq!(model_picker::current_row(&app), Some(Row::Model(1)));
@@ -283,7 +283,7 @@ fn paste_filters_only_while_the_field_is_focused() {
 fn opening_the_picker_resets_a_stale_filter() {
     let mut app = app_on(0);
     type_query(&mut app, "large");
-    model_picker::open(&mut app);
+    model_picker::open(&mut app, &stub());
     assert_eq!(app.model_picker.search.query, "");
     assert_eq!(model_picker::rows(&app).len(), 4);
 }
@@ -346,4 +346,92 @@ fn a_model_that_requires_an_upgrade_is_not_offered() {
         .map(|m| m.alias.as_str())
         .collect();
     assert_eq!(aliases, vec!["medium", "legacy"]);
+}
+
+fn runtime_locking(locked: bool) -> Value {
+    let mut runtime = runtime();
+    let large = &mut runtime["runtime"]["config"]["models"][1];
+    if locked {
+        large["requires"] = json!({"kind": "higher_plan"});
+    }
+    runtime
+}
+
+/// An app in session `s`, its answers going to `tx`, on a catalog that locks `large` or not.
+fn app_in_session(tx: vibe_rs::ui_event::Sender, locked: bool) -> App {
+    let mut app = App {
+        events: Some(tx),
+        ..App::default()
+    };
+    app.session.session_id = Some("s".into());
+    vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime_locking(locked));
+    app
+}
+
+#[tokio::test]
+async fn opening_with_a_locked_model_and_a_session_checks_the_catalog() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let mut app = app_in_session(tx, true);
+
+    model_picker::open(&mut app, &stub());
+
+    assert_eq!(app.model_picker.checks_in_flight, 1);
+    let buffer = redraw(&mut app);
+    let title = (0..buffer.area.height)
+        .find(|y| row(&buffer, *y).contains("Select Model"))
+        .expect("the title");
+    let line = row(&buffer, title);
+    let label = format!("Select Model  · {}", model_picker::CHECKING_LABEL);
+    assert!(
+        line.contains(&label),
+        "the check shows after the title: {line}"
+    );
+    model_picker::apply_event(&mut app, model_picker::Event::Checked);
+    assert_eq!(app.model_picker.checks_in_flight, 0);
+}
+
+#[test]
+fn opening_with_no_locked_model_checks_nothing() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let mut app = app_in_session(tx, false);
+
+    model_picker::open(&mut app, &stub());
+
+    assert_eq!(app.model_picker.checks_in_flight, 0);
+}
+
+#[test]
+fn an_unlocked_model_appears_and_the_highlight_stays_on_its_model() {
+    let mut app = App::default();
+    vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime_locking(true));
+    model_picker::open(&mut app, &stub());
+    // Default, medium, legacy: highlight legacy.
+    app.model_picker.list.highlight(2);
+    assert_eq!(
+        model_picker::selected_alias(&app).as_deref(),
+        Some("legacy")
+    );
+
+    vibe_rs::event_handler::apply_runtime_value(&mut app, &runtime_locking(false));
+
+    assert_eq!(model_picker::rows(&app).len(), 4);
+    assert_eq!(
+        model_picker::selected_alias(&app).as_deref(),
+        Some("legacy")
+    );
+}
+
+#[tokio::test]
+async fn reopening_during_a_check_keeps_the_label_until_both_answer() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(4);
+    let mut app = app_in_session(tx, true);
+    model_picker::open(&mut app, &stub());
+    model_picker::cancel(&mut app);
+    model_picker::open(&mut app, &stub());
+
+    model_picker::apply_event(&mut app, model_picker::Event::Checked);
+
+    assert_eq!(app.model_picker.checks_in_flight, 1);
+    model_picker::apply_event(&mut app, model_picker::Event::Checked);
+    assert_eq!(app.model_picker.checks_in_flight, 0);
 }

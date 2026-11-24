@@ -26,6 +26,8 @@ _ELAPSED = re.compile(r"(?<=… \()(?:\d+h)?(?:\d+m)?\d+s(?=[ )])")
 _UPDATE_CURRENT = re.compile(r"\d+\.\d+\.\d+(?= → \d+\.\d+\.\d+)")
 _VIBE_DIR = str(VIBE_DIR)
 _VIBE_DIR_PLACEHOLDER = "<vibe-dir>"
+# macOS canonicalizes `/tmp` under `/private`; scenario-pinned `/tmp` paths must match Linux.
+_PRIVATE_TMP = "/private/tmp/"
 
 _SWITCHES = frozenset({"session/agent/update", "session/approvalPolicy/update"})
 _QUEUE_REPLACE = "session/turn/queue/replace"
@@ -82,6 +84,9 @@ def _normalize_request(request: Request, replacement_keys: dict[str, str]) -> Re
         params["repoLocalPaths"] = ["<cwd>" for _ in params.get("repoLocalPaths", [])]
         if params.get("sessionCwd") is not None:
             params["sessionCwd"] = "<cwd>"
+    # The startup config read names the checkout too.
+    if request.method == "config/read" and isinstance(params.get("cwd"), str):
+        params["cwd"] = "<cwd>"
     # The trusted-folder add view starts on the checkout and resolves against it.
     if request.method.startswith("workspace/trust/folders/") and isinstance(
         cwd := params.get("cwd"), str
@@ -124,6 +129,8 @@ def _normalize_request_value(value: Any) -> Any:
         }
     if isinstance(value, list):
         return [_normalize_request_value(item) for item in value]
+    if isinstance(value, str) and value.startswith(_PRIVATE_TMP):
+        return value.removeprefix("/private")
     return value
 
 

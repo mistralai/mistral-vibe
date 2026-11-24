@@ -241,6 +241,7 @@ class HostRequestHandler:
             self._load_orchestrator,
             self._resolved_builtin_plugin_roots,
             connector_catalog,
+            self._credentials,
         )
         self._missing_layers = MissingLayerFetches(
             org_config, experiments, model_catalog, self._credentials
@@ -477,6 +478,7 @@ class HostRequestHandler:
             session_files,
             config_orchestrator=orchestrator,
             builtin_plugin_roots=self._builtin_plugin_roots,
+            credentials=self._credentials,
         )
         _issues, projection = await asyncio.to_thread(
             discover_session_skills,
@@ -506,9 +508,18 @@ class HostRequestHandler:
         # A plan upgrade unlocks models: the picker's read refreshes an old
         # catalog (one showing an upsell is old after 30 s), and
         # `config/changed` tells the client once it lands.
-        await self._model_catalog.check_for_picker(
-            ModelCatalogKey.current(config, self._credentials)
-        )
+        key = ModelCatalogKey.current(config, self._credentials)
+        if params.refresh_model_catalog:
+            await self._model_catalog.refreshed_for_picker(key)
+            # Built again on what the fetch brought, so the answer lists it.
+            orchestrator = await self._load_picker_orchestrator(
+                params.cwd,
+                client_info=client_info,
+                attached_session_id=attached_session_id,
+            )
+            config = orchestrator.config
+        else:
+            await self._model_catalog.check_for_picker(key)
         view = project_config_view(
             config,
             active_model_pinned=active_model_is_pinned(orchestrator),
@@ -751,15 +762,8 @@ class HostRequestHandler:
             raise RequestFailure(
                 ProtocolErrorCode.INVALID_PARAMS, f"Not a directory: {target}"
             )
-        # The same boundary the live move keeps: a session may only reach the
-        # counterparts of where it already sits, so a move never grants a tree
-        # the session never occupied.
-        if not await asyncio.to_thread(_is_counterpart, Path(current), target):
-            raise RequestFailure(
-                ProtocolErrorCode.INVALID_PARAMS,
-                f"Not a worktree of this session's repository: {target}",
-            )
-
+        # As on the live move, any directory will do: the record grants no
+        # trust, and the client asks for the destination's before moving.
         await relocate_saved_session(params.session_id, target, config.session_logging)
         # Read back through the same path `session/read` uses, so the state a
         # move answers with is the state a read of the moved session gives.
@@ -1323,21 +1327,3 @@ def git_checkouts_response(
                     )
                 )
         return WorkspaceGitCheckoutsResponse(checkouts=checkouts)
-
-
-def _is_counterpart(cwd: Path, target: Path) -> bool:
-    """Whether *target* is where a session at *cwd* sits, in another checkout.
-
-    The detached mirror of ``AgentLoop._is_derived_destination``: the same
-    narrowing, so a session cannot reach a tree it never occupied whether or
-    not an agent happens to be holding it. Git refusing to answer is a no,
-    since a destination that cannot be shown to be a counterpart is not one.
-    """
-    try:
-        with WorktreeRepository.open(cwd) as repository:
-            counterparts = {worktree.path.resolve() for worktree in repository.linked()}
-            if (in_repository := repository.repository_counterpart) is not None:
-                counterparts.add(in_repository)
-    except GitError:
-        return False
-    return target in counterparts

@@ -63,10 +63,10 @@ def test_clients_read_the_sender_from_the_display_marker() -> None:
 
 def test_a_handed_task_hides_its_report_back_instructions() -> None:
     projected = project_session_message(
-        _user_message("Fix the test", handed_task_text("parent-1"))
+        _user_message("Fix the test", handed_task_text("parent-1", can_message=True))
     )
 
-    assert "send_to_session" in handed_task_text("parent-1")
+    assert "send_to_session" in handed_task_text("parent-1", can_message=True)
     assert isinstance(projected, PublicMessageEntry)
     assert projected.content == [TextContentBlock(text="Fix the test")]
 
@@ -76,7 +76,7 @@ def test_text_the_user_typed_is_left_as_it_came() -> None:
         _user_message("<session_message> is a tag I am writing about"),
         # Without the marker, a pasted header is the user's own text.
         _user_message(session_message_header(_SENDER), "Rebase"),
-        _user_message(handed_task_text("parent-1")),
+        _user_message(handed_task_text("parent-1", can_message=True)),
     ]
 
     assert [project_session_message(entry) for entry in typed] == typed
@@ -84,7 +84,9 @@ def test_text_the_user_typed_is_left_as_it_came() -> None:
 
 def test_the_preview_shows_what_the_user_would_read() -> None:
     sent = f"{session_message_header(_SENDER)} Rebase on main"
-    handed = f"Fix the test {handed_task_text('parent-1')}".replace("\n", " ")
+    handed = f"Fix the test {handed_task_text('parent-1', can_message=True)}".replace(
+        "\n", " "
+    )
 
     assert project_session_message_preview(sent) == "Rebase on main"
     assert project_session_message_preview(handed[:200] + "…") == "Fix the test"
@@ -113,7 +115,9 @@ def test_history_shows_what_was_sent_without_what_preparation_added() -> None:
         )
     )
     task = project_session_message(
-        _user_message("Fix the test", handed_task_text("parent-1"), skill)
+        _user_message(
+            "Fix the test", handed_task_text("parent-1", can_message=True), skill
+        )
     )
 
     assert isinstance(message, PublicMessageEntry)
@@ -126,7 +130,7 @@ def test_history_shows_what_was_sent_without_what_preparation_added() -> None:
 
 
 def test_a_handed_task_says_the_final_reply_goes_back_on_its_own() -> None:
-    text = handed_task_text("parent-1")
+    text = handed_task_text("parent-1", can_message=True)
 
     assert "goes back to it on its own" in text
     assert "report back" not in text

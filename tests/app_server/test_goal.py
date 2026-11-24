@@ -164,10 +164,14 @@ async def test_the_model_cannot_replace_an_unfinished_goal(tmp_path: Path) -> No
     await _set(controller, objective="The user's goal")
 
     # Do / Assert
-    with pytest.raises(GoalError, match="Only the user"):
+    with pytest.raises(GoalError, match="Only the user") as error:
         await controller.run_tool(
             "create_goal", {"objective": "Another"}, call_id="call-1"
         )
+    # Every client replaces a goal its own way: the model asks for the
+    # action, not for the CLI's /goal command.
+    assert "ask them to replace the goal" in str(error.value)
+    assert "/goal" not in str(error.value)
 
 
 @pytest.mark.asyncio

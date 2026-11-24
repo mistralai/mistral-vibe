@@ -35,6 +35,9 @@ class HarnessFilesManager:
     # Writable without being opened as a project: no config, skills, hooks or
     # AGENTS.md are read from them.
     writable_roots: tuple[Path, ...] = ()
+    # The session's other project folders: writable like ``writable_roots``,
+    # and also named in the prompt.
+    access_roots: tuple[Path, ...] = ()
     trust_store: TrustedFoldersManager = field(
         default_factory=lambda: trusted_folders_manager, compare=False, repr=False
     )

@@ -16,6 +16,7 @@ import tomli_w
 
 from vibe.core.paths import (
     AGENTS_MD_FILENAME,
+    SCRATCH_DIR,
     TRUSTED_FOLDERS_FILE,
     find_local_config_dirs,
 )
@@ -153,7 +154,8 @@ def maybe_build_workspace_trust_prompt(
 ) -> WorkspaceTrustPrompt | None:
     manager = manager or trusted_folders_manager
     resolved_cwd = cwd.resolve()
-    if resolved_cwd == Path.home().resolve():
+    # Home trusts everything under it, and a scratch folder is never trusted.
+    if resolved_cwd == Path.home().resolve() or is_in_scratch_dir(resolved_cwd):
         return None
 
     if manager.is_trusted(cwd) is True:
@@ -358,6 +360,8 @@ class TrustedFoldersManager:
     def _closest_decision(self, path: Path) -> tuple[bool, Path] | None:
         """``(trusted, ancestor)`` for the closest decision, ``None`` if undecided."""
         current = Path(self._normalize_path(path))
+        if is_in_scratch_dir(current):
+            return False, current
         while True:
             s = str(current)
             if s in self._trusted or s in self._session_trusted:
@@ -378,6 +382,8 @@ class TrustedFoldersManager:
 
     def trust_status(self, path: Path) -> WorkspaceTrustStatus:
         current = Path(self._normalize_path(path))
+        if is_in_scratch_dir(current):
+            return WorkspaceTrustStatus.UNTRUSTED
         while True:
             s = str(current)
             if s in self._session_trusted:
@@ -407,6 +413,16 @@ class TrustedFoldersManager:
 
     def add_untrusted(self, path: Path) -> None:
         self._change(self._normalize_path(path), False)
+
+
+def is_in_scratch_dir(path: Path) -> bool:
+    # A scratch folder holds what its projectless session wrote, so no decision trusts it.
+    return (
+        path
+        .expanduser()
+        .resolve()
+        .is_relative_to(SCRATCH_DIR.path.expanduser().resolve())
+    )
 
 
 def _move(

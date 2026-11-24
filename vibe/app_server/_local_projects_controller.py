@@ -34,6 +34,7 @@ from vibe.app_server.protocol import (
     ProjectsRenameParams,
     ProjectsRetireCloudParams,
     ProjectsSetCloudParams,
+    ProjectsSetRootsParams,
     ProtocolErrorCode,
 )
 from vibe.core.vibe_code_project import VibeProjectsStore
@@ -50,6 +51,7 @@ LOCAL_PROJECT_METHODS = frozenset({
     "projects/rename",
     "projects/retireCloud",
     "projects/setCloud",
+    "projects/setRoots",
 })
 
 
@@ -93,6 +95,12 @@ class LocalProjectsController:
                     params = validate_wire(ProjectsRenameParams, raw_params)
                     project = await asyncio.to_thread(
                         store.rename, params.id, params.name
+                    )
+                case "projects/setRoots":
+                    params = validate_wire(ProjectsSetRootsParams, raw_params)
+                    roots = [_project_path(root) for root in params.root_paths]
+                    project = await asyncio.to_thread(
+                        _set_local_project_roots, store, params.id, roots
                     )
                 case "projects/remove":
                     params = validate_wire(ProjectsRemoveParams, raw_params)
@@ -151,6 +159,14 @@ def _cloud_owner(owner: LocalProjectCloudOwner | None) -> CloudOwner | None:
     return CloudOwner(**owner.model_dump(by_alias=False)) if owner is not None else None
 
 
+def _set_local_project_roots(
+    store: LocalProjectStore, project_id: str, roots: list[Path]
+) -> LocalProject:
+    # Imported first: a folder linked since the last listing must count as linked.
+    _import_project_links(store)
+    return store.set_roots(project_id, roots, VibeProjectsStore())
+
+
 def _remove_local_project(store: LocalProjectStore, project_id: str) -> None:
     # Imported first: a folder linked to its cloud project since the last listing joins it, so its link goes too.
     _import_project_links(store)
@@ -193,8 +209,15 @@ def _report_failure(exc: Exception, message: str) -> None:
 
 
 def _root_path(value: str) -> Path:
+    if not Path(value).expanduser().is_dir():
+        raise LocalProjectError(f"Not a folder: {value!r}")
+    return _project_path(value)
+
+
+def _project_path(value: str) -> Path:
+    """An absolute path, resolved; the store checks that a new folder is there."""
     root = Path(value).expanduser()
-    if not root.is_absolute() or not root.is_dir():
+    if not root.is_absolute():
         raise LocalProjectError(f"Not a folder: {value!r}")
     resolved = root.resolve()
     if resolved.parent == resolved:

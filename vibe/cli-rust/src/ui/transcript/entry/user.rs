@@ -5,55 +5,51 @@ use std::path::{Path, PathBuf};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+use super::super::super::hint_line;
 use super::super::super::markdown::{self, LinkKind, LinkedLines, Sc};
 use super::super::super::theme;
 use super::loop_prompt::push_loop_prompt;
 use super::user_text;
+use crate::hints::{action, key, Hint};
 use crate::selection::Fold;
 use crate::server::{ImageAttachment, ImageSource, MessageContent, MessageEntry};
 use crate::transcript::{FiredLoop, TranscriptEntry};
 
-const QUEUE_HEADER_LABEL: &str = "» Queued";
+const QUEUE_HEADER_MARKER: &str = "» ";
+const QUEUE_HEADER_LABEL: &str = "Queued";
 /// Shown once the server holds the queue: Enter releases it, Up edits it.
-const QUEUE_PAUSED_PREFIX: &str = "» Queued — press ";
-const QUEUE_PAUSED_SEND: &str = " to send, ";
-const QUEUE_PAUSED_SUFFIX: &str = " to edit, type to add";
-const QUEUE_HINTS_GAP: &str = "   ";
+const QUEUE_PAUSED_HINTS: &[Hint] = &[(key::ENTER, action::SEND), (key::UP, action::EDIT)];
 const ATTACHED_IMAGE: &str = "  ┝ attached image: ";
 const LAST_ATTACHED_IMAGE: &str = "  └ attached image: ";
 /// The alias the harness gives a resumed image, which forgets its placeholder.
 const GENERIC_IMAGE_ALIAS: &str = "image";
 
-/// The queue header: one gap row, the bold-italic label and the queue's keys, then the
-/// same expanding separator a user message paints.
-pub(super) fn push_queue_header(
-    lines: &mut LinkedLines,
-    width: u16,
-    paused: bool,
-    hints: &[crate::hints::Hint],
-) {
-    let label = theme::text(theme::ORANGE).add_modifier(Modifier::BOLD | Modifier::ITALIC);
+/// The queue header: a gap, the orange marker, the bold-italic label and the queue's keys, then a user message's separator.
+pub(super) fn push_queue_header(lines: &mut LinkedLines, width: u16, paused: bool, hints: &[Hint]) {
+    let emphasis = Modifier::BOLD | Modifier::ITALIC;
     lines.push_gap();
-    let mut line = match paused {
-        false => Line::from(Span::styled(QUEUE_HEADER_LABEL, label)),
-        // The shortcuts only recolor the label they sit in.
-        true => Line::from(vec![
-            Span::styled(QUEUE_PAUSED_PREFIX, label),
-            Span::styled(crate::hints::key::ENTER, label.fg(theme::primary())),
-            Span::styled(QUEUE_PAUSED_SEND, label),
-            Span::styled(crate::hints::key::UP, label.fg(theme::primary())),
-            Span::styled(QUEUE_PAUSED_SUFFIX, label),
-        ]),
-    };
-    // Keys only join a label they fit beside: the cached layout measured one row.
-    let keys = crate::ui::hint_line::spans(hints);
-    let keys_width: usize = keys.iter().map(Span::width).sum();
-    if !hints.is_empty() && line.width() + QUEUE_HINTS_GAP.len() + keys_width <= usize::from(width)
-    {
-        line.spans.push(Span::raw(QUEUE_HINTS_GAP));
-        line.spans.extend(keys);
-    }
-    lines.push(line);
+    let mut spans = vec![
+        Span::styled(
+            QUEUE_HEADER_MARKER,
+            theme::text(theme::ORANGE).add_modifier(emphasis),
+        ),
+        Span::styled(
+            QUEUE_HEADER_LABEL,
+            theme::text(theme::foreground()).add_modifier(emphasis),
+        ),
+    ];
+    let paused_keys: &[Hint] = if paused { QUEUE_PAUSED_HINTS } else { &[] };
+    let label_width: usize = spans.iter().map(Span::width).sum();
+    // The widest key list that fits the one measured row: the paused queue's Enter and ↑ drop last.
+    let fitting = (0..=hints.len()).rev().find_map(|kept| {
+        let keys: Vec<Hint> = paused_keys.iter().chain(&hints[..kept]).copied().collect();
+        let mut tail = vec![Span::styled(" — ", hint_line::action_style())];
+        tail.extend(hint_line::inline_spans(&keys));
+        let tail_width: usize = tail.iter().map(Span::width).sum();
+        (!keys.is_empty() && label_width + tail_width <= usize::from(width)).then_some(tail)
+    });
+    spans.extend(fitting.unwrap_or_default());
+    lines.push(Line::from(spans));
     push_separator(lines, width);
 }
 
@@ -71,6 +67,8 @@ pub(super) struct UserView<'a> {
     pub selected: bool,
     pub follows_user: bool,
     pub followed_by_user: bool,
+    /// Steered into the running turn: packed closer, marked `↳`, no separator.
+    pub steer: bool,
     /// The scheduled loop whose firing sent this prompt.
     pub fired_loop: Option<&'a FiredLoop>,
     /// Whether a loop prompt shows its instructions under its title.
@@ -86,6 +84,7 @@ impl<'a> UserView<'a> {
             selected,
             follows_user: entry.follows_user,
             followed_by_user: entry.followed_by_user,
+            steer: entry.steer,
             fired_loop: entry.fired_loop,
             expanded,
             entry_id: entry.id,
@@ -124,6 +123,7 @@ pub(super) fn push_user(
         selected,
         follows_user,
         followed_by_user,
+        steer,
         fired_loop,
         expanded,
         entry_id,
@@ -131,7 +131,9 @@ pub(super) fn push_user(
     let (prompt, content) = prompt_styles(fired_loop.is_some(), pending, selected);
     if !pending && !follows_user {
         lines.push_gap();
-        lines.push_gap();
+        if !steer {
+            lines.push_gap();
+        }
     }
     // A settled message's content widget spans the row (`width: 1fr`), so its
     // rewind highlight reverses the padding too; a queued one is `width: auto`.
@@ -146,7 +148,12 @@ pub(super) fn push_user(
         }
         return;
     }
-    let collapsed = user_text::push(lines, message, width, (prompt, content), padded, usize::MAX);
+    let marker = match steer {
+        true => user_text::STEER_MARKER,
+        false => user_text::PROMPT_MARKER,
+    };
+    let styles = (prompt, content);
+    let collapsed = user_text::push(lines, message, width, (marker, styles), padded, usize::MAX);
     let images: Vec<&ImageAttachment> = message
         .content
         .iter()
@@ -190,7 +197,7 @@ pub(super) fn push_user(
             lines.fold_last(Fold::hung(gap, 0));
         }
     }
-    if !pending && !followed_by_user {
+    if !pending && !followed_by_user && !steer {
         push_separator(lines, width);
     }
 }

@@ -7,6 +7,9 @@ use unicode_width::UnicodeWidthStr;
 
 use super::tab_cells::{cells, cells_width, Cell};
 
+#[cfg(test)]
+mod tests;
+
 /// Visual row as `(start, end, column)`: body bytes and its logical-line column.
 type Range = (usize, usize, usize);
 
@@ -165,6 +168,27 @@ fn rows_with(body: &str, rows: impl Fn(&str) -> Vec<Range>) -> Vec<Range> {
     visual
 }
 
+/// Text columns behind `marker`, one column kept free so a full row's trailing caret fits.
+fn content_width(marker: &str, width: u16) -> u16 {
+    width
+        .saturating_sub(1)
+        .saturating_sub(marker.width() as u16)
+        .max(1)
+}
+
+/// Visual rows of `body` behind `marker`, like `ComposerLayout::height`, counted only up to `cap`.
+pub fn capped_height(body: &str, marker: &str, width: u16, cap: u16) -> u16 {
+    let width = content_width(marker, width);
+    let mut rows = 0;
+    for text in body.split('\n') {
+        rows += wrapped_ranges(text, width).len();
+        if rows >= usize::from(cap) {
+            return cap;
+        }
+    }
+    rows as u16
+}
+
 pub struct ComposerLayout<'a> {
     body: &'a str,
     cursor: usize,
@@ -173,15 +197,10 @@ pub struct ComposerLayout<'a> {
 
 impl<'a> ComposerLayout<'a> {
     pub fn new(body: &'a str, marker: &str, cursor: usize, width: u16) -> Self {
-        // One column stays free so a full row's trailing caret fits.
-        let content_width = width
-            .saturating_sub(1)
-            .saturating_sub(marker.width() as u16)
-            .max(1);
         Self {
             body,
             cursor,
-            visual_rows: visual_rows(body, content_width),
+            visual_rows: visual_rows(body, content_width(marker, width)),
         }
     }
 

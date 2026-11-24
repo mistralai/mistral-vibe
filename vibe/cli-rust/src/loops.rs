@@ -1,4 +1,4 @@
-//! `/loop` with no arguments: the session's scheduled loops, to review, delete and add.
+//! `/loop` with no arguments: the session's scheduled loops, to review, edit, run, delete and add.
 
 use std::sync::Arc;
 
@@ -10,28 +10,32 @@ use crate::server::{method, Client, PublicSessionState, ScheduledLoop};
 
 mod form;
 mod input;
+mod run;
 pub mod schedule;
 
-pub use form::{Form, FormField, INSTRUCTIONS_ROWS};
-pub use input::{handle_key, paste};
+pub use form::{Editing, FieldArea, Form, FormField, INSTRUCTIONS_ROWS};
+pub use input::{edit, handle_key, paste};
+pub use run::run;
 
-/// The loop manager (a bottom app): the list, or the form that adds a loop.
+/// The loop manager (a bottom app): the list, or the form that adds or edits a loop.
 #[derive(Default)]
 pub struct LoopsApp {
     pub open: bool,
-    /// Highlighted loop and viewport; a row has several actions (`d`, `n`).
+    /// Highlighted loop and viewport; a row has several actions (Enter/`e`, `r`, `d`, `n`).
     pub list: OptionList<MultiAction>,
-    /// The add form, shown in place of the list while set.
+    /// The add or edit form, shown in place of the list while set.
     pub form: Option<Form>,
     /// The loop a `loops/delete` is removing.
     pub deleting: Option<String>,
+    /// The loop a `loops/run` is making due.
+    pub running: Option<String>,
     /// The last request's failure, shown above the footer until the next action.
     pub error: Option<String>,
     /// Row loop ids: soonest first on open, then frozen; new loops append.
     pub order: Vec<String>,
     /// The highlighted loop's instructions pane.
     pub details: Details,
-    /// Counts sent `loops/create`; only the open form's latest one may close it.
+    /// Counts sent `loops/create` and `loops/update`; only the open form's latest one may close it.
     pub submissions: u64,
 }
 
@@ -65,10 +69,14 @@ pub enum Event {
         id: String,
         error: Option<String>,
     },
-    Created {
+    Saved {
         session_id: String,
         /// The `LoopsApp::submissions` count that sent it.
         submission: u64,
+        result: Result<ScheduledLoop, String>,
+    },
+    Ran {
+        session_id: String,
         result: Result<ScheduledLoop, String>,
     },
 }
@@ -190,15 +198,20 @@ pub fn delete(app: &mut App, client: &Arc<Client>) {
     }
 }
 
-/// Schedule the form's loop; the form stays open until the server accepts it.
-pub fn create(app: &mut App, client: &Arc<Client>, session_id: String, params: Value) -> bool {
+/// Schedule the form's loop, or save it over the edited one; the form stays open until the server accepts it.
+pub fn save(
+    app: &mut App,
+    client: &Arc<Client>,
+    session_id: String,
+    (method, params): (&'static str, Value),
+) -> bool {
     app.loops.error = None;
     let submission = app.loops.submissions + 1;
-    let sent = request(app, client, method::LOOPS_CREATE, params, move |result| {
+    let sent = request(app, client, method, params, move |result| {
         let result = result.and_then(|value| {
             serde_json::from_value(value["loop"].clone()).map_err(|error| error.to_string())
         });
-        Event::Created {
+        Event::Saved {
             session_id,
             submission,
             result,
@@ -231,7 +244,9 @@ fn request(
 
 /// Apply a `loops/*` answer; one for another session, or for a form since closed, is dropped.
 pub fn apply_event(app: &mut App, event: Event) {
-    let (Event::Deleted { session_id, .. } | Event::Created { session_id, .. }) = &event;
+    let (Event::Deleted { session_id, .. }
+    | Event::Saved { session_id, .. }
+    | Event::Ran { session_id, .. }) = &event;
     if app.session.session_id.as_deref() != Some(session_id.as_str()) {
         return;
     }
@@ -251,19 +266,20 @@ pub fn apply_event(app: &mut App, event: Event) {
                 .filter(|scheduled| scheduled.id != id);
             replace(app, loops.cloned().collect());
         }
-        Event::Created {
+        Event::Saved {
             submission, result, ..
         } => {
             let pending = app.loops.form.as_ref().and_then(|form| form.submission);
             if pending != Some(submission) {
                 return;
             }
-            created(app, result);
+            saved(app, result);
         }
+        Event::Ran { result, .. } => run::ran(app, result),
     }
 }
 
-fn created(app: &mut App, result: Result<ScheduledLoop, String>) {
+fn saved(app: &mut App, result: Result<ScheduledLoop, String>) {
     match result {
         Err(error) => {
             if let Some(form) = &mut app.loops.form {
@@ -271,13 +287,13 @@ fn created(app: &mut App, result: Result<ScheduledLoop, String>) {
             }
             app.loops.error = Some(error);
         }
-        Ok(created) => {
+        Ok(saved) => {
             app.loops.form = None;
             let mut loops = app.session.loops.clone();
-            loops.retain(|scheduled| scheduled.id != created.id);
-            loops.push(created.clone());
+            loops.retain(|scheduled| scheduled.id != saved.id);
+            loops.push(saved.clone());
             replace(app, loops);
-            highlight(app, Some(created.id));
+            highlight(app, Some(saved.id));
         }
     }
 }

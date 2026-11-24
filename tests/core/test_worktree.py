@@ -1412,37 +1412,104 @@ def test_concurrent_prunes_do_not_remove_below_the_limit(
     def pause_snapshot(prepared: PreparedWorktree) -> str:
         if prepared.name == oldest.name:
             inspection_started.set()
-            assert release_inspection.wait(timeout=5)
+            assert release_inspection.wait(timeout=30)
         return snapshot(prepared)
 
-    real_prune_lock = worktree_module.worktree_prune_lock
-    lock_attempts = 0
-    attempts_lock = Lock()
-    second_started = Event()
-
-    @contextmanager
-    def observe_prune_lock() -> Iterator[None]:
-        nonlocal lock_attempts
-        with attempts_lock:
-            lock_attempts += 1
-            if lock_attempts == 2:
-                second_started.set()
-        with real_prune_lock():
-            yield
-
     monkeypatch.setattr(PreparedWorktree, "snapshot", pause_snapshot)
-    monkeypatch.setattr(worktree_module, "worktree_prune_lock", observe_prune_lock)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         first = executor.submit(ManagedWorktree.prune, 1)
-        assert inspection_started.wait(timeout=5)
-        second = executor.submit(ManagedWorktree.prune, 1)
-        assert second_started.wait(timeout=5)
-        release_inspection.set()
-        assert sorted((first.result(timeout=10), second.result(timeout=10))) == [0, 1]
+        try:
+            assert inspection_started.wait(timeout=10)
+            assert executor.submit(ManagedWorktree.prune, 1).result(timeout=30) == 0
+        finally:
+            release_inspection.set()
+        assert first.result(timeout=30) == 1
 
     assert not oldest.root.exists()
     assert newest.root.is_dir()
+
+
+def test_a_concurrent_prune_keeps_the_limit_when_the_first_removal_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    oldest = _prepare_auto(Path(repo.working_dir), suggested_name="oldest")
+    newest = _prepare_auto(Path(repo.working_dir), suggested_name="newest")
+    _finish_starts(oldest, newest)
+    _age_claim(_claim(repo, oldest.name), 30)
+    snapshot_started = Event()
+    fail_snapshot = Event()
+    snapshot = PreparedWorktree.snapshot
+
+    def fail_oldest_snapshot(prepared: PreparedWorktree) -> str:
+        if prepared.name != oldest.name:
+            return snapshot(prepared)
+        snapshot_started.set()
+        assert fail_snapshot.wait(timeout=30)
+        raise WorktreeError("cannot save")
+
+    monkeypatch.setattr(PreparedWorktree, "snapshot", fail_oldest_snapshot)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(ManagedWorktree.prune, 1)
+        try:
+            assert snapshot_started.wait(timeout=10)
+            assert executor.submit(ManagedWorktree.prune, 1).result(timeout=30) == 0
+        finally:
+            fail_snapshot.set()
+        assert first.result(timeout=30) == 1
+
+    assert oldest.root.is_dir()
+    assert not newest.root.exists()
+
+
+@pytest.mark.timeout(120)
+def test_prune_does_not_block_other_worktrees_while_it_snapshots_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    removed_first = _prepare_auto(Path(repo.working_dir), suggested_name="first")
+    paused = _prepare_auto(Path(repo.working_dir), suggested_name="paused")
+    held = _prepare_auto(Path(repo.working_dir), suggested_name="held")
+    _finish_starts(removed_first, paused, held)
+    _age_claim(_claim(repo, removed_first.name), 30)
+    _hold(held.root, "session-held")
+    snapshot_started = Event()
+    finish_snapshot = Event()
+    snapshot = PreparedWorktree.snapshot
+
+    def pause_snapshot(prepared: PreparedWorktree) -> str:
+        if prepared.name == paused.name:
+            snapshot_started.set()
+            assert finish_snapshot.wait(timeout=60)
+        return snapshot(prepared)
+
+    monkeypatch.setattr(PreparedWorktree, "snapshot", pause_snapshot)
+    held_managed = ManagedWorktree.at(held.root)
+    restored_managed = ManagedWorktree.at(removed_first.root)
+    assert held_managed is not None
+    assert restored_managed is not None
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        prune = executor.submit(ManagedWorktree.prune, 0)
+        try:
+            assert snapshot_started.wait(timeout=20)
+            attach = executor.submit(held_managed.hold_for_attachment)
+            restore = executor.submit(restored_managed.restore, removed_first.root)
+            pending_hold = attach.result(timeout=20)
+            assert restore.result(timeout=20) is True
+        finally:
+            finish_snapshot.set()
+        assert prune.result(timeout=30) == 2
+
+    assert pending_hold is not None
+    pending_hold.release()
+    assert not paused.root.exists()
+    assert held.root.is_dir()
+    assert removed_first.root.is_dir()
+    _claim(repo, removed_first.name).finish_starting()
+    held_managed.release_holder("session-held")
 
 
 def test_prune_discards_an_abandoned_empty_reservation(tmp_path: Path) -> None:

@@ -9,6 +9,11 @@ import json
 import re
 from types import MappingProxyType
 
+from mistralai_vibe_local_harness.vibe._mcp_apps import (
+    APP_AUDIENCE,
+    MODEL_AUDIENCE,
+    mcp_tool_visibility,
+)
 from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPRemoteToolDescriptor,
     MCPRouteSnapshot,
@@ -43,6 +48,7 @@ def build_route_snapshot(
     }
     display_names = _display_names(entries)
     groups: list[MCPToolGroup] = []
+    all_tools: list[MCPToolDescriptor] = []
     routes: dict[tuple[str, str], MCPToolRoute] = {}
     for server, descriptors in entries:
         group_name = group_names[server.name]
@@ -50,31 +56,18 @@ def build_route_snapshot(
         for remote in sorted(
             descriptors, key=lambda descriptor: descriptor.remote_name
         ):
-            programmatic_name = programmatic_names[server.name][remote.remote_name]
-            display_name = display_names[(server.name, remote.remote_name)]
-            # Core refuses a tool whose schema's type is not "object": only that
-            # tool is left out, and the server's other tools stay routed.
-            enabled = (
-                remote.remote_name not in server.disabled_tools
-                and (tool_filter is None or tool_filter.allows(display_name))
-                and not type_is_not_object(remote.input_schema)
-            )
-            descriptor = MCPToolDescriptor(
-                server_name=server.name,
-                remote_name=remote.remote_name,
+            descriptor = _tool_descriptor(
+                server,
+                remote,
                 group_name=group_name,
-                programmatic_name=programmatic_name,
-                display_name=display_name,
-                description=remote.description,
-                input_schema=remote.input_schema,
-                output_schema=remote.output_schema,
-                annotations=remote.annotations,
-                enabled=enabled,
+                programmatic_name=programmatic_names[server.name][remote.remote_name],
+                display_name=display_names[(server.name, remote.remote_name)],
+                tool_filter=tool_filter,
             )
             tools.append(descriptor)
-            if enabled:
-                key = (group_name, descriptor.programmatic_name)
-                routes[key] = MCPToolRoute(
+            all_tools.append(descriptor)
+            if descriptor.enabled:
+                routes[group_name, descriptor.programmatic_name] = MCPToolRoute(
                     group_name=group_name,
                     tool_name=descriptor.programmatic_name,
                     descriptor=descriptor,
@@ -97,7 +90,64 @@ def build_route_snapshot(
         groups=tuple(groups),
         routes=MappingProxyType(routes),
         sources=sources,
+        tools=tuple(all_tools),
     )
+
+
+def mcp_tool_config_name(server_name: str, remote_name: str) -> str:
+    """The name Vibe config and permission rules give a server's tool.
+
+    A tool's display name is this one unless it is not an identifier or two
+    tools share it.
+    """
+    return f"{server_name}_{remote_name}"
+
+
+def _tool_descriptor(
+    server: ResolvedMCPServerConfig,
+    remote: MCPRemoteToolDescriptor,
+    *,
+    group_name: str,
+    programmatic_name: str,
+    display_name: str,
+    tool_filter: MCPToolFilter | None,
+) -> MCPToolDescriptor:
+    user_disabled = _user_disabled(
+        server, remote.remote_name, display_name, tool_filter
+    )
+    visibility = mcp_tool_visibility(remote.meta)
+    return MCPToolDescriptor(
+        server_name=server.name,
+        remote_name=remote.remote_name,
+        group_name=group_name,
+        programmatic_name=programmatic_name,
+        display_name=display_name,
+        description=remote.description,
+        input_schema=remote.input_schema,
+        output_schema=remote.output_schema,
+        annotations=remote.annotations,
+        # Core refuses a tool whose schema's type is not "object": only that
+        # tool is left out, and the server's other tools stay routed.
+        enabled=not user_disabled
+        and not type_is_not_object(remote.input_schema)
+        and MODEL_AUDIENCE in visibility,
+        meta=remote.meta,
+        user_disabled=user_disabled,
+        model_visible=MODEL_AUDIENCE in visibility,
+        app_visible=APP_AUDIENCE in visibility,
+    )
+
+
+def _user_disabled(
+    server: ResolvedMCPServerConfig,
+    remote_name: str,
+    display_name: str,
+    tool_filter: MCPToolFilter | None,
+) -> bool:
+    """Whether the user's ``disabled_tools`` or the Host filter leaves the tool out."""
+    if remote_name in server.disabled_tools:
+        return True
+    return tool_filter is not None and not tool_filter.allows(display_name)
 
 
 def _group_names(
@@ -148,7 +198,7 @@ def _display_names(
         for descriptor in descriptors
     ]
     candidates = {
-        identity: _normalize_identifier(f"{identity[0]}_{identity[1]}")
+        identity: _normalize_identifier(mcp_tool_config_name(*identity))
         for identity in identities
     }
     owners: dict[str, list[tuple[str, str]]] = defaultdict(list)
@@ -158,7 +208,7 @@ def _display_names(
     used: set[str] = set()
     for identity in sorted(identities):
         candidate = candidates[identity]
-        raw_candidate = f"{identity[0]}_{identity[1]}"
+        raw_candidate = mcp_tool_config_name(*identity)
         if _is_identifier(raw_candidate) and len(owners[candidate]) == 1:
             result[identity] = raw_candidate
             used.add(raw_candidate)

@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 import json
+import os
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import httpx2
@@ -33,6 +35,8 @@ from vibe.app_server._vibe_bot_tools import (
     LocalToolFailure,
     LocalToolResult,
     LocalTools,
+    approval_text,
+    args_hash,
     local_tool_mode,
 )
 from vibe.app_server.mcp_catalog import MCPCatalogService
@@ -287,32 +291,56 @@ async def test_an_allowed_call_runs_once_and_answers_its_text(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("ceiling", "tool", "approval"),
+    ("ceiling", "tool", "approval", "ceiling_allows"),
     [
-        ("ask", "echo", "allow"),
-        ("accept-edits", "echo", "allow"),
-        ("smart-approve", "write_note", "allow"),
-        ("auto-approve", "echo", "ask"),
+        ("ask", "echo", "allow", False),
+        ("accept-edits", "echo", "allow", False),
+        ("smart-approve", "write_note", "allow", False),
+        ("auto-approve", "echo", "ask", True),
     ],
 )
-async def test_a_call_that_needs_a_human_is_refused_and_never_runs(
-    sessions: VibeBotLocalSessions, ceiling: str, tool: str, approval: str
+async def test_a_call_that_needs_a_human_waits_for_the_inbox_and_does_not_run(
+    sessions: VibeBotLocalSessions,
+    ceiling: str,
+    tool: str,
+    approval: str,
+    ceiling_allows: bool,
 ) -> None:
-    """Untrusted text can make the bot call a tool; the user's machine decides."""
+    """Untrusted text can make the bot call a tool; the user approves it in the inbox."""
     config = _config(
         vibe_bot_max_approval_policy=ceiling,
         vibe_bot_local_tools=[{"server": "grafana", "approval": approval}],
     )
     mcp = _FakeMCP({"grafana": (ECHO, WRITE)})
-    [answer], _ = await _answers(
+    [answer], client = await _answers(
         sessions,
         config,
         mcp,
-        [_call("cb-1", "call_local_tool", {"server": "grafana", "tool": tool})],
+        [
+            _call(
+                "cb-1",
+                "call_local_tool",
+                {"server": "grafana", "tool": tool, "arguments": {"text": "x"}},
+            )
+        ],
     )
 
     assert mcp.calls == []
-    assert answer["error"]["code"] == "approval_required"
+    assert answer["output"] == {"status": "awaiting_approval", "approvalId": "cb-1"}
+    [pending] = [r for r in client.reports if r["kind"] == "tool_pending"]
+    assert pending == {
+        "kind": "tool_pending",
+        "clientId": sessions.client_id(BOT),
+        "requestId": "cb-1",
+        "callerSessionId": ORCH,
+        "server": "grafana",
+        "tool": tool,
+        "arguments": {"text": "x"},
+        "argsHash": args_hash({"text": "x"}),
+        "readOnly": tool == "echo",
+        # The card offers Always allow only when this ceiling alone lets a call run (VIB2-442).
+        "context": {"ceilingAllows": ceiling_allows},
+    }
 
 
 @pytest.mark.asyncio
@@ -637,6 +665,171 @@ async def test_a_real_stdio_server_is_listed_and_called_through_the_harness(
     }
 
 
+async def _approve(
+    sessions: VibeBotLocalSessions,
+    config: VibeConfigSchema,
+    mcp: _FakeMCP,
+    delivery: dict[str, Any],
+    *,
+    arguments: dict[str, Any] | None = None,
+) -> _ClaimingClient:
+    """The call waits for the user; then the heartbeat hands its answer over."""
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {
+                "server": "grafana",
+                "tool": "write_note",
+                "arguments": arguments or {"text": "x"},
+            },
+        )
+    ])
+    client = _ClaimingClient()
+    controller = _controller(api, client, sessions, local_tools=_tools(config, mcp))
+    try:
+        await _follow(controller)
+        await _until(lambda: bool(api.answers))
+        await controller.dispatch(
+            "vibebot/deliver", {"botWorkflowId": BOT, "deliveries": [delivery]}
+        )
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+        return client
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+def _approval(decision: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {
+        "kind": "tool_approval",
+        "requestId": "approve-cb-1",
+        "callbackId": "cb-1",
+        "argsHash": args_hash(args or {"text": "x"}),
+        "decision": decision,
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_runs_once_with_the_arguments_the_user_saw(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)}, answer="noted")
+    client = await _approve(sessions, config, mcp, _approval("allow"))
+
+    assert mcp.calls == [("grafana", "write_note", {"text": "x"})]
+    [done] = [r for r in client.reports if r["kind"] == "tool_result"]
+    assert done == {
+        "kind": "tool_result",
+        "clientId": sessions.client_id(BOT),
+        "requestId": "cb-1",
+        "outcome": "ok",
+        "content": "noted",
+        "isError": False,
+        "truncated": False,
+        "totalBytes": 5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_an_approval_for_other_arguments_runs_nothing(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)})
+    client = await _approve(
+        sessions, config, mcp, _approval("allow", {"text": "rm -rf"})
+    )
+
+    assert mcp.calls == []
+    [done] = [r for r in client.reports if r["kind"] == "tool_result"]
+    assert done["outcome"] == "failed" and "arguments" in done["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_denied_call_is_reported_rejected_without_running(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)})
+    client = await _approve(sessions, config, mcp, _approval("deny"))
+
+    assert mcp.calls == []
+    [done] = [r for r in client.reports if r["kind"] == "tool_result"]
+    assert done["outcome"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_an_approval_after_the_user_removed_the_tool_from_the_list_runs_nothing(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """The policy is read again when the approval arrives."""
+    asked = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    removed = _config(vibe_bot_local_tools=[])
+    configs = [asked]
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)})
+
+    async def read_config() -> VibeConfigSchema:
+        return configs[-1]
+
+    async def make_mcp() -> LocalMCP:
+        return mcp
+
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {"server": "grafana", "tool": "write_note", "arguments": {"text": "x"}},
+        )
+    ])
+    client = _ClaimingClient()
+    tools = LocalTools(read_config=read_config, mcp=make_mcp)
+    controller = _controller(api, client, sessions, local_tools=tools)
+    try:
+        await _follow(controller)
+        await _until(lambda: bool(api.answers))
+        configs.append(removed)
+        await controller.dispatch(
+            "vibebot/deliver",
+            {"botWorkflowId": BOT, "deliveries": [_approval("allow")]},
+        )
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    assert mcp.calls == []
+    [done] = [r for r in client.reports if r["kind"] == "tool_result"]
+    assert done["outcome"] == "failed"
+    assert done["error"].startswith("not_exposed: ")
+
+
+@pytest.mark.asyncio
+async def test_an_approval_this_machine_never_held_or_already_ran_is_reported_expired(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """A restart between running and reporting must not run the call twice."""
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)})
+    client = _ClaimingClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, local_tools=_tools(config, mcp)
+    )
+    try:
+        await _follow(controller, session_ids=[])
+        await controller.dispatch(
+            "vibebot/deliver",
+            {"botWorkflowId": BOT, "deliveries": [_approval("allow")]},
+        )
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    assert mcp.calls == []
+    assert [r["outcome"] for r in client.reports if r["kind"] == "tool_result"] == [
+        "expired"
+    ]
+
+
 @pytest.mark.asyncio
 async def test_a_call_to_one_server_keeps_the_others_connected(tmp_path: Path) -> None:
     """Calls run concurrently: one to another server must not close this one's."""
@@ -735,6 +928,329 @@ async def test_an_entry_names_its_server_as_written_in_mcp_servers(
 
 
 @pytest.mark.asyncio
+async def test_a_slow_approved_run_neither_holds_the_heartbeat_nor_reports_twice(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """The heartbeat waits for `vibebot/deliver`, and the workflow sends the
+    approval again until the result arrives.
+    """
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)}, answer="noted", delay=0.5)
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {"server": "grafana", "tool": "write_note", "arguments": {"text": "x"}},
+        )
+    ])
+    client = _ClaimingClient()
+    controller = _controller(api, client, sessions, local_tools=_tools(config, mcp))
+    deliver = {"botWorkflowId": BOT, "deliveries": [_approval("allow")]}
+    try:
+        await _follow(controller)
+        await _until(lambda: bool(api.answers))
+        await asyncio.wait_for(controller.dispatch("vibebot/deliver", deliver), 0.2)
+        await asyncio.wait_for(controller.dispatch("vibebot/deliver", deliver), 0.2)
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+        await asyncio.sleep(0.1)
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    assert mcp.calls == [("grafana", "write_note", {"text": "x"})]
+    assert [r["outcome"] for r in client.reports if r["kind"] == "tool_result"] == [
+        "ok"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_approval_two_connections_receive_runs_once_and_reports_once(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Bugbot on #81890: the hold is shared by every connection, so the run in
+    flight must be too.
+    """
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)}, answer="noted", delay=0.5)
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {"server": "grafana", "tool": "write_note", "arguments": {"text": "x"}},
+        )
+    ])
+    client = _ClaimingClient()
+    first = _controller(api, client, sessions, local_tools=_tools(config, mcp))
+    second = _controller(
+        _FakeSessionApi([]), client, sessions, local_tools=_tools(config, mcp)
+    )
+    deliver = {"botWorkflowId": BOT, "deliveries": [_approval("allow")]}
+    try:
+        await _follow(first)
+        await _until(lambda: bool(api.answers))
+        await first.dispatch("vibebot/deliver", deliver)
+        await second.dispatch("vibebot/deliver", deliver)
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+        await asyncio.sleep(0.6)
+    finally:
+        await asyncio.gather(*first.close(), *second.close(), return_exceptions=True)
+
+    assert mcp.calls == [("grafana", "write_note", {"text": "x"})]
+    assert [r["outcome"] for r in client.reports if r["kind"] == "tool_result"] == [
+        "ok"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_approval_two_app_servers_of_one_machine_receive_runs_once(
+    tmp_path: Path,
+) -> None:
+    """Felix on #81890: the hold file and client id are per machine, so a second
+    app server handed the same approval must leave the run to the first, not
+    report it expired while it runs.
+    """
+    id_file = tmp_path / "vibe_bot_client_id"
+    here = VibeBotLocalSessions(client_id_file=id_file)
+    other = VibeBotLocalSessions(client_id_file=id_file)
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)}, answer="noted", delay=0.5)
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {"server": "grafana", "tool": "write_note", "arguments": {"text": "x"}},
+        )
+    ])
+    client = _ClaimingClient()
+    first = _controller(api, client, here, local_tools=_tools(config, mcp))
+    second = _controller(
+        _FakeSessionApi([]), client, other, local_tools=_tools(config, mcp)
+    )
+    deliver = {"botWorkflowId": BOT, "deliveries": [_approval("allow")]}
+    try:
+        await _follow(first)
+        await _until(lambda: bool(api.answers))
+        await first.dispatch("vibebot/deliver", deliver)
+        await asyncio.sleep(0.1)
+        await second.dispatch("vibebot/deliver", deliver)
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+        await asyncio.sleep(0.6)
+    finally:
+        await asyncio.gather(*first.close(), *second.close(), return_exceptions=True)
+
+    assert mcp.calls == [("grafana", "write_note", {"text": "x"})]
+    assert [r["outcome"] for r in client.reports if r["kind"] == "tool_result"] == [
+        "ok"
+    ]
+
+
+def test_two_app_servers_of_one_machine_keep_each_others_holds(tmp_path: Path) -> None:
+    id_file = tmp_path / "vibe_bot_client_id"
+    here = VibeBotLocalSessions(client_id_file=id_file)
+    other = VibeBotLocalSessions(client_id_file=id_file)
+    assert other.held_tool(BOT, "cb-0") is None
+
+    here.hold_tool(BOT, "cb-1", {"server": "s", "tool": "t", "argsHash": "h1"})
+    other.hold_tool(BOT, "cb-2", {"server": "s", "tool": "t", "argsHash": "h2"})
+    here.update_tool(BOT, "cb-1", running=True)
+
+    reopened = VibeBotLocalSessions(client_id_file=id_file)
+    assert reopened.held_tool(BOT, "cb-1") is not None
+    assert reopened.held_tool(BOT, "cb-2") is not None
+    assert other.held_tool(BOT, "cb-1")["running"] is True  # pyright: ignore[reportOptionalSubscript]
+
+
+def test_a_run_lock_is_taken_once_per_machine_and_old_ones_are_cleared(
+    tmp_path: Path,
+) -> None:
+    id_file = tmp_path / "vibe_bot_client_id"
+    here = VibeBotLocalSessions(client_id_file=id_file)
+    other = VibeBotLocalSessions(client_id_file=id_file)
+    lock = here.claim_run(BOT, "cb-1")
+    assert lock is not None
+    assert other.claim_run(BOT, "cb-1") is None
+    here.release_run(lock)
+    again = other.claim_run(BOT, "cb-1")
+    assert again is not None
+    other.release_run(again)
+
+    runs = tmp_path / "vibe_bot_runs"
+    old = time.time() - 8 * 24 * 3600
+    for stale in runs.iterdir():
+        os.utime(stale, (old, old))
+    fresh = here.claim_run(BOT, "cb-2")
+    assert fresh is not None
+    assert len(list(runs.iterdir())) == 1
+    here.release_run(fresh)
+
+
+@pytest.mark.asyncio
+async def test_an_outcome_whose_report_was_lost_is_reported_on_the_next_follow(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Bugbot on #81890: once the workflow expires the call it stops sending the
+    approval, so a held outcome must go out without one.
+    """
+    sessions.hold_tool(
+        BOT, "cb-1", {"server": "grafana", "tool": "write_note", "argsHash": "h"}
+    )
+    sessions.update_tool(BOT, "cb-1", running=True)
+    sessions.update_tool(BOT, "cb-1", outcome={"outcome": "ok", "content": "noted"})
+    sessions.hold_tool(BOT, "cb-2", {"server": "grafana", "tool": "t", "argsHash": "h"})
+    client = _ClaimingClient()
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        await _follow(controller, session_ids=[])
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+        await _until(lambda: sessions.held_tool(BOT, "cb-1") is None)
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    assert [r for r in client.reports if r["kind"] == "tool_result"] == [
+        {
+            "kind": "tool_result",
+            "clientId": sessions.client_id(BOT),
+            "requestId": "cb-1",
+            "outcome": "ok",
+            "content": "noted",
+        }
+    ]
+    assert sessions.held_tool(BOT, "cb-2") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_desktop_reports_only_its_own_held_outcomes(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Another Desktop on this Vibe home holds its own calls: their outcomes are
+    its to report, under its id, or the bot refuses them.
+    """
+    other = sessions.client_id(BOT, instance="/profiles/dev")
+    sessions.hold_tool(
+        BOT,
+        "cb-other",
+        {"server": "s", "tool": "t", "argsHash": "h", "clientId": other},
+    )
+    sessions.update_tool(BOT, "cb-other", outcome={"outcome": "ok", "content": "x"})
+    client = _ClaimingClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, instance="/profiles/dev-port-5182"
+    )
+    try:
+        await _follow(controller, session_ids=[])
+        await asyncio.sleep(0.05)
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    assert [r for r in client.reports if r["kind"] == "tool_result"] == []
+    assert sessions.held_tool(BOT, "cb-other") is not None
+
+
+@pytest.mark.asyncio
+async def test_a_flush_that_finds_the_outcome_already_reported_sends_nothing(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Reviewer on #81890: another app server may report and drop the outcome
+    between the follow's read and the flush's claim; the flush must not report
+    the call rejected then.
+    """
+    client = _ClaimingClient()
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    try:
+        controller._start_approved(BOT, {"callbackId": "cb-1", "flush": True})  # pyright: ignore[reportPrivateUsage]
+        await _until(lambda: not controller._approved_runs)  # pyright: ignore[reportPrivateUsage]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    assert [r for r in client.reports if r["kind"] == "tool_result"] == []
+
+
+def test_a_run_lock_works_where_utime_takes_no_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer on #81890: Windows' `os.utime` takes a path, not a descriptor."""
+    real = os.utime
+
+    def path_only(target: Any, *args: Any, **kwargs: Any) -> None:
+        if isinstance(target, int):
+            raise NotImplementedError("utime: fd unavailable on this platform")
+        real(target, *args, **kwargs)
+
+    monkeypatch.setattr(os, "utime", path_only)
+    sessions = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+    lock = sessions.claim_run(BOT, "cb-1")
+    assert lock is not None
+    sessions.release_run(lock)
+
+
+def test_a_running_mark_that_cannot_be_saved_fails_before_the_run(
+    sessions: VibeBotLocalSessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reviewer on #81890: without its `running` mark a crash mid-run would let
+    the next delivery run the call again.
+    """
+    sessions.hold_tool(BOT, "cb-1", {"server": "s", "tool": "t", "argsHash": "h"})
+
+    def refuse(*_: Any, **__: Any) -> None:
+        raise PermissionError("in use")
+
+    monkeypatch.setattr("vibe.app_server._vibe_bot._write_atomically", refuse)
+    with pytest.raises(OSError):
+        sessions.update_tool(BOT, "cb-1", required=True, running=True)
+
+
+@pytest.mark.asyncio
+async def test_two_bots_approved_runs_with_one_callback_id_are_both_kept(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Bugbot on #81890: one Desktop follows several bots, whose callback ids may meet."""
+    client = _ClaimingClient()
+    controller = _controller(_FakeSessionApi([]), client, sessions)
+    hold = asyncio.Event()
+
+    async def slow(bot: str, delivery: dict[str, Any]) -> None:
+        await hold.wait()
+
+    controller._report_approved = slow  # type: ignore[method-assign]  # pyright: ignore[reportPrivateUsage]
+    try:
+        controller._start_approved(BOT, {"callbackId": "cb-1"})  # pyright: ignore[reportPrivateUsage]
+        controller._start_approved("other-bot", {"callbackId": "cb-1"})  # pyright: ignore[reportPrivateUsage]
+        assert len(controller._approved_runs) == 2  # pyright: ignore[reportPrivateUsage]
+        hold.set()
+        await _until(lambda: not controller._approved_runs)  # pyright: ignore[reportPrivateUsage]
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_arguments_the_inbox_cannot_show_in_full_is_refused(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """The user approves only arguments they can read whole."""
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)})
+    [answer], client = await _answers(
+        sessions,
+        config,
+        mcp,
+        [
+            _call(
+                "cb-1",
+                "call_local_tool",
+                {
+                    "server": "grafana",
+                    "tool": "write_note",
+                    "arguments": {"text": "x" * 3000},
+                },
+            )
+        ],
+    )
+
+    assert mcp.calls == []
+    assert answer["error"]["code"] == "arguments_too_long"
+    assert [r["kind"] for r in client.reports] == ["tool_claimed"]
+
+
+@pytest.mark.asyncio
 async def test_a_call_retunes_only_its_own_server(tmp_path: Path) -> None:
     """Another call's timeout or listing must not reach a server in use."""
     config = build_test_vibe_config(
@@ -787,6 +1303,178 @@ async def test_a_call_to_an_allowlisted_server_that_is_down_says_so(
         await tools.mode("grafana", "echo")
 
     assert failure.value.code == "local_server_unavailable"
+
+
+class _LosingReportClient(_ClaimingClient):
+    """Loses the first `tool_result` report."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lost = False
+
+    async def report(self, bot: str, event: dict[str, Any]) -> bool:
+        if event["kind"] == "tool_result" and not self.lost:
+            self.lost = True
+            raise RuntimeError("the BFF is down")
+        return await super().report(bot, event)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_result_report_is_sent_again_with_what_ran(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)}, answer="noted")
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {"server": "grafana", "tool": "write_note", "arguments": {"text": "x"}},
+        )
+    ])
+    client = _LosingReportClient()
+    controller = _controller(api, client, sessions, local_tools=_tools(config, mcp))
+    deliver = {"botWorkflowId": BOT, "deliveries": [_approval("allow")]}
+    try:
+        await _follow(controller)
+        await _until(lambda: bool(api.answers))
+        await controller.dispatch("vibebot/deliver", deliver)
+        await _until(lambda: client.lost and not controller._approved_runs)  # pyright: ignore[reportPrivateUsage]
+        await controller.dispatch("vibebot/deliver", deliver)
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    assert mcp.calls == [("grafana", "write_note", {"text": "x"})]
+    [done] = [r for r in client.reports if r["kind"] == "tool_result"]
+    assert done["outcome"] == "ok" and done["content"] == "noted"
+
+
+@pytest.mark.asyncio
+async def test_a_call_held_longer_than_a_week_is_let_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+    first.hold_tool(BOT, "cb-old", {"server": "s", "tool": "t", "arguments": {}})
+    later = time.time() + 8 * 24 * 3600
+    monkeypatch.setattr(time, "time", lambda: later)
+
+    reopened = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+
+    assert reopened.held_tool(BOT, "cb-old") is None
+
+
+@pytest.mark.asyncio
+async def test_a_call_held_longer_than_a_week_is_let_go_without_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Felix on #81890: an app server running for over a week must not keep an
+    old hold answerable either.
+    """
+    sessions = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+    sessions.hold_tool(
+        BOT, "cb-old", {"server": "s", "tool": "t", "arguments": {}, "argsHash": "h"}
+    )
+    assert sessions.held_tool(BOT, "cb-old") is not None
+    later = time.time() + 8 * 24 * 3600
+    monkeypatch.setattr(time, "time", lambda: later)
+
+    assert sessions.held_tool(BOT, "cb-old") is None
+    sessions.update_tool(BOT, "cb-old", running=True)
+    assert sessions.held_tool(BOT, "cb-old") is None
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_crosses_the_week_keeps_its_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A late answer near the week: its outcome must survive a lost report, or a
+    retry would say it did not run.
+    """
+    sessions = VibeBotLocalSessions(client_id_file=tmp_path / "vibe_bot_client_id")
+    start = time.time()
+    sessions.hold_tool(
+        BOT, "cb-1", {"server": "s", "tool": "t", "arguments": {}, "argsHash": "h"}
+    )
+    week = 7 * 24 * 3600
+    monkeypatch.setattr(time, "time", lambda: start + week - 1)
+    sessions.update_tool(BOT, "cb-1", running=True)
+    monkeypatch.setattr(time, "time", lambda: start + week + 1)
+    sessions.update_tool(BOT, "cb-1", outcome={"outcome": "ok", "content": "done"})
+
+    held = sessions.held_tool(BOT, "cb-1")
+
+    assert held is not None and held["outcome"] == {"outcome": "ok", "content": "done"}
+
+
+@pytest.mark.asyncio
+async def test_a_deny_for_a_call_no_longer_held_is_still_a_refusal(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Bugbot on #81890: the bot hears the user's no, not that the machine forgot."""
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    client = _ClaimingClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, local_tools=_tools(config, _FakeMCP({}))
+    )
+    try:
+        await _follow(controller, session_ids=[])
+        await controller.dispatch(
+            "vibebot/deliver", {"botWorkflowId": BOT, "deliveries": [_approval("deny")]}
+        )
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    assert [r["outcome"] for r in client.reports if r["kind"] == "tool_result"] == [
+        "rejected"
+    ]
+
+
+class _SlowPendingClient(_ClaimingClient):
+    """The workflow takes the first `tool_pending`, but its answer is lost."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lost = False
+
+    async def report(self, bot: str, event: dict[str, Any]) -> bool:
+        taken = await super().report(bot, event)
+        if event["kind"] == "tool_pending" and not self.lost:
+            self.lost = True
+            raise TimeoutError("the answer did not come back")
+        return taken
+
+
+@pytest.mark.asyncio
+async def test_a_pending_report_whose_answer_was_lost_keeps_the_call_for_the_approval(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)}, answer="noted")
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {"server": "grafana", "tool": "write_note", "arguments": {"text": "x"}},
+        )
+    ])
+    client = _SlowPendingClient()
+    controller = _controller(api, client, sessions, local_tools=_tools(config, mcp))
+    try:
+        await _follow(controller)
+        await _until(lambda: bool(api.answers))
+        await controller.dispatch(
+            "vibebot/deliver",
+            {"botWorkflowId": BOT, "deliveries": [_approval("allow")]},
+        )
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    assert mcp.calls == [("grafana", "write_note", {"text": "x"})]
+    [done] = [r for r in client.reports if r["kind"] == "tool_result"]
+    assert done["outcome"] == "ok"
 
 
 @pytest.mark.asyncio
@@ -1214,3 +1902,329 @@ async def test_a_config_that_fails_to_load_tells_the_bot_nothing_about_this_mach
     [answer] = api.answers
     assert "/Users/me" not in json.dumps(answer)
     assert answer["error"]["code"] == "local_tool_failed"
+
+
+class _FailingToRun(_FakeMCP):
+    async def call_tool(
+        self,
+        server: str,
+        tool: str,
+        arguments: dict[str, Any],
+        *,
+        timeout_s: float,
+        require_read_only: bool = False,
+    ) -> LocalToolResult:
+        raise RuntimeError(
+            "spawn /Users/me/bin/grafana-mcp --token-file /Users/me/.secret failed"
+        )
+
+
+@pytest.mark.asyncio
+async def test_an_approved_call_that_fails_tells_the_bot_nothing_about_this_machine(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Bugbot on #81890: the approved path keeps host details local, as the direct one does."""
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FailingToRun({"grafana": (ECHO, WRITE)})
+    client = await _approve(sessions, config, mcp, _approval("allow"))
+
+    [done] = [r for r in client.reports if r["kind"] == "tool_result"]
+    assert "/Users/me" not in json.dumps(done)
+    assert done["outcome"] == "failed"
+    assert done["error"].startswith("local_tool_failed: ")
+
+
+def test_the_approval_text_escapes_bidi_and_zero_width_characters_as_the_inbox_does() -> (
+    None
+):
+    """Nayef on #81890: the length check counts the string the user sees."""
+    text = approval_text({
+        "path": "/tmp/\u202egnp.exe",
+        "note": "a\u200bb",
+        "city": "Zürich",
+    })
+
+    assert text == (
+        '{"city": "Zürich", "note": "a\\u200bb", "path": "/tmp/\\u202egnp.exe"}'
+    )
+
+
+def test_the_approval_text_escapes_blank_looking_characters_and_variation_selectors() -> (
+    None
+):
+    """As the workflow's card text, so the 2000-character check measures the same string."""
+    text = approval_text({"text": "a\u3164b\ufe0f\U000e0100\ue000"})
+
+    assert text == '{"text": "a\\u3164b\\ufe0f\\udb40\\udd00\\ue000"}'
+
+
+@pytest.mark.asyncio
+async def test_a_retried_approval_request_keeps_the_outcome_of_a_run_that_happened(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Bugbot on #81890: a retry of the same call must not reset its hold, or a lost report reruns the tool."""
+    call = {
+        "server": "grafana",
+        "tool": "write_note",
+        "arguments": {"text": "x"},
+        "argsHash": "h",
+    }
+    sessions.hold_tool(BOT, "cb-1", call)
+    sessions.update_tool(BOT, "cb-1", running=True)
+    sessions.update_tool(BOT, "cb-1", outcome={"outcome": "ok", "content": "noted"})
+
+    sessions.hold_tool(BOT, "cb-1", call)
+
+    held = sessions.held_tool(BOT, "cb-1")
+    assert held is not None
+    assert held["running"] is True
+    assert held["outcome"] == {"outcome": "ok", "content": "noted"}
+
+
+@pytest.mark.asyncio
+async def test_an_approval_retried_after_a_lost_report_runs_the_tool_once(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)}, answer="noted")
+    await _approve(sessions, config, mcp, _approval("allow"))
+    sessions.hold_tool(
+        BOT,
+        "cb-1",
+        {
+            "server": "grafana",
+            "tool": "write_note",
+            "arguments": {"text": "x"},
+            "argsHash": args_hash({"text": "x"}),
+        },
+    )
+    sessions.update_tool(BOT, "cb-1", running=True)
+
+    sessions.hold_tool(
+        BOT,
+        "cb-1",
+        {
+            "server": "grafana",
+            "tool": "write_note",
+            "arguments": {"text": "x"},
+            "argsHash": args_hash({"text": "x"}),
+        },
+    )
+
+    assert (sessions.held_tool(BOT, "cb-1") or {}).get("running") is True
+    assert len(mcp.calls) == 1
+
+
+def test_the_pending_tool_calls_file_is_readable_only_by_its_owner(
+    sessions: VibeBotLocalSessions, tmp_path: Path
+) -> None:
+    """Gabriel on #81890: it holds the bot's tool arguments, like a token file."""
+    sessions.hold_tool(
+        BOT,
+        "cb-1",
+        {"server": "s", "tool": "t", "arguments": {"q": "x"}, "argsHash": "h"},
+    )
+
+    mode = (tmp_path / "vibe_bot_pending_tools.json").stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("running", "says"), [(False, "did not run"), (True, "may have run")]
+)
+async def test_an_expired_report_tells_the_bot_whether_the_call_may_have_run(
+    sessions: VibeBotLocalSessions, running: bool, says: str
+) -> None:
+    """Reviewer on #81890: the bot must not retry a write that may already have run."""
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _FakeMCP({"grafana": (ECHO, WRITE)})
+    if running:
+        sessions.hold_tool(
+            BOT,
+            "cb-1",
+            {
+                "server": "grafana",
+                "tool": "write_note",
+                "arguments": {"text": "x"},
+                "argsHash": args_hash({"text": "x"}),
+            },
+        )
+        sessions.update_tool(BOT, "cb-1", running=True)
+    client = _ClaimingClient()
+    controller = _controller(
+        _FakeSessionApi([]), client, sessions, local_tools=_tools(config, mcp)
+    )
+    try:
+        await _follow(controller, session_ids=[])
+        await controller.dispatch(
+            "vibebot/deliver",
+            {"botWorkflowId": BOT, "deliveries": [_approval("allow")]},
+        )
+        await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+    finally:
+        await asyncio.gather(*controller.close(), return_exceptions=True)
+
+    [done] = [r for r in client.reports if r["kind"] == "tool_result"]
+    assert done["outcome"] == "expired"
+    assert says in done.get("error", "")
+    assert mcp.calls == []
+
+
+class _ClosingMCP(_FakeMCP):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.closed = 0
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("final", [False, True])
+async def test_an_approved_run_outlives_the_connection_that_got_it(
+    sessions: VibeBotLocalSessions, final: bool
+) -> None:
+    """Bugbot on #81890: a window reload or a closed connection must not kill a
+    write the user allowed; its servers close once it is done.
+    """
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _ClosingMCP({"grafana": (ECHO, WRITE)}, answer="noted", delay=0.3)
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {"server": "grafana", "tool": "write_note", "arguments": {"text": "x"}},
+        )
+    ])
+    client = _ClaimingClient()
+    controller = _controller(api, client, sessions, local_tools=_tools(config, mcp))
+    await _follow(controller)
+    await _until(lambda: bool(api.answers))
+    await controller.dispatch(
+        "vibebot/deliver", {"botWorkflowId": BOT, "deliveries": [_approval("allow")]}
+    )
+    await asyncio.sleep(0.05)
+
+    await asyncio.gather(*controller.close(), return_exceptions=True)
+    closing = asyncio.create_task(
+        controller.aclose_tools() if final else controller.drop_tools()
+    )
+    await asyncio.sleep(0.05)
+
+    assert mcp.closed == 0
+    await closing
+    await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+    await _until(lambda: mcp.closed == 1)
+    [done] = [r for r in client.reports if r["kind"] == "tool_result"]
+    assert done["outcome"] == "ok"
+    assert mcp.calls == [("grafana", "write_note", {"text": "x"})]
+
+
+@pytest.mark.asyncio
+async def test_a_detach_mid_run_never_closes_the_servers_of_the_next_connection(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Reviewer on #81890: the run's servers close after it; the next
+    connection's own servers stay open.
+    """
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    first = _ClosingMCP({"grafana": (ECHO, WRITE)}, answer="noted", delay=0.3)
+    second = _ClosingMCP({"grafana": (ECHO, WRITE)}, answer="noted")
+    runtimes = iter((first, second))
+
+    async def read_config() -> VibeConfigSchema:
+        return config
+
+    async def make_mcp() -> LocalMCP:
+        return next(runtimes)
+
+    tools = LocalTools(read_config=read_config, mcp=make_mcp)
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {"server": "grafana", "tool": "write_note", "arguments": {"text": "x"}},
+        )
+    ])
+    client = _ClaimingClient()
+    controller = _controller(api, client, sessions, local_tools=tools)
+    await _follow(controller)
+    await _until(lambda: bool(api.answers))
+    await controller.dispatch(
+        "vibebot/deliver", {"botWorkflowId": BOT, "deliveries": [_approval("allow")]}
+    )
+    await asyncio.sleep(0.05)
+
+    await asyncio.gather(*controller.close(), return_exceptions=True)
+    await controller.drop_tools()
+    await tools.list({}, "desk")
+    await _until(lambda: any(r["kind"] == "tool_result" for r in client.reports))
+    await _until(lambda: first.closed == 1)
+    await asyncio.sleep(0.05)
+
+    assert second.closed == 0
+    await asyncio.gather(*controller.close(), return_exceptions=True)
+    await controller.aclose_tools()
+    assert second.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_the_final_close_after_a_detach_mid_run_closes_the_detached_servers(
+    sessions: VibeBotLocalSessions,
+) -> None:
+    """Reviewer on #81890: quitting right after a reload must not leave the
+    detached servers running.
+    """
+    config = _config(vibe_bot_local_tools=[{"server": "grafana", "approval": "ask"}])
+    mcp = _ClosingMCP({"grafana": (ECHO, WRITE)}, answer="noted", delay=0.3)
+    api = _FakeSessionApi([
+        _call(
+            "cb-1",
+            "call_local_tool",
+            {"server": "grafana", "tool": "write_note", "arguments": {"text": "x"}},
+        )
+    ])
+    controller = _controller(
+        api, _ClaimingClient(), sessions, local_tools=_tools(config, mcp)
+    )
+    await _follow(controller)
+    await _until(lambda: bool(api.answers))
+    await controller.dispatch(
+        "vibebot/deliver", {"botWorkflowId": BOT, "deliveries": [_approval("allow")]}
+    )
+    await asyncio.sleep(0.05)
+    await asyncio.gather(*controller.close(), return_exceptions=True)
+    await controller.drop_tools()
+
+    await controller.aclose_tools()
+
+    assert mcp.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_the_final_close_gives_up_on_a_run_that_ignores_its_cancel(
+    sessions: VibeBotLocalSessions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Bugbot on #81890: a run stuck past its cancel must not hang the shutdown."""
+    from vibe.app_server import _vibe_bot
+
+    monkeypatch.setattr(_vibe_bot, "MAX_CALL_SECONDS", 0.05)
+    monkeypatch.setattr(_vibe_bot, "_RUN_GRACE_SECONDS", 0.05)
+    release = asyncio.Event()
+
+    async def stubborn() -> None:
+        while not release.is_set():
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                continue
+
+    controller = _controller(_FakeSessionApi([]), _ClaimingClient(), sessions)
+    stuck = asyncio.create_task(stubborn())
+    controller._approved_runs[BOT, "cb-1"] = stuck  # pyright: ignore[reportPrivateUsage]
+    try:
+        await asyncio.wait_for(controller.aclose_tools(), 1)
+    finally:
+        release.set()
+        await stuck

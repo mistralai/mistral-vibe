@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Final
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
 from vibe.core.config._model_aliases import CATALOG_LAYER, build_alias_index
 from vibe.core.config.models import ModelConfig, normalize_model_configs
@@ -22,6 +22,8 @@ CATALOG_FILTER_KEY: Final = "model_catalog_filter"
 # The GrowthBook layer's name; imported, its module would import this one back.
 _GROWTHBOOK_LAYER: Final = "growthbook"
 _DEFAULT_LAYER: Final = "default"
+_BUILTIN_MODELS_KEY: Final = "enable_builtin_models"
+_BOOL: Final = TypeAdapter(bool)
 
 # Not `max_context_length`: the window is a fact of the model the catalog
 # owns, and a wrong one would compact every session of a cohort too early.
@@ -153,25 +155,41 @@ def with_remote_models(
     layers: list[tuple[str, dict[str, Any]]],
 ) -> list[tuple[str, dict[str, Any]]]:
     """``layers`` with the catalog filtered, and without the built-in models
-    while the catalog or a GrowthBook model flag lists models.
+    while the catalog lists models or ``enable_builtin_models`` is off.
     """
     layers = with_catalog_filter(layers)
-    if not any(
+    if _builtin_models_enabled(layers) and not _catalog_lists_models(layers):
+        return layers
+    # An empty map, not a missing key: the schema default would bring the
+    # built-in models back when no other layer defines one.
+    return [
+        (name, {**data, "models": {}} if name == _DEFAULT_LAYER else data)
+        for name, data in layers
+    ]
+
+
+def _catalog_lists_models(layers: list[tuple[str, dict[str, Any]]]) -> bool:
+    return any(
         isinstance(models := normalize_model_configs(data.get("models")), Mapping)
         and bool(models)
         for name, data in layers
-        if name in {CATALOG_LAYER, _GROWTHBOOK_LAYER}
-    ):
-        return layers
-    return [
-        (
-            name,
-            {key: value for key, value in data.items() if key != "models"}
-            if name == _DEFAULT_LAYER
-            else data,
-        )
-        for name, data in layers
-    ]
+        if name == CATALOG_LAYER
+    )
+
+
+def _builtin_models_enabled(layers: list[tuple[str, dict[str, Any]]]) -> bool:
+    """``enable_builtin_models`` as the highest layer that sets it says.
+
+    Read before the merge, since it decides what the default layer
+    contributes. A value that is not a boolean is skipped here; the schema
+    reports it.
+    """
+    for _, data in reversed(layers):
+        try:
+            return _BOOL.validate_python(data[_BUILTIN_MODELS_KEY])
+        except (KeyError, ValidationError):
+            continue
+    return True
 
 
 def _with_settings(

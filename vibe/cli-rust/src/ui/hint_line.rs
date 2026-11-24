@@ -103,3 +103,11 @@ pub(crate) fn draw_above(f: &mut Frame, x: u16, bottom: u16, width: u16, hints: 
     let top = (bottom + 1).saturating_sub(height(hints, width));
     draw(f, Rect::new(x, top, width, bottom + 1 - top), hints);
 }
+
+/// One footer row: the `hints` from the left, `more` against the right edge.
+pub(crate) fn draw_pinned(f: &mut Frame, area: Rect, hints: &[Hint], more: Hint) {
+    draw(f, Rect { height: 1, ..area }, hints);
+    let wide = hints::width(&[more]);
+    let x = area.right().saturating_sub(wide);
+    f.buffer_mut().set_line(x, area.y, &line(&[more]), wide);
+}

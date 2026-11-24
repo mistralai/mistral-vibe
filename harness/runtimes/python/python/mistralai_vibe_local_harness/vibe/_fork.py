@@ -178,6 +178,31 @@ def skipped_user_anchor(
     return len(history)
 
 
+def turn_public_start(
+    public_entries: Sequence[Mapping[str, object]], anchor: int
+) -> int:
+    """Where the Turn opened by the user message at ``anchor`` starts in public history.
+
+    A Turn's pre_agent hooks run before its user message is recorded, so their
+    notices sit right before it. Hook notices carry no Turn id, so the Turn's
+    notices are the pre_agent notices directly before the message: a cut that
+    removes the message removes them too, and stops at any other entry.
+    """
+    start = anchor
+    while start > 0 and _is_pre_agent_notice(public_entries[start - 1]):
+        start -= 1
+    return start
+
+
+def _is_pre_agent_notice(entry: Mapping[str, object]) -> bool:
+    detail = entry.get("detail")
+    return (
+        entry.get("type") == "notice"
+        and isinstance(detail, Mapping)
+        and cast(Mapping[str, object], detail).get("scope") == "pre_agent"
+    )
+
+
 def _is_user_entry(entry: Mapping[str, object]) -> bool:
     return entry.get("type") == "message" and entry.get("role") == "user"
 
@@ -213,4 +238,5 @@ __all__ = [
     "history_user_anchor",
     "imported_entry_id",
     "skipped_user_anchor",
+    "turn_public_start",
 ]

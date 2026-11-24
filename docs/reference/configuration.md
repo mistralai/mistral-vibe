@@ -11,22 +11,21 @@ The effective order is:
 
 1. `DefaultConfigLayer`, materialized from `VibeConfigSchema` defaults;
 2. `ModelCatalogLayer`, materialized from the cached or fetched model catalog
-   when `experimental_enable_model_catalog` is on; it contributes models, which
+   when `enable_model_catalog` is on (the default); it contributes models, which
    every layer above can override field by field, and the aliases a pin can
    name them by. While it lists at least one model, the built-in default
    models from layer 1 are not available anymore, so a catalog alias may take
    a built-in's name;
 3. `GrowthbookLayer`, materialized from remote or hydrated experiment
-   assignments. The `vibe_cli_model_catalog` flag turns
-   `experimental_enable_model_catalog` on from here, below the TOML layers, so
-   a user's `false` keeps the catalog off. While that flag is on, this layer
-   leaves out the two older model flags: `vibe_cli_extra_models`, which adds
-   models, and `vibe_cli_default_routing_model`, which adds a model and makes
-   it the default (the "routed default"). While those flags list at least one
-   model, the built-in models from layer 1 are not available, as under a
-   catalog listing models. The catalog lists its own models and recommends its
-   own default; when neither it nor those flags supply a model, the built-in
-   models (Mistral Large 4, then Mistral Medium 3.5) remain. The `vibe_cli_model_catalog_filter` flag filters the catalog's
+   assignments. It adds no models: the catalog lists them and recommends its
+   own default; when it lists none (off, not fetched, or not served), the
+   built-in models (Mistral Large 4, then Mistral Medium 3.5) remain, unless
+   `enable_builtin_models` is off: then only the `[[models]]` entries of the
+   layers above remain, and with none the config fails validation with "No
+   models are configured. Define at least one model under [[models]]." The
+   highest layer that sets `enable_builtin_models` decides; it is read before
+   the layers merge, since it decides what layer 1 contributes. The
+   `vibe_cli_model_catalog_filter` flag filters the catalog's
    data before the merge, as if the catalog itself had sent it filtered:
    `hide` drops models, `order` lists ids first in the picker, `default`
    picks the default, and `settings` sets per-model fields (request settings,
@@ -127,21 +126,26 @@ the session neither scopes nor records it.
 An `active_model` that names one of a catalog model's `aliases` is first
 resolved to that model's ID. An `active_model` absent from the merged model
 list is then normalized to the empty, unpinned sentinel. Default resolution
-then applies: the GrowthBook routed default (absent while the
-`vibe_cli_model_catalog` flag is on), then the catalog filter's `default`, then
-the model catalog's recommendation, then the built-in default Mistral Large 4
-(available only while neither the catalog nor a GrowthBook model flag lists
-models), then the first available model, each skipped when
+then applies: the catalog filter's `default`, then the model catalog's
+recommendation, then the built-in default Mistral Large 4 (available only while
+the catalog lists no models and `enable_builtin_models` is on), then the first
+available model, each skipped when
 `allowed_models` excludes it. The
 invalid source value is left untouched and reported as a validation warning
 that names no cause.
+
+A model whose `provider` no layer defines is left out of the merged config the
+same way, with a log line naming the model and the provider, and applies again
+once the provider returns. A pin on it gets the missing-model fallback, and its
+warning names the provider. When no model has a defined provider, the models
+are kept, so the config still loads.
 
 A model entry without `provider` only overrides a model another layer defines.
 When no layer defines that model, the entry is left out of the merged config and
 reported as a validation warning; it applies again once the model returns.
 Missing-model warnings are never suppressed while a catalog fetch is pending:
 the session-start wait (VIBE-5122) is the only hold. A field write to a model
-the catalog or GrowthBook layer defines stays settings-only for the same
+the catalog layer or the admin layer defines stays settings-only for the same
 reason — the layer redefines the model at launch, and copied identity would
 keep a retired model running.
 
@@ -336,6 +340,12 @@ running one, a catalog is old after 30 seconds, so a client re-reading the
 models as the user returns from upgrading their plan sees them unlocked. A
 session on a runnable model refreshes it every 10 minutes. A turn on a locked model waits up to 2 seconds
 for that refresh before it is refused.
+
+A model picker opening sends `config/read` with `refreshModelCatalog: true`.
+When the catalog locks a model, it is fetched right away, whatever its age,
+and the read answers once the fetch ends. On a session read, an idle session
+loads the new catalog and announces it with `runtime/updated`. If the fetch
+fails, the read answers with the catalog already held.
 
 ## Client-local application
 

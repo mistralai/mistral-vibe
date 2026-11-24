@@ -20,7 +20,7 @@ use crate::utils::startup_cache;
 use crate::utils::text::bounded_message;
 use crate::{
     agents, approval, artifacts, completion_manager, config, feedback, mcp, message_queue,
-    model_picker, notices, observability, post_ready, question_app, resume_picker, session_exit,
+    model_picker, notices, observability, post_ready, question_app, session_exit, sessions_page,
     startup, subagents, todo_tracker, turn_summary, ui,
 };
 
@@ -42,10 +42,6 @@ pub fn apply_startup_event(
             if app.config_screen.open {
                 config::load(session_id, client, config_tx, true);
             }
-            false
-        }
-        StartupEvent::Sessions(value) => {
-            resume_picker::open_listed(app, client, &value);
             false
         }
         StartupEvent::Config(config) => {
@@ -109,14 +105,18 @@ pub fn show_dangerous_directory_warning(app: &mut App) {
         return;
     }
     if let Some(reason) = crate::utils::paths::dangerous_directory_reason() {
-        let warning =
-            format!("⚠ WARNING: {reason}\n\nRunning in this location is not recommended.");
+        let warning = dangerous_directory_text(&reason);
         local::add_warning(
             &mut app.view.transcript,
             DANGEROUS_DIRECTORY_WARNING_ID,
             &warning,
         );
     }
+}
+
+/// The risky-folder warning body for `reason`.
+pub fn dangerous_directory_text(reason: &str) -> String {
+    format!("⚠ WARNING: {reason}\n\nRunning in this location is not recommended.")
 }
 
 /// One detached, non-forced update check after startup, its outcome only written to the update
@@ -152,7 +152,7 @@ fn attach_notice(app: &mut App, attach: startup::Attach) {
     let text = match attach {
         startup::Attach::Started => return transcript.remove(RESUME_STATUS_ID),
         startup::Attach::Resumed(session) => {
-            format!("Resumed session {}.", resume_picker::short_id(&session))
+            format!("Resumed session {}.", sessions_page::short_id(&session))
         }
         startup::Attach::NoPrevious => "No previous sessions found.".to_owned(),
         startup::Attach::Failed(message) => {
@@ -199,11 +199,9 @@ fn apply_ready(
         }
     };
     crate::terminal_notifier::configure(app, &runtime);
-    if !app.session.resumed {
-        let title = runtime["sessionLog"]["title"].as_str();
-        let title = title.or(state.session.title.as_deref()).unwrap_or("");
-        app.terminal_notifier.set_default_title(title);
-    }
+    let title = runtime["sessionLog"]["title"].as_str();
+    let title = title.or(state.session.title.as_deref()).unwrap_or("");
+    app.terminal_notifier.set_default_title(title);
     app.subagents.status_list_enabled = startup::read_show_subagent_status_list(&runtime);
     app.artifacts_modal.enabled = startup::read_pr_monitoring(&runtime);
     app.view.sticky_prompt_enabled = startup::read_enable_sticky_prompt(&runtime);
@@ -225,27 +223,18 @@ fn apply_ready(
     app.view
         .transcript
         .set_show_reasoning(startup::read_show_thinking_nodes(&runtime));
-    // The picker can resume before the handshake finishes, and that session
-    // wins: the one started here is only what Esc would fall back to.
-    if !app.session.resumed {
-        message_queue::reconcile_snapshot(app, client, &state);
-        app.set_session_id(state.session.id.clone());
-        crate::background_work::adopt_state(app, &state);
-        crate::loops::adopt_state(app, &state);
-        app.subagents.seed_snapshot(state.child_sessions.clone());
-        subagents::refresh(app);
-        match app.resume_picker.open {
-            true => resume_picker::rebase(app, &state),
-            false => {
-                app.todo_tracker.seed_from_history(state.history.as_ref());
-                crate::goal::adopt(app, state.session.goal.clone(), true);
-                crate::goal::sync_running_turn(app, &state.session.id, state.turns.as_deref());
-                resume_picker::load_history(app, &state);
-                // The ready read below reads the live branch.
-                crate::worktree::track_state(app, &state);
-            }
-        }
-    }
+    message_queue::reconcile_snapshot(app, client, &state);
+    app.set_session_id(state.session.id.clone());
+    crate::background_work::adopt_state(app, &state);
+    crate::loops::adopt_state(app, &state);
+    app.subagents.seed_snapshot(state.child_sessions.clone());
+    subagents::refresh(app);
+    app.todo_tracker.seed_from_history(state.history.as_ref());
+    crate::goal::adopt(app, state.session.goal.clone(), true);
+    crate::goal::sync_running_turn(app, &state.session.id, state.turns.as_deref());
+    sessions_page::load_history(app, &state);
+    // The ready read below reads the live branch.
+    crate::worktree::track_state(app, &state);
     app.session.tokens = startup::read_tokens(&runtime);
     app.subagents.main_tokens = app.session.tokens;
     app.session.stats = crate::utils::json::read(&runtime["runtime"]["stats"]);
@@ -260,11 +249,8 @@ fn apply_ready(
             tracing::debug!("absorbed notification deferred; no approval is pending pre-TUI");
         }
     }
-    // Snapshot the usage baseline once the session attaches; a picker resume
-    // that already adopted keeps the baseline it set.
-    if !app.session.resumed {
-        app.session.usage_baseline = Some(session_exit::current_usage(app));
-    }
+    // Snapshot the usage baseline once the session attaches.
+    app.session.usage_baseline = Some(session_exit::current_usage(app));
     app.completion.skills = startup::read_skills(&runtime);
     app.voice.mode_enabled = config.voice_mode_enabled;
     app.voice.transcription = config.transcription;
@@ -277,6 +263,14 @@ fn apply_ready(
     crate::skills_browser::notify_updates(app, client, &runtime);
     notices::show_config_issues(app, &runtime);
     crate::tmux_hint::show(app);
+    // `--resume` without an id opens the Sessions page: the prompt waits for
+    // the session the user opens, or is dropped when they leave the page. The
+    // page is known before the banners mount, so what's new waits for a fresh
+    // session instead of being marked seen behind the page.
+    let page = matches!(app.session.startup_resume, StartupResume::Picker);
+    if page {
+        app.session.resume_picker_shown = true;
+    }
     startup::banners::mount(app, &runtime, client);
     // Read the what's-new gate inside mount before scheduling the update
     // check; keeping the spawn after mount preserves that ordering.
@@ -286,25 +280,21 @@ fn apply_ready(
     spawn_background_update_check(config.enable_update_checks);
     post_ready::fetch(app, client);
     artifacts::fetch(app, client);
-    resume_picker::subscribe(app, client);
+    sessions_page::leases::subscribe(app, client);
+    sessions_page::server_ready(app, client);
     crate::storage_panel::startup::read(app, client);
     completion_manager::refresh(app);
-    // A picker resume that landed first already adopted its own turn: leave
-    // the status it set rather than drop that turn to `Ready`.
-    if !app.session.resumed {
-        match app.resume_picker.open {
-            true => app.set_status(Status::Ready),
-            false => adopt_active_turn(app, &state),
-        }
-    }
+    adopt_active_turn(app, &state);
     approval::show_pending(app);
+    if page {
+        app.session.startup_resume = StartupResume::None;
+        sessions_page::open(app, client, sessions_page::Trigger::Startup);
+    }
     record_startup(app, &attach, is_cold_start);
     attach_notice(app, attach);
     crate::commands::shell::flush_pending(app, client);
     message_queue::flush_pending(app, client);
-    // The resume picker owns the startup: the prompt waits for the session the
-    // user picks, or is dropped when they cancel.
-    if !app.resume_picker.open {
+    if !page {
         process_initial_prompt(app, client);
     }
     // Prompts flush before deferred slash commands; a prompt-then-command typed
@@ -620,7 +610,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
     // Lease updates apply pre-Starting: the startup resume picker is open while
     // the engine comes up, and its locks must not miss them.
     if event.method == notification::SESSION_LEASE_UPDATED {
-        resume_picker::on_lease_updated(app, client, &event.params);
+        sessions_page::leases::on_updated(app, client, &event.params);
         return true;
     }
     if event.method == notification::STORAGE_USAGE_UPDATED {
@@ -628,7 +618,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
         return true;
     }
     if event.method == notification::SESSION_LEASE_ENDED {
-        resume_picker::on_lease_ended(app);
+        sessions_page::leases::on_ended(app);
         return true;
     }
     if event.method == notification::REPLAY_DRAINED {
@@ -731,7 +721,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                         false => {
                             // A handoff or resync adopts another harness session.
                             app.todo_tracker.seed_from_history(state.history.as_ref());
-                            resume_picker::load_history(app, &state);
+                            sessions_page::load_history(app, &state);
                         }
                     }
                     crate::worktree::adopt_state(app, &state);
@@ -890,11 +880,7 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
             }
         }
         notification::SESSION_COMPACTED => {
-            // The handoff installs the replacement session.
-            match compact::compacted_handoff(&event.params) {
-                Some((id, child_sessions)) => compact::apply_compacted(app, id, child_sessions),
-                None => compact::settle_compact(app),
-            }
+            compact::apply_compacted_notification(app, &event.params);
         }
         // A child session update upserts the child, announces the ready
         // transition, and coalesce the viewed child's transcript refresh.
@@ -919,18 +905,11 @@ pub fn apply_notification(app: &mut App, client: &Arc<Client>, event: &Notificat
                 subagents::refresh(app);
             }
         }
-        // A cleared context resets the subagent views; the
-        // handoff state carries the replacement session's children. The
-        // replacement is the live session from here on, or every later
-        // notification reads as foreign (`apply_compacted` parity).
+        // A cleared context resets the subagent views; the replacement is the
+        // live session from here on, or every later notification reads as foreign.
         notification::SESSION_CONTEXT_CLEARED => {
-            if let Some(state) = event.params.get("state").cloned().and_then(|state| {
-                serde_json::from_value::<crate::server::PublicSessionState>(state).ok()
-            }) {
-                app.set_session_id(state.session.id.clone());
-                crate::background_work::adopt_state(app, &state);
-                crate::loops::adopt_state(app, &state);
-                app.subagents.seed_snapshot(state.child_sessions.clone());
+            if let Some(state) = compact::handoff_state(&event.params) {
+                crate::background_work::adopt_session(app, &state);
                 subagents::reset_views(app);
                 subagents::refresh(app);
             }

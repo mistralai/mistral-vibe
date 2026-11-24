@@ -375,3 +375,104 @@ fn large_steering_during_compaction_is_preflighted_before_agent_dispatch() {
         .only_action();
     runtime.finish_turn_with_text(turn_id, &resumed, "done");
 }
+
+/// *Prepare*: Automatic compaction with a 20,000-token threshold. The provider
+/// counts every agent request at half its byte estimate.
+/// *Do*: Three turns adding about 10,000, 10,000 and 20,000 tokens by
+/// estimate, each reply reporting half the estimate of the request it
+/// answered.
+/// *Assert*: The second turn's request is over the threshold by estimate but
+/// under it as the provider counts it, so it goes to the agent. The third
+/// turn's request reaches the threshold as the provider counts it and
+/// compacts.
+#[test]
+fn an_estimate_twice_the_reported_count_compacts_at_the_threshold() {
+    let threshold = 20_000;
+    let config = automatic_compaction_config_with_threshold(threshold);
+    let mut runtime = SynchronousRuntime::new_with_history(
+        config.clone(),
+        vec![
+            Message::user_text(format!("old request {}", "0123456789abcdef".repeat(2_500))),
+            assistant_text("old answer"),
+        ],
+    );
+    let reply_at_half = |runtime: &mut SynchronousRuntime, turn_id: &str, agent: &Value| {
+        let estimate = agent_request_estimate(&runtime.checkpoint_value(), config.clone());
+        let usage = json!({
+            "input_tokens": estimate / 2,
+            "output_tokens": 10,
+            "total_tokens": estimate / 2 + 10,
+            "cached_input_tokens": 0,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 0,
+        });
+        runtime.apply(
+            json!({
+                "type": "completion_succeeded",
+                "action_id": action_id(agent),
+                "result": {
+                    "parts": [{"type": "text", "text": "ok"}],
+                    "finish_reason": "stop",
+                    "usage": usage,
+                },
+            }),
+            completed(turn_id, vec![json!({"type": "text", "text": "ok"})])
+                .observe(json!({
+                    "type": "assistant_message_committed",
+                    "turn_id": turn_id,
+                    "action_id": action_id(agent),
+                    "candidate": {
+                        "message": {"role": "assistant", "content": [{"type": "text", "text": "ok"}]},
+                        "finish_reason": "stop",
+                        "usage": usage,
+                    },
+                }))
+                .observe(turn_completed(turn_id, "ok")),
+        );
+        estimate
+    };
+
+    let first = "turn-estimate-twice-reported-1";
+    let agent = runtime
+        .apply(
+            user_message(first, "hi", "queue"),
+            running(first)
+                .dispatch(llm_call(0))
+                .observe(turn_started(first, "hi")),
+        )
+        .only_action();
+    reply_at_half(&mut runtime, first, &agent);
+    assert!(
+        runtime
+            .checkpoint_value()
+            .get("estimate_correction")
+            .is_none()
+    );
+
+    let second = "turn-estimate-twice-reported-2";
+    let request = format!("second request {}", "0123456789abcdef".repeat(2_500));
+    let agent = runtime
+        .apply(
+            user_message(second, &request, "queue"),
+            running(second)
+                .dispatch(llm_call(0))
+                .observe(turn_started(second, &request)),
+        )
+        .only_action();
+    let estimate = reply_at_half(&mut runtime, second, &agent);
+    assert!(estimate > threshold, "{estimate}");
+
+    let third = "turn-estimate-twice-reported-3";
+    let request = format!("third request {}", "0123456789abcdef".repeat(5_000));
+    let compaction = runtime
+        .apply(
+            user_message(third, &request, "queue"),
+            running(third)
+                .dispatch(compaction_call("automatic", 0, 1))
+                .observe(turn_started(third, &request)),
+        )
+        .only_action();
+    assert_eq!(compaction["purpose"], "compaction");
+    let estimate = agent_request_estimate(&runtime.checkpoint_value(), config);
+    assert!(estimate >= 2 * threshold, "{estimate}");
+}

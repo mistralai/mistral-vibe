@@ -24,16 +24,22 @@ pub fn is_toggle_key(key: &KeyEvent) -> bool {
     key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('x')
 }
 
-/// Ctrl+X and ←→, Tab or Shift+Tab over an open window or the subagent list, not a child view: letter the rail, or switch windows.
+/// Ctrl+X and ←→, Tab or Shift+Tab over an open window, the subagent list or the loop list, not a child view: letter the rail, or switch windows.
 pub fn nav_key(app: &mut App, client: &Arc<Client>, key: &KeyEvent) -> bool {
     // A child view is no rail surface: only Esc leaves it.
     let child_view = app.subagents.viewed_subagent_id.is_some();
-    if !matches!(app.focus(), Focus::RailWindow | Focus::SubagentList) || child_view {
+    let surface =
+        matches!(app.focus(), Focus::RailWindow | Focus::SubagentList) || super::loop_list(app);
+    if !surface || child_view {
         return false;
     }
     if is_toggle_key(key) {
         enter(app);
         return true;
+    }
+    // A focused search field keeps ←→ and Tab for its caret.
+    if crate::tasks_panel::typing(app) {
+        return false;
     }
     let Some(right) = direction(key) else {
         return false;

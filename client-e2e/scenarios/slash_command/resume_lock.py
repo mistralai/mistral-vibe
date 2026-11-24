@@ -1,4 +1,4 @@
-"""The resume picker marks a session held by another process with a lock."""
+"""The Sessions page marks a session held by another process and refuses to open it."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ handshake = {
 }
 request_methods = {"session/lease/subscribe"}
 
-# Enter submits /resume (the picker highlights the current session), Up
+# Enter submits /resume (the page highlights the current session), Up
 # selects the locked row, and its Enter is refused locally with the busy
 # inline notice, without a session/resume request.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "\r"]

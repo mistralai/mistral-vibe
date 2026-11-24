@@ -130,7 +130,10 @@ def core_list_output(state: SubagentRuntimeState) -> dict[str, JsonValue]:
         error: str | None = None
         match child.state:
             case (
-                ReservedChild() | CreationFailedChild() | CreationCleanupPendingChild()
+                ReservedChild()
+                | CreationFailedChild()
+                | CreationCleanupPendingChild()
+                | ChildTombstone()
             ):
                 continue
             case RunningChild():
@@ -139,8 +142,6 @@ def core_list_output(state: SubagentRuntimeState) -> dict[str, JsonValue]:
                 status = "idle"
             case TurnFailedChild(outcome=outcome):
                 status, error = "failed", outcome.failure.message
-            case ChildTombstone():
-                status, error = "failed", "Child Session is closed and unavailable"
             case DeletingIdleChild() | DeletingRunningChild():
                 status, error = "failed", "Child Session is closing"
         item: dict[str, JsonValue] = {

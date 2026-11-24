@@ -15,7 +15,12 @@ from mcp import ClientSession
 from mcp.client.auth import OAuthFlowError
 from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.types import PaginatedRequestParams
+from mcp.types import (
+    PaginatedRequestParams,
+    ReadResourceRequest,
+    ReadResourceRequestParams,
+    ReadResourceResult,
+)
 from pydantic import JsonValue, TypeAdapter
 
 from mistralai_vibe_local_harness.vibe._http_transport import env_proxy_transport
@@ -128,6 +133,32 @@ async def call_http(
         raise
     except BaseException as exc:
         raise _translate_failure(exc, operation="call") from exc
+
+
+async def read_resource_http(
+    server: ResolvedMCPServerConfig,
+    authorization: MCPAuthorizationSnapshot,
+    *,
+    http_transport_policy: MCPHTTPTransportPolicy,
+    uri: str,
+    sampling_callback: MCPSamplingCallback | None = None,
+) -> JsonObject:
+    if not server.url:
+        raise MCPRuntimeFailure(
+            "mcp_invalid_configuration", "MCP HTTP server has no URL"
+        )
+    try:
+        async with _http_session(
+            server,
+            authorization,
+            http_transport_policy,
+            sampling_callback=sampling_callback,
+        ) as session:
+            return await _read_resource(session, uri, timeout_s=server.tool_timeout_s)
+    except asyncio.CancelledError:
+        raise
+    except BaseException as exc:
+        raise _translate_failure(exc, operation="resource read") from exc
 
 
 class _HttpSessionContext:
@@ -305,6 +336,14 @@ class _StdioConnection(MCPClientConnection):
         except BaseException as exc:
             raise _translate_failure(exc, operation="call") from exc
 
+    async def read_resource(self, uri: str, *, timeout_s: float) -> JsonObject:
+        try:
+            return await _read_resource(self._session, uri, timeout_s=timeout_s)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            raise _translate_failure(exc, operation="resource read") from exc
+
     async def aclose(self) -> None:
         if self._closed:
             return
@@ -365,7 +404,43 @@ def _normalize_descriptor(value: object) -> MCPRemoteToolDescriptor:
         input_schema=input_schema,
         output_schema=output_schema,
         annotations=_JSON_VALUE.validate_python(raw.get("annotations")),
+        meta=_JSON_VALUE.validate_python(raw.get("_meta")),
     )
+
+
+async def _read_resource(
+    session: ClientSession, uri: str, *, timeout_s: float
+) -> JsonObject:
+    # The session's own read timeout is the startup one: give this read the
+    # same time as a tool call, as `call_tool` does.
+    with anyio.fail_after(timeout_s):
+        result = await session.send_request(
+            ReadResourceRequest(params=ReadResourceRequestParams(uri=uri)),
+            ReadResourceResult,
+            request_read_timeout_seconds=timeout_s,
+        )
+    return _normalize_resource(result)
+
+
+def _normalize_resource(value: object) -> JsonObject:
+    """The ``resources/read`` result as MCP JSON: its contents and ``_meta``."""
+    raw = _model_dump(value)
+    contents = _JSON_VALUE.validate_python(raw.get("contents", []))
+    if not isinstance(contents, list) or not all(
+        isinstance(item, dict) for item in contents
+    ):
+        raise MCPRuntimeFailure(
+            "mcp_invalid_result", "MCP resource contents are not a list of objects"
+        )
+    normalized: JsonObject = {
+        "contents": [
+            _without_nulls(cast(dict[str, JsonValue], item)) for item in contents
+        ]
+    }
+    meta = _JSON_VALUE.validate_python(raw.get("_meta"))
+    if meta is not None:
+        normalized["_meta"] = meta
+    return normalized
 
 
 def _normalize_result(value: object) -> MCPNormalizedResult:
@@ -463,6 +538,7 @@ def _translate_failure(exc: BaseException, *, operation: str) -> MCPRuntimeFailu
             return MCPHTTPStatusFailure(
                 nested.response.status_code,
                 f"MCP {operation} failed with an HTTP error",
+                retry_after_s=_retry_after_s(nested.response),
             )
         if isinstance(nested, MCPRuntimeFailure):
             return nested
@@ -473,6 +549,12 @@ def _translate_failure(exc: BaseException, *, operation: str) -> MCPRuntimeFailu
         if isinstance(nested, _TRANSPORT_FAILURES):
             return MCPTransportDisconnected(f"MCP {operation} transport disconnected")
     return MCPRuntimeFailure("mcp_transport_failed", f"MCP {operation} failed")
+
+
+def _retry_after_s(response: httpx2.Response) -> int | None:
+    # Only the delay-seconds form: the HTTP-date form depends on clock agreement.
+    value = response.headers.get("retry-after", "").strip()
+    return int(value) if value.isdigit() else None
 
 
 def _flatten_exceptions(exc: BaseException) -> tuple[BaseException, ...]:
@@ -574,4 +656,9 @@ def _log_stderr(stderr: Any) -> None:
         return
 
 
-__all__ = ["UnifiedMCPTransportFactory", "call_http", "discover_http"]
+__all__ = [
+    "UnifiedMCPTransportFactory",
+    "call_http",
+    "discover_http",
+    "read_resource_http",
+]

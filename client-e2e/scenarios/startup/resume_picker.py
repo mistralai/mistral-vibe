@@ -1,4 +1,4 @@
-"""`--resume` with no id opens the saved-session picker at startup."""
+"""`--resume` with no id opens the Sessions page once the session is ready."""
 
 from __future__ import annotations
 

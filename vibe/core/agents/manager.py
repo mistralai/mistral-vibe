@@ -88,9 +88,8 @@ class AgentManager:
         ``initial_agent`` is read as ``initial_policy``, as before the split.
         """
         self._orchestrator = orchestrator
-        self._registry = AgentRegistry(
-            orchestrator, harness_files or get_harness_files_manager()
-        )
+        self._harness_files = harness_files or get_harness_files_manager()
+        self._registry = AgentRegistry(orchestrator, self._harness_files)
         # Policies chosen explicitly at startup (e.g. --smart-approve) stay in the
         # picker/cycle for the whole session even when the rollout gate would hide
         # them, so cycling away and back still returns to them.
@@ -534,6 +533,16 @@ class AgentManager:
         view._forced_policies = set(self._forced_policies)
         view.restore_warnings = list(self.restore_warnings)
         return view
+
+    def rediscover(self) -> None:
+        """Scan the agent directories again, under the config as it is now.
+
+        Files added, edited or removed since the last scan change which agents
+        and subagents can be picked or spawned. The running agent and policy
+        stay installed as they are: switching to them again reads the new file.
+        Off the event loop only: it reads every agent file.
+        """
+        self._registry = AgentRegistry(self._orchestrator, self._harness_files)
 
     def switch_agent(self, name: str) -> None:
         """Off the event loop only; code on it uses ``aswitch_agent``."""

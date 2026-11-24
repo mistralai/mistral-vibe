@@ -42,6 +42,7 @@ def _mount(
     namespace: str | None = None,
     *,
     default_enabled: bool = True,
+    starter_prompt: dict[str, object] | None = None,
 ) -> Path:
     destination.mkdir(parents=True)
     manifest: dict[str, object] = {
@@ -55,6 +56,8 @@ def _mount(
         extension["toolNamespace"] = namespace
     if not default_enabled:
         extension["defaultEnabled"] = False
+    if starter_prompt is not None:
+        extension["starterPrompt"] = starter_prompt
     if len(extension) > 1:
         manifest["extensions"] = {"ai.mistral.vibe": extension}
     (destination / "plugin.json").write_text(json.dumps(manifest))
@@ -115,6 +118,30 @@ async def test_lists_a_global_plugin_with_what_it_provides(config_dir: Path) -> 
         ("productivity:inspect-data", _SKILLS["inspect-data"]),
         ("productivity:prepare-report", _SKILLS["prepare-report"]),
     ]
+    assert plugin.starter_prompt is None
+
+
+@pytest.mark.asyncio
+async def test_lists_a_plugins_starter_prompt_for_try_in_chat(config_dir: Path) -> None:
+    _mount(
+        config_dir / "plugins" / "productivity",
+        starter_prompt={"prompt": {"en": "Plan my week", "fr": "Planifie ma semaine"}},
+    )
+    _mount(
+        config_dir / "plugins" / "briefing", "briefing", starter_prompt={"submit": True}
+    )
+
+    listed = {p.name: p for p in (await _list(_handler())).plugins}
+
+    typed = listed["productivity"].starter_prompt
+    assert typed is not None
+    assert typed.prompt == {"en": "Plan my week", "fr": "Planifie ma semaine"}
+    assert typed.submit is False
+    sent = listed["briefing"].starter_prompt
+    assert sent is not None
+    assert (sent.prompt, sent.submit) == (None, True)
+    # Desktop shows it now: no longer a part it does not support.
+    assert listed["productivity"].unsupported_parts == []
 
 
 @pytest.mark.asyncio
@@ -611,10 +638,13 @@ async def test_lists_the_connectors_a_plugin_needs_in_its_order(
 
     [plugin] = (await _list(_handler_with_catalog(read))).plugins
 
-    assert [(c.id, c.display_name, c.status, c.tools) for c in plugin.connectors] == [
-        ("slack", "Slack", "connected", ["send_message"]),
+    assert [
+        (c.id, c.display_name, c.connector_id, c.status, c.tools)
+        for c in plugin.connectors
+    ] == [
+        ("slack", "Slack", "id-slack", "connected", ["send_message"]),
         # Not in the account's catalog at all.
-        ("jira", None, "unavailable", ["create_issue"]),
+        ("jira", None, None, "unavailable", ["create_issue"]),
     ]
 
 

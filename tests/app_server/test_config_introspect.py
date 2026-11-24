@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import json
 from pathlib import Path
 from typing import Any
 
@@ -198,41 +197,6 @@ async def test_collect_layer_values_hides_the_unset_threshold(
         "/models/mistral-large-4-0/auto_compact_threshold"
     ]
     assert "/models/mistral-medium-3.5/auto_compact_threshold" not in values
-
-
-@pytest.mark.asyncio
-async def test_build_field_wires_projects_growthbook_routed_model_threshold(
-    make_config: Callable[..., VibeConfigSchema],
-) -> None:
-    routed = {
-        "name": "routed-model",
-        "provider": "mistral",
-        "alias": "routed",
-        "auto_compact_threshold": 168_000,
-    }
-    growthbook = GrowthbookLayer()
-    growthbook.set_variants({
-        ExperimentName.CLI_MODEL_ROUTING.value: {
-            "active_model": "routed",
-            "model_config": routed,
-        }
-    })
-
-    config = make_config(
-        active_model="",
-        routed_default_model="routed",
-        routed_model_config=json.dumps(routed),
-    )
-    values = await collect_layer_values([growthbook], config)
-    threshold = next(
-        wire
-        for wire in build_field_wires(config, values)
-        if wire.name == "auto_compact_threshold"
-    )
-
-    assert threshold.value == 168_000
-    assert threshold.path == "/models/routed/auto_compact_threshold"
-    assert threshold.origin == "growthbook"
 
 
 def test_build_field_wires_surfaces_the_active_model_window(
@@ -461,11 +425,10 @@ async def test_build_field_wires_edits_the_catalog_filter_model_threshold() -> N
     growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
     assert isinstance(growthbook, GrowthbookLayer)
     growthbook.set_variants({
-        ExperimentName.MODEL_CATALOG.value: True,
         ExperimentName.MODEL_CATALOG_FILTER.value: {
             "default": "large",
             "settings": {"large": {"auto_compact_threshold": 50_000}},
-        },
+        }
     })
     catalog = parse_model_catalog_response({
         "models": [

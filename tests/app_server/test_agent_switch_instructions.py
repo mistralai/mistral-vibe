@@ -94,7 +94,7 @@ class _RecordingModel:
                     RustTextContentBlock(text=self.reply).model_dump(mode="json")
                 ],
                 "finish_reason": "stop",
-                "usage": {"input_tokens": 10, "output_tokens": 1, "total_tokens": 11},
+                "usage": {"input_tokens": 0, "output_tokens": 1, "total_tokens": 1},
             },
         })
 

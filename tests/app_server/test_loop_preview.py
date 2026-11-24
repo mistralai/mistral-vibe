@@ -8,15 +8,13 @@ import pytest
 import respx
 import tomli_w
 
-from tests.app_server.backend_contract.conftest import (
-    _mistral_sse_payload,
-    connect_backend_contract_host,
-)
+from tests.app_server.backend_contract.conftest import connect_backend_contract_host
 from tests.constants import (
     CHAT_COMPLETIONS_PATH,
     CONNECTORS_BOOTSTRAP_PATH,
     MISTRAL_BASE_URL,
 )
+from tests.stubs.mistral_responses import mistral_sse_payload
 from vibe.app_server._loop_prompt import LOOP_INSTRUCTIONS, project_loop_preview
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.models import PublicMessageEntry
@@ -101,7 +99,7 @@ async def test_loop_preview_is_clean_live_stored_listed_and_resumed(
     respx_mock.post(f"{MISTRAL_BASE_URL}{CHAT_COMPLETIONS_PATH}").mock(
         return_value=httpx.Response(
             200,
-            stream=httpx.ByteStream(_mistral_sse_payload("Understood.", None)),
+            stream=httpx.ByteStream(mistral_sse_payload("Understood.", None)),
             headers={"Content-Type": "text/event-stream"},
         )
     )

@@ -126,6 +126,7 @@ impl EventLoop {
         startup: Vec<StartupEvent>,
         timings: &mut crate::startup::StartupRecorder,
     ) -> Result<Option<LoopExit>> {
+        self.follow_width();
         for event in startup {
             if let StartupEvent::MissingApiKey { provider, env_key } = event {
                 return Ok(Some(LoopExit::NeedsOnboarding { provider, env_key }));
@@ -146,9 +147,17 @@ impl EventLoop {
         Ok(None)
     }
 
+    /// The layouts that depend on the terminal width learn it before the first frame; resizes follow.
+    fn follow_width(&mut self) {
+        if let Ok(size) = self.terminal.size() {
+            crate::sessions_page::folders::resized(&mut self.app, size.width);
+        }
+    }
+
     /// Run to an exit; the summary is read only on a clean exit, the only case
     /// that prints the resume block.
     pub async fn run(mut self) -> RunOutcome {
+        self.follow_width();
         let result = match self.steady().await {
             Ok(LoopExit::Quit) => Ok(()),
             Ok(LoopExit::NeedsOnboarding { provider, env_key }) => {
@@ -224,6 +233,9 @@ pub async fn stop_session(
     telemetry: &mut mpsc::Receiver<crate::telemetry::TelemetryEvent>,
 ) {
     crate::telemetry::flush(client, session_id, telemetry).await;
+    // The session was on screen until now: nothing in it is unread.
+    let seen = serde_json::json!({ "sessionId": session_id });
+    let _ = client.request(method::SESSION_MARK_AS_SEEN, seen).await;
     let params = serde_json::json!({"sessionId": session_id, "reason": null});
     let _ = client.request(method::SESSION_STOP, params).await;
 }

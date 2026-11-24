@@ -9,7 +9,9 @@ use super::super::super::markdown::{self, LinkedLines};
 use super::super::super::{pulse, theme};
 use crate::selection::{fold, Fold};
 use crate::server::CheckpointEntry;
-use crate::transcript::grouping::{compaction_failed, paints_compaction, paints_resumed};
+use crate::transcript::grouping::{
+    compaction_failed, paints_compaction, paints_resumed, RELOCATION,
+};
 use crate::utils::clean;
 
 /// Columns the `✓`/`⚠`/`✕` marker and its pad take before the text.
@@ -81,11 +83,12 @@ pub(super) fn push_command_error(lines: &mut LinkedLines, text: &str, width: u16
 }
 
 /// A client checkpoint and a resumed turn settle as a status message; a server
-/// compaction paints as a compact status row; other server checkpoints paint
-/// nothing.
+/// compaction paints as a compact status row; a move to another folder paints
+/// as a status naming both folders; other server checkpoints paint nothing.
 pub(super) fn push_checkpoint(
     lines: &mut LinkedLines,
     checkpoint: &CheckpointEntry,
+    width: u16,
     local: bool,
     in_progress: bool,
     pulse_frame: usize,
@@ -93,10 +96,24 @@ pub(super) fn push_checkpoint(
     let message = checkpoint.message.as_deref().unwrap_or(&checkpoint.kind);
     if local || paints_resumed(checkpoint) {
         push_settled(lines, message);
+    } else if checkpoint.kind == RELOCATION {
+        // Markdown like a command's status row: the folders show as code.
+        let text = relocation_text(checkpoint).unwrap_or_else(|| message.to_owned());
+        push_command_status(lines, &text, width, "✓", theme::status_ready());
     } else if paints_compaction(checkpoint) {
         let failed = compaction_failed(checkpoint);
         push_compact_status(lines, message, in_progress, failed, pulse_frame);
     }
+}
+
+/// `Moved from ~/a to ~/b`, from the folders the checkpoint records.
+fn relocation_text(checkpoint: &CheckpointEntry) -> Option<String> {
+    let to = checkpoint.details.get("cwd")?.as_str()?;
+    let from = checkpoint
+        .details
+        .get("previousCwd")
+        .and_then(|from| from.as_str());
+    Some(crate::commands::cd::moved_text(from, to))
 }
 
 /// A settled status message: the `✓` indicator then its text, whose extra lines

@@ -45,6 +45,8 @@ pub fn load_older_history_page(app: &mut App, client: &Arc<Client>) {
         || app.view.last_total == u16::MAX
         || app.subagents.viewed_subagent_id.is_some()
         || app.view.transcript_cache.preparing_history()
+        // A switch paints the preview's copy of a session not resumed yet.
+        || crate::sessions_page::switching(app)
     {
         return;
     }

@@ -5,7 +5,8 @@ copy on disk. Now the process holds one catalog per account and endpoint, with
 the copy on disk for the next process: a session is served the one held at
 once, an old one is refreshed in the background, a failure backs off for every
 session, and a session only waits, within its cap, for an account never
-fetched on this machine. Each open session follows the catalog held
+fetched on this machine (the fetch in flight, or the retry once the backoff is
+over). Each open session follows the catalog held
 (``followed``) and loads a change at its next turn boundary.
 """
 
@@ -38,7 +39,6 @@ from vibe.core.platform_auth._mistral import (
     mistral_credentials,
     resolve_principal,
 )
-from vibe.core.utils.fetch_wait import FetchFailures
 from vibe.core.utils.remote_cache import (
     Cached,
     CacheStore,
@@ -101,7 +101,7 @@ class ModelCatalogKey:
         """The key *config* reads its catalog under, without resolving the
         credential; ``None`` with the catalog off or no known account.
         """
-        if not config.experimental_enable_model_catalog:
+        if not config.enable_model_catalog:
             return None
         mistral = mistral_credentials(config, credentials)
         if mistral is None or (principal := mistral.cached_principal()) is None:
@@ -115,7 +115,7 @@ class ModelCatalogKey:
         """``current``, resolving the credential's principal when not known
         yet (a token refresh, a tenant discovery).
         """
-        if not config.experimental_enable_model_catalog:
+        if not config.enable_model_catalog:
             return None
         mistral = mistral_credentials(config, credentials)
         if mistral is None or (principal := await resolve_principal(mistral)) is None:
@@ -124,10 +124,6 @@ class ModelCatalogKey:
 
 
 class ModelCatalogFetchFailedError(Exception):
-    pass
-
-
-class ModelCatalogAccountChangedError(ModelCatalogFetchFailedError):
     pass
 
 
@@ -157,9 +153,6 @@ class ModelCatalogService:
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._fetch_catalog = fetch
-        # Set once a first fetch failed or outlasted its cap: no later session
-        # of the process holds its first turn for one.
-        self.failures = FetchFailures()
         self._cache: RemoteCache[ModelCatalogKey, ModelCatalogResponse] = RemoteCache(
             "Model catalog",
             policy,
@@ -215,6 +208,20 @@ class ModelCatalogService:
             model_locked=any(model.requires is not None for model in catalog.models),
         )
 
+    async def refreshed_for_picker(self, key: ModelCatalogKey | None) -> None:
+        """A model picker opening: fetch a catalog that locks a model now,
+        whatever its age, and wait for the fetch, whatever its outcome. The
+        user may have just upgraded their plan. A catalog that locks nothing
+        takes ``check_for_picker``'s rule.
+        """
+        catalog = await self.load(key)
+        if key is None or catalog is None:
+            return
+        if not any(model.requires is not None for model in catalog.models):
+            await self.check(key)
+            return
+        await self.refresh(key)
+
     async def checked_for_locked_model(
         self, key: ModelCatalogKey, *, timeout_s: float
     ) -> None:
@@ -233,17 +240,9 @@ class ModelCatalogService:
             # The fetch bounds itself, after reading the disk copy: a shorter
             # wait here would give up on a fetch about to answer.
             entry = await self._cache.first(key, timeout_s=math.inf)
-        except RemoteFetchFailedError as exc:
-            # Only a failure that leaves nothing held: a failed refresh behind
-            # one is no reason for a later session to skip its wait. Nor is a
-            # sign-in during the fetch: the new account's catalog is still due.
-            if not isinstance(exc.cause, ModelCatalogAccountChangedError):
-                self.failures.mark()
+        except RemoteFetchFailedError:
             return None
-        if entry is None:
-            self.failures.mark()
-            return None
-        return entry.value
+        return entry.value if entry is not None else None
 
     async def refresh(self, key: ModelCatalogKey) -> ModelCatalogResponse | None:
         try:
@@ -266,7 +265,7 @@ class ModelCatalogService:
             raise ModelCatalogFetchFailedError("Model catalog fetch failed")
         if not key.is_current():
             # Neither held for this key nor written to disk.
-            raise ModelCatalogAccountChangedError("Signed in to another account")
+            raise ModelCatalogFetchFailedError("Signed in to another account")
         logger.info(
             "Model catalog fetched: %d models, recommended=%s",
             len(catalog.models),

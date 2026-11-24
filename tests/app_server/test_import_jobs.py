@@ -749,6 +749,7 @@ async def test_app_server_discovers_claude_projects_and_their_sessions(
     server = AppServer(
         transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         imports_service=ImportsService({
             ImportHarness.CLAUDE: ClaudeImportService(

@@ -23,7 +23,7 @@ QUIET ?=
 QUIET_FLAGS = $(if $(QUIET),-q,)
 NEXTEST_QUIET = $(if $(QUIET),--status-level none --final-status-level fail,)
 
-.PHONY: start run build build_test release fmt fmt_check lint lint_test check clean sweep test test_rust test_golden store_golden profile-stress view-stress
+.PHONY: start run build build_test build_debug release fmt fmt_check lint lint_test check clean sweep test test_rust test_golden store_golden profile-stress view-stress
 
 # The golden snapshot pytest run, shared by `test` and `test_golden`.
 GOLDEN_CMD = uv run --no-project --with "pyte==0.8.2" --with "rich==15.0.0" --with pytest --with pytest-timeout --with pytest-xdist \
@@ -51,6 +51,9 @@ build:          ## Optimized release build only
 
 build_test:     ## Release build in the CI configuration, used by every test target
 	cargo build $(M) --release $(TEST_CARGO_FLAGS)
+
+build_debug:    ## Debug build in the CI configuration, used by goldens when no release build exists
+	cargo build $(M) --bins $(TEST_CARGO_FLAGS)
 
 fmt:            ## Format
 	cargo fmt $(M)

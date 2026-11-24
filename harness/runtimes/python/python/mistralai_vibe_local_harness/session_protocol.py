@@ -316,11 +316,16 @@ class ProtocolError(SessionProtocolModel):
 
 
 class PublicError(SessionProtocolModel):
-    """Client-facing error details; retry policy remains runtime-private."""
+    """Client-facing error details."""
 
     message: str
     code: str | None = None
     details: JsonValue = None
+    # Set only on a failed Turn's error: whether the same request may succeed
+    # if sent again, as the Runtime decided. Absent means false or not
+    # recorded (older errors). Omitted while false, so older readers still
+    # read an error that is not retryable.
+    retryable: bool = Field(default=False, exclude_if=lambda value: not value)
 
 
 class TokenUsage(SessionProtocolModel):

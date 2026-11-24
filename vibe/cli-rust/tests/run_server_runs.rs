@@ -22,16 +22,13 @@ fn an_app_server_takes_k_runs_and_the_next_one_starts_another() {
     server.start_run("a", json!({}));
     server.start_run("b", json!({}));
     assert_eq!(server.request("ping", json!({}))["result"], json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.app_servers(), 1);
     server.start_run("c", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.app_servers(), 2);
 
     server.request("run/stop", json!({"runId": "a"}));
     server.ended("a", Duration::from_secs(5));
     server.start_run("d", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.app_servers(), 2, "a freed slot is reused");
 }
 
@@ -42,10 +39,8 @@ fn an_app_server_takes_16_runs_by_default() {
     for run in 0..16 {
         server.start_run(&format!("r{run}"), json!({}));
     }
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.app_servers(), 1);
     server.start_run("r16", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.app_servers(), 2);
 }
 
@@ -59,7 +54,6 @@ fn a_run_awaiting_its_close_acknowledgement_takes_no_room() {
     server.request("run/stop", json!({"runId": "slow-a"}));
     server.ended("slow-a", Duration::from_secs(5));
     server.start_run("c", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
 
     assert_eq!(
         server.app_servers(),
@@ -75,7 +69,6 @@ fn an_app_server_exits_once_its_last_run_ends() {
     server.initialize();
     server.start_run("a", json!({}));
     server.start_run("b", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.app_servers(), 2);
 
     server.request("run/stop", json!({"runId": "a"}));
@@ -94,7 +87,6 @@ fn an_app_server_exits_once_its_last_run_ends() {
     }
     assert_eq!(alive().len(), 1, "the busy app-server stays");
     server.start_run("c", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.app_servers(), 3, "a new run starts a new app-server");
 }
 
@@ -106,11 +98,9 @@ fn new_runs_fill_the_fuller_app_server_so_the_other_drains_and_exits() {
     for run in ["a", "b", "c"] {
         server.start_run(run, json!({}));
     }
-    std::thread::sleep(Duration::from_millis(300));
     let first = server.app_server_pids();
     assert_eq!(first.len(), 1);
     server.start_run("d", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     let second: Vec<i32> = server
         .app_server_pids()
         .into_iter()
@@ -156,7 +146,6 @@ fn a_crashed_app_server_fails_only_its_own_runs() {
     assert_eq!(crashed["outcome"], "infrastructure_failure");
     assert_eq!(crashed["exitCode"], 2);
     server.start_run("after", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         server.app_servers(),
         3,
@@ -179,7 +168,6 @@ fn app_servers_get_two_malloc_arenas_unless_the_user_chose() {
         let mut server = RunServer::start_with_env("fake", &[], &env);
         server.initialize();
         server.start_run("a", json!({}));
-        std::thread::sleep(Duration::from_millis(300));
 
         assert_eq!(server.app_server_arenas(), [expected]);
     }

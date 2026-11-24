@@ -1,0 +1,8 @@
+[
+ {
+  "method": "config/read",
+  "params": {
+   "cwd": "<cwd>"
+  }
+ }
+]

@@ -34,6 +34,7 @@ mod unix {
     use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use vibe_rs::mouse::pixels::reported_cell;
     use vibe_rs::terminal_capabilities::read;
@@ -101,6 +102,28 @@ mod unix {
         assert_eq!(palette[6], Some([0x00, 0xcd, 0xcd]));
         assert_eq!(palette[12], Some([0x5c, 0x5c, 0xff]));
         assert_eq!(reported_cell(&response), Some((17, 36)));
+    }
+
+    #[test]
+    fn a_terminal_that_never_sends_device_attributes_ends_the_probe_at_the_timeout() {
+        let (master, mut slave) = pty();
+        let mut responder = master.try_clone().unwrap();
+        let thread = thread::spawn(move || {
+            let mut sent = vec![0; request().len()];
+            responder.read_exact(&mut sent).unwrap();
+            responder.write_all(b"\x1b[?1016;2$y").unwrap();
+        });
+        let started = Instant::now();
+        let response = query(&mut slave).unwrap();
+        let waited = started.elapsed();
+        thread.join().unwrap();
+        assert_eq!(response, b"\x1b[?1016;2$y");
+        assert_eq!(read(&response).status, "unanswered");
+        assert!(
+            waited >= Duration::from_millis(400),
+            "returned after {waited:?}"
+        );
+        assert!(waited < Duration::from_secs(5), "returned after {waited:?}");
     }
 
     #[test]

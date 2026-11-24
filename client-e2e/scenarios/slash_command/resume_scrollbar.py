@@ -1,4 +1,4 @@
-"""An overflowing `/resume` list shows its scrollbar."""
+"""An overflowing Sessions page list shows its scrollbar."""
 
 from __future__ import annotations
 
