@@ -32,7 +32,15 @@ from e2e.pty.screen import Snapshot
 # The client probes the terminal background (OSC 11) and falls back to the OS
 # appearance, so a scenario that renders before the config lands would follow
 # the host. Answer dark by default; a scenario overrides it by query string.
-_DEFAULT_TERMINAL_RESPONSES = {"\x1b]11;?\x07": "\x1b]11;rgb:0000/0000/0000\x1b\\"}
+# The startup probe (terminal_probe) reads until the Device Attributes (DA1)
+# reply, which every terminal sends; unanswered, each launch waits out the
+# 500 ms tty_query timeout. Answer as a VT220 with color and leave the probe's
+# other queries (palette, pixel reports, XTVERSION) unanswered, as a terminal
+# without those features would.
+_DEFAULT_TERMINAL_RESPONSES = {
+    "\x1b]11;?\x07": "\x1b]11;rgb:0000/0000/0000\x1b\\",
+    "\x1b[c": "\x1b[?62;22c",
+}
 
 # setup/* is per-scenario: every interactive run sends a pre-session
 # setup/status (the base fixture's hasApiKey:true keeps the wizard closed),
@@ -95,6 +103,8 @@ class HeadlessCapture:
     stderr: str
     returncode: int
     requests: list[Request]
+    stdout_text: str = ""
+    """Raw stdout, for a text run that prints only once the turn completes."""
 
 
 def capture_scenario(scenario: Scenario, launch: Launcher = exec_launch) -> Capture:
@@ -167,11 +177,29 @@ def _headless_events(scenario: Scenario) -> list[AppServerEvent]:
     events = batches[0]
     if events[-1].get("method") != "turn/completed":
         raise ValueError("headless scenario must end with turn/completed")
+    if (scenario.headless_stdout is None) == (not scenario.stdout_before_completion):
+        raise ValueError(
+            "headless scenario needs exactly one of stdout_before_completion (JSONL)"
+            " or headless_stdout (text)"
+        )
     return events
 
 
+def _text_capture(process: subprocess.Popen[str], request_log: Path) -> HeadlessCapture:
+    """Capture a text run's whole stdout once it exits."""
+    stdout_text, stderr = process.communicate(timeout=10)
+    return HeadlessCapture(
+        stdout_before_completion=[],
+        stdout=[],
+        stderr=stderr,
+        returncode=process.returncode,
+        requests=_read_logged_requests(request_log),
+        stdout_text=stdout_text,
+    )
+
+
 def capture_headless_scenario(scenario: Scenario) -> HeadlessCapture:
-    """Capture JSONL before releasing the scenario's final `turn/completed`."""
+    """Capture JSONL before releasing the final `turn/completed`, or all stdout without any."""
     events = _headless_events(scenario)
 
     with _isolated_home() as home, replay_fixture(scenario) as fixture:
@@ -190,6 +218,9 @@ def capture_headless_scenario(scenario: Scenario) -> HeadlessCapture:
             text=True,
         )
         try:
+            if scenario.headless_stdout is not None:
+                os.write(step_fd, b"\0" * len(events))
+                return _text_capture(process, request_log)
             os.write(step_fd, b"\0" * (len(events) - 1))
             if process.stdout is None:
                 raise RuntimeError("headless client stdout is unavailable")

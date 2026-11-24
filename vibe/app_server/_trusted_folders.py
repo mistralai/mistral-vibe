@@ -30,7 +30,11 @@ from vibe.app_server.protocol import (
     WorkspaceTrustFoldersUpdateParams,
 )
 from vibe.core.paths import TRUSTED_FOLDERS_FILE
-from vibe.core.trusted_folders import TrustedFoldersManager, TrustFileError
+from vibe.core.trusted_folders import (
+    TrustedFoldersManager,
+    TrustFileError,
+    is_in_scratch_dir,
+)
 
 TRUST_FOLDER_METHODS = frozenset({
     "workspace/trust/folders/add",
@@ -204,6 +208,9 @@ def _problem(folder: Path) -> TrustFolderProblem | None:
     # Compared as files, not strings: a case-insensitive disk spells home many ways.
     if any(_same_folder(folder, holder) for holder in (home, *home.parents)):
         return "home"
+    # No decision trusts a scratch folder, so storing one would mislead.
+    if is_in_scratch_dir(folder):
+        return "scratch"
     return None
 
 

@@ -27,6 +27,8 @@ Known gaps versus the legacy engine-side recorder, accepted for this backend:
 from __future__ import annotations
 
 from collections.abc import Callable
+from itertools import islice
+from operator import attrgetter, indexOf
 from pathlib import Path
 from typing import Literal
 
@@ -38,10 +40,12 @@ from vibe.app_server._effect_models import (
     FileWriteEffectDetail,
     FileWriteEffectOutput,
 )
+from vibe.app_server.events import unchanged_prefix
 from vibe.app_server.models import (
     BlockedSessionStatus,
     CompletedEffectState,
     PublicEffectEntry,
+    PublicHistoryEntry,
     PublicMessageEntry,
     PublicSessionState,
     RunningSessionStatus,
@@ -75,6 +79,9 @@ class RewindFileSnapshots:
         self._reconstructed: set[str] = set()
         self._observed_active: str | None = None
         self._status_known = False
+        # The history the last file-effect pass read: its entries recorded all
+        # they had to, so a later pass skips them while they stay the same objects.
+        self._observed_history: tuple[PublicHistoryEntry, ...] = ()
 
     def observe(self, state: PublicSessionState) -> None:
         """Fold one translated session state into the snapshot log."""
@@ -239,7 +246,10 @@ class RewindFileSnapshots:
         self._close_open_turn()
 
     def _record_file_effects(self, state: PublicSessionState) -> None:
-        for entry in state.history or []:
+        history = tuple(state.history or ())
+        start = unchanged_prefix(self._observed_history, history)
+        self._observed_history = history
+        for entry in history[start:]:
             if (
                 not isinstance(entry, PublicEffectEntry)
                 or entry.id in self._seen_effects
@@ -440,10 +450,17 @@ def _active_turn(state: PublicSessionState) -> str | None:
 
 def _turn_anchor(state: PublicSessionState, turn_id: str) -> str | None:
     """The user entry that opened ``turn_id``: the id a rewind names."""
+    history = state.history or []
+    # The search starts at the Turn's first entry, found in C: a Turn begins
+    # near the end of a long history.
+    try:
+        start = indexOf(map(attrgetter("turn_id"), history), turn_id)
+    except ValueError:
+        return None
     return next(
         (
             entry.id
-            for entry in state.history or []
+            for entry in islice(history, start, None)
             if isinstance(entry, PublicMessageEntry)
             and entry.role == "user"
             and entry.turn_id == turn_id

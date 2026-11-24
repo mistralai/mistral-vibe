@@ -1,0 +1,32 @@
+[
+ {
+  "method": "workspace/trust/status",
+  "params": {
+   "cwd": "/tmp/vibe_e2e_fixtures/cd"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.slash_command_used",
+   "properties": {
+    "command": "cd",
+    "command_type": "builtin"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ },
+ {
+  "method": "telemetry/record",
+  "params": {
+   "correlateLastRequest": false,
+   "name": "vibe.session_relocation.done",
+   "properties": {
+    "reason": "error",
+    "status": "error"
+   },
+   "sessionId": "00000000-0000-4000-8000-000000000001"
+  }
+ }
+]

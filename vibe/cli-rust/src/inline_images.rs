@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::app::App;
 use crate::server::{ImageAttachment, ImageSource};
+use crate::transcript::Transcript;
 
 const PREFIX: &str = "vibe-image-";
 
@@ -18,7 +19,12 @@ pub fn target(entry_id: &str, index: usize) -> String {
 
 /// Write the linked inline image to a temporary file and open it.
 pub fn open(app: &App, target: &str) {
-    let Some(path) = materialize(app, target) else {
+    open_from(&app.view.transcript, target);
+}
+
+/// Open an inline image of `transcript`, such as the one a Sessions page preview shows.
+pub fn open_from(transcript: &Transcript, target: &str) {
+    let Some(path) = path_in(transcript, target) else {
         tracing::warn!(target, "inline image is no longer in the transcript");
         return;
     };
@@ -28,9 +34,10 @@ pub fn open(app: &App, target: &str) {
     }
 }
 
-fn materialize(app: &App, target: &str) -> Option<PathBuf> {
+/// The file an inline image of `transcript` is written to, `None` when it is not there.
+pub fn path_in(transcript: &Transcript, target: &str) -> Option<PathBuf> {
     let (entry_id, index) = target.rsplit_once('#')?;
-    let raw = app.view.transcript.entry_raw(entry_id)?;
+    let raw = transcript.entry_raw(entry_id)?;
     let attachment = attachments(raw).into_iter().nth(index.parse().ok()?)?;
     match attachment.source {
         ImageSource::Inline { data } => inline_file(&data, &attachment.mime_type),

@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
-from typing import Literal, Self
+from typing import Self
 
 from pydantic import (
     BaseModel,
@@ -23,7 +23,9 @@ from pydantic import (
 )
 
 from mistralai_vibe_local_harness.vibe._mcp_models import (
+    MCP_DESCRIPTOR_CACHE_FORMAT_VERSION,
     JsonSchema,
+    MCPDescriptorCacheFormatVersion,
     MCPDescriptorCacheKey,
     MCPDescriptorCachePolicy,
     MCPDescriptorCacheRecordV1,
@@ -38,8 +40,8 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-class _CacheKeyV1(_StrictModel):
-    format_version: Literal[1] = Field(alias="formatVersion")
+class _CacheKey(_StrictModel):
+    format_version: MCPDescriptorCacheFormatVersion = Field(alias="formatVersion")
     naming_version: str = Field(alias="namingVersion", min_length=1)
     server_fingerprint: str = Field(alias="serverFingerprint", min_length=1)
     authorization_descriptor_revision: str = Field(
@@ -47,20 +49,21 @@ class _CacheKeyV1(_StrictModel):
     )
 
 
-class _DescriptorV1(_StrictModel):
+class _Descriptor(_StrictModel):
     remote_name: str = Field(alias="remoteName", min_length=1)
     description: str = ""
     input_schema: JsonValue = Field(alias="inputSchema", default_factory=dict)
     output_schema: JsonValue = Field(alias="outputSchema", default=None)
     annotations: JsonValue = None
+    meta: JsonValue = None
 
 
-class _CacheRecordV1(_StrictModel):
-    key: _CacheKeyV1
+class _CacheRecord(_StrictModel):
+    key: _CacheKey
     source_name: str = Field(alias="sourceName", min_length=1)
     discovered_at: datetime = Field(alias="discoveredAt")
     last_used_at: datetime = Field(alias="lastUsedAt")
-    descriptors: list[_DescriptorV1]
+    descriptors: list[_Descriptor]
 
     def to_runtime(self) -> MCPDescriptorCacheRecordV1:
         return MCPDescriptorCacheRecordV1(
@@ -86,6 +89,7 @@ class _CacheRecordV1(_StrictModel):
                         else _JSON_SCHEMA.validate_python(descriptor.output_schema)
                     ),
                     annotations=descriptor.annotations,
+                    meta=descriptor.meta,
                 )
                 for descriptor in self.descriptors
             ),
@@ -112,6 +116,7 @@ class _CacheRecordV1(_StrictModel):
                     "inputSchema": descriptor.input_schema,
                     "outputSchema": descriptor.output_schema,
                     "annotations": descriptor.annotations,
+                    "meta": descriptor.meta,
                 }
                 for descriptor in record.descriptors
             ],
@@ -119,9 +124,18 @@ class _CacheRecordV1(_StrictModel):
 
 
 class MCPDescriptorCache:
+    """Descriptor records under ``root``, in one folder per format version.
+
+    A build reads, writes and evicts only its own format's folder
+    (``v<format>``), and never the files at ``root`` itself: a build that
+    keeps its records there globs them and deletes what it cannot parse, so
+    the two would wipe each other's records on every write.
+    """
+
     def __init__(self, root: Path, policy: MCPDescriptorCachePolicy) -> None:
         _validate_policy(policy)
-        self._root = root
+        self._base = root
+        self._root = root / f"v{MCP_DESCRIPTOR_CACHE_FORMAT_VERSION}"
         self._policy = policy
         self._lock = threading.RLock()
 
@@ -282,9 +296,10 @@ class MCPDescriptorCache:
         return self._root / f"{hashlib.sha256(raw.encode()).hexdigest()}.json"
 
     def _ensure_root(self) -> None:
-        self._root.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
-        with _suppress_os_error():
-            self._root.chmod(0o700)
+        for folder in (self._base, self._root):
+            folder.mkdir(parents=True, exist_ok=True, mode=PRIVATE_DIRECTORY_MODE)
+            with _suppress_os_error():
+                folder.chmod(0o700)
 
     def _replace(self, path: Path, payload: bytes) -> None:
         file_descriptor, temporary = tempfile.mkstemp(
@@ -329,7 +344,8 @@ class MCPDescriptorCache:
         for path in files:
             try:
                 size = path.stat().st_size
-                record = _parse_record(path.read_bytes())
+                payload = path.read_bytes()
+                record = _parse_record(payload)
                 last_used = record.last_used_at
                 if not _is_aware(last_used):
                     raise ValueError("naive timestamp")
@@ -362,12 +378,12 @@ class _suppress_os_error:
         return isinstance(exception, OSError)
 
 
-def _parse_record(payload: bytes) -> _CacheRecordV1:
-    return _CacheRecordV1.model_validate_json(payload, strict=True)
+def _parse_record(payload: bytes) -> _CacheRecord:
+    return _CacheRecord.model_validate_json(payload, strict=True)
 
 
 def _encode_record(record: MCPDescriptorCacheRecordV1) -> bytes:
-    model = _CacheRecordV1.from_runtime(record)
+    model = _CacheRecord.from_runtime(record)
     return model.model_dump_json(by_alias=True, exclude_none=False).encode("utf-8")
 
 

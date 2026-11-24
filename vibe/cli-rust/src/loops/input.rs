@@ -1,10 +1,10 @@
-//! `/loop` manager keys and paste: the list's, or the add form's while it is open.
+//! `/loop` manager keys and paste: the list's, or the add or edit form's while it is open.
 
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::{close, create, delete, navigate, Form, FormField};
+use super::{close, delete, navigate, save, selected, Form, FormField};
 use crate::app::App;
 use crate::chat_input::Action;
 use crate::server::Client;
@@ -24,6 +24,7 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
         KeyCode::Char('k') if plain => navigate(app, false),
         KeyCode::Char('j') if plain => navigate(app, true),
         KeyCode::Char('d') if plain => delete(app, client),
+        KeyCode::Char('r') if plain => super::run(app, client),
         KeyCode::PageUp | KeyCode::PageDown => {
             let details = &mut app.loops.details;
             details.scroll_by(key.code == KeyCode::PageDown, details.visible.max(1));
@@ -32,8 +33,18 @@ pub fn handle_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
             app.loops.error = None;
             app.loops.form = Some(Form::default());
         }
+        KeyCode::Enter | KeyCode::Char('e') if plain => edit(app),
         _ => {}
     }
+}
+
+/// Open the form on the highlighted loop.
+pub fn edit(app: &mut App) {
+    let Some(form) = selected(app).map(Form::editing) else {
+        return;
+    };
+    app.loops.error = None;
+    app.loops.form = Some(form);
 }
 
 fn form_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) {
@@ -72,11 +83,11 @@ fn submit(app: &mut App, client: &Arc<Client>) {
     if form.submission.is_some() {
         return;
     }
-    let params = match form.params(&session_id) {
-        Ok(params) => params,
+    let request = match form.request(&session_id) {
+        Ok(request) => request,
         Err(error) => return app.loops.error = Some(error),
     };
-    if create(app, client, session_id, params) {
+    if save(app, client, session_id, request) {
         let submission = app.loops.submissions;
         if let Some(form) = app.loops.form.as_mut() {
             form.submission = Some(submission);

@@ -114,7 +114,11 @@ pub fn latest(app: &App) -> Option<&PublicSessionArtifact> {
 
 /// The synced lifecycle state, `None` before the first sync.
 pub fn state(artifact: &PublicSessionArtifact) -> Option<PrState> {
-    artifact.details.as_ref()?.state
+    let details = artifact.details.as_ref()?;
+    match details.state {
+        Some(PrState::Open) if details.is_in_merge_queue => Some(PrState::Queued),
+        state => state,
+    }
 }
 
 /// The server's actionability status, `None` for merged, closed and draft PRs or before a sync.
@@ -189,6 +193,7 @@ pub fn status_label(artifact: &PublicSessionArtifact) -> Option<String> {
         (Some(PrState::Merged), _) => "merged",
         (Some(PrState::Closed), _) => "closed",
         (Some(PrState::Draft), _) => "draft",
+        (Some(PrState::Queued), _) => "queued",
         (_, Some(PrStatus::ActionNeeded)) => match reason(artifact) {
             Some(PrStatusReason::ChangesRequested) => "changes requested",
             Some(PrStatusReason::ChecksFailing) => "CI failing",

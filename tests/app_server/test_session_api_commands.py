@@ -91,7 +91,7 @@ async def test_a_model_switch_goes_through_config_write_with_its_limits(
         LocalRuntimeAdapterConfig.at(cwd=tmp_path, session_api=True),
     )
     session = await host.start(SessionStartParams(history_limit=50))
-    commands = SessionApiCommands(session)
+    commands = SessionApiCommands.local(session)
     await commands.start_turn(_start(session.session_id, "Read a"))
     await session._wait_for_pending_turns()
     core, local = session.core_config, session.adapter_config
@@ -257,7 +257,7 @@ async def test_a_turn_start_reply_without_a_start_time_gets_the_current_time(
         LocalRuntimeAdapterConfig.at(cwd=tmp_path, session_api=True),
     )
     session = await host.start(SessionStartParams(history_limit=50))
-    commands = SessionApiCommands(session)
+    commands = SessionApiCommands.local(session)
     request = commands.transport.request
 
     async def without_start_time(method: str, params: Any, result_type: Any) -> Any:
@@ -356,7 +356,7 @@ async def _session_on_a_large_model(
         ),
     )
     session = await host.start(SessionStartParams(history_limit=50))
-    commands = SessionApiCommands(session)
+    commands = SessionApiCommands.local(session)
     await commands.start_turn(_start(session.session_id, "first"))
     await session._wait_for_pending_turns()
     return host, session, commands, provider
@@ -572,7 +572,7 @@ async def test_a_subagent_approval_is_answered_through_the_session_api(
         LocalRuntimeAdapterConfig.at(cwd=tmp_path, roots=(tmp_path,), session_api=True),
     )
     root = await host.start(SessionStartParams(history_limit=20), cwd=str(tmp_path))
-    commands = SessionApiCommands(root, host)
+    commands = SessionApiCommands.local(root, host)
     await commands.start_turn(_start(root.session_id, "Delegate"))
     await asyncio.wait_for(model.child_started.wait(), timeout=5)
     [record] = host.child_session_records(root.session_id)
@@ -675,6 +675,7 @@ _KNOWN_LOCAL_FIELDS = frozenset({
     "title_prompt",
     "title_provider",
     "tool_modes",
+    "tool_result_images",
     "workspace",
 })
 _KNOWN_CORE_FIELDS = {
@@ -696,6 +697,7 @@ _KNOWN_CORE_FIELDS = {
     "context": frozenset({
         "compaction",
         "compaction_model_input_modalities",
+        "compaction_model_window",
         # The bound on live instructions, relative to the compaction threshold,
         # so a model switch keeps it; any other change of it is no model switch.
         "instructions",
@@ -748,7 +750,7 @@ async def test_rename_through_the_local_transport_is_refused(tmp_path: Path) -> 
         LocalRuntimeAdapterConfig.at(cwd=tmp_path, session_api=True),
     )
     session = await host.start(SessionStartParams(history_limit=50))
-    commands = SessionApiCommands(session)
+    commands = SessionApiCommands.local(session)
 
     # Do
     with pytest.raises(UnsupportedSessionProcedureError):

@@ -70,6 +70,14 @@ pub fn dim(color: Color) -> Style {
 pub fn muted_style() -> Style {
     dim(muted())
 }
+/// Composer placeholder text, fainter than muted labels.
+pub fn placeholder_style() -> Style {
+    match (is_ansi(), is_dark()) {
+        (true, true) => text(Color::DarkGray),
+        (true, false) => text(Color::Gray),
+        (false, _) => text(blend(background(), auto_contrast(), 0.35)),
+    }
+}
 /// Link cells under the mouse.
 pub fn link_hover_style() -> Style {
     let style = if is_ansi() {

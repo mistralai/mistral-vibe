@@ -20,10 +20,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 import logging
-from typing import Any, Protocol, assert_never
+from typing import TYPE_CHECKING, Any, Protocol, assert_never
 
 from mistralai_vibe_local_harness.protocol import RustHarnessConfig
 from mistralai_vibe_local_harness.session_api.app_server.session.models import (
@@ -103,6 +103,9 @@ from vibe.app_server.protocol import (
 )
 from vibe.user_content import UserBlobResource, UserResourceLink, UserTextResource
 
+if TYPE_CHECKING:
+    from vibe.app_server._runtime_session_port import RuntimeSessionPort
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,21 +114,58 @@ logger = logging.getLogger(__name__)
 _ACCEPTED = CommandResult(response=Accepted(accepted=True, last_event_id=None))
 
 
+type RefusalTranslation = Callable[
+    [Callable[[], Awaitable[str | None]]], AbstractAsyncContextManager[None]
+]
+"""Turns a runtime's Session API refusals into the Runtime errors the adapter maps.
+
+It receives a reader of the active Turn ID, which a Turn conflict names.
+"""
+
+
 class SessionApiCommands(SessionCommands):
-    """The Session API commands of one root Session and its subagents."""
+    """The Session API commands of one root Session and its subagents.
+
+    A local Session gets them from ``local``, over the local runtime's
+    transport. A connection to another runtime passes its own ``transport``
+    and the ``refusals`` that
+    translate that runtime's errors: its Session API classes are not the local
+    runtime's copies, so the default translation would not catch them. Such a
+    runtime settles its callbacks on its own, so it also passes
+    ``grant_before_answer=False``.
+    """
 
     def __init__(
         self,
-        session: UnifiedHarnessSessionBackend,
+        session: RuntimeSessionPort,
         children: ChildSessions | None = None,
+        *,
+        transport: LocalSessionApiTransport,
+        refusals: RefusalTranslation | None = None,
+        grant_before_answer: bool = True,
     ) -> None:
         self._session = session
         self._children = children
-        self.transport = LocalSessionApiTransport(
-            session, session_api_view_of(session), children=children
-        )
+        self.grant_before_answer = grant_before_answer
+        self.transport = transport
+        self._refusals: RefusalTranslation = refusals or _runtime_errors
         self._opened = False
         self._open_lock = asyncio.Lock()
+
+    @classmethod
+    def local(
+        cls,
+        session: UnifiedHarnessSessionBackend,
+        children: ChildSessions | None = None,
+    ) -> SessionApiCommands:
+        """The commands of a local runtime Session, over its local transport."""
+        return cls(
+            session,
+            children,
+            transport=LocalSessionApiTransport(
+                session, session_api_view_of(session), children=children
+            ),
+        )
 
     async def ensure_open(self) -> None:
         async with self._open_lock:
@@ -144,7 +184,7 @@ class SessionApiCommands(SessionCommands):
             # The API's Turn start has no field for Vibe display content.
             return turn_started(await self._session.start_turn(params))
         await self.ensure_open()
-        async with _runtime_errors(self._active_turn_id):
+        async with self._refusals(self._active_turn_id):
             response = await self.transport.request(
                 "app_server/session/turn/start",
                 ApiTurnStartParams(
@@ -170,7 +210,7 @@ class SessionApiCommands(SessionCommands):
             # The API's steer has no field for Vibe display content.
             return accepted(await self._session.steer_turn(params))
         await self.ensure_open()
-        async with _runtime_errors(self._active_turn_id):
+        async with self._refusals(self._active_turn_id):
             await self.transport.request(
                 "app_server/session/turn/steer",
                 ApiTurnSteerParams(
@@ -188,7 +228,7 @@ class SessionApiCommands(SessionCommands):
         self, params: TurnInterruptParams
     ) -> CommandResult[Accepted]:
         await self.ensure_open()
-        async with _runtime_errors(self._active_turn_id):
+        async with self._refusals(self._active_turn_id):
             await self.transport.request(
                 "app_server/session/turn/interrupt",
                 ApiInterruptParams(
@@ -205,7 +245,7 @@ class SessionApiCommands(SessionCommands):
         """Answer a callback of this Session or of one of its subagents."""
         self._require_known_session(params.session_id)
         await self.ensure_open()
-        async with _runtime_errors(self._active_turn_id):
+        async with self._refusals(self._active_turn_id):
             await self.transport.request(
                 "app_server/session/callback/result",
                 ApiCallbackResultParams.model_validate({

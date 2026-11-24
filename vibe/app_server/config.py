@@ -17,7 +17,7 @@ from vibe.config_values import (
 # Where a model comes from, as the pickers group it: `project` covers project
 # config, agent profile, env and session overrides; `local` the user config and
 # built-ins.
-ModelSource = Literal["admin", "growthbook", "catalog", "project", "local"]
+ModelSource = Literal["admin", "catalog", "project", "local"]
 
 
 class ModelRequirementView(ProtocolModel):

@@ -108,6 +108,7 @@ from mistralai_vibe_local_harness.vibe._fork import (
     history_user_anchor,
     imported_entry_id,
     skipped_user_anchor,
+    turn_public_start,
 )
 from mistralai_vibe_local_harness.vibe._local_actions import (
     HookHandlers,
@@ -214,6 +215,10 @@ from mistralai_vibe_local_harness.vibe._storage import (
     empty_runtime_state,
     history_fingerprint,
     session_is_live,
+)
+from mistralai_vibe_local_harness.vibe._subagents._closed_log import (
+    ClosedSubagentLog,
+    known_child_records,
 )
 from mistralai_vibe_local_harness.vibe._subagents._configuration import (
     LocalChildSessionBinding,
@@ -1627,7 +1632,11 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         if public_anchor is None:
             raise ValueError(f"Cannot rewind from unknown user entry: {entry_id}")
         now = _now_milliseconds()
-        entries = list(public.history.entries[:public_anchor])
+        entries = list(
+            public.history.entries[
+                : turn_public_start(public.history.entries, public_anchor)
+            ]
+        )
         entries.append({
             "type": "checkpoint",
             "id": f"checkpoint-rewind-{entry_id}",
@@ -2114,14 +2123,25 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             await asyncio.to_thread(lease.release)
 
     def references_child(self, root_session_id: str, child_session_id: str) -> bool:
+        return any(
+            child.child_session_id == child_session_id
+            for child in self._known_child_records(root_session_id)
+        )
+
+    def _known_child_records(
+        self, root_session_id: str
+    ) -> tuple[ChildSessionRecord, ...]:
         root = self._live_session(root_session_id)
         if root is None or root.ephemeral:
-            return False
-        subagents = root._runtime_for_host().runtime_state.subagents
-        return subagents is not None and any(
-            child.child_session_id == child_session_id
-            for child in subagents.children.values()
-        )
+            return ()
+        controller = self._subagent_controller(root_session_id)
+        if controller is not None:
+            return controller.known_child_records()
+        runtime = root._runtime_for_host()
+        subagents = runtime.runtime_state.subagents
+        if subagents is None:
+            return ()
+        return known_child_records(subagents, ClosedSubagentLog(runtime.session_root))
 
     def live_child(
         self, root_session_id: str, child_session_id: str
@@ -2134,21 +2154,17 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
     def child_session_records(
         self, root_session_id: str
     ) -> tuple[ChildSessionRecord, ...]:
-        """Copies of the root's persisted child records, in stored order.
+        """Copies of the root's persisted child records: its state's, in stored
+        order, then the closed ones retired from it.
 
         A resumed root carries records for children that are not bound yet;
         callers use them to enumerate children without forcing each one to load.
         The copies are read-only views: mutating harness state requires the
         runtime's own commit path.
         """
-        root = self._live_session(root_session_id)
-        if root is None or root.ephemeral:
-            return ()
-        subagents = root._runtime_for_host().runtime_state.subagents
-        if subagents is None:
-            return ()
         return tuple(
-            record.model_copy(deep=True) for record in subagents.children.values()
+            record.model_copy(deep=True)
+            for record in self._known_child_records(root_session_id)
         )
 
     def session_model_facts(self, session_id: str) -> RustModelFacts | None:
@@ -2818,7 +2834,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             if isinstance(lifecycle, DeletingSessionTree):
                 planned = tuple(lifecycle.ordered_child_session_ids)
                 remaining = planned[len(lifecycle.deleted_child_session_ids) :]
-            elif _tree_child_session_ids(stored.runtime_state):
+            elif _tree_child_session_ids(stored.runtime_state, store.session_root):
                 raise RuntimeError("root Session did not enter tree deletion")
             else:
                 planned, remaining = (), ()
@@ -2891,7 +2907,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
         runtime = session._runtime_for_host()
 
         def prepare(state: RuntimeStateV3) -> RuntimeStateV3:
-            plan = _tree_deletion_plan(state)
+            plan = _tree_deletion_plan(state, runtime.session_root)
             if plan is None:
                 return state
             return state.model_copy(update={"lifecycle": plan})
@@ -2902,7 +2918,7 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
     def _prepare_stored_tree_delete(
         store: UnifiedSessionStore, stored: StoredSession
     ) -> StoredSession:
-        plan = _tree_deletion_plan(stored.runtime_state)
+        plan = _tree_deletion_plan(stored.runtime_state, store.session_root)
         if plan is None:
             return stored
         return UnifiedHarnessSessionBackendHost._write_stored_lifecycle(
@@ -4257,7 +4273,12 @@ class UnifiedHarnessSessionBackendHost:  # noqa: PLR0904 - implements the app-se
             return
         task = asyncio.create_task(
             self._run_orphan_diagnostic(
-                parent_session_id, frozenset(_tree_child_session_ids(parent_state))
+                parent_session_id,
+                frozenset(
+                    _tree_child_session_ids(
+                        parent_state, self._session_root(parent_session_id)
+                    )
+                ),
             ),
             name=f"subagent-orphan-diagnostic:{parent_session_id}",
         )
@@ -5324,15 +5345,20 @@ def _validate_child_runtime_state(
         raise ValueError("child Session binding conflicts with its parent record")
 
 
-def _tree_child_session_ids(state: RuntimeStateV3) -> list[str]:
+def _tree_child_session_ids(state: RuntimeStateV3, session_root: Path) -> list[str]:
     if state.subagents is None:
         return []
     return sorted({
-        child.child_session_id for child in state.subagents.children.values()
+        child.child_session_id
+        for child in known_child_records(
+            state.subagents, ClosedSubagentLog(session_root)
+        )
     })
 
 
-def _tree_deletion_plan(state: RuntimeStateV3) -> DeletingSessionTree | None:
+def _tree_deletion_plan(
+    state: RuntimeStateV3, session_root: Path
+) -> DeletingSessionTree | None:
     """The deletion order to record before removing this root, if it needs one.
 
     A root with children publishes one so a crash resumes where it stopped. A
@@ -5344,7 +5370,7 @@ def _tree_deletion_plan(state: RuntimeStateV3) -> DeletingSessionTree | None:
     """
     if isinstance(state.lifecycle, DeletingSessionTree):
         return None
-    children = _tree_child_session_ids(state)
+    children = _tree_child_session_ids(state, session_root)
     if not children:
         return None
     return DeletingSessionTree(

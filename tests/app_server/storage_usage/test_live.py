@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
+from typing import Any
 
 import pytest
 
+from mistralai_vibe_local_harness.vibe import _storage
 from mistralai_vibe_local_harness.vibe._storage import SessionLease
 from tests.app_server.storage_usage._tree import NOW_MS
 from vibe.app_server._storage_usage import live
@@ -20,6 +22,7 @@ from vibe.app_server.protocol import (
     StorageUsageSnapshot,
     StorageWorktreeUsage,
 )
+from vibe.core.utils.file_lock import acquire_file_lock
 
 _GB = 10**9
 _DAY_MS = 24 * 60 * 60 * 1000
@@ -210,40 +213,72 @@ def test_an_unmeasured_worktree_the_action_frees_makes_the_number_a_lower_bound(
     ).reclaimable_at_least
 
 
-def test_a_probe_in_a_loop_never_makes_a_lease_acquire_fail(tmp_path: Path) -> None:
-    """*Prepare*: A session store and a thread probing open sessions in a loop.
-    *Do*: Acquire and release the session's lease many times meanwhile.
-    *Assert*: Every acquire succeeds, and the probe saw it open at least once.
+def test_an_acquire_during_a_probe_waits_for_it_and_never_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: A lease file a crashed process left behind, and a probe paused
+    while it holds that file's lock.
+    *Do*: Acquire the session's lease meanwhile, then let the probe finish.
+    *Assert*: The acquire waits for the lease directory lock the probe holds
+    instead of failing, then succeeds, and the next probe sees it open.
     """
     # Prepare
-    stop = threading.Event()
-    seen_open: list[bool] = []
-
-    def probe() -> None:
-        while not stop.is_set():
-            seen_open.append("s1" in open_sessions([tmp_path]))
-
-    prober = threading.Thread(target=probe)
-    prober.start()
+    leases = tmp_path / "active"
+    leases.mkdir()
+    (leases / "s1.lock").write_bytes(b"\0")
+    probing = threading.Event()
+    resume = threading.Event()
+    settled = threading.Event()
+    waited: list[bool] = []
     failures: list[BaseException] = []
+
+    def pause_probe(file: Any, *, blocking: bool = False) -> None:
+        acquire_file_lock(file, blocking=blocking)
+        if not blocking:
+            probing.set()
+            resume.wait()
+
+    def report_wait(file: Any, *, blocking: bool = False) -> None:
+        if blocking:
+            try:
+                acquire_file_lock(file)
+                return
+            except BlockingIOError:
+                waited.append(True)
+                settled.set()
+        acquire_file_lock(file, blocking=blocking)
+
+    monkeypatch.setattr(live, "acquire_file_lock", pause_probe)
+    monkeypatch.setattr(_storage, "_acquire_file_lock", report_wait)
+    lease = SessionLease(tmp_path, "s1")
+
+    def take() -> None:
+        try:
+            lease.acquire()
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            settled.set()
+
+    prober = threading.Thread(target=open_sessions, args=([tmp_path],))
+    prober.start()
+    probing.wait()
+    taker = threading.Thread(target=take)
 
     # Do
     try:
-        for _ in range(300):
-            lease = SessionLease(tmp_path, "s1")
-            try:
-                lease.acquire()
-            except BaseException as exc:
-                failures.append(exc)
-                continue
-            lease.release()
+        taker.start()
+        settled.wait()
     finally:
-        stop.set()
+        resume.set()
+        taker.join()
         prober.join()
 
     # Assert
     assert failures == []
-    assert any(seen_open)
+    assert waited == [True]
+    assert open_sessions([tmp_path]) == {"s1"}
+    lease.release()
 
 
 def test_an_unheld_lease_file_is_not_open_and_is_kept(tmp_path: Path) -> None:

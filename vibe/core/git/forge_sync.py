@@ -75,8 +75,10 @@ _FETCH_TIMEOUT_SECONDS = 10
 def _gh_pull_request_fields(number: str, *, cursor: str | None, required: bool) -> str:
     is_required = f"isRequired(pullRequestNumber: {number})" if required else ""
     after = f", after: {cursor}" if cursor is not None else ""
+    # Only the first page supplies lifecycle fields to the parser.
+    merge_queue = _GH_MERGE_QUEUE_FIELD if cursor is None else ""
     return f"""
-      title state isDraft headRefName baseRefName author {{ login }}
+      title state isDraft{merge_queue} headRefName baseRefName author {{ login }}
       createdAt closedAt mergedAt mergeCommit {{ oid }}
       mergeStateStatus reviewDecision
       commits(last: 1) {{ nodes {{ commit {{
@@ -114,8 +116,12 @@ query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {{
 # title. GitHub computes the merge state on request: it reads UNKNOWN at
 # first, so it would change the fingerprint without a change of status.
 # Cheap: GitHub reads 50 of them in one query in about 3 s, for 1 point.
-_GH_CHECK_FIELDS = """
-  state isDraft reviewDecision headRefOid
+_GH_MERGE_QUEUE_FIELD = " isInMergeQueue"
+_GH_CHECK_FIELDS = (
+    """
+  state isDraft"""
+    + _GH_MERGE_QUEUE_FIELD
+    + """ reviewDecision headRefOid
   commits(last: 1) { nodes { commit { statusCheckRollup {
     state
     contexts(first: 0) {
@@ -123,6 +129,7 @@ _GH_CHECK_FIELDS = """
       statusContextCountsByState { state count }
     }
   } } } }"""
+)
 
 GITHUB_CHECK_BATCH = 50
 GITHUB_FULL_READ_BATCH = 6
@@ -130,6 +137,7 @@ GITHUB_FULL_READ_BATCH = 6
 # GitHub Enterprise Server hosts that do not know ``isRequired``: an unknown
 # field fails the whole query, so their reads leave it out.
 _HOSTS_WITHOUT_IS_REQUIRED: set[str] = set()
+_HOSTS_WITHOUT_MERGE_QUEUE: set[str] = set()
 
 
 class ForgeSyncError(ForgeError):
@@ -182,6 +190,7 @@ class PullRequestSnapshot:
     source_branch: str
     target_branch: str
     author: str
+    is_in_merge_queue: bool = False
     created_at: str | None = None
     closed_at: str | None = None
     merged_at: str | None = None
@@ -530,6 +539,8 @@ def parse_github_pull_request(payload: object, checked_at: str) -> PullRequestSn
     return PullRequestSnapshot(
         state=state,
         title=title,
+        is_in_merge_queue=state == "open"
+        and pull_request.get("isInMergeQueue") is True,
         source_branch=_opt_str("headRefName") or "",
         target_branch=_opt_str("baseRefName") or "",
         author=author if isinstance(author, str) else "",
@@ -875,6 +886,9 @@ def _github_graphql(
     An alias that fails alone (a PR that does not exist) is ``null`` in the
     data: the rest of the answer stands, although gh exits with an error.
     """
+    host_key = host.lower()
+    if host_key in _HOSTS_WITHOUT_MERGE_QUEUE:
+        query = query.replace(_GH_MERGE_QUEUE_FIELD, "")
     result = _run_process(
         [gh_path, "api", "graphql", "-f", f"query={query}"], "GH_HOST", host, label
     )
@@ -887,6 +901,20 @@ def _github_graphql(
     error_text = json.dumps(errors) if errors else ""
     if "RATE_LIMITED" in error_text:
         _github_reset(gh_path, host, RateLimitedSyncError(f"{label} rate limited"))
+    if (
+        data is None
+        and _GH_MERGE_QUEUE_FIELD in query
+        and isinstance(errors, list)
+        and any(
+            isinstance(error, dict)
+            and isinstance(extensions := error.get("extensions"), dict)
+            and extensions.get("code") == "undefinedField"
+            and extensions.get("fieldName") == "isInMergeQueue"
+            for error in errors
+        )
+    ):
+        _HOSTS_WITHOUT_MERGE_QUEUE.add(host_key)
+        return _github_graphql(gh_path, host, query, label)
     if "isRequired" in error_text and data is None:
         raise _IsRequiredUnknownError(label)
     if isinstance(data, dict):

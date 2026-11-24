@@ -55,11 +55,14 @@ from mistralai_vibe_local_harness.vibe._session_api_extensions import (
     VibeExtensionEvent,
     VibeSessionReadResponse,
 )
+from vibe.app_server._harness_errors import harness_call
 from vibe.app_server._session_api_commands import SessionApiCommands
+from vibe.app_server._session_api_follower import SessionApiFeed
 from vibe.app_server._session_api_projection import ApiHistoryProjection
 from vibe.app_server._session_api_session import (
     ApiSessionState,
     AppliedBatch,
+    final_answer,
     runtime_turn,
 )
 from vibe.app_server._session_api_streams import SessionApiStreams, SessionBatch
@@ -68,21 +71,20 @@ from vibe.app_server._session_backend_port import (
     SessionBackendResult,
     SessionEventSubscription,
 )
-from vibe.app_server._unified_harness_backend_adapter import (
-    _HISTORY_PAGE_WINDOW,
-    _harness_call,
-    _history_limit,
-    _ProjectedHistory,
-    _public_turn,
-    _retrying_event,
-    _turns_from_history,
-    _with_app_server_entries,
-    _with_callbacks_in_history,
+from vibe.app_server._session_projection import (
+    HISTORY_PAGE_WINDOW,
+    ProjectedHistory,
+    public_turn,
+    retrying_event,
+    turns_from_history,
+    with_app_server_entries,
+    with_callbacks_in_history,
 )
 from vibe.app_server._unified_history_projection import (
     with_approval_display,
     with_available_path_scopes,
 )
+from vibe.app_server.events import unchanged_prefix
 from vibe.app_server.models import (
     PublicCallbackEntry,
     PublicEntryGenerationStatus,
@@ -116,6 +118,11 @@ class ApiHistoryWindow:
     history_before_cursor: str | None
 
 
+def _history_limit(params: SessionReadParams) -> int:
+    history = params.history
+    return history.limit if history is not None else HISTORY_PAGE_WINDOW
+
+
 class SessionApiPath:
     """The Session API side of one root Session's adapter."""
 
@@ -136,6 +143,15 @@ class SessionApiPath:
         # Reads waiting for their bookmark to be published, by API event ID.
         # Each gets the client event ID current when that event went out.
         self._pending_reads: dict[str, list[asyncio.Future[int]]] = {}
+        # The root's last live history with its MCP app routes linked, and
+        # the projection it came from: an update links only what changed.
+        self._linked: tuple[ApiHistoryProjection | None, list[PublicHistoryEntry]] = (
+            None,
+            [],
+        )
+        # Whether a root question was resolved since the last live update: the
+        # client then holds the resolution's copy, which the next update links.
+        self._question_resolved = False
 
     async def read(self, params: SessionReadParams) -> SessionReadResponse:
         """Read the root Session through the Session API.
@@ -223,7 +239,7 @@ class SessionApiPath:
             if state is None:
                 try:
                     read, extensions = await self._read_page(
-                        item.session_id, _HISTORY_PAGE_WINDOW
+                        item.session_id, HISTORY_PAGE_WINDOW
                     )
                 except Exception:
                     if item.session_id == adapter.session_id:
@@ -281,7 +297,7 @@ class SessionApiPath:
         page = await self._with_lone_result_call(session_id, latest)
         has_older = page.next_cursor is not None
         projection = ApiHistoryProjection(session_id, adapter._session_display_roots())
-        history = _with_app_server_entries(
+        history = with_app_server_entries(
             projection.reset(page.items),
             has_older=has_older,
             goal_notices=adapter._goal_notices.notices,
@@ -309,7 +325,7 @@ class SessionApiPath:
                 ApiTurnsListParams(
                     session_id=session_id,
                     page=ApiPageRequest(
-                        limit=_HISTORY_PAGE_WINDOW, direction="forward", cursor=cursor
+                        limit=HISTORY_PAGE_WINDOW, direction="forward", cursor=cursor
                     ),
                 ),
                 ApiTurnsListResponse,
@@ -318,9 +334,9 @@ class SessionApiPath:
             cursor = listed.page.next_cursor
             if cursor is None:
                 break
-        window = await self.read_window(_HISTORY_PAGE_WINDOW)
+        window = await self.read_window(HISTORY_PAGE_WINDOW)
         known = {
-            turn.id: turn for turn in _turns_from_history(window.history, session_id)
+            turn.id: turn for turn in turns_from_history(window.history, session_id)
         }
         turns: list[PublicTurn] = []
         session_created_at: int | None = None
@@ -337,7 +353,9 @@ class SessionApiPath:
                     session_created_at = await self._session_created_at(session_id)
                 started_at = session_created_at
             raw = runtime_turn(state, session_id, {}, fallback_started_at=started_at)
-            turn = _public_turn(_HARNESS_TURN.validate_python(raw))
+            turn = public_turn(_HARNESS_TURN.validate_python(raw)).model_copy(
+                update={"final_answer": final_answer(state)}
+            )
             if seen is not None:
                 turn = turn.model_copy(update={"input_entry_id": seen.input_entry_id})
             turns.append(turn)
@@ -378,7 +396,7 @@ class SessionApiPath:
         followed = streams is not None and adapter._events_subscribed
         try:
             before = await self._read(adapter.session_id, 1)
-            compacted_reply = await _harness_call(
+            compacted_reply = await harness_call(
                 self.commands.compact(params.extra_instructions or None)
             )
             if streams is not None and followed:
@@ -392,9 +410,7 @@ class SessionApiPath:
             raise
         state = adapter._translated_state if followed else None
         if state is None:
-            read, extensions = await self._read(
-                adapter.session_id, _HISTORY_PAGE_WINDOW
-            )
+            read, extensions = await self._read(adapter.session_id, HISTORY_PAGE_WINDOW)
             compacted = ApiSessionState(
                 adapter.session_id, adapter._session_display_roots()
             )
@@ -424,7 +440,7 @@ class SessionApiPath:
         state = self._states.get(adapter.session_id)
         if state is None:
             return
-        read, extensions = await self._read(adapter.session_id, _HISTORY_PAGE_WINDOW)
+        read, extensions = await self._read(adapter.session_id, HISTORY_PAGE_WINDOW)
         state.reset(read, extensions)
         previous = adapter._translated_state
         if previous is not None:
@@ -436,6 +452,15 @@ class SessionApiPath:
                     "turns": reread.turns,
                 }
             )
+
+    def follower_feed(self) -> SessionApiFeed:
+        """The Session follower's own stream of the root Session."""
+        adapter = self._adapter
+        return SessionApiFeed(
+            self.commands,
+            display_roots=adapter._session_display_roots,
+            public_turn=public_turn,
+        )
 
     def release_events(self) -> None:
         """Let the stream go on, as the adapter shuts down."""
@@ -562,14 +587,16 @@ class SessionApiPath:
         state: ApiSessionState,
         read: ApiSessionReadResponse | None = None,
         *,
-        callbacks_in_history: bool = True,
         event_id: int | None = None,
         has_older: bool = False,
+        live_from: PublicSessionState | None = None,
     ) -> SessionReadResponse:
         """Vibe's read response for one Session API state.
 
         A read carries open callbacks as history entries, as a resync must.
-        The live update leaves them out: the callback's own events add it.
+        A live update from the state the client holds (``live_from``) leaves
+        them out: the callback's own events add it. It also links MCP app
+        routes only to the entries that changed (see ``_linked_history``).
         """
         has_older = has_older or (
             read is not None
@@ -581,14 +608,53 @@ class SessionApiPath:
                 state=state.runtime_state(), history_limit=0, watermark=0
             ),
             event_id=event_id,
-            projected_history=_ProjectedHistory(
-                entries=state.history, has_older=has_older
+            projected_history=(
+                ProjectedHistory(
+                    entries=self._linked_history(state, live_from),
+                    has_older=has_older,
+                    apps_linked=True,
+                )
+                if live_from is not None
+                else ProjectedHistory(entries=state.history, has_older=has_older)
             ),
         )
-        current = response.state
-        if callbacks_in_history:
-            current = _with_callbacks_in_history(current)
+        current = _with_final_answers(response.state, state)
+        if live_from is None:
+            current = with_callbacks_in_history(current)
         return response.model_copy(update={"state": current})
+
+    def _linked_history(
+        self, state: ApiSessionState, client_state: PublicSessionState
+    ) -> list[PublicHistoryEntry]:
+        """The root's history with its MCP app routes linked, for a live update.
+
+        An entry links the same route each time (``SessionMcpApps`` keeps the
+        first lookup), so the entries no event replaced since the last update
+        keep their linked copies. An entry the client holds as a settled
+        callback takes the client's copy here too, as
+        ``_with_settled_callbacks_kept`` does afterwards, so that later updates
+        still share it with the client: a changed entry, or any entry once a
+        callback was resolved since the last update.
+        """
+        projection = state.history_projection
+        history, unchanged = projection.take_history()
+        source, linked = self._linked
+        start = unchanged if source is projection else 0
+        linked = [*linked[:start], *self._adapter._mcp_apps.apply(history[start:])]
+        # A resolution sent since the last update can name any entry; otherwise
+        # only the changed entries can need the client's copy.
+        if self._question_resolved:
+            start = 0
+            self._question_resolved = False
+        if any(_is_settled_callback(entry) for entry in linked[start:]):
+            settled = {
+                entry.id: entry
+                for entry in client_state.history or []
+                if _is_settled_callback(entry)
+            }
+            linked[start:] = [settled.get(entry.id, entry) for entry in linked[start:]]
+        self._linked = (projection, linked)
+        return list(linked)
 
     def _adopt_child(
         self,
@@ -608,7 +674,7 @@ class SessionApiPath:
             HarnessSessionSnapshot(
                 state=state.runtime_state(), history_limit=0, watermark=0
             ),
-            projected_history=_ProjectedHistory(entries=state.history, has_older=False),
+            projected_history=ProjectedHistory(entries=state.history, has_older=False),
         )
 
     async def _translated_events(
@@ -689,6 +755,11 @@ class SessionApiPath:
             raise RuntimeError("Unified event stream has no translated state")
         if root:
             translated, current = await self._root_update(state, applied, previous)
+            # Only a question's resolution joins the client's history.
+            self._question_resolved |= any(
+                cast(Mapping[str, Any], callback["detail"]).get("kind") == "user_input"
+                for callback in applied.resolved_callbacks
+            )
         else:
             translated, current = await self._child_update(state, previous)
         adapter._translated_state = current
@@ -738,8 +809,8 @@ class SessionApiPath:
             # A live update keeps the window it extends, older entries included.
             current = self._read_response(
                 state,
-                callbacks_in_history=False,
                 has_older=previous.history_before_cursor is not None,
+                live_from=previous,
             ).state
             adapter._track_context_tokens(current)
             current = current.model_copy(
@@ -771,7 +842,7 @@ class SessionApiPath:
             and previous.retrying != current.retrying
             and current.retrying is not None
         ):
-            translated.append(_retrying_event(state.session_id, current.retrying))
+            translated.append(retrying_event(state.session_id, current.retrying))
         goal_events, root_state = await adapter._child_goal_progress(root_state)
         return [*translated, *goal_events], root_state
 
@@ -846,16 +917,49 @@ def _with_settled_callbacks_kept(
     rebuilt from the API callback and differs in its opening time; a client
     refuses any change to a completed entry, so the copy it has stays.
     """
+    previous_history = previous.history or []
+    current_history = current.history or []
+    # The shared prefix is already the client's own copies.
+    start = unchanged_prefix(previous_history, current_history)
     settled = {
         entry.id: entry
-        for entry in previous.history or []
-        if isinstance(entry, PublicCallbackEntry)
-        and entry.generation_status is PublicEntryGenerationStatus.COMPLETED
+        for entry in previous_history[start:]
+        if _is_settled_callback(entry)
     }
-    if not settled or not current.history:
+    if not settled or not current_history:
         return current
-    history = [settled.get(entry.id, entry) for entry in current.history]
+    history = [
+        *current_history[:start],
+        *(settled.get(entry.id, entry) for entry in current_history[start:]),
+    ]
     return current.model_copy(update={"history": history})
+
+
+def _with_final_answers(
+    current: PublicSessionState, state: ApiSessionState
+) -> PublicSessionState:
+    """``current``, with each Turn's final answer taken from the Session API.
+
+    Vibe's Turn is built in the Runtime's format, which has no answer: the
+    answer comes from the API's termination, which the local runtime fills only
+    with stated reasons.
+    """
+    if not current.turns:
+        return current
+    turns = [
+        turn.model_copy(update={"final_answer": answer})
+        if (answer := state.final_answer_of(turn.id)) is not None
+        else turn
+        for turn in current.turns
+    ]
+    return current.model_copy(update={"turns": turns})
+
+
+def _is_settled_callback(entry: PublicHistoryEntry) -> bool:
+    return (
+        isinstance(entry, PublicCallbackEntry)
+        and entry.generation_status is PublicEntryGenerationStatus.COMPLETED
+    )
 
 
 async def _batches_as_events(

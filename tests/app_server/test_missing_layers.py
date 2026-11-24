@@ -231,19 +231,16 @@ def _set_local_config(config_dir: Path, **values: object) -> None:
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
 
 
-def _model_catalog_eval(enabled: bool) -> EvalResponse:
-    return EvalResponse.model_validate({
-        "features": {
-            ExperimentName.MODEL_CATALOG.value: {"defaultValue": enabled, "rules": []}
-        }
-    })
+def _unset_local_config(config_dir: Path, key: str) -> None:
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config.pop(key, None)
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
 
 
 @pytest.fixture
 def remote_config_enabled(config_dir: Path) -> None:
-    _set_local_config(
-        config_dir, enable_telemetry=True, experimental_enable_model_catalog=True
-    )
+    _set_local_config(config_dir, enable_telemetry=True, enable_model_catalog=True)
 
 
 def _set_limits(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
@@ -448,7 +445,7 @@ async def test_account_switch_during_picker_fetch_never_caches_previous_response
     assert load_cached_managed_config(mistral_credential_cache_key(config)) is None
     assert load_cached_eval_response(config) is None
     catalog_key = ModelCatalogKey.current(
-        VibeConfigSchema(experimental_enable_model_catalog=True), None
+        VibeConfigSchema(enable_model_catalog=True), None
     )
     assert await process_services.model_catalog.load(catalog_key) is None
 
@@ -477,9 +474,43 @@ async def test_a_read_with_nothing_cached_answers_with_the_fetched_config(
 
 
 @pytest.mark.asyncio
+async def test_a_read_without_growthbook_lists_the_catalog_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    # No catalog setting anywhere, telemetry and experiments off: no eval is
+    # sent, and the catalog is fetched all the same.
+    _set_local_config(config_dir, enable_telemetry=False, experiments={"enable": False})
+    _unset_local_config(config_dir, "enable_model_catalog")
+    remote = _Remote(monkeypatch, org_server)
+
+    view = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" in {model.alias for model in view.models}
+    assert remote.calls == {"org": 1, "eval": 0, "catalog": 1}
+
+
+@pytest.mark.asyncio
+async def test_the_catalog_turned_off_by_the_environment_is_not_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+    org_server: FakeOrgConfigServer,
+) -> None:
+    monkeypatch.setenv("VIBE_ENABLE_MODEL_CATALOG", "false")
+    remote = _Remote(monkeypatch, org_server)
+
+    view = (await _read_config(_handler(process_services=process_services))).config
+
+    assert "catalog-model" not in {model.alias for model in view.models}
+    assert remote.calls["catalog"] == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("remote_config_enabled", "short_limits")
 @pytest.mark.parametrize("org_limit", [_LIMIT])
-async def test_hanging_endpoints_answer_local_defaults_and_are_not_waited_for_again(
+async def test_hanging_endpoints_answer_local_defaults_within_each_limit(
     monkeypatch: pytest.MonkeyPatch,
     process_services: ProcessServices,
     org_server: FakeOrgConfigServer,
@@ -490,15 +521,8 @@ async def test_hanging_endpoints_answer_local_defaults_and_are_not_waited_for_ag
     started = time.monotonic()
     first = (await _read_config(handler)).config
     first_duration = time.monotonic() - started
-    # GrowthBook's and the catalog's own limits start once the org config's
-    # ends: all three have failed or hit their limit once both are marked.
-    while not (
-        process_services.experiments.failures.failed
-        and process_services.model_catalog.failures.failed
-    ):
-        await asyncio.sleep(0.01)
-    # Any wait now would take seconds, far above the read's own cost.
-    _set_limits(monkeypatch, 5.0)
+    # A later read joins the fetches still running, within its own limits,
+    # and asks nothing again.
     started = time.monotonic()
     second = (await _read_config(handler)).config
     second_duration = time.monotonic() - started
@@ -507,47 +531,9 @@ async def test_hanging_endpoints_answer_local_defaults_and_are_not_waited_for_ag
     assert first_duration < 1.5
     assert first.default_approval_policy != "ask"
     assert "catalog-model" not in {model.alias for model in first.models}
-    # Every source failed or hit its limit: the second read neither fetches
-    # nor waits.
-    assert second_duration < 2.5
+    assert second_duration < 1.5
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
     assert second.default_approval_policy == first.default_approval_policy
-
-
-@pytest.mark.asyncio
-async def test_a_catalog_the_eval_turns_on_is_fetched_for_the_read(
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-    org_server: FakeOrgConfigServer,
-    config_dir: Path,
-) -> None:
-    _set_local_config(config_dir, enable_telemetry=True)
-    remote = _Remote(
-        monkeypatch, org_server, eval_response=_model_catalog_eval(enabled=True)
-    )
-
-    view = (await _read_config(_handler(process_services=process_services))).config
-
-    assert "catalog-model" in {model.alias for model in view.models}
-    assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
-
-
-@pytest.mark.asyncio
-async def test_a_catalog_the_eval_leaves_off_is_not_fetched(
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-    org_server: FakeOrgConfigServer,
-    config_dir: Path,
-) -> None:
-    _set_local_config(config_dir, enable_telemetry=True)
-    remote = _Remote(
-        monkeypatch, org_server, eval_response=_model_catalog_eval(enabled=False)
-    )
-
-    view = (await _read_config(_handler(process_services=process_services))).config
-
-    assert "catalog-model" not in {model.alias for model in view.models}
-    assert remote.calls == {"org": 1, "eval": 1, "catalog": 0}
 
 
 @pytest.mark.asyncio
@@ -560,7 +546,7 @@ async def test_a_self_hosted_read_never_asks_growthbook(
     _set_local_config(
         config_dir,
         enable_telemetry=True,
-        experimental_enable_model_catalog=True,
+        enable_model_catalog=True,
         providers=[
             {
                 "name": "mistral",
@@ -692,7 +678,7 @@ async def test_a_slow_org_config_is_not_counted_against_the_other_fetches(
 ) -> None:
     # The org config takes most of the read's limit, so the read answers
     # before GrowthBook and the catalog land. Each lands within its own limit,
-    # so neither is recorded as failed: a session start still waits for them.
+    # so the next read finds them.
     # Read limit 2 s; GrowthBook and the catalog land at 2.6 s, 0.8 s before
     # their own limits, which start once the org config is in at 1.4 s. Each
     # step keeps 0.6 s of slack for a loaded worker.
@@ -707,8 +693,6 @@ async def test_a_slow_org_config_is_not_counted_against_the_other_fetches(
     second = (await _read_config(handler)).config
 
     assert "catalog-model" not in {model.alias for model in first.models}
-    assert not process_services.experiments.failures.failed
-    assert not process_services.model_catalog.failures.failed
     assert "catalog-model" in {model.alias for model in second.models}
     assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
 
@@ -743,13 +727,11 @@ async def test_the_fetches_follow_the_org_config(
 ) -> None:
     # Local config has the catalog off and telemetry on; the org config turns
     # the catalog on and telemetry off, so no eval is sent.
-    _set_local_config(
-        config_dir, enable_telemetry=True, experimental_enable_model_catalog=False
-    )
+    _set_local_config(config_dir, enable_telemetry=True, enable_model_catalog=False)
     remote = _Remote(
         monkeypatch,
         org_server,
-        org_toml="experimental_enable_model_catalog = true\nenable_telemetry = false\n",
+        org_toml="enable_model_catalog = true\nenable_telemetry = false\n",
     )
 
     view = (await _read_config(_handler(process_services=process_services))).config
@@ -792,9 +774,7 @@ async def test_the_picker_fetches_the_catalog_through_the_process_service(
     config = (await _read_config(_handler(process_services=process_services))).config
 
     assert "catalog-model" in {model.alias for model in config.models}
-    key = await ModelCatalogKey.of(
-        VibeConfigSchema(experimental_enable_model_catalog=True), None
-    )
+    key = await ModelCatalogKey.of(VibeConfigSchema(enable_model_catalog=True), None)
     assert key is not None
     assert await process_services.model_catalog.ensure(key) == _catalog()
     assert remote.calls["catalog"] == 1
@@ -802,19 +782,49 @@ async def test_the_picker_fetches_the_catalog_through_the_process_service(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("remote_config_enabled")
-async def test_a_source_that_already_failed_is_not_fetched(
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-    org_server: FakeOrgConfigServer,
+async def test_a_failed_source_is_fetched_again_once_its_retry_delay_passed(
+    monkeypatch: pytest.MonkeyPatch, org_server: FakeOrgConfigServer
 ) -> None:
-    # The session path recorded these failures; the read shares them.
+    # Like the org config: a failed GrowthBook eval or catalog is not asked
+    # again within its retry delay, and a read after it waits for the retry.
+    clock = [1_000_000.0]
+    services = fake_process_services(org_server, clock=lambda: clock[0])
     remote = _Remote(monkeypatch, org_server)
-    process_services.experiments.failures.mark()
-    process_services.model_catalog.failures.mark()
+    offline = [True]
+    initialize = ExperimentManager.initialize
+    catalog = remote._catalog
 
-    await _read_config(_handler(process_services=process_services))
+    async def eval_or_fail(
+        manager: ExperimentManager, attributes: ExperimentAttributes
+    ) -> None:
+        if offline[0]:
+            remote.calls["eval"] += 1
+            return
+        await initialize(manager, attributes)
 
-    assert remote.calls == {"org": 1, "eval": 0, "catalog": 0}
+    async def catalog_or_fail(*args: Any) -> ModelCatalogResponse | None:
+        if offline[0]:
+            remote.calls["catalog"] += 1
+            return None
+        return await catalog(*args)
+
+    monkeypatch.setattr(ExperimentManager, "initialize", eval_or_fail)
+    remote._catalog = catalog_or_fail  # type: ignore[method-assign]
+    handler = _handler(process_services=services)
+    try:
+        await _read_config(handler)
+        await _read_config(handler)
+        assert remote.calls == {"org": 1, "eval": 1, "catalog": 1}
+
+        offline[0] = False
+        clock[0] += ORG_CONFIG_POLICY.retry_after_s
+        view = (await _read_config(handler)).config
+
+        assert remote.calls == {"org": 1, "eval": 2, "catalog": 2}
+        assert view.default_approval_policy == "ask"
+        assert "catalog-model" in {model.alias for model in view.models}
+    finally:
+        await services.close()
 
 
 class _RecordingHost(HostRequestHandler):
@@ -852,6 +862,7 @@ async def test_the_server_tells_picker_reads_whether_a_session_is_attached(
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=host,
     )

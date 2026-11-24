@@ -10,8 +10,9 @@ const NARROW_NO_BREAK_SPACE: char = '\u{202f}';
 mod list;
 
 pub use list::{
-    pasted_image_path, pasted_image_path_on, pasted_image_paths, pasted_image_paths_on,
-    path_candidates, path_candidates_on, paths_resolve, paths_resolve_on, MAX_PASTED_PATHS,
+    escape_on, pasted_image_path, pasted_image_path_on, pasted_image_paths, pasted_image_paths_on,
+    path_candidates, path_candidates_on, paths_resolve, paths_resolve_on, shell_path,
+    shell_path_on, unescape_on, MAX_PASTED_PATHS,
 };
 
 pub fn has_supported_path_root(candidate: &str, windows: bool) -> bool {
@@ -101,7 +102,7 @@ fn is_mention_path_char(character: char) -> bool {
     character.is_alphanumeric() || "._/\\-()[]{}~".contains(character)
 }
 
-fn is_windows_drive_path(candidate: &str) -> bool {
+pub(crate) fn is_windows_drive_path(candidate: &str) -> bool {
     let bytes = candidate.as_bytes();
     bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
@@ -142,7 +143,7 @@ fn expanded_path(candidate: &str) -> Option<PathBuf> {
     Some(PathBuf::from(candidate))
 }
 
-fn home_dir() -> Option<PathBuf> {
+pub(crate) fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)

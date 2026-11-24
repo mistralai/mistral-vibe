@@ -38,7 +38,7 @@ from .content import ContentBlock, TextContentBlock, refuse_unsupported_blocks
 type FileChangeStatus = Literal["proposed", "approved", "denied", "applied", "failed"]
 type NoticeLevel = Literal["info", "warning", "error"]
 type NoticeKind = Literal["tool_discovery", "operation_progress"]
-type CheckpointKind = Literal["compaction", "rollback", "resume", "custom"]
+type CheckpointKind = Literal["compaction", "rollback", "resume", "custom", "model_change"]
 type HistoryEntryType = Annotated[
     Literal[
         "message",
@@ -330,6 +330,11 @@ class ResourceHistoryEntry(HistoryEntryBase):
 
 
 class CheckpointHistoryEntry(HistoryEntryBase):
+    """A marker in the history that is not conversation content.
+
+    A ``model_change`` checkpoint has ``details`` ``{"model": <the new model>}``.
+    """
+
     type: Literal["checkpoint"] = "checkpoint"
     checkpoint_kind: CheckpointKind | UnknownValue
     message: str | None = None

@@ -128,6 +128,7 @@ pub fn renders_nothing(entry: &HistoryEntry, local: bool) -> bool {
         HistoryEntry::Checkpoint(checkpoint) => {
             !local
                 && !(checkpoint.kind == "model_change"
+                    || checkpoint.kind == RELOCATION
                     || paints_compaction(checkpoint)
                     || paints_resumed(checkpoint))
         }
@@ -136,6 +137,9 @@ pub fn renders_nothing(entry: &HistoryEntry, local: bool) -> bool {
         _ => false,
     }
 }
+
+/// The checkpoint a session's move to another folder (`/cd`) leaves in its history.
+pub const RELOCATION: &str = "relocation";
 
 /// Whether a server checkpoint paints as a compaction row. `/compact` paints its
 /// own local row, so a manual compaction paints none, live or resumed.

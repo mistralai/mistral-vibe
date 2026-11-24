@@ -69,6 +69,7 @@ mod onboarding_round;
 mod onboarding_setup_scenarios;
 mod pending_commands_ready;
 mod piped_stdin;
+mod rail_last_use;
 mod replay_clock;
 mod runtime_config_refresh;
 mod server_multiplex;

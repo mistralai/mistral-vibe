@@ -129,8 +129,12 @@ fn enters_rail(app: &App, key: &KeyEvent) -> bool {
 
 /// Handle application-level bindings before a modal consumes local keys.
 pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -> Option<bool> {
-    // Where Tab moves through something, Shift+Tab moves back through it instead.
-    if key.code == KeyCode::BackTab && !crate::focus::tab_navigates(app) {
+    // Where Tab moves through something, Shift+Tab moves back through it instead;
+    // the Sessions page takes Shift+Tab itself.
+    if key.code == KeyCode::BackTab
+        && !crate::focus::tab_navigates(app)
+        && app.focus() != Focus::SessionsPage
+    {
         agents::cycle(app, client);
         return Some(false);
     }
@@ -180,7 +184,7 @@ pub fn handle_priority_key(app: &mut App, client: &Arc<Client>, key: KeyEvent) -
     if crate::tmux_hint::handle_key(app, &key) {
         return Some(false);
     }
-    if key.modifiers.contains(KeyModifiers::SHIFT) {
+    if key.modifiers.contains(KeyModifiers::SHIFT) && app.focus() != Focus::SessionsPage {
         match key.code {
             KeyCode::Up => scroll_chat(app, true, KEY_SCROLL_STEP),
             KeyCode::Down => scroll_chat(app, false, KEY_SCROLL_STEP),
@@ -432,6 +436,8 @@ fn handle_key_inner(
             subagents::show_main_chat(app, true);
         }
         KeyCode::Esc if completion_manager::dismiss(app) => app.overlays.last_escape = None,
+        // The server is opening a session: it lands whatever is pressed, so Esc waits for it.
+        KeyCode::Esc if crate::sessions_page::switching(app) => app.overlays.last_escape = None,
         KeyCode::Esc if app.session.shell_operation_id.is_some() => {
             crate::commands::shell::interrupt(app, client);
             app.overlays.last_escape = Some(crate::clock::now());
@@ -525,7 +531,14 @@ fn handle_escape(app: &mut App, client: &Arc<Client>) {
         return;
     }
     if app.chat_input.full_text().is_empty() {
-        rewind::start(app, client);
+        match submission::rewind_hint(app) {
+            Some(hint) => crate::ui::notice::show_sticky(
+                app,
+                crate::app::Severity::Warning,
+                &format!("Rewind is not available — {hint}"),
+            ),
+            None => rewind::start(app, client),
+        }
         return;
     }
     reset_history_state(app);
@@ -848,7 +861,9 @@ fn handle_paste_inner(app: &mut App, text: &str) -> Option<(usize, String, Vec<S
     app.chat_input.anchor = None;
     let text = app.chat_input.open_pasted_mode(text);
     // A path list stays inline: the existence probe turns it into compact mentions.
-    let candidates = match app.chat_input.mode.names_images() {
+    // A `/cd` argument stays a path: `/cd` reads it, not the model.
+    let cd_argument = crate::dir_completion::span(app, app.chat_input.cursor).is_some();
+    let candidates = match app.chat_input.mode.names_images() && !cd_argument {
         true => paste_path::path_candidates(text),
         false => Vec::new(),
     };
@@ -868,6 +883,15 @@ fn handle_paste_inner(app: &mut App, text: &str) -> Option<(usize, String, Vec<S
 fn handle_ctrl_c(app: &mut App, client: &Arc<Client>) -> bool {
     // A rail window hides the composer, so it closes before an unseen draft is cleared or a subagent view arms quit.
     if crate::rail::close_window(app) {
+        return false;
+    }
+    if app.focus() == Focus::SessionsPage {
+        crate::sessions_page::close(app);
+        return false;
+    }
+    // The server is opening a session the page picked: it lands whatever is
+    // pressed, so Ctrl+C neither cancels it nor arms quit meanwhile.
+    if crate::sessions_page::switching(app) {
         return false;
     }
     if app.focus() == Focus::Loops {

@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
 
 use super::{
-    artifacts_modal, goal_panel, goal_row, hint_line, list_cursor, subagent_list, theme, todo,
+    artifacts_modal, goal_panel, goal_row, hint_line, subagent_list, tasks_window, theme, todo,
 };
 use crate::app::App;
 use crate::goal::format;
@@ -18,9 +18,13 @@ use crate::todo_tracker::TodoStatus;
 /// Content rows a window shows at most before it clips.
 const MAX_ROWS: u16 = 10;
 
-/// The open window, unless it is a subagent list with no rows to show.
+/// The open window, unless it is a subagent list with no rows to show; the loop manager draws as its own box.
 fn shown(app: &App) -> Option<Item> {
-    rail::open_item(app).filter(|item| *item != Item::Agents || subagent_list::height(app) > 0)
+    rail::open_item(app).filter(|item| match item {
+        Item::Loops => false,
+        Item::Agents => subagent_list::height(app) > 0,
+        _ => true,
+    })
 }
 
 /// The window's rows in the box's slot: at least `box_height`, so opening one never moves the rail.
@@ -37,17 +41,19 @@ fn height(app: &App, screen: Rect) -> u16 {
         return 0;
     };
     let cap = MAX_ROWS.min((screen.height / 2).saturating_sub(2));
-    match content_rows(app, item, screen.width.saturating_sub(4)).min(cap) {
+    match content_rows(app, item, screen.width.saturating_sub(4), cap).min(cap) {
         0 => 0,
         rows => rows + 2,
     }
 }
 
-/// Rows the window's content needs at `width` columns, the goal's objective and todos wrapped.
-fn content_rows(app: &App, item: Item, width: u16) -> u16 {
+/// Rows the window's content needs at `width` columns, up to `cap`, the goal's objective and todos wrapped.
+fn content_rows(app: &App, item: Item, width: u16, cap: u16) -> u16 {
     match item {
+        // `shown` never yields the loop manager, which draws as its own box.
+        Item::Loops => 0,
         Item::Agents => subagent_list::height(app),
-        Item::Tasks => app.session.background_tasks.len() as u16,
+        Item::Tasks => tasks_window::content_rows(app, width, cap),
         Item::Prs => crate::artifacts_modal::option_count(app) as u16,
         Item::Goal => goal_lines(app, width).len() as u16,
         Item::Plan => plan_lines(app, width).len() as u16,
@@ -73,6 +79,10 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     };
     crate::mouse::register_region(app, area, crate::mouse::MouseTarget::RailWindow);
     app.view.rail_window_selection_region = super::selection::frame_region(content);
+    if item == Item::Tasks {
+        tasks_window::draw(app, f, area, content);
+        return super::selection::overlay_region(app, f, crate::selection::RegionId::RailWindow);
+    }
     let text = match item {
         Item::Goal => goal_lines(app, content.width),
         Item::Plan => plan_lines(app, content.width),
@@ -90,11 +100,12 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
             };
             subagent_list::draw(app, f, list);
         }
-        Item::Tasks => tasks(app, f, content),
         Item::Prs => artifacts_modal::draw_rows(app, f, content),
+        Item::Loops | Item::Tasks => {}
         Item::Goal | Item::Plan => {
             let top = match app.rail.scroll {
                 Scroll::Current => current_row(app, content.width),
+                Scroll::End => app.rail.scroll_max,
                 Scroll::Row(row) => row,
             };
             app.rail.scroll_top = top.min(app.rail.scroll_max);
@@ -105,7 +116,7 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
 }
 
 /// The border, `─ title ─` on the left of the top edge, the hints that fit on the right of the bottom edge.
-fn frame(f: &mut Frame, area: Rect, title: Vec<Span<'static>>, hints: &[Hint]) {
+pub(super) fn frame(f: &mut Frame, area: Rect, title: Vec<Span<'static>>, hints: &[Hint]) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(theme::border_style());
@@ -138,6 +149,8 @@ fn title(app: &App, item: Item) -> Vec<Span<'static>> {
     let bold = theme::text(theme::foreground()).add_modifier(Modifier::BOLD);
     let muted = theme::muted_style();
     let (head, detail) = match item {
+        // The loop manager has its own box, the tasks window its own title.
+        Item::Loops | Item::Tasks => return Vec::new(),
         Item::Agents => match app.subagents.viewed_child() {
             Some(child) => (
                 format!("Viewing {}", crate::subagents::display_name(&child.name)),
@@ -153,10 +166,6 @@ fn title(app: &App, item: Item) -> Vec<Span<'static>> {
             }
         },
         Item::Prs => return artifacts_modal::title(app),
-        Item::Tasks => (
-            "Background tasks".to_owned(),
-            app.session.background_tasks.len().to_string(),
-        ),
         Item::Goal => {
             let Some(goal) = &app.goal.goal else {
                 return Vec::new();
@@ -183,61 +192,17 @@ fn hints(app: &App, item: Item, scrolls: bool) -> Vec<Hint> {
     let mut hints = match item {
         Item::Agents if app.subagents.viewed_subagent_id.is_some() => vec![hints::BACK],
         Item::Agents => vec![hints::NAVIGATE, (key::ENTER, action::VIEW), hints::CLOSE],
-        Item::Tasks => vec![hints::NAVIGATE, ("s", action::STOP), hints::CLOSE],
         Item::Prs => artifacts_modal::hints(app),
         Item::Goal => match &app.goal.goal {
             Some(goal) => goal_panel::detail_hints(goal),
             None => vec![hints::CLOSE],
         },
-        Item::Plan => vec![hints::CLOSE],
+        Item::Loops | Item::Plan | Item::Tasks => vec![hints::CLOSE],
     };
     if scrolls {
         hints.insert(0, (key::NAV, action::SCROLL));
     }
     hints
-}
-
-/// One `▪ command` row per running task, the highlighted one on the list-cursor bar, a scrollbar on overflow.
-fn tasks(app: &mut App, f: &mut Frame, content: Rect) {
-    let rows = app.session.background_tasks.len();
-    let scrolls = rows > usize::from(content.height);
-    let options = Rect {
-        width: content.width.saturating_sub(if scrolls { 2 } else { 0 }),
-        ..content
-    };
-    let offset = app.tasks_panel.list.layout_rows(rows, options);
-    let target = crate::mouse::MouseTarget::TasksPanel;
-    crate::mouse::register_region(app, content, target);
-    for (row, index) in (offset..rows).take(options.height.into()).enumerate() {
-        let row = row as u16;
-        let highlighted = index == app.tasks_panel.list.selected();
-        let line_area = Rect {
-            y: options.y + row,
-            height: 1,
-            ..options
-        };
-        if highlighted {
-            list_cursor::paint(f, line_area);
-        }
-        let (text, _) = list_cursor::styles(highlighted);
-        let glyph = match highlighted {
-            true => text,
-            false => theme::text(theme::text_accent()),
-        };
-        let command = app.session.background_tasks[index].command.clone();
-        let line = Line::from(vec![Span::styled("▪ ", glyph), Span::styled(command, text)]);
-        f.buffer_mut()
-            .set_line(line_area.x, line_area.y, &line, line_area.width);
-    }
-    if scrolls {
-        let bar = Rect {
-            x: content.right() - 1,
-            width: 1,
-            ..content
-        };
-        let (total, visible) = (rows as u16, options.height);
-        super::scrollbar::draw(app, f, target, bar, total, visible, offset as u16);
-    }
 }
 
 /// The objective wrapped to `width`, then its time and token usage.

@@ -20,6 +20,7 @@ from vibe.core.git.worktree.repository import (
     WorktreeRelease,
     WorktreeReleaseOutcome,
     WorktreeRepository,
+    access_roots_at,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "WorktreeRelease",
     "WorktreeReleaseOutcome",
     "WorktreeRepository",
+    "access_roots_at",
 ]

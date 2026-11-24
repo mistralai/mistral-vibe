@@ -19,9 +19,24 @@ from vibe.app_server.local import LocalHarnessHost, LocalHarnessOptions
 from vibe.app_server.models import PublicMessageEntry
 from vibe.app_server.protocol import (
     ClientCapabilities,
+    EmptyResponse,
+    ProjectsListParams,
+    ProjectsListResponse,
+    SessionArchiveParams,
+    SessionArchiveResponse,
+    SessionDeleteParams,
+    SessionForkParams,
+    SessionForkResponse,
+    SessionListParams,
+    SessionListResponse,
+    SessionMarkAsSeenParams,
     SessionOptions,
+    SessionPinParams,
+    SessionPinResponse,
     SessionReadParams,
     SessionReadResponse,
+    SessionTitleUpdateParams,
+    SessionTitleUpdateResponse,
 )
 from vibe.app_server.session import AppServerSession
 
@@ -495,6 +510,94 @@ async def test_fork_during_a_turn_after_a_compaction_copies_the_turns_before_it(
     copied = _texts(fork.state.history)
     assert copied[-2:] == ["Second", "Second answer"]
     assert "Running" not in copied
+
+
+@pytest.mark.asyncio
+async def test_the_sessions_page_acts_on_other_sessions_during_a_turn(
+    backend_contract_mistral_api: respx.Route,
+    backend_contract_mistral_response: Callable[..., httpx.Response],
+    backend_contract_gated_mistral_response: Callable[..., httpx.Response],
+    backend_contract_persistent_connection: BackendContractConnection,
+    backend_contract_persistent_session: AppServerSession,
+) -> None:
+    """*Prepare*: Two stored sessions beside the attached one, whose turn runs.
+    *Do*: Make every call the Sessions page makes while busy (ADR 0012).
+    *Assert*: Each succeeds and the attached turn keeps running.
+    """
+    # Prepare
+    started, release = asyncio.Event(), asyncio.Event()
+    backend_contract_mistral_api.mock(
+        side_effect=[
+            backend_contract_mistral_response("First answer"),
+            backend_contract_gated_mistral_response(
+                "Running answer", started=started, release=release
+            ),
+        ]
+    )
+    session = backend_contract_persistent_session
+    client = backend_contract_persistent_connection.client
+    await _act(session, "First", "user-1")
+    other = (await session.resources.sessions.fork(attach=False)).state.session.id
+    deleted = (await session.resources.sessions.fork(attach=False)).state.session.id
+
+    async with _running_turn(session, started, release) as turn:
+        # Do
+        listed = SessionListResponse.model_validate(
+            await client.request("session/list", SessionListParams())
+        )
+        read = SessionReadResponse.model_validate(
+            await client.request("session/read", SessionReadParams(session_id=other))
+        )
+        renamed = SessionTitleUpdateResponse.model_validate(
+            await client.request(
+                "session/rename",
+                SessionTitleUpdateParams(session_id=other, title="Renamed"),
+            )
+        )
+        pinned = SessionPinResponse.model_validate(
+            await client.request(
+                "session/pin", SessionPinParams(session_id=other, pinned=True)
+            )
+        )
+        EmptyResponse.model_validate(
+            await client.request(
+                "session/markAsSeen", SessionMarkAsSeenParams(session_id=other)
+            )
+        )
+        archived = SessionArchiveResponse.model_validate(
+            await client.request(
+                "session/archive", SessionArchiveParams(session_id=other, archived=True)
+            )
+        )
+        EmptyResponse.model_validate(
+            await client.request(
+                "session/delete", SessionDeleteParams(session_id=deleted)
+            )
+        )
+        forked = SessionForkResponse.model_validate(
+            await client.request(
+                "session/fork",
+                SessionForkParams(source_session_id=session.session_id, attach=False),
+            )
+        )
+        ProjectsListResponse.model_validate(
+            await client.request("projects/list", ProjectsListParams())
+        )
+        running = not turn.done()
+
+    # Assert
+    assert running
+    assert {other, deleted, session.session_id} <= {item.id for item in listed.items}
+    assert read.state.session.id == other
+    assert renamed.title == "Renamed"
+    assert pinned.pinned_at is not None
+    assert archived.archived_at is not None
+    assert forked.state.session.parent_session_id == session.session_id
+    remaining = SessionListResponse.model_validate(
+        await client.request("session/list", SessionListParams(include_archived=True))
+    )
+    assert deleted not in {item.id for item in remaining.items}
+    assert _texts(session.history)[-2:] == ["Running", "Running answer"]
 
 
 @pytest.mark.asyncio

@@ -157,7 +157,7 @@ fn config_reload_that_flips_voice_mode_records_the_toggle() {
 }
 
 #[tokio::test]
-async fn stop_session_sends_queued_events_before_session_stop() {
+async fn stop_session_sends_queued_events_and_marks_the_session_seen_before_session_stop() {
     let (app, mut rx) = app_with_telemetry();
     telemetry::slash_command_used(&app, "/exit", "builtin");
     telemetry::user_cancelled_action(&app, "interrupt_agent");
@@ -182,6 +182,7 @@ async fn stop_session_sends_queued_events_before_session_stop() {
                 json!("telemetry/record"),
                 json!(event::USER_CANCELLED_ACTION)
             ),
+            (json!("session/markAsSeen"), Value::Null),
             (json!("session/stop"), Value::Null),
         ]
     );

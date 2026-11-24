@@ -126,6 +126,29 @@ class TestRelocateSavedSession:
         )
         assert persisted["origin_directory"] == "/repo"
 
+    @pytest.mark.asyncio
+    async def test_the_recorded_repository_and_checkout_are_dropped_with_the_old_folder(
+        self, session_config: SessionLoggingConfig
+    ) -> None:
+        write_saved_session(
+            session_config,
+            "20240101_120000",
+            "dddddddd",
+            {
+                "session_id": "dddddddd-4444",
+                "environment": {"working_directory": "/repo"},
+                "repository_root": "/repo",
+                "checkout_root": "/repo",
+            },
+        )
+
+        updated = await relocate_saved_session(
+            "dddddddd-4444", Path("/elsewhere"), session_config
+        )
+
+        assert "repository_root" not in updated
+        assert "checkout_root" not in updated
+
 
 class TestUpdateSavedSessionTitle:
     @pytest.mark.asyncio

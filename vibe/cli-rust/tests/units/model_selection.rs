@@ -9,6 +9,8 @@ use vibe_rs::model_selection;
 use vibe_rs::telemetry::{self, event, TelemetryEvent};
 use vibe_rs::thinking_picker;
 
+use crate::support::stub;
+
 /// On `medium`, pinned or on Default; `devstral` saves `medium`.
 fn app(pinned: Option<&str>) -> App {
     let mut app = App::default();
@@ -34,7 +36,7 @@ fn each_picker_records_one_opened_naming_it() {
     let mut app = app(None);
     let (tx, mut rx) = tokio::sync::mpsc::channel(telemetry::TELEMETRY_CHANNEL_CAP);
     app.telemetry_tx = Some(tx);
-    model_picker::open(&mut app);
+    model_picker::open(&mut app, &stub());
     thinking_picker::open(&mut app);
     let events: Vec<TelemetryEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let names: Vec<_> = events.iter().map(|event| event.name).collect();
@@ -50,7 +52,7 @@ fn each_picker_records_one_opened_naming_it() {
 #[test]
 fn a_model_other_than_the_default_is_not_a_default_pick() {
     let mut app = app(None);
-    model_picker::open(&mut app);
+    model_picker::open(&mut app, &stub());
     app.model_picker.list.highlight(2);
     model_picker::select(
         &mut app,

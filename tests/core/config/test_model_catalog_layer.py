@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 import tomllib
@@ -304,10 +303,9 @@ async def test_the_filters_threshold_wins_over_the_catalogs() -> None:
     growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
     assert isinstance(growthbook, GrowthbookLayer)
     growthbook.set_variants({
-        ExperimentName.MODEL_CATALOG.value: True,
         ExperimentName.MODEL_CATALOG_FILTER.value: {
             "settings": {_LARGE: {"auto_compact_threshold": 300_000}}
-        },
+        }
     })
     await apply_model_catalog(orchestrator, _catalog(_large(400_000)))
 
@@ -547,51 +545,6 @@ async def test_a_local_sparse_override_keeps_the_other_catalog_fields(
     assert config.validation_warnings == ()
 
 
-async def _orchestrator_with_model_experiments(
-    *, catalog_flag: bool
-) -> ConfigOrchestrator[VibeConfigSchema]:
-    """GrowthBook adds ``glm-5-3``, routes the default to it, and sets the
-    catalog flag.
-    """
-    orchestrator = await build_default_orchestrator()
-    growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
-    assert isinstance(growthbook, GrowthbookLayer)
-    model = {"name": "glm-5-3", "provider": "mistral", "alias": "glm-5-3"}
-    growthbook.set_variants({
-        ExperimentName.CLI_EXTRA_MODELS.value: json.dumps([model]),
-        ExperimentName.CLI_MODEL_ROUTING.value: json.dumps({
-            "active_model": "glm-5-3",
-            "model_config": model,
-        }),
-        ExperimentName.MODEL_CATALOG.value: catalog_flag,
-    })
-    await orchestrator.reload()
-    return orchestrator
-
-
-@pytest.mark.asyncio
-async def test_the_catalog_flag_replaces_the_growthbook_models() -> None:
-    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=True)
-
-    await apply_model_catalog(orchestrator, _catalog(_entry(_GLM, recommended=True)))
-
-    config = orchestrator.config
-    assert "glm-5-3" not in config.models
-    assert _GLM in config.models
-    assert config.resolve_default_model_alias() == _GLM
-
-
-@pytest.mark.asyncio
-async def test_the_catalog_flag_drops_the_growthbook_models_before_the_catalog_loads() -> (
-    None
-):
-    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=True)
-
-    config = orchestrator.config
-    assert "glm-5-3" not in config.models
-    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "catalog",
@@ -601,55 +554,10 @@ async def test_the_catalog_flag_drops_the_growthbook_models_before_the_catalog_l
 async def test_a_catalog_with_no_model_leaves_the_built_in_models(
     catalog: ModelCatalogResponse,
 ) -> None:
-    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=True)
+    config = await _config(catalog)
 
-    await apply_model_catalog(orchestrator, catalog)
-
-    config = orchestrator.config
-    assert "glm-5-3" not in config.models
+    assert DEFAULT_ACTIVE_MODEL_CONFIG.alias in config.models
     assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
-
-
-@pytest.mark.asyncio
-async def test_a_local_catalog_keeps_the_growthbook_models_when_the_flag_is_off(
-    config_dir: Path,
-) -> None:
-    _write_user_config(config_dir, experimental_enable_model_catalog=True)
-    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=False)
-
-    await apply_model_catalog(orchestrator, _catalog(_entry(_GLM)))
-
-    config = orchestrator.config
-    assert "glm-5-3" in config.models
-    assert _GLM in config.models
-
-
-@pytest.mark.asyncio
-async def test_a_local_setting_off_still_drops_the_growthbook_models(
-    config_dir: Path,
-) -> None:
-    _write_user_config(config_dir, experimental_enable_model_catalog=False)
-    orchestrator = await _orchestrator_with_model_experiments(catalog_flag=True)
-
-    config = orchestrator.config
-    assert config.experimental_enable_model_catalog is False
-    assert "glm-5-3" not in config.models
-    assert config.resolve_default_model_alias() == DEFAULT_ACTIVE_MODEL_CONFIG.alias
-
-
-@pytest.mark.asyncio
-async def test_the_catalog_flag_keeps_the_other_experiments() -> None:
-    orchestrator = await build_default_orchestrator()
-    growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
-    assert isinstance(growthbook, GrowthbookLayer)
-    growthbook.set_variants({
-        ExperimentName.REGISTRY_SKILLS.value: True,
-        ExperimentName.MODEL_CATALOG.value: True,
-    })
-
-    await apply_model_catalog(orchestrator, _catalog(_entry(_GLM)))
-
-    assert orchestrator.config.experimental_enable_registry_skills is True
 
 
 @pytest.mark.asyncio
@@ -879,22 +787,6 @@ async def test_the_recommendation_is_the_unpinned_default(config_dir: Path) -> N
 
     assert config.resolve_default_model_alias() == _MEDIUM
     assert config.get_active_model().alias == _MEDIUM
-
-
-@pytest.mark.asyncio
-async def test_a_live_routed_default_wins_over_the_recommendation() -> None:
-    orchestrator = await build_default_orchestrator()
-    growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
-    assert isinstance(growthbook, GrowthbookLayer)
-    growthbook.set_variants({
-        ExperimentName.CLI_MODEL_ROUTING.value: json.dumps({"active_model": _MEDIUM})
-    })
-
-    await apply_model_catalog(
-        orchestrator, _catalog(_entry(_GLM, recommended=True), _entry(_MEDIUM))
-    )
-
-    assert orchestrator.config.resolve_default_model_alias() == _MEDIUM
 
 
 @pytest.mark.asyncio

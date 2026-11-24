@@ -79,14 +79,14 @@ impl Output {
         write_line(&line)
     }
 
-    /// Emit the final output and return the turn's answer. Returns the I/O
-    /// error instead of panicking so the caller can still run session/stop
-    /// cleanup on a closed pipe.
+    /// Emit the final output and return the turn's answer: `answer` when the
+    /// server sent one, else the history's. Returns the I/O error instead of
+    /// panicking so the caller can still run session/stop cleanup on a closed pipe.
     pub fn finalize(
         &self,
         history: Value,
         turn_id: Option<&str>,
-        hook_answer: Option<&str>,
+        answer: Option<&str>,
     ) -> io::Result<Option<String>> {
         match self.format {
             OutputFormat::Streaming => Ok(None),
@@ -96,7 +96,7 @@ impl Output {
             }
             OutputFormat::Json => Ok(None),
             OutputFormat::Text | OutputFormat::Silent => {
-                let text = match hook_answer {
+                let text = match answer {
                     Some(answer) => Some(answer.to_owned()).filter(|answer| !answer.is_empty()),
                     None => last_assistant_text(&turn_entries(&history, turn_id)),
                 };

@@ -73,19 +73,16 @@ async def test_get_variant_or_none_returns_none_when_unassigned() -> None:
 
 @pytest.mark.asyncio
 async def test_assignments_serializes_json_object_arm() -> None:
-    payload = {
-        "active_model": "target-testing-model-alias",
-        "fallbacks": {"multimodal": "mistral-medium-3.5"},
-    }
+    payload = {"default": "glm-5-2", "hide": ["mistral-medium-3.5"]}
     response = _response({
-        ExperimentName.CLI_MODEL_ROUTING.value: {
+        ExperimentName.MODEL_CATALOG_FILTER.value: {
             "defaultValue": payload,
             "rules": [
                 {
                     "tracks": [
                         {
                             "experiment": {
-                                "key": ExperimentName.CLI_MODEL_ROUTING.value
+                                "key": ExperimentName.MODEL_CATALOG_FILTER.value
                             },
                             "result": {
                                 "variationId": 1,
@@ -103,7 +100,7 @@ async def test_assignments_serializes_json_object_arm() -> None:
 
     assignments = manager.assignments()
     assert len(assignments) == 1
-    assert assignments[0].experiment_id == ExperimentName.CLI_MODEL_ROUTING.value
+    assert assignments[0].experiment_id == ExperimentName.MODEL_CATALOG_FILTER.value
     assert json.loads(assignments[0].variation_name) == payload
     assert assignments[0].variation_id == 1
 
@@ -575,24 +572,24 @@ async def test_initialize_drops_unknown_features() -> None:
     assert set(snapshot.features.keys()) == {ExperimentName.SYSTEM_PROMPT.value}
 
 
-def test_config_variants_from_response_returns_forced_routing_variant() -> None:
+def test_config_variants_from_response_returns_forced_object_variant() -> None:
     response = _response({
-        ExperimentName.CLI_MODEL_ROUTING.value: {
-            "rules": [{"force": {"active_model": "magistral"}, "tracks": []}]
+        ExperimentName.MODEL_CATALOG_FILTER.value: {
+            "rules": [{"force": {"default": "magistral"}, "tracks": []}]
         }
     })
 
     variants = config_variants_from_response(response)
 
-    assert variants[ExperimentName.CLI_MODEL_ROUTING.value] == {
-        "active_model": "magistral"
+    assert variants[ExperimentName.MODEL_CATALOG_FILTER.value] == {
+        "default": "magistral"
     }
 
 
 def test_config_variants_from_response_empty_without_forced_or_assigned() -> None:
     response = _response({
-        ExperimentName.CLI_MODEL_ROUTING.value: {
-            "defaultValue": DEFAULT_VARIANTS[ExperimentName.CLI_MODEL_ROUTING],
+        ExperimentName.MODEL_CATALOG_FILTER.value: {
+            "defaultValue": DEFAULT_VARIANTS[ExperimentName.MODEL_CATALOG_FILTER],
             "rules": [],
         }
     })
@@ -601,14 +598,17 @@ def test_config_variants_from_response_empty_without_forced_or_assigned() -> Non
 
 
 def test_config_variants_from_response_includes_differing_default_value() -> None:
-    payload = {"active_model": "magistral"}
+    payload = {"default": "magistral"}
     response = _response({
-        ExperimentName.CLI_MODEL_ROUTING.value: {"defaultValue": payload, "rules": []}
+        ExperimentName.MODEL_CATALOG_FILTER.value: {
+            "defaultValue": payload,
+            "rules": [],
+        }
     })
 
     variants = config_variants_from_response(response)
 
-    assert variants[ExperimentName.CLI_MODEL_ROUTING.value] == payload
+    assert variants[ExperimentName.MODEL_CATALOG_FILTER.value] == payload
 
 
 def test_hydrate_drops_unknown_features() -> None:

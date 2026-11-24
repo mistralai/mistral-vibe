@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import StrEnum, auto
-import json
 import logging
 import os
 from pathlib import Path
@@ -10,13 +9,13 @@ import re
 import shlex
 from string import Formatter
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
     HttpUrl,
-    ValidationError,
     field_validator,
     model_validator,
 )
@@ -134,6 +133,11 @@ class SessionLoggingConfig(BaseSettings):
         return str(Path(v).expanduser().resolve())
 
 
+# Mistral's internal AI gateway, an OpenAI-compatible proxy whose vision models
+# take images in a tool message.
+_TOOL_RESULT_IMAGE_HOSTS = frozenset({"internal-ai-gateway.mistralai.com"})
+
+
 class ProviderConfig(BaseModel):
     name: str
     api_base: str
@@ -159,6 +163,12 @@ class ProviderConfig(BaseModel):
     # stream (and retried). Set to False for OpenAI-compatible endpoints that
     # do not emit a finish reason, to avoid spurious incomplete-stream errors.
     emits_finish_reason: bool = True
+    # Whether this provider takes images in a tool message, which the OpenAI
+    # Chat Completions spec does not allow (text only). Unset (None), it is on
+    # only for a known endpoint that takes them (`sends_tool_result_images`);
+    # off, a tool result reaches the model with `[Image]` in place of each
+    # image. The `mistral` backend sends tool images whatever this says.
+    tool_result_images: bool | None = None
     project_id: str = ""
     region: str = ""
     extra_headers: dict[str, str] = Field(default_factory=dict)
@@ -194,6 +204,19 @@ class ProviderConfig(BaseModel):
             and bool(self.browser_auth_base_url)
             and bool(self.browser_auth_api_base_url)
         )
+
+    @property
+    def sends_tool_result_images(self) -> bool:
+        """Whether tool-result images go in the tool message.
+
+        The provider's ``tool_result_images`` when set, False included;
+        otherwise on only for an endpoint known to take them. Derived on read,
+        so a copy with another ``api_base`` never keeps a stale value.
+        """
+        if self.tool_result_images is not None:
+            return self.tool_result_images
+        host = (urlparse(self.api_base).hostname or "").rstrip(".")
+        return host in _TOOL_RESULT_IMAGE_HOSTS
 
     @property
     def uses_vertex(self) -> bool:
@@ -680,48 +703,6 @@ def normalize_model_configs(value: Any) -> Any:
         return normalized
 
     return value
-
-
-def parse_routed_model_payload(payload: Any) -> ModelConfig | None:
-    """One routed-model payload (a model table or its JSON string), or None."""
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except ValueError:
-            return None
-    if isinstance(payload, ModelConfig):
-        return payload
-    if not isinstance(payload, Mapping):
-        return None
-    try:
-        return ModelConfig.model_validate(payload)
-    except ValidationError:
-        return None
-
-
-def routed_model_keys(data: Mapping[str, Any]) -> set[str]:
-    """The model keys the routed-model fields inject into ``models``.
-
-    Mirrors the injection validators: the routed config counts only when it is
-    the routed default.
-    """
-    keys: set[str] = set()
-    default = data.get("routed_default_model")
-    config = parse_routed_model_payload(data.get("routed_model_config"))
-    if config is not None and config.alias and config.alias == default:
-        keys.add(config.alias)
-    extra = data.get("routed_extra_models")
-    if isinstance(extra, str):
-        try:
-            extra = json.loads(extra)
-        except ValueError:
-            extra = None
-    if isinstance(extra, list):
-        for entry in extra:
-            model = parse_routed_model_payload(entry)
-            if model is not None and model.alias:
-                keys.add(model.alias)
-    return keys
 
 
 def serialize_model_configs(value: Any) -> Any:

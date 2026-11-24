@@ -19,7 +19,7 @@ on_request = {
 }
 
 screen_contains = ("Recovering", "Interrupted", "after cancel")
-screen_excludes = ("partial", "Stream ended early", "/retry")
+screen_excludes = ("partial", "Stream ended early", "Run /retry")
 
 timeline: Timeline = [
     "first\r",

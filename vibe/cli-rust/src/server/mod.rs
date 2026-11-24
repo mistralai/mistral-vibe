@@ -20,6 +20,7 @@ pub mod process;
 pub mod proto_agents;
 pub mod proto_approval;
 pub mod proto_artifacts;
+pub mod proto_background;
 pub mod proto_callback;
 pub mod proto_children;
 pub mod proto_context;
@@ -59,6 +60,7 @@ pub use process::{
 pub use proto_agents::*;
 pub use proto_approval::*;
 pub use proto_artifacts::*;
+pub use proto_background::*;
 pub use proto_callback::*;
 pub use proto_children::*;
 pub use proto_context::*;

@@ -111,6 +111,7 @@ async def complete_once(
         max_tokens=max_tokens,
         reasoning_field_name=provider.reasoning_field_name,
         emits_finish_reason=provider.emits_finish_reason,
+        tool_result_images=provider.sends_tool_result_images,
         extra_headers=provider.extra_headers,
         project_id=provider.project_id,
         region=provider.region,

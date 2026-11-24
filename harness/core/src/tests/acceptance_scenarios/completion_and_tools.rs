@@ -347,7 +347,7 @@ fn reasoning_only_completion_ends_the_turn_with_empty_visible_output() {
             }],
         },
         "finish_reason": "stop",
-        "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+        "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
     });
 
     // Do
@@ -361,7 +361,7 @@ fn reasoning_only_completion_ends_the_turn_with_empty_visible_output() {
                     "content": [{"type": "text", "text": reasoning}],
                 }],
                 "finish_reason": "stop",
-                "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+                "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
             },
         }),
         completed(turn_id, vec![])
@@ -1291,7 +1291,7 @@ fn cut_off_completion(action: &Value, text: &str) -> Value {
         "result": {
             "parts": [{"type": "text", "text": text}],
             "finish_reason": "length",
-            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+            "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }
@@ -1531,7 +1531,7 @@ fn cut_off_answers_and_cut_off_tool_calls_share_one_recovery_budget() {
     // Do
     let third = runtime
         .apply(
-            cut_off_tool_call_completion(&second, json!({"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0})),
+            cut_off_tool_call_completion(&second, json!({"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0})),
             running(turn_id)
                 .dispatch(llm_call(2))
                 .observe(cut_off_tool_call_committed(turn_id, &second))
@@ -1563,7 +1563,7 @@ fn cut_off_tool_call_runs_as_a_tool_call_without_output_limit_recovery() {
     // Do
     let next = runtime
         .apply(
-            cut_off_tool_call_completion(&completion, json!({"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0})),
+            cut_off_tool_call_completion(&completion, json!({"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0})),
             running(turn_id)
                 .dispatch(llm_call(1))
                 .observe(cut_off_tool_call_committed(turn_id, &completion))
@@ -1615,7 +1615,7 @@ fn cut_off_tool_call_committed(turn_id: &str, action: &Value) -> Value {
                 ],
             },
             "finish_reason": "tool_call",
-            "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+            "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         },
     })
 }

@@ -21,10 +21,22 @@ fn send_frame(frame: Value) {
     stdout.flush().unwrap();
 }
 
+/// Append `line` to the `FAKE_RUNS` file of `run_id`.
+fn record(run_id: &str, line: &str) {
+    let path = PathBuf::from(std::env::var_os("FAKE_RUNS").unwrap()).join(run_id);
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap();
+    writeln!(file, "{line}").unwrap();
+}
+
 /// By runId: `leak*` fails `initialize` quoting its credentials, `crash*` exits,
 /// `wedge*` opens its session then answers nothing, others hang; `slow*`
 /// acknowledges its channel's close only after `SLOW_CLOSE`, `mute*` never, and
-/// then ignores the end of its input. Its pid file holds its `MALLOC_ARENA_MAX`.
+/// then ignores the end of its input. Its pid file holds its `MALLOC_ARENA_MAX`,
+/// and each run's file lists `open` then the methods the run called.
 pub fn fake_app_server() {
     if let Some(dir) = std::env::var_os("FAKE_PIDS") {
         let arenas = std::env::var("MALLOC_ARENA_MAX").unwrap_or_default();
@@ -42,9 +54,13 @@ pub fn fake_app_server() {
         let channel = frame["channelId"].as_str().unwrap().to_owned();
         if let Some(open) = frame.get("open") {
             opens.insert(channel.clone(), open.clone());
+            record(open["runId"].as_str().unwrap(), "open");
         }
         let message = &frame["message"];
         let run_id = opens[&channel]["runId"].as_str().unwrap().to_owned();
+        if let Some(method) = message["method"].as_str() {
+            record(&run_id, method);
+        }
         deaf |= run_id.starts_with("mute");
         if message.is_null() {
             let ack = json!({"channelId": channel, "message": null});
@@ -105,6 +121,8 @@ pub struct RunServer {
     pub stdout: Vec<String>,
     pub home: PathBuf,
     pub pids: PathBuf,
+    runs: PathBuf,
+    started: Vec<String>,
     next_id: u64,
 }
 
@@ -122,7 +140,9 @@ impl RunServer {
         ));
         let _ = std::fs::remove_dir_all(&home);
         let pids = home.join("pids");
+        let runs = home.join("runs");
         std::fs::create_dir_all(&pids).unwrap();
+        std::fs::create_dir_all(&runs).unwrap();
         let fake_cmd = format!(
             "{} --ignored --exact --nocapture -- {fake}",
             std::env::current_exe().unwrap().display()
@@ -133,6 +153,7 @@ impl RunServer {
             .env("VIBE_HOME", &home)
             .env("VIBE_APP_SERVER_CMD", fake_cmd)
             .env("FAKE_PIDS", &pids)
+            .env("FAKE_RUNS", &runs)
             .env("LOG_LEVEL", "DEBUG")
             .env_remove("VIBE_CWD")
             .env_remove("MALLOC_ARENA_MAX")
@@ -161,6 +182,8 @@ impl RunServer {
             stdout: Vec::new(),
             home,
             pids,
+            runs,
+            started: Vec::new(),
             next_id: 0,
         }
     }
@@ -207,7 +230,11 @@ impl RunServer {
             .as_object_mut()
             .unwrap()
             .extend(extra.as_object().cloned().unwrap_or_default());
-        self.request("run/start", params)
+        let reply = self.request("run/start", params);
+        if reply.get("result").is_some() {
+            self.started.push(run_id.to_owned());
+        }
+        reply
     }
 
     /// The run's `run/ended` params.
@@ -255,23 +282,55 @@ impl RunServer {
         self.child.id()
     }
 
+    /// The pid files, once every started run reached its app-server, so each
+    /// app-server started so far has written its own.
+    fn pid_files(&self) -> impl Iterator<Item = PathBuf> {
+        for run in &self.started {
+            self.wait_for_call(run, "open");
+        }
+        std::fs::read_dir(&self.pids)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+    }
+
+    /// Wait until `run` called `method` on its app-server (`open` once placed).
+    pub fn wait_for_call(&self, run: &str, method: &str) {
+        let calls = self.runs.join(run);
+        self.wait_until(&format!("{run} to call {method}"), || {
+            std::fs::read_to_string(&calls).is_ok_and(|text| text.lines().any(|l| l == method))
+        });
+    }
+
+    /// Wait until the server's logs hold `line`.
+    pub fn wait_for_log(&self, line: &str) {
+        self.wait_until(&format!("the logs to say {line:?}"), || {
+            self.logs().contains(line)
+        });
+    }
+
+    fn wait_until(&self, what: &str, done: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     /// App-server processes started so far.
     pub fn app_servers(&self) -> usize {
-        std::fs::read_dir(&self.pids).unwrap().count()
+        self.pid_files().count()
     }
 
     /// Each started app-server's `MALLOC_ARENA_MAX`.
     pub fn app_server_arenas(&self) -> Vec<String> {
-        std::fs::read_dir(&self.pids)
-            .unwrap()
-            .map(|e| std::fs::read_to_string(e.unwrap().path()).unwrap())
+        self.pid_files()
+            .map(|path| std::fs::read_to_string(path).unwrap())
             .collect()
     }
 
     pub fn app_server_pids(&self) -> Vec<i32> {
-        std::fs::read_dir(&self.pids)
-            .unwrap()
-            .filter_map(|e| e.ok()?.file_name().to_str()?.parse().ok())
+        self.pid_files()
+            .filter_map(|path| path.file_name()?.to_str()?.parse().ok())
             .collect()
     }
 

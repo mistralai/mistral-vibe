@@ -187,3 +187,28 @@ def test_unseen_state_is_derived_from_metadata_timestamps() -> None:
 
     assert seen_state.is_unseen
     assert not seen_state.mark_seen(datetime(2026, 1, 1, 0, 4, tzinfo=UTC)).is_unseen
+
+
+def test_a_seen_session_can_be_marked_unseen_again() -> None:
+    seen_state = SessionSeenState(
+        unseen_at="2026-01-01T00:01:00Z", seen_at="2026-01-01T00:02:00Z"
+    )
+
+    assert not seen_state.is_unseen
+    assert seen_state.mark_unseen(datetime(2026, 1, 1, 0, 3, tzinfo=UTC)).is_unseen
+
+
+def test_marking_unseen_in_the_millisecond_it_was_seen_still_marks_it_unseen() -> None:
+    at = datetime(2026, 1, 1, 0, 2, tzinfo=UTC)
+
+    state = SessionSeenState(unseen_at=None, seen_at=None).mark_seen(at)
+
+    assert state.mark_unseen(at).is_unseen
+
+
+def test_marking_seen_before_the_unseen_mark_on_a_skewed_clock_still_marks_it_seen() -> (
+    None
+):
+    state = SessionSeenState(unseen_at="2026-01-01T00:02:00Z", seen_at=None)
+
+    assert not state.mark_seen(datetime(2026, 1, 1, 0, 1, tzinfo=UTC)).is_unseen

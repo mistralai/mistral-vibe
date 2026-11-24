@@ -24,40 +24,19 @@ from vibe.acp.utils import (
     compact_start_update,
     get_proxy_help_text,
 )
-from vibe.app_server.models import PublicTurn, PublicTurnStatus, TurnErrorCode
+from vibe.app_server.models import turn_retryable
 from vibe.app_server.protocol import AppServerResponseError
 from vibe.utils.data_retention import DATA_RETENTION_MESSAGE
-from vibe.utils.retry_prompt import build_retry_prompt
 
 _NOTHING_TO_RETRY_MESSAGE = "No failed or interrupted response to retry."
-# Matches the CLI's `RETRYABLE_ERROR_CODES`: other failures would fail the same way again.
-_RETRYABLE_ERROR_CODES = frozenset({
-    TurnErrorCode.BACKEND_ERROR,
-    TurnErrorCode.RATE_LIMIT,
-    TurnErrorCode.RESPONSE_TOO_LONG,
-    TurnErrorCode.INCOMPLETE_STREAM,
-})
 
 type SendConfigOptions = Callable[[AcpSession], Awaitable[None]]
 
 
-def _can_retry(turn: PublicTurn | None) -> bool:
-    if turn is None:
-        return False
-    if turn.status is PublicTurnStatus.INTERRUPTED:
-        return True
-    return (
-        turn.status is PublicTurnStatus.FAILED
-        and turn.error is not None
-        and turn.error.code in _RETRYABLE_ERROR_CODES
-    )
-
-
 @dataclass(frozen=True)
-class InjectedPrompt:
-    """Command outcome that runs a turn on a prompt the user never typed."""
-
-    text: str
+class RetryTurn:
+    turn_id: str
+    instructions: str
 
 
 class AcpCommandController:
@@ -91,7 +70,7 @@ class AcpCommandController:
 
     async def execute(
         self, session: AcpSession, text: str, message_id: str
-    ) -> PromptResponse | InjectedPrompt | None:
+    ) -> PromptResponse | RetryTurn | None:
         parts = text.strip().split(None, 1)
         if not parts or not parts[0].startswith("/"):
             return None
@@ -318,10 +297,14 @@ class AcpCommandController:
 
     async def _retry(
         self, session: AcpSession, instructions: str
-    ) -> PromptResponse | InjectedPrompt:
-        if not _can_retry(session.app_server.state.latest_turn):
-            return await self._reply(session, _NOTHING_TO_RETRY_MESSAGE)
-        return InjectedPrompt(build_retry_prompt(instructions))
+    ) -> PromptResponse | RetryTurn:
+        turn = session.app_server.state.latest_turn
+        if turn is None or not turn_retryable(turn):
+            return await self.reply_nothing_to_retry(session)
+        return RetryTurn(turn.id, instructions)
+
+    async def reply_nothing_to_retry(self, session: AcpSession) -> PromptResponse:
+        return await self._reply(session, _NOTHING_TO_RETRY_MESSAGE)
 
     async def _set_lean(
         self, session: AcpSession, *, installed: bool

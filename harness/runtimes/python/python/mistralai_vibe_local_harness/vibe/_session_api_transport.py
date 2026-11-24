@@ -28,7 +28,6 @@ from mistralai_vibe_local_harness.protocol import RustHarnessConfig
 from mistralai_vibe_local_harness.session_api.app_server.session import (
     ChildSessionProcedureRefusedError,
     SessionCallbackSettledError,
-    SessionIdempotencyConflictError,
     SessionTurnConflictError,
     UnsupportedSessionProcedureError,
 )
@@ -249,22 +248,16 @@ def _minted_entry_id(session_id: str, idempotency_key: str | None) -> str:
     return f"message-{digest[:24]}"
 
 
-def _lookup_receipt(
-    view: SessionApiView, key: str | None, fingerprint: str
-) -> JsonValue:
+def _lookup_receipt(view: SessionApiView, key: str | None) -> JsonValue:
     """The accepted response saved under ``key``, or None when the key is new.
 
-    Raises a conflict when the key was accepted for a different message.
+    A retry gets it whatever its message: the key alone names the request.
     """
     if key is None:
         return None
     receipt = view.message_receipts.get(key)
     if receipt is None:
         return None
-    if receipt.get("fingerprint") != fingerprint:
-        raise SessionIdempotencyConflictError(
-            idempotency_key=key.removeprefix(_TURN_START_RECEIPT_PREFIX)
-        )
     return receipt.get("response")
 
 
@@ -565,8 +558,7 @@ class LocalSessionApiTransport:
                 backend=_BACKEND,
                 reason="this Runtime takes no context without a message",
             )
-        fingerprint = _fingerprint(params.message, params.message_entry_id)
-        cached = _lookup_receipt(self.view, params.idempotency_key, fingerprint)
+        cached = _lookup_receipt(self.view, params.idempotency_key)
         if cached is not None:
             return MessageSendResponse.model_validate(cached)
         # The Runtime names a message entry after the client's ID when it has
@@ -598,7 +590,11 @@ class LocalSessionApiTransport:
                 raise SessionTurnConflictError(str(exc)) from exc
             turn_id = started.turn.id
         response = MessageSendResponse(message_entry_id=entry_id, turn_id=turn_id)
-        await self._record_receipt(params.idempotency_key, fingerprint, response)
+        await self._record_receipt(
+            params.idempotency_key,
+            _fingerprint(params.message, params.message_entry_id),
+            response,
+        )
         return response
 
     async def _record_receipt(
@@ -610,6 +606,8 @@ class LocalSessionApiTransport:
         self.view.record_message_receipt(
             key,
             {
+                # Written, never read. TODO(compat, remove after the next release): builds
+                # before ADR 0049 compare it, and refuse a receipt without it.
                 "fingerprint": fingerprint,
                 "response": cast(
                     JsonValue, response.model_dump(mode="json", by_alias=True)
@@ -647,8 +645,7 @@ class LocalSessionApiTransport:
         # A retried start returns the first reply. The Runtime's own command
         # receipt would replay it under a new Turn ID that never runs.
         key = _turn_start_key(params.idempotency_key)
-        fingerprint = _fingerprint(params.message, params.message_entry_id)
-        cached = _lookup_receipt(self.view, key, fingerprint)
+        cached = _lookup_receipt(self.view, key)
         if cached is not None:
             return TurnStartResponse.model_validate(cached)
         result = cast(
@@ -671,7 +668,9 @@ class LocalSessionApiTransport:
             turn=self._started_turn_state(state, turn.id, turn.started_at),
             last_event_id=last_event_id,
         )
-        await self._record_receipt(key, fingerprint, response)
+        await self._record_receipt(
+            key, _fingerprint(params.message, params.message_entry_id), response
+        )
         return response
 
     def _started_turn_state(
@@ -683,6 +682,9 @@ class LocalSessionApiTransport:
         published state then holds it as terminated. A Turn not listed yet
         reads as running.
         """
+        published = self._producer.published_turn_state(state, turn_id)
+        if published is not None:
+            return published
         for observed in self.view.turn_states(state):
             if observed.id == turn_id:
                 return observed

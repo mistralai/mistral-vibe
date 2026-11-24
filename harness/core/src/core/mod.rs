@@ -312,10 +312,41 @@ fn carried_measurements(
     } else {
         measured
     };
-    if next.settings.context.model_facts != current.model_facts {
+    let context = &next.settings.context;
+    if context.model_facts != current.model_facts {
         validate_model_switch(next, next_tools, messages, measurements)?;
+    } else if context.compaction_model_window != current.compaction_model_window {
+        validate_compaction_window_switch(next, next_tools, messages, measurements)?;
     }
     Ok(measurements)
+}
+
+/// Refuses a new compaction model window, the agent model unchanged, only when
+/// the next turn's automatic compaction could not start under it. The refusal
+/// names the compaction model's window. Without a separate window, compaction
+/// runs on the agent model, so the agent model's check applies.
+fn validate_compaction_window_switch(
+    config: &HarnessConfig,
+    resolved_tools: &ResolvedTools,
+    messages: &[StoredMessage],
+    measurements: RequestMeasurements,
+) -> Result<(), CoreError> {
+    let Some(window) = config.settings.context.compaction_model_window else {
+        return validate_model_switch(config, resolved_tools, messages, measurements);
+    };
+    let Some(unfit) = next_turn_compaction_unfit(config, resolved_tools, messages, measurements)?
+    else {
+        return Ok(());
+    };
+    Err(CoreError::invalid_configuration(
+        "settings.context.compaction_model_window",
+        format!(
+            "the Session's context cannot move to a compaction model with a {}-token \
+             context window: {}",
+            window.context_window,
+            unfit.error().message
+        ),
+    ))
 }
 
 fn store_measurements(state: &mut HarnessState, measurements: RequestMeasurements) {

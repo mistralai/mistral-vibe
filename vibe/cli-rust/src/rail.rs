@@ -1,4 +1,4 @@
-//! The status rail on the loading row: subagents, background tasks, PRs, goal and plan, keyboard-reachable.
+//! The status rail on the loading row: loops, subagents, background tasks, PRs, goal and plan, keyboard-reachable.
 
 use std::sync::Arc;
 
@@ -7,14 +7,19 @@ use crate::focus::Focus;
 use crate::server::{Client, SessionStatus};
 
 mod keys;
+mod used;
 mod window;
 
 pub use keys::{direction, handle_key, is_toggle_key, nav_key};
-pub use window::{close_window, enter_from_box, handle_window_key, leave_box, scroll};
+pub use used::{hint_hidden, load_use, save_use};
+pub use window::{
+    close_window, enter_from_box, handle_window_key, leave_box, scroll, scroll_by, scroll_to,
+};
 
 /// One rail item, in the order it is painted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
+    Loops,
     Agents,
     Tasks,
     Prs,
@@ -26,6 +31,7 @@ impl Item {
     /// The letter that jumps to the item while the rail has focus.
     pub fn letter(self) -> char {
         match self {
+            Item::Loops => 'o',
             Item::Agents => 's',
             Item::Goal => 'g',
             Item::Plan => 't',
@@ -56,13 +62,19 @@ pub struct Rail {
     /// The row the last frame started at, and the largest it allowed.
     pub scroll_top: usize,
     pub scroll_max: usize,
+    /// Rows the last frame showed, a PageUp/PageDown step.
+    pub scroll_page: usize,
+    /// Unix seconds of the last Ctrl+X or chip click, and the one the cache holds.
+    pub used_at: Option<i64>,
+    pub saved_at: Option<i64>,
 }
 
-/// The goal or plan window's first row: a row, or the in-progress todo's.
+/// The text window's first row: a row, the in-progress todo's, or the last page's, following new output.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scroll {
     Row(usize),
     Current,
+    End,
 }
 
 impl Default for Scroll {
@@ -71,9 +83,12 @@ impl Default for Scroll {
     }
 }
 
-/// The open tasks, PR, goal or plan window, while its item is still on the rail.
+/// The open tasks, PR, goal or plan window, while its item is still on the rail; a task's output stays after its task ended.
 pub fn window(app: &App) -> Option<Item> {
-    app.rail.window.filter(|item| items(app).contains(item))
+    let output = app.tasks_panel.shown().is_some();
+    app.rail
+        .window
+        .filter(|item| items(app).contains(item) || (*item == Item::Tasks && output))
 }
 
 /// Close a window whose item left the rail, so it never comes back with the item; an emptied rail hands the keyboard back.
@@ -98,13 +113,14 @@ pub fn agent_counts(app: &App) -> (usize, usize) {
     (running, listed)
 }
 
-/// The items the rail paints now, left to right; the todo list is always last.
+/// The items the rail paints now, left to right: loops first, so a narrow row drops them first; the todo list is always last.
 pub fn items(app: &App) -> Vec<Item> {
     let agents = app.subagents.status_list_enabled
         && app.subagents.list.shown
         && app.subagents.viewed_subagent_id.is_none()
         && agent_counts(app).1 > 0;
     [
+        (!app.session.loops.is_empty(), Item::Loops),
         (agents, Item::Agents),
         (!app.session.background_tasks.is_empty(), Item::Tasks),
         (
@@ -121,6 +137,16 @@ pub fn items(app: &App) -> Vec<Item> {
     .into_iter()
     .filter_map(|(shown, item)| shown.then_some(item))
     .collect()
+}
+
+/// The loop list with its chip on the rail: one of the rail's windows, not the add form.
+pub fn loop_list(app: &App) -> bool {
+    app.focus() == Focus::Loops && app.loops.form.is_none() && loops_open(app)
+}
+
+/// The loop manager is open with its chip on the rail.
+fn loops_open(app: &App) -> bool {
+    app.loops.open && items(app).contains(&Item::Loops)
 }
 
 /// The items on the rail minus those the latest frame had no room for.
@@ -150,6 +176,7 @@ pub fn enter(app: &mut App) -> bool {
     app.rail.focused = true;
     app.rail.letters = true;
     app.rail.selected = open.or(Some(first));
+    used::mark_used(app);
     true
 }
 
@@ -179,7 +206,14 @@ pub fn open(app: &mut App, client: &Arc<Client>, item: Item) {
         crate::subagents::leave_list(app);
     }
     app.rail.window = None;
+    app.tasks_panel.close_output();
+    if item != Item::Loops {
+        crate::loops::close(app);
+    }
     match item {
+        // Opening the open manager again keeps its highlight and scroll.
+        Item::Loops if app.loops.open => {}
+        Item::Loops => crate::loops::open(app),
         Item::Agents => {
             crate::subagents::focus_first(app);
         }
@@ -217,26 +251,32 @@ pub fn hovered(app: &App) -> Option<Item> {
 pub fn click(app: &mut App, client: &Arc<Client>, column: u16, row: u16) {
     if let Some(item) = item_at(app, column, row) {
         leave(app);
+        used::mark_used(app);
         // A second click on the open window's chip closes it.
         if open_item(app) == Some(item) && window::close(app, item) {
             return;
         }
         open(app, client, item);
-        if item == Item::Prs {
-            crate::telemetry::slash_command_clicked(app, "/pr", "rail");
+        match item {
+            Item::Prs => crate::telemetry::slash_command_clicked(app, "/pr", "rail"),
+            Item::Loops => crate::telemetry::slash_command_clicked(app, "/loop", "rail"),
+            _ => {}
         }
     }
 }
 
-/// Whether an item's window is open: the subagent list or a child view counts too.
+/// Whether an item's window is open: the loop manager, the subagent list or a child view counts too.
 pub fn window_open(app: &App) -> bool {
     open_item(app).is_some()
 }
 
-/// The item whose window is open: the tasks, PR, goal or plan window, or the subagent list and child view.
+/// The item whose window is open: the loop manager, the tasks, PR, goal or plan window, or the subagent list and child view.
 pub fn open_item(app: &App) -> Option<Item> {
     let list = app.subagents.list.focused || app.subagents.viewed_subagent_id.is_some();
-    window(app).or_else(|| list.then_some(Item::Agents))
+    let loops = loops_open(app).then_some(Item::Loops);
+    loops
+        .or_else(|| window(app))
+        .or_else(|| list.then_some(Item::Agents))
 }
 
 /// ←→ in an open window: open the previous or next item's window, wrapping at both ends.

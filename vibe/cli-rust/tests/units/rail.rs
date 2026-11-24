@@ -101,6 +101,10 @@ fn b_opens_the_tasks_panel_and_the_last_stop_closes_it_back_to_the_rail() {
         2,
         "Enter never stops a task"
     );
+    assert!(
+        vibe_rs::tasks_panel::back(&mut app),
+        "Enter shows the output"
+    );
     vibe_rs::tasks_panel::handle_key(&mut app, &client, ctrl('j'));
     let stop = key(KeyCode::Char('s'));
     vibe_rs::tasks_panel::handle_key(&mut app, &client, stop);
@@ -199,9 +203,58 @@ fn a_narrow_row_shrinks_chips_from_the_left_before_dropping_any() {
     );
     let all_short = crate::support::row(&crate::support::rail(&mut app, 21), 0);
     assert!(all_short.contains("◐ 1 · ▶ 4m · ≡ 0/1"), "{all_short:?}");
+}
 
-    let plan_only = vibe_rs::ui::rail::width(&app, 8);
-    assert_eq!(plan_only, "  ≡ 0/1 ".chars().count() as u16);
+#[test]
+fn a_narrow_row_drops_other_chips_before_subagents_and_prs() {
+    let mut app = with_items(true);
+    let no_goal = crate::support::row(&crate::support::rail(&mut app, 15), 0);
+    assert!(no_goal.contains("◐ 1 · ≡ 0/1"), "{no_goal:?}");
+
+    let agents_only = crate::support::row(&crate::support::rail(&mut app, 8), 0);
+    assert!(agents_only.contains("◐ 1"), "{agents_only:?}");
+    assert!(!agents_only.contains('≡'), "{agents_only:?}");
+}
+
+#[test]
+fn a_long_loading_line_wraps_to_keep_the_subagents_on_the_rail() {
+    let mut app = with_items(true);
+    app.set_status(vibe_rs::app::Status::Generating {
+        since: vibe_rs::clock::now(),
+    });
+    app.view
+        .loading
+        .set_label("Reading every file of a very large repository");
+    let width = vibe_rs::ui::rail::width_beside(&app, 70, 0);
+    assert_eq!(width, "  ◐ 1 ".chars().count() as u16);
+    let rail = crate::support::row(&crate::support::rail(&mut app, width), 0);
+    assert!(rail.contains("◐ 1"), "{rail:?}");
+}
+
+#[test]
+fn pinned_chips_never_split_a_label_with_a_parenthesis() {
+    let mut app = with_items(true);
+    app.set_status(vibe_rs::app::Status::Generating {
+        since: vibe_rs::clock::now(),
+    });
+    let label = "Which database (Postgres or MySQL)?";
+    app.view.loading.set_label(label);
+    let label_width = label.chars().count() as u16 + 4;
+    let width = vibe_rs::ui::rail::width_beside(&app, 60, 0);
+    assert!(width <= 60 - label_width, "{width}");
+}
+
+#[test]
+fn pinned_chips_never_clip_a_label_that_cannot_wrap() {
+    let mut app = with_items(true);
+    app.set_status(vibe_rs::app::Status::Generating {
+        since: vibe_rs::clock::now(),
+    });
+    let label = "Waiting for 1 subagent and 2 background tasks";
+    app.view.loading.set_label(label);
+    let label_width = label.chars().count() as u16 + 4;
+    let width = vibe_rs::ui::rail::width_beside(&app, 60, 0);
+    assert!(width <= 60 - label_width, "{width}");
 }
 
 #[test]

@@ -11,7 +11,7 @@ fn prompt(text: &str) -> MessageEntry {
 }
 
 fn rows(text: &str, width: u16) -> Vec<String> {
-    sticky(&prompt(text), None, width, 3)
+    sticky(&prompt(text), None, None, width, 3)
         .lines()
         .iter()
         .map(|line| line.to_string().trim_end().to_owned())
@@ -53,7 +53,7 @@ fn fired() -> FiredLoop {
 }
 
 fn loop_rows(text: &str, width: u16) -> Vec<String> {
-    sticky(&prompt(text), Some(&fired()), width, 3)
+    sticky(&prompt(text), Some(&fired()), None, width, 3)
         .lines()
         .iter()
         .map(|line| line.to_string().trim_end().to_owned())
@@ -65,6 +65,7 @@ fn a_loop_prompt_pins_as_its_folded_title_in_the_primary_marker_colour() {
     let lines = sticky(
         &prompt("Say hi\nSay hi to the user."),
         Some(&fired()),
+        None,
         30,
         3,
     );
@@ -73,7 +74,7 @@ fn a_loop_prompt_pins_as_its_folded_title_in_the_primary_marker_colour() {
         loop_rows("Say hi\nSay hi to the user.", 30),
         ["⏵ Say hi", &"─".repeat(30)]
     );
-    let lines = sticky(&prompt("tick"), None, 20, 3);
+    let lines = sticky(&prompt("tick"), None, None, 20, 3);
     assert_eq!(lines.lines()[0].spans[0].style.fg, Some(theme::ORANGE));
 }
 
@@ -101,4 +102,20 @@ fn a_cut_inside_zero_width_marks_still_shows_the_ellipsis() {
     let lines = rows(&format!("{}\nnext", "e\u{301}".repeat(400)), 12);
     assert!(lines[2].ends_with('…'), "{lines:?}");
     assert!(lines.iter().all(|line| !line.contains("next")), "{lines:?}");
+}
+
+#[test]
+fn under_a_steer_the_prompt_and_the_steer_take_one_row_each() {
+    let lines: Vec<String> = sticky(
+        &prompt("one\ntwo\nthree"),
+        None,
+        Some(&prompt("also check the docs and the changelog")),
+        20,
+        3,
+    )
+    .lines()
+    .iter()
+    .map(|line| line.to_string().trim_end().to_owned())
+    .collect();
+    assert_eq!(lines, ["> one…", "↳ also check the…", &"─".repeat(20)]);
 }

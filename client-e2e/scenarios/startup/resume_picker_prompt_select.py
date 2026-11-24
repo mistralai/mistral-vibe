@@ -1,4 +1,4 @@
-"""Picking a session in the startup picker sends the positional prompt to that session."""
+"""Opening a session from the startup Sessions page sends the positional prompt to that session."""
 
 from __future__ import annotations
 

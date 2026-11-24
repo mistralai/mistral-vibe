@@ -26,6 +26,7 @@ pub fn word(state: PrState) -> &'static str {
     match state {
         PrState::Open | PrState::Unknown => "open",
         PrState::Draft => "draft",
+        PrState::Queued => "queued",
         PrState::Merged => "merged",
         PrState::Closed => "closed",
     }
@@ -36,6 +37,7 @@ pub fn color(state: PrState) -> Color {
     match state {
         PrState::Open | PrState::Unknown => theme::text_success(),
         PrState::Draft => theme::muted(),
+        PrState::Queued => theme::text_warning(),
         PrState::Merged => theme::merged(),
         PrState::Closed => theme::text_error(),
     }

@@ -113,6 +113,11 @@ pub(crate) struct ContextSettings {
     /// model's `model_facts.input_modalities`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_model_input_modalities: Option<Vec<InputModality>>,
+    /// The context window of the model that writes compaction summaries, when
+    /// the host uses a separate model for them. Absent means the agent
+    /// model's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_model_window: Option<CompactionModelWindow>,
     /// The bound on the live instructions, which every compaction carries.
     /// Absent means the defaults.
     #[serde(default, skip_serializing_if = "instructions::Settings::is_default")]
@@ -142,6 +147,9 @@ impl ContextSettings {
                 modalities,
             )?;
         }
+        if let Some(window) = &self.compaction_model_window {
+            window.validate()?;
+        }
         Ok(())
     }
 
@@ -170,6 +178,29 @@ pub(crate) struct ModelFacts {
     /// The kinds of input the model reads. Text is always one of them.
     pub input_modalities: Vec<InputModality>,
     pub image_cost: ImageCostRule,
+}
+
+/// The window of a separate compaction model: what a summary request may hold.
+/// The compaction threshold stays the agent model's, in `ModelFacts`.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CompactionModelWindow {
+    pub context_window: u64,
+    /// The budget of a summary request: the largest threshold the window
+    /// allows.
+    pub summary_budget: u64,
+}
+
+impl CompactionModelWindow {
+    fn validate(&self) -> Result<(), CoreError> {
+        if self.summary_budget == 0 || self.summary_budget >= self.context_window {
+            return Err(CoreError::invalid_configuration(
+                "settings.context.compaction_model_window",
+                "0 < summary_budget < context_window must hold",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A kind of input a model reads.
@@ -663,6 +694,25 @@ mod tests {
                 initial_state(config).unwrap_err(),
                 CoreError::InvalidConfiguration {
                     field: "settings.context.compaction_model_input_modalities",
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn a_compaction_model_window_must_leave_room_for_a_summary_budget() {
+        for (context_window, summary_budget) in [(10_000, 0), (10_000, 10_000), (10_000, 12_000)] {
+            let mut config = config();
+            config.settings.context.compaction_model_window = Some(CompactionModelWindow {
+                context_window,
+                summary_budget,
+            });
+
+            assert!(matches!(
+                initial_state(config).unwrap_err(),
+                CoreError::InvalidConfiguration {
+                    field: "settings.context.compaction_model_window",
                     ..
                 }
             ));

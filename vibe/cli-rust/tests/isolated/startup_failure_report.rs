@@ -60,6 +60,7 @@ async fn startup_reports(server: &str) -> Vec<bool> {
             trust_workspace: true,
             ..Default::default()
         },
+        start_model: Default::default(),
         notifications: None,
         pre_initialized: None,
         trust_already_resolved: true,

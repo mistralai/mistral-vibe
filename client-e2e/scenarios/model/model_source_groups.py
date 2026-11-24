@@ -19,10 +19,9 @@ def _model(alias: str, display_name: str, source: str) -> dict[str, Any]:
 
 
 _DEFAULT = _model("mistral-medium-3.5", "Mistral Medium 3.5", "local")
-# Admin, GrowthBook, catalog in catalog order, then the user's own and built-ins.
+# Admin, catalog in catalog order, then the user's own and built-ins.
 _MODELS = [
     _model("org-model", "Org Model", "admin"),
-    _model("experiment-model", "Experiment Model", "growthbook"),
     _model("zai-glm-5-3", "GLM 5.3", "catalog"),
     _model("mistral-large-3", "Mistral Large 3", "catalog"),
     _model("devstral", "Devstral (local)", "local"),

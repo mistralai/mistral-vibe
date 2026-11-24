@@ -18,7 +18,7 @@ UI conventions for `vibe/cli-rust/`. Every screen follows them so the TUI reads 
 - Wording: actions are lowercase verbs (`navigate`, `select`, `close`); keys keep their canonical casing (`Enter`, `Esc`, `Ctrl+C`, `Backspace`). Combined keys use `/` (`Space/Enter`, `Esc/Ctrl+C`).
 - Vertical navigation is `key::NAV` (`↑↓/jk`) whenever j/k work; use `key::ARROWS` (`↑↓`) only where a focused text field owns the letters. Horizontal navigation is `key::LEFT_RIGHT` (`←→`).
 - Footers read `key action  key action`, ending with the Esc hint. Inline status lines (loading line, narrator) are the one exception and read `key to action`.
-- Hints are never cut: a footer too wide for its box wraps between `key action` pairs (`hints::rows`), never inside one, and the box grows by the extra rows (`hint_line::extra` for a box's height, `browser_box::chrome` for the shared browser box). Never drop hints to make a footer fit.
+- Hints are never cut: a footer too wide for its box wraps between `key action` pairs (`hints::rows`), never inside one, and the box grows by the extra rows (`hint_line::extra` for a box's height, `browser_box::chrome` for the shared browser box). Never drop hints to make a footer fit. The one exception is a footer whose `?` unfolds every key (the Sessions page): its one row keeps as many hints as fit, in priority order (`hints::fit`), with `? all keys & marks` pinned to the right edge (`hint_line::draw_pinned`).
 - Render every footer through `ui/hint_line.rs` (`draw`, `draw_footer`, `draw_above`, `lines`, `styled_rows`, `height`): they apply the shared key/action styles and wrap to the width they are given. Never place hint text with hardcoded x offsets or custom key styles. Center a hint with `hints::width`.
 - Onboarding and dialogs follow the same footer form (`Enter continue`, `Esc back`), not sentences like "Press Esc to go back".
 
@@ -54,6 +54,7 @@ UI conventions for `vibe/cli-rust/`. Every screen follows them so the TUI reads 
 - Do not add other entry points into search (Tab, Left, type-to-search on open). Do not make Enter only "apply" the filter: it acts on the highlighted item.
 - The list footer includes `hints::SEARCH`.
 - The search row sits directly under the title, followed by one blank row, and reads `/  placeholder` (`Search plugins`, `Search settings`). It is always visible in the list view and hidden in detail views. Draw it only with `ui/search_field.rs` `draw_row`, which owns the `/` and the field's indent; a bottom-app box draws it with `draw_under_title`, which also registers the field's mouse region and keeps box drags from selecting it. Never put a search field at the bottom of a list or in the footer. The project picker is the one exception: its labelled `Search projects:` field shares the form `Field` of its create view.
+- Text that is read rather than picked from (a background task's output) searches like a pager instead: `/` opens a one-row search at the bottom of the text, shown only while searching, typing jumps to the latest match with every match lit, Enter keeps the search, `n`/`N` move between matches, and Esc leaves the field, then clears the search, then goes back. It never filters the text.
 
 ## Selection
 

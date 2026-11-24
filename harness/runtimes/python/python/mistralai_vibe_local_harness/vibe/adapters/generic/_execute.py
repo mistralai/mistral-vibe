@@ -556,6 +556,7 @@ def _provider_view(config: LocalRuntimeAdapterConfig) -> ProviderView:
         api_style=config.api_style,
         reasoning_field_name=config.reasoning_field_name,
         emits_finish_reason=config.emits_finish_reason,
+        tool_result_images=config.tool_result_images,
         project_id=config.project_id,
         region=config.region,
         extra_headers=dict(config.extra_headers),

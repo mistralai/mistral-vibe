@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-import json
 from pathlib import Path
 import tomllib
 from types import SimpleNamespace
@@ -19,8 +18,12 @@ from tests.skills.registry.conftest import (
     registry_serves_deploy,
     store_deploy,
 )
-from tests.stubs.experiment_responses import routing_eval_response
-from tests.stubs.process_services import runnable_catalog as _runnable_catalog
+from tests.stubs.experiment_responses import behavior_eval_response
+from tests.stubs.process_services import (
+    fake_process_services,
+    locked_catalog as _locked_catalog,
+    runnable_catalog as _runnable_catalog,
+)
 from vibe.app_server._process_services import ProcessServices
 from vibe.app_server.models import AccountPlanKind
 from vibe.app_server.protocol import ClientInfo, SessionOptions
@@ -39,29 +42,13 @@ if TYPE_CHECKING:
     # tests skip rather than fail when it is absent.
     from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionContext
 
-_ROUTED_ALIAS = "experiment-routed"
-_EXTRA_MODELS_VARIANT = json.dumps({
-    "models": [
-        {
-            "name": "experiment-routed-model",
-            "provider": "mistral",
-            "alias": _ROUTED_ALIAS,
-        }
-    ]
-})
+_BEHAVIOR = "Experiment behavior."
 
 
 # ``defaultValue`` alone resolves for ``get_variant`` but is deliberately not a
 # config override — only a forced rule or a confirmed track is.
-def _extra_models_response() -> EvalResponse:
-    return EvalResponse.model_validate({
-        "features": {
-            "vibe_cli_extra_models": {
-                "defaultValue": "{}",
-                "rules": [{"force": _EXTRA_MODELS_VARIANT, "tracks": []}],
-            }
-        }
-    })
+def _behavior_response() -> EvalResponse:
+    return behavior_eval_response(_BEHAVIOR)
 
 
 class _StubEvalClient(RemoteEvalClient):
@@ -223,8 +210,12 @@ def _model_aliases(adapter: Any) -> list[str]:
     return [model.alias for model in adapter._runtime.config.models]
 
 
+def _behavior(adapter: Any) -> str:
+    return adapter._context.config_orchestrator.config.system_prompt_behavior
+
+
 @pytest.mark.asyncio
-async def test_unified_experiment_variants_reach_the_live_model_catalog(
+async def test_unified_experiment_variants_reach_the_live_session(
     tmp_path: Path,
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -236,19 +227,18 @@ async def test_unified_experiment_variants_reach_the_live_model_catalog(
     session = _RecordingSession()
     adapter, _client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=session,
         monkeypatch=monkeypatch,
         process_services=process_services,
     )
-    assert _ROUTED_ALIAS not in _model_aliases(adapter)
+    assert _behavior(adapter) != _BEHAVIOR
 
     await adapter.initialize_experiments(_launch_context())
 
-    config = adapter._context.config_orchestrator.config
-    assert _ROUTED_ALIAS in config.available_models()
-    assert _ROUTED_ALIAS in _model_aliases(adapter)
+    assert _behavior(adapter) == _BEHAVIOR
     assert session.applied, "the derivation was never pushed into the live session"
+    assert _BEHAVIOR in (session.system_instructions[-1] or "")
 
 
 @pytest.mark.asyncio
@@ -264,7 +254,7 @@ async def test_unified_experiment_reports_its_surface_to_growthbook(
     _enable_experiments(config_dir)
     adapter, client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -298,7 +288,7 @@ async def test_unified_custom_system_prompt_ignores_the_experiment_prompt(
     _enable_experiments(config_dir, system_prompt_id=user_prompt)
     adapter, client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -331,7 +321,7 @@ async def test_unified_variants_resolved_mid_turn_wait_for_the_next_turn(
     session = _RecordingSession(active_turn_id="turn-1")
     adapter, _client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=session,
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -339,16 +329,14 @@ async def test_unified_variants_resolved_mid_turn_wait_for_the_next_turn(
 
     await adapter.initialize_experiments(_launch_context())
     mid_turn_pushes = len(session.applied)
-    mid_turn_aliases = _model_aliases(adapter)
     session.active_turn_id = None
     await adapter._settle_configuration()
 
     # The Core reads its settings at turn start, so a mid-turn push would swap
-    # the model underneath the running turn.
+    # the configuration underneath the running turn.
     assert mid_turn_pushes == 0
-    assert _ROUTED_ALIAS not in mid_turn_aliases
-    assert _ROUTED_ALIAS in _model_aliases(adapter)
     assert len(session.applied) == 1
+    assert _BEHAVIOR in (session.system_instructions[-1] or "")
 
 
 def _syncs(adapter: Any) -> set[asyncio.Task[None]]:
@@ -415,7 +403,7 @@ async def test_unified_experiments_are_skipped_when_the_ab_opt_out_is_set(
     session = _RecordingSession()
     adapter, client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=session,
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -453,7 +441,7 @@ async def test_unified_a_self_hosted_session_never_asks_growthbook(
     session = _RecordingSession()
     adapter, client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=session,
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -505,7 +493,7 @@ async def test_unified_experiment_initialization_never_raises(
     session = _RecordingSession()
     adapter, client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=session,
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -518,7 +506,6 @@ async def test_unified_experiment_initialization_never_raises(
 
     await adapter.initialize_experiments(_launch_context())
     assert session.applied == []
-    assert process_services.experiments.failures.failed is True
 
 
 @pytest.mark.asyncio
@@ -534,7 +521,7 @@ async def test_unified_the_eval_client_is_closed_once_the_eval_landed(
     session = _RecordingSession()
     adapter, client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=session,
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -559,7 +546,7 @@ async def test_unified_resolved_variants_carry_to_the_next_session_through_the_c
     _enable_experiments(config_dir)
     adapter, _client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -570,7 +557,7 @@ async def test_unified_resolved_variants_carry_to_the_next_session_through_the_c
         services=process_services
     ).build_unified_session_context(SessionOptions(cwd=str(tmp_path)))
 
-    assert _ROUTED_ALIAS in reopened.config_orchestrator.config.available_models()
+    assert reopened.config_orchestrator.config.system_prompt_behavior == _BEHAVIOR
 
 
 @pytest.mark.asyncio
@@ -588,7 +575,7 @@ async def test_the_experiment_task_is_handed_to_the_server_as_a_done_callback(
     _enable_experiments(config_dir)
     adapter, _client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -624,7 +611,7 @@ async def test_closing_a_session_drops_an_eval_still_in_flight(
     session = _RecordingSession()
     adapter, client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=session,
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -790,6 +777,131 @@ async def test_unified_config_read_loads_a_refreshed_catalog_into_an_idle_sessio
     assert announced.await_count == 2
 
 
+def _catalog_locking(model_id: str) -> Any:
+    """The fetched model, runnable, and *model_id*, which the plan locks."""
+    return _runnable_catalog("fetched-model").model_copy(
+        update={
+            "models": [
+                *_runnable_catalog("fetched-model").models,
+                *_locked_catalog(model_id).models,
+            ]
+        }
+    )
+
+
+async def _open_catalog_locking(
+    adapter: Any, monkeypatch: pytest.MonkeyPatch, process_services: ProcessServices
+) -> None:
+    """Open the session on a catalog that locks ``paid-model``."""
+    _serve_catalog(
+        monkeypatch,
+        process_services,
+        AsyncMock(return_value=_catalog_locking("paid-model")),
+    )
+    await _open_catalog(adapter)
+    adapter.mark_announced()
+
+
+@pytest.mark.asyncio
+async def test_unified_picker_opening_loads_the_model_the_plan_now_includes(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    # Seconds after the last fetch, the user upgraded their plan: opening the
+    # picker fetches at once and answers with the unlocked model.
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, announced = await _adapter_fetching(
+        tmp_path, config_dir, session, monkeypatch, process_services=process_services
+    )
+    await _open_catalog_locking(adapter, monkeypatch, process_services)
+    fetch = AsyncMock(return_value=_runnable_catalog("fetched-model", "paid-model"))
+    _serve_catalog(monkeypatch, process_services, fetch)
+
+    response = await adapter._dispatch_config_read(
+        "config/read", {"refreshModelCatalog": True}
+    )
+
+    fetch.assert_awaited_once()
+    paid = next(m for m in response.config.models if m.alias == "paid-model")
+    assert paid.requires is None
+    assert len(session.applied) == 2
+    assert announced.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unified_plain_config_read_does_not_force_a_recent_catalog_fetch(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, _announced = await _adapter_fetching(
+        tmp_path, config_dir, session, monkeypatch, process_services=process_services
+    )
+    await _open_catalog_locking(adapter, monkeypatch, process_services)
+    fetch = AsyncMock(return_value=_runnable_catalog("fetched-model", "paid-model"))
+    _serve_catalog(monkeypatch, process_services, fetch)
+
+    await adapter._dispatch_config_read("config/read", {})
+    await asyncio.sleep(0.05)
+
+    fetch.assert_not_awaited()
+    assert len(session.applied) == 1
+
+
+@pytest.mark.asyncio
+async def test_unified_picker_opening_answers_with_the_held_catalog_when_the_fetch_fails(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, announced = await _adapter_fetching(
+        tmp_path, config_dir, session, monkeypatch, process_services=process_services
+    )
+    await _open_catalog_locking(adapter, monkeypatch, process_services)
+    _serve_catalog(monkeypatch, process_services, AsyncMock(return_value=None))
+
+    response = await adapter._dispatch_config_read(
+        "config/read", {"refreshModelCatalog": True}
+    )
+
+    paid = next(m for m in response.config.models if m.alias == "paid-model")
+    assert paid.requires is not None
+    assert len(session.applied) == 1
+    announced.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_unified_picker_opening_mid_turn_fetches_nothing(
+    tmp_path: Path,
+    config_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    process_services: ProcessServices,
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    session = _RecordingSession()
+    adapter, _announced = await _adapter_fetching(
+        tmp_path, config_dir, session, monkeypatch, process_services=process_services
+    )
+    await _open_catalog_locking(adapter, monkeypatch, process_services)
+    fetch = AsyncMock(return_value=_runnable_catalog("fetched-model", "paid-model"))
+    _serve_catalog(monkeypatch, process_services, fetch)
+    session.active_turn_id = "turn-1"
+
+    await adapter._dispatch_config_read("config/read", {"refreshModelCatalog": True})
+
+    fetch.assert_not_awaited()
+    assert len(session.applied) == 1
+
+
 @pytest.mark.asyncio
 async def test_unified_config_read_before_the_announce_keeps_the_running_catalog(
     tmp_path: Path,
@@ -940,7 +1052,7 @@ async def test_unified_pin_on_a_catalog_alias_selects_the_fetched_model(
 def _write_user_config(config_dir: Path, **fields: object) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
-    config.update({"experimental_enable_model_catalog": True, **fields})
+    config.update({"enable_model_catalog": True, **fields})
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
 
 
@@ -1021,48 +1133,6 @@ async def test_unified_readiness_skips_the_catalog_for_a_locally_defined_pin(
     await task
 
 
-@pytest.mark.asyncio
-async def test_unified_sessions_stop_waiting_once_a_catalog_fetch_failed(
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-) -> None:
-    pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    _write_user_config(config_dir, active_model="")
-    # The endpoint answers nothing (the fake server's default).
-    first, _client = await _build_adapter(
-        tmp_path,
-        response=None,
-        session=_RecordingSession(),
-        monkeypatch=monkeypatch,
-        process_services=process_services,
-    )
-    first._start_model_catalog_fetch()
-    assert first._model_catalog_wait is not None
-    await first.dispatch_extension("session/ready/wait", {})
-
-    second, _client = await _build_adapter(
-        tmp_path,
-        response=None,
-        session=_RecordingSession(),
-        monkeypatch=monkeypatch,
-        process_services=process_services,
-    )
-    second._start_model_catalog_fetch()
-    cleared = _replacement_adapter(first)
-    cleared._start_model_catalog_fetch()
-
-    assert second._model_catalog_wait is None
-    assert cleared._model_catalog_wait is None
-    read = await second.dispatch_extension("session/ready/read", {})
-    assert read.response.ready is True
-    for adapter in (second, cleared):
-        task = adapter._model_catalog_task
-        assert task is not None
-        await task
-
-
 def _replacement_adapter(source: Any) -> Any:
     """An adapter over *source*'s context, as ``/clear`` builds one."""
     from vibe.app_server._unified_harness_backend_adapter import (
@@ -1076,6 +1146,67 @@ def _replacement_adapter(source: Any) -> Any:
         context,
         context.derive(UnifiedSessionSettings()),
     )
+
+
+@pytest.mark.asyncio
+async def test_unified_a_catalog_fetch_that_failed_is_waited_for_again_after_its_retry_delay(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._model_catalog_service import MODEL_CATALOG_POLICY
+
+    _write_user_config(config_dir, active_model="")
+    clock = [1_000_000.0]
+    services = fake_process_services(clock=lambda: clock[0])
+    answers: list[object] = [None, _runnable_catalog("fetched-model")]
+    calls: list[object] = []
+
+    async def _fetch(_config: object, _credentials: object = None) -> object:
+        calls.append(None)
+        return answers[min(len(calls), len(answers)) - 1]
+
+    _serve_catalog(monkeypatch, services, _fetch)
+    try:
+        # The endpoint answers nothing the first time.
+        first, _client = await _build_adapter(
+            tmp_path,
+            response=None,
+            session=_RecordingSession(),
+            monkeypatch=monkeypatch,
+            process_services=services,
+        )
+        first._start_model_catalog_fetch()
+        assert first._model_catalog_wait is not None
+        await first.dispatch_extension("session/ready/wait", {})
+
+        # Within the retry delay: not asked again, and nothing to wait for.
+        cleared = _replacement_adapter(first)
+        cleared._start_model_catalog_fetch()
+        await asyncio.wait_for(cleared._wait_for_first_turn_fetches(), timeout=2)
+        assert len(calls) == 1
+
+        # After it: a new session waits for the retry and gets its models.
+        clock[0] += MODEL_CATALOG_POLICY.retry_after_s
+        after, _client = await _build_adapter(
+            tmp_path,
+            response=None,
+            session=_RecordingSession(),
+            monkeypatch=monkeypatch,
+            process_services=services,
+        )
+        monkeypatch.setattr(after, "_announce_runtime", AsyncMock())
+        monkeypatch.setattr(after, "wait_announced", AsyncMock())
+        after._start_model_catalog_fetch()
+        assert after._model_catalog_wait is not None
+        await asyncio.wait_for(after._wait_for_first_turn_fetches(), timeout=2)
+        assert len(calls) == 2
+        assert "fetched-model" in _model_aliases(after)
+        for adapter in (first, cleared, after):
+            task = adapter._model_catalog_task
+            assert task is not None
+            await task
+    finally:
+        await services.close()
 
 
 @pytest.mark.asyncio
@@ -1124,7 +1255,7 @@ async def test_unified_a_restored_pin_only_the_catalog_defines_runs_once_ready(
 
 
 @pytest.mark.asyncio
-async def test_unified_sessions_stop_waiting_once_a_fetch_outlasts_the_cap(
+async def test_unified_a_session_joins_a_catalog_fetch_still_running_past_another_cap(
     tmp_path: Path,
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1165,8 +1296,11 @@ async def test_unified_sessions_stop_waiting_once_a_fetch_outlasts_the_cap(
     second._start_model_catalog_fetch()
     cleared = _replacement_adapter(first)
     cleared._start_model_catalog_fetch()
-    assert second._model_catalog_wait is None
-    assert cleared._model_catalog_wait is None
+    # Each joins the fetch still running, within its own cap.
+    for joined in (second, cleared):
+        wait = joined._model_catalog_wait
+        assert wait is not None
+        assert not wait.done
     released.set()
     for adapter in (first, second, cleared):
         task = adapter._model_catalog_task
@@ -1250,7 +1384,7 @@ async def test_unified_an_uncached_eval_holds_an_unpinned_session_until_it_lands
     _unpin_with_experiments(config_dir)
     adapter, client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1264,8 +1398,7 @@ async def test_unified_an_uncached_eval_holds_an_unpinned_session_until_it_lands
     assert not waiter.done()
     released.set()
     await asyncio.wait_for(waiter, timeout=2)
-    config = adapter._context.config_orchestrator.config
-    assert config.get_active_model().alias == _ROUTED_ALIAS
+    assert _behavior(adapter) == _BEHAVIOR
 
 
 @pytest.mark.asyncio
@@ -1280,7 +1413,7 @@ async def test_unified_a_pinned_session_does_not_wait_for_the_eval(
     _enable_experiments(config_dir)  # the test config pins a built-in model
     adapter, client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1310,7 +1443,7 @@ async def test_unified_a_reopened_session_with_a_pinned_model_does_not_wait(
     _unpin_with_experiments(config_dir)
     adapter, client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1344,7 +1477,7 @@ async def test_unified_a_cached_eval_means_no_wait(
     _unpin_with_experiments(config_dir)
     first, _client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1357,7 +1490,7 @@ async def test_unified_a_cached_eval_means_no_wait(
 
     second, _client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1371,44 +1504,71 @@ async def test_unified_a_cached_eval_means_no_wait(
 
 
 @pytest.mark.asyncio
-async def test_unified_sessions_stop_waiting_once_an_eval_failed(
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
+async def test_unified_an_eval_that_failed_is_waited_for_again_after_its_retry_delay(
+    tmp_path: Path, config_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._experiments_service import EXPERIMENTS_POLICY
 
     _unpin_with_experiments(config_dir)
-    first, _client = await _build_adapter(
-        tmp_path,
-        response=None,
-        session=_RecordingSession(),
-        monkeypatch=monkeypatch,
-        process_services=process_services,
-    )
-    _start_experiments(first)
-    assert first._experiments_wait is not None
-    await asyncio.wait_for(first._wait_for_first_turn_fetches(), timeout=2)
+    clock = [1_000_000.0]
+    services = fake_process_services(clock=lambda: clock[0])
+    try:
+        first, _client = await _build_adapter(
+            tmp_path,
+            response=None,
+            session=_RecordingSession(),
+            monkeypatch=monkeypatch,
+            process_services=services,
+        )
+        _start_experiments(first)
+        assert first._experiments_wait is not None
+        await asyncio.wait_for(first._wait_for_first_turn_fetches(), timeout=2)
 
-    second, _client = await _build_adapter(
-        tmp_path,
-        response=None,
-        session=_RecordingSession(),
-        monkeypatch=monkeypatch,
-        process_services=process_services,
-    )
-    _start_experiments(second)
+        # Within the retry delay: the eval is not asked again, and the first
+        # turn finds it already over.
+        within, client = await _build_adapter(
+            tmp_path,
+            response=_behavior_response(),
+            session=_RecordingSession(),
+            monkeypatch=monkeypatch,
+            process_services=services,
+        )
+        _start_experiments(within)
+        await asyncio.wait_for(within._wait_for_first_turn_fetches(), timeout=2)
+        assert client.attributes is None
+        assert within._context.config_orchestrator.config.system_prompt_behavior != (
+            _BEHAVIOR
+        )
 
-    assert second._experiments_wait is None
-    for adapter in (first, second):
-        task = adapter._experiments_task
-        assert task is not None
-        await task
+        # After it: the next session waits for the retry and runs on it.
+        clock[0] += EXPERIMENTS_POLICY.retry_after_s
+        after, client = await _build_adapter(
+            tmp_path,
+            response=_behavior_response(),
+            session=_RecordingSession(),
+            monkeypatch=monkeypatch,
+            process_services=services,
+        )
+        released = _hold_eval(client, monkeypatch)
+        _start_experiments(after)
+        waiter = asyncio.create_task(after._wait_for_first_turn_fetches())
+        await asyncio.sleep(0.05)
+        assert not waiter.done()
+        released.set()
+        await asyncio.wait_for(waiter, timeout=2)
+        config = after._context.config_orchestrator.config
+        assert config.system_prompt_behavior == _BEHAVIOR
+        for adapter in (first, within, after):
+            task = adapter._experiments_task
+            assert task is not None
+            await task
+    finally:
+        await services.close()
 
 
 @pytest.mark.asyncio
-async def test_unified_sessions_stop_waiting_once_an_eval_outlasts_the_cap(
+async def test_unified_a_session_joins_an_eval_still_running_past_another_cap(
     tmp_path: Path,
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1421,7 +1581,7 @@ async def test_unified_sessions_stop_waiting_once_an_eval_outlasts_the_cap(
     monkeypatch.setattr(wait_module, "EVAL_WAIT_CAP_SECONDS", 0.05)
     first, client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1446,7 +1606,9 @@ async def test_unified_sessions_stop_waiting_once_an_eval_outlasts_the_cap(
         process_services=process_services,
     )
     _start_experiments(second)
-    assert second._experiments_wait is None
+    # It joins the eval still running, within its own cap.
+    assert second._experiments_wait is not None
+    assert not second._experiments_wait.done
     first._cancel_experiments_task()
     await ready
     # The second session joined the eval the first one started: closing the
@@ -1455,12 +1617,11 @@ async def test_unified_sessions_stop_waiting_once_an_eval_outlasts_the_cap(
     second_task = second._experiments_task
     assert second_task is not None
     await asyncio.wait_for(second_task, timeout=2)
-    config = second._context.config_orchestrator.config
-    assert config.get_active_model().alias == _ROUTED_ALIAS
+    assert _behavior(second) == _BEHAVIOR
 
 
 @pytest.mark.asyncio
-async def test_unified_an_eval_outlasting_the_cap_in_a_pinned_session_stops_later_waits(
+async def test_unified_an_eval_outlasting_a_pinned_session_cap_is_still_waited_for(
     tmp_path: Path,
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1473,7 +1634,7 @@ async def test_unified_an_eval_outlasting_the_cap_in_a_pinned_session_stops_late
     monkeypatch.setattr(wait_module, "EVAL_WAIT_CAP_SECONDS", 0.05)
     pinned, client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1483,7 +1644,6 @@ async def test_unified_an_eval_outlasting_the_cap_in_a_pinned_session_stops_late
 
     await asyncio.sleep(0.2)
 
-    assert process_services.experiments.failures.failed is True
     _unpin_with_experiments(config_dir)
     unpinned, _client = await _build_adapter(
         tmp_path,
@@ -1493,7 +1653,7 @@ async def test_unified_an_eval_outlasting_the_cap_in_a_pinned_session_stops_late
         process_services=process_services,
     )
     _start_experiments(unpinned)
-    assert unpinned._experiments_wait is None
+    assert unpinned._experiments_wait is not None
     pinned._cancel_experiments_task()
     released.set()
     task = unpinned._experiments_task
@@ -1513,14 +1673,14 @@ async def test_unified_a_cache_written_after_the_session_was_built_still_waits(
     _unpin_with_experiments(config_dir)
     second, _client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
     )
     first, _client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1568,23 +1728,10 @@ async def test_unified_a_slow_lookup_without_an_eval_is_not_an_eval_failure(
     await asyncio.sleep(0.2)
 
     assert adapter._experiments_wait is None
-    assert process_services.experiments.failures.failed is False
     released.set()
     task = adapter._experiments_task
     assert task is not None
     await task
-
-
-def _model_catalog_on_response(*, routed: str | None = None) -> EvalResponse:
-    """An eval that turns the model catalog on, and routes the default to
-    *routed* through the old routing flag.
-    """
-    features: dict[str, Any] = {
-        "vibe_cli_model_catalog": {"defaultValue": True, "rules": []}
-    }
-    if routed is not None:
-        features.update(routing_eval_response(routed).model_dump()["features"])
-    return EvalResponse.model_validate({"features": features})
 
 
 def _recommended_catalog(model_id: str) -> Any:
@@ -1603,95 +1750,7 @@ def _recommended_catalog(model_id: str) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_unified_a_catalog_the_eval_turns_on_holds_the_first_turn(
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-) -> None:
-    pytest.importorskip("mistralai_vibe_local_harness.vibe")
-
-    _unpin_with_experiments(config_dir)
-    fetched = asyncio.Event()
-    released = asyncio.Event()
-
-    async def _held_fetch(_config: Any, _credentials: Any = None) -> Any:
-        fetched.set()
-        await released.wait()
-        return _recommended_catalog("catalog-model")
-
-    fetch = AsyncMock(side_effect=_held_fetch)
-    _serve_catalog(monkeypatch, process_services, fetch)
-    adapter, _client = await _build_adapter(
-        tmp_path,
-        response=_model_catalog_on_response(routed=_ROUTED_ALIAS),
-        session=_RecordingSession(),
-        monkeypatch=monkeypatch,
-        process_services=process_services,
-    )
-    monkeypatch.setattr(adapter, "wait_announced", AsyncMock())
-    config = adapter._context.config_orchestrator.config
-    assert not config.experimental_enable_model_catalog
-
-    _start_experiments(adapter)
-    waiter = asyncio.create_task(adapter._wait_for_first_turn_fetches())
-    await asyncio.wait_for(fetched.wait(), timeout=2)
-
-    # The eval landed and turned the catalog on; the turn waits for it.
-    assert not waiter.done()
-    released.set()
-    await asyncio.wait_for(waiter, timeout=2)
-    config = adapter._context.config_orchestrator.config
-    assert config.get_active_model().alias == "catalog-model"
-    assert _ROUTED_ALIAS not in config.models
-    fetch.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_unified_a_catalog_the_eval_turns_on_starts_from_the_one_held(
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-) -> None:
-    pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from vibe.app_server._model_catalog_service import ModelCatalogKey
-    from vibe.core.config import VibeConfigSchema
-
-    _unpin_with_experiments(config_dir)
-    # Another session of the process already holds a catalog.
-    _serve_catalog(
-        monkeypatch,
-        process_services,
-        AsyncMock(return_value=_recommended_catalog("cached-model")),
-    )
-    key = await ModelCatalogKey.of(
-        VibeConfigSchema(experimental_enable_model_catalog=True), None
-    )
-    assert key is not None
-    await process_services.model_catalog.ensure(key)
-    fetch = AsyncMock(side_effect=AssertionError("no request"))
-    _serve_catalog(monkeypatch, process_services, fetch)
-    adapter, _client = await _build_adapter(
-        tmp_path,
-        response=_model_catalog_on_response(routed=_ROUTED_ALIAS),
-        session=_RecordingSession(),
-        monkeypatch=monkeypatch,
-        process_services=process_services,
-    )
-    monkeypatch.setattr(adapter, "wait_announced", AsyncMock())
-
-    _start_experiments(adapter)
-    await asyncio.wait_for(adapter._wait_for_first_turn_fetches(), timeout=2)
-
-    config = adapter._context.config_orchestrator.config
-    assert config.get_active_model().alias == "cached-model"
-    assert _ROUTED_ALIAS not in config.models
-    fetch.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_unified_a_catalog_already_on_is_not_fetched_again_after_the_eval(
+async def test_unified_the_catalog_is_not_fetched_again_after_the_eval(
     tmp_path: Path,
     config_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1705,7 +1764,7 @@ async def test_unified_a_catalog_already_on_is_not_fetched_again_after_the_eval(
     _serve_catalog(monkeypatch, process_services, fetch)
     adapter, _client = await _build_adapter(
         tmp_path,
-        response=_model_catalog_on_response(),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1719,74 +1778,6 @@ async def test_unified_a_catalog_already_on_is_not_fetched_again_after_the_eval(
         await task
 
     fetch.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_unified_a_catalog_flag_turned_off_waits_for_the_next_session(
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-) -> None:
-    pytest.importorskip("mistralai_vibe_local_harness.vibe")
-
-    _unpin_with_experiments(config_dir)
-    # The session opens on a cached eval with the flag on, then a fresh eval
-    # turns it off.
-    monkeypatch.setattr(
-        "vibe.app_server._cached_layers.load_cached_eval_response",
-        lambda _config, _credentials=None: _model_catalog_on_response(),
-    )
-    fetch = AsyncMock(return_value=_recommended_catalog("catalog-model"))
-    _serve_catalog(monkeypatch, process_services, fetch)
-    adapter, _client = await _build_adapter(
-        tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
-        session=_RecordingSession(),
-        monkeypatch=monkeypatch,
-        process_services=process_services,
-    )
-    monkeypatch.setattr(adapter, "wait_announced", AsyncMock())
-    assert adapter._context.config_orchestrator.config.experimental_enable_model_catalog
-
-    _start_experiments(adapter)
-    await asyncio.wait_for(adapter._wait_for_first_turn_fetches(), timeout=2)
-    await adapter._experiments_task
-
-    config = adapter._context.config_orchestrator.config
-    assert config.experimental_enable_model_catalog
-    assert "catalog-model" in config.models
-    assert _ROUTED_ALIAS not in config.models
-    fetch.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_unified_a_local_setting_off_wins_over_the_catalog_flag(
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-) -> None:
-    pytest.importorskip("mistralai_vibe_local_harness.vibe")
-
-    _unpin_with_experiments(config_dir)
-    _write_user_config(config_dir, experimental_enable_model_catalog=False)
-    fetch = AsyncMock(return_value=_recommended_catalog("catalog-model"))
-    _serve_catalog(monkeypatch, process_services, fetch)
-    adapter, _client = await _build_adapter(
-        tmp_path,
-        response=_model_catalog_on_response(),
-        session=_RecordingSession(),
-        monkeypatch=monkeypatch,
-        process_services=process_services,
-    )
-
-    _start_experiments(adapter)
-    await adapter._experiments_task
-    await asyncio.wait_for(adapter._wait_for_first_turn_fetches(), timeout=2)
-
-    assert adapter._model_catalog_task is None
-    fetch.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1805,7 +1796,7 @@ async def test_unified_an_eval_the_session_was_built_with_reloads_nothing(
     _enable_experiments(config_dir)
     first, _client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1813,7 +1804,7 @@ async def test_unified_an_eval_the_session_was_built_with_reloads_nothing(
     await first.initialize_experiments(_launch_context())
     second, _client = await _build_adapter(
         tmp_path,
-        response=_extra_models_response(),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1831,7 +1822,7 @@ async def test_unified_an_eval_the_session_was_built_with_reloads_nothing(
     await second.initialize_experiments(_launch_context())
 
     assert reloads == []
-    assert _ROUTED_ALIAS in _model_aliases(second)
+    assert _behavior(second) == _BEHAVIOR
 
 
 @pytest.mark.asyncio
@@ -1842,7 +1833,6 @@ async def test_unified_a_restarted_app_server_opens_sessions_without_waiting_on_
     process_services: ProcessServices,
 ) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    from tests.stubs.process_services import fake_process_services
 
     # An earlier app server evaluated this account and client. The next one
     # serves its sessions that eval from disk: readiness and the first turn of
@@ -1850,7 +1840,7 @@ async def test_unified_a_restarted_app_server_opens_sessions_without_waiting_on_
     _unpin_with_experiments(config_dir)
     earlier, _client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=process_services,
@@ -1861,7 +1851,7 @@ async def test_unified_a_restarted_app_server_opens_sessions_without_waiting_on_
     restarted = fake_process_services()
     adapter, client = await _build_adapter(
         tmp_path,
-        response=routing_eval_response(_ROUTED_ALIAS),
+        response=_behavior_response(),
         session=_RecordingSession(),
         monkeypatch=monkeypatch,
         process_services=restarted,
@@ -1876,8 +1866,7 @@ async def test_unified_a_restarted_app_server_opens_sessions_without_waiting_on_
     await asyncio.wait_for(task, timeout=0.5)
 
     assert client.attributes is None
-    config = adapter._context.config_orchestrator.config
-    assert config.get_active_model().alias == _ROUTED_ALIAS
+    assert _behavior(adapter) == _BEHAVIOR
     assert adapter._context.experiment_manager.attributes() is not None
     await restarted.close()
 
@@ -1908,9 +1897,7 @@ async def _refresh_held_catalog(process_services: ProcessServices) -> None:
     from vibe.app_server._model_catalog_service import ModelCatalogKey
     from vibe.core.config import VibeConfigSchema
 
-    key = await ModelCatalogKey.of(
-        VibeConfigSchema(experimental_enable_model_catalog=True), None
-    )
+    key = await ModelCatalogKey.of(VibeConfigSchema(enable_model_catalog=True), None)
     assert key is not None
     await process_services.model_catalog.refresh(key)
 
@@ -2530,33 +2517,6 @@ async def test_unified_a_pick_ends_with_unknown_model_at_the_catalog_cap(
 
 
 @pytest.mark.asyncio
-async def test_unified_a_pick_reaching_its_cap_does_not_stop_later_sessions_waiting(
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-) -> None:
-    """A pinned session holds no readiness wait, only the pick's: its cap must
-    not record a process-wide failure that unpinned sessions would then skip.
-    """
-    pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    import vibe.core.model_catalog.wait as wait_module
-
-    _write_user_config(config_dir)
-    monkeypatch.setattr(wait_module, "MODEL_CATALOG_WAIT_CAP_SECONDS", 0.05)
-    adapter, _released = await _cold_catalog_adapter(
-        tmp_path, monkeypatch, process_services, _runnable_catalog("fetched-model")
-    )
-    assert adapter._model_catalog_wait is None
-    assert adapter._model_catalog_pick_wait is not None
-
-    await asyncio.sleep(0.2)
-
-    assert process_services.model_catalog.failures.failed is False
-    await adapter.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_unified_a_pick_of_a_model_the_config_offers_does_not_wait(
     tmp_path: Path,
     config_dir: Path,
@@ -2573,51 +2533,6 @@ async def test_unified_a_pick_of_a_model_the_config_offers_does_not_wait(
     written = await asyncio.wait_for(_pick(adapter, offered), timeout=2)
 
     assert not written.response.failures
-    await adapter.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_unified_a_pick_waits_for_the_eval_that_turns_the_catalog_on(
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-) -> None:
-    pytest.importorskip("mistralai_vibe_local_harness.vibe")
-    # Catalog setting left unset locally, the session on its built-in model.
-    _enable_experiments(config_dir)
-    catalog_released = asyncio.Event()
-
-    async def _held_fetch(_config: object, _credentials: object = None) -> object:
-        await catalog_released.wait()
-        return _runnable_catalog("catalog-model")
-
-    _serve_catalog(monkeypatch, process_services, _held_fetch)
-    adapter, client = await _build_adapter(
-        tmp_path,
-        response=_model_catalog_on_response(),
-        session=_RecordingSession(),
-        monkeypatch=monkeypatch,
-        process_services=process_services,
-    )
-    eval_released = _hold_eval(client, monkeypatch)
-    config = adapter._context.config_orchestrator.config
-    assert not config.experimental_enable_model_catalog
-    assert config.active_model
-
-    _start_experiments(adapter)
-    pick = asyncio.create_task(_pick(adapter, "catalog-model"))
-    await asyncio.sleep(0.01)
-    assert not pick.done()
-    eval_released.set()
-    await asyncio.sleep(0.01)
-    assert not pick.done()
-    catalog_released.set()
-    written = await asyncio.wait_for(pick, timeout=2)
-
-    assert not written.response.failures
-    config = adapter._context.config_orchestrator.config
-    assert config.get_active_model().alias == "catalog-model"
     await adapter.shutdown()
 
 

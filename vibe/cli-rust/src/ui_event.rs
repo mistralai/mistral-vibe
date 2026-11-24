@@ -9,7 +9,7 @@ use crate::app::App;
 use crate::server::Client;
 use crate::{
     agents, approval, connector_auth, debug_console, feedback, log_level_picker, mcp, mcp_oauth,
-    message_queue, model_picker, older_history, paste_image, question_app, resume_picker, rewind,
+    message_queue, model_picker, older_history, paste_image, question_app, rewind, sessions_page,
     storage_panel, subagents, theme_picker, thinking_picker, turn_summary, usage_gauge,
 };
 
@@ -37,7 +37,7 @@ ui_events! {
     LogLevel(log_level_picker::Event),
     Thinking(thinking_picker::Event),
     Agents(agents::Event),
-    Resume(resume_picker::Event),
+    Sessions(sessions_page::Event),
     Storage(storage_panel::Event),
     Rewind(rewind::Event),
     Mcp(mcp::Event),
@@ -56,6 +56,10 @@ ui_events! {
     CodePreview(crate::code_preview::Event),
     Loops(crate::loops::Event),
     Goal(crate::goal::Event),
+    Trust(crate::trust_gate::Event),
+    Cd(crate::commands::cd::Event),
+    Dirs(crate::dir_completion::Event),
+    DirListing(crate::dir_complete::Listed),
 }
 
 /// Run `task` off the main thread and hand its answer back, holding the app busy until it lands.
@@ -81,7 +85,7 @@ pub fn apply(app: &mut App, client: &Arc<Client>, event: UiEvent) {
         UiEvent::ConnectorAuth(event) => connector_auth::apply_event(app, client, event),
         UiEvent::Feedback(event) => feedback::apply_event(app, event),
         UiEvent::Narrator(event) => turn_summary::apply_event(app, event),
-        UiEvent::Resume(event) => resume_picker::apply_event(app, client, event),
+        UiEvent::Sessions(event) => sessions_page::apply_event(app, client, event),
         UiEvent::Storage(event) => storage_panel::apply_event(app, client, event),
         UiEvent::Queue(event) => {
             if let Some(session) = message_queue::apply_event(app, client, event) {
@@ -98,5 +102,9 @@ pub fn apply(app: &mut App, client: &Arc<Client>, event: UiEvent) {
         UiEvent::CodePreview(event) => crate::code_preview::apply_event(app, event),
         UiEvent::Loops(event) => crate::loops::apply_event(app, event),
         UiEvent::Goal(event) => crate::goal::apply_event(app, event),
+        UiEvent::Trust(event) => crate::trust_gate::apply_event(app, client, event),
+        UiEvent::Cd(event) => crate::commands::cd::apply_event(app, event),
+        UiEvent::Dirs(event) => crate::dir_completion::apply_event(app, event),
+        UiEvent::DirListing(listed) => crate::dir_complete::apply_event(app, listed),
     }
 }

@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import StrEnum, auto
 from typing import Annotated, ClassVar, Literal, Self, cast
 
-from pydantic import BaseModel, Field, JsonValue, model_validator
+from pydantic import BaseModel, Discriminator, Field, JsonValue, Tag, model_validator
 
 from vibe.app_server._model import ProtocolModel
 from vibe.questions import UserQuestionRequest
@@ -240,18 +240,63 @@ class McpAppReference(ProtocolModel):
 
     Clients load ``resource_uri`` and call the app's tools through the
     connector, so the connector id is the one the connectors API knows.
+    ``kind`` tags the variant; an older server sent none, so it defaults.
     """
 
+    kind: Literal["connector"] = "connector"
     resource_uri: str
     connector_id: str
     connector_name: str
     connector_display_name: str
 
 
+class PluginMcpAppReference(ProtocolModel):
+    """The MCP App that renders a tool of a plugin's own MCP server.
+
+    Clients load ``resource_uri`` and call the app's tools through the
+    ``session/mcpApp/*`` methods, which take ``server``: the server's name in
+    the session's merged MCP catalog.
+    """
+
+    kind: Literal["plugin"]
+    resource_uri: str
+    plugin_name: str
+    server: str
+
+
+class McpServerAppReference(ProtocolModel):
+    """The MCP App that renders a tool of an MCP server of the user's config.
+
+    Like a plugin's: ``server`` is the name ``session/mcpApp/*`` takes.
+    """
+
+    kind: Literal["mcp_server"]
+    resource_uri: str
+    server: str
+
+
+def _mcp_app_kind(value: object) -> str | None:
+    """A reference's ``kind``; one without it is a connector's, as sent before."""
+    kind = (
+        value.get("kind", "connector")
+        if isinstance(value, dict)
+        else getattr(value, "kind", None)
+    )
+    return kind if isinstance(kind, str) else None
+
+
 class GenericEffectDetail(_EffectDetailBase):
     kind: Literal[ToolEffectKind.TOOL] = ToolEffectKind.TOOL
     input: JsonValue = None
-    mcp_app: McpAppReference | None = None
+    mcp_app: (
+        Annotated[
+            Annotated[McpAppReference, Tag("connector")]
+            | Annotated[PluginMcpAppReference, Tag("plugin")]
+            | Annotated[McpServerAppReference, Tag("mcp_server")],
+            Discriminator(_mcp_app_kind),
+        ]
+        | None
+    ) = None
 
 
 class ShellEffectDetail(_EffectDetailBase):

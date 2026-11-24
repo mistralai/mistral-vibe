@@ -38,6 +38,10 @@ __all__ = [
 GOAL_NOTICES_FILENAME = "goal-notices.json"
 # Enough for any real goal history; the oldest go first past it.
 MAX_GOAL_NOTICES = 2000
+# Left out of the file: a released app server (3.1.x) forbids unknown fields in
+# a notice's detail and would drop every saved notice. A notice read back
+# without it is placed by its time, as one the model set always was before.
+_NOT_SAVED = {"notices": {"__all__": {"detail": {"turn_id"}}}}
 
 
 class _StoredNoticesV1(BaseModel):
@@ -125,7 +129,7 @@ class GoalNoticeStore:
         # The notices quote the objective, which is session content.
         self._path.touch(mode=0o600, exist_ok=True)
         payload = _StoredNoticesV1(notices=self._notices).model_dump_json(
-            by_alias=True, exclude_none=True
+            by_alias=True, exclude_none=True, exclude=_NOT_SAVED
         )
         async with file_write_lock(self._path):
             await atomic_replace(self._path, payload + "\n")

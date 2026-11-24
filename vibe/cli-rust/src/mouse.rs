@@ -10,7 +10,7 @@ pub use option_gesture::option_gesture;
 pub use scrollbar::{drag_scroll, register_scrollbar, scrollbar_tracks};
 
 pub(crate) use capture::cancel_capture;
-pub use dispatch::toggle_effect_at;
+pub use dispatch::{open_link, toggle_effect_at};
 
 use std::sync::Arc;
 
@@ -22,8 +22,8 @@ use crate::app::App;
 use crate::selection;
 use crate::server::Client;
 use crate::{
-    approval, completion_manager, config, log_level_picker, model_picker, resume_picker,
-    theme_picker, thinking_picker,
+    approval, completion_manager, config, log_level_picker, model_picker, theme_picker,
+    thinking_picker,
 };
 use dispatch::dispatch;
 pub(crate) use dispatch::option_list;
@@ -56,8 +56,12 @@ pub enum MouseTarget {
     Loops,
     /// The highlighted loop's instructions under or beside the `/loop` rows, scrolled on their own.
     LoopsDetails,
+    /// The `/loop` add or edit form: a click focuses a field and moves its caret.
+    LoopsForm,
     GoalConfirm,
-    ResumePicker,
+    SessionsPage,
+    /// The Sessions page preview's scrollbar: a drag scrolls its conversation.
+    SessionsPreview,
     ProxySetup,
     BottomApp,
     Mcp,
@@ -276,7 +280,9 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         MouseTarget::Loops => crate::loops::navigate(app, !up),
         MouseTarget::LoopsDetails => app.loops.details.scroll_by(!up, MOUSE_SCROLL_STEP as usize),
         MouseTarget::GoalConfirm => crate::goal::step(app, !up),
-        MouseTarget::ResumePicker => resume_picker::wheel(app, !up),
+        MouseTarget::SessionsPage | MouseTarget::SessionsPreview => {
+            crate::sessions_page::mouse::wheel(app, event, !up)
+        }
         MouseTarget::Mcp
         | MouseTarget::Skills
         | MouseTarget::Config
@@ -313,6 +319,7 @@ fn handle_wheel(app: &mut App, event: MouseEvent) -> bool {
         | MouseTarget::Loading
         | MouseTarget::GoalRow
         | MouseTarget::BottomApp
+        | MouseTarget::LoopsForm
         | MouseTarget::McpOAuth
         | MouseTarget::ConnectorAuth
         | MouseTarget::BottomBar

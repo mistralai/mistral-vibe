@@ -17,7 +17,14 @@ from vibe.app_server.models import (
     PublicGoal,
 )
 
-__all__ = ["GoalNotice", "change_notice", "continuation_notice", "with_turn_failure"]
+__all__ = [
+    "GoalNotice",
+    "change_notice",
+    "continuation_notice",
+    "made_in_turn",
+    "with_block_cause",
+    "with_turn_failure",
+]
 
 # The turn error quoted in a notice: enough to name the cause, a row or two.
 MAX_NOTICE_ERROR_CHARS = 300
@@ -111,9 +118,7 @@ def with_turn_failure(
     a context too long) fails a resumed goal straight away, so the notice
     points away from resuming.
     """
-    reason = " ".join((error or "").split())
-    if len(reason) > MAX_NOTICE_ERROR_CHARS:
-        reason = f"{reason[: MAX_NOTICE_ERROR_CHARS - 1]}…"
+    reason = _bounded(error)
     advice = (
         "Run /goal resume to try again."
         if retryable
@@ -126,6 +131,34 @@ def with_turn_failure(
         message=f"{notice.message}{cause}. {advice}",
         detail=notice.detail.model_copy(update={"error": reason or None}),
     )
+
+
+def with_block_cause(notice: GoalNotice, cause: str) -> GoalNotice:
+    """``notice`` saying, in the server's words, why the goal cannot go on."""
+    reason = _bounded(cause)
+    return replace(
+        notice,
+        message=f"{notice.message}: {reason}",
+        detail=notice.detail.model_copy(update={"error": reason or None}),
+    )
+
+
+def _bounded(text: str | None) -> str:
+    reason = " ".join((text or "").split())
+    if len(reason) > MAX_NOTICE_ERROR_CHARS:
+        reason = f"{reason[: MAX_NOTICE_ERROR_CHARS - 1]}…"
+    return reason
+
+
+def made_in_turn(notice: GoalNotice, turn_id: str | None) -> GoalNotice:
+    """``notice`` naming the turn whose tool call made the change.
+
+    Only the detail names it: the notice is still recorded without a turn, so
+    the history keeps placing it by its time, inside that turn.
+    """
+    if turn_id is None:
+        return notice
+    return replace(notice, detail=notice.detail.model_copy(update={"turn_id": turn_id}))
 
 
 def continuation_notice(goal: PublicGoal, number: int) -> GoalNotice:

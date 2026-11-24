@@ -19,7 +19,12 @@ experiments and the model catalog) follows one path:
 
 1. **Held by a service** in a `RemoteCache` (`vibe/core/utils/remote_cache.py`):
    served at once, refreshed in the background once old, one fetch per key,
-   backoff after a failure, a copy on disk shared across processes.
+   backoff after a failure, a copy on disk shared across processes. The
+   backoff is the only memory of a failure: a session that waits for a value
+   none holds (a session start for the org config, a first turn or a model
+   pick for the eval and the catalog) finds a failed fetch over until its
+   retry is due, then waits for the retry within its own cap, and joins a
+   fetch still running past another session's cap.
 2. **Followed by each session** with a `RemoteFollower`
    (`_remote_follower.py`). It only tells whether the value held differs from
    the one the session's config was last built from. It applies nothing.
@@ -44,6 +49,14 @@ experiments and the model catalog) follows one path:
 A running turn keeps the config it started with. `/reload` reloads the local
 files, refreshes the remote values, then converges at once.
 
+A session's mode is chosen when it is built. A `default_agent` that arrives
+later (an eval that lands after the session opened, an org config refreshed
+since) applies from the next session: the org config only moves a running
+session off a mode it disables, since switching modes under a user who may
+already be typing changes what runs without asking. A session start waits for
+the org config only within its cap, so an org default also arrives late when
+the org config is refreshed mid-session, or failed or was slow at the start.
+
 The GrowthBook eval (`ExperimentsService`) is held in a `RemoteCache` too, with
 its own copy on disk (`experiment_held_eval_cache.json`: the response with the
 attributes and plan telemetry segments it by), but not followed: a session
@@ -55,6 +68,9 @@ The model catalog (`ModelCatalogService`) takes steps 1 to 3, one catalog per
 account and endpoint with its own copy on disk (`model_catalog_cache.json`).
 A session opens on the catalog held, from memory or disk with no request,
 and waits, within its cap, only for an account never fetched on this machine.
+A catalog turned on after the session opened, by the eval or by an org
+config, is followed from then: the turn that opens next in a session on the
+default model, a model pick, and a `/reload` wait for it within the same cap.
 A session whose model is pinned keeps it: a refreshed catalog that retires the
 pinned model is refused for that session, which says so once (one that renames
 it, keeping the old name as an alias, is loaded). A session pins the model it
@@ -65,13 +81,20 @@ A plan upgrade unlocks models, so a catalog is old after 30 seconds rather
 than 10 minutes to a session running a model it locks and to a model picker
 showing an upsell. A session on a runnable model keeps the 10 minutes, though
 every plan below the top one lists locked models. A catalog that changes
-publishes `config/changed`, as does a session that loads a new one. Two paths
-refresh an old catalog, each in the process that holds it: a `config/read`
-(the model picker, which a client re-reads as the user returns to it) in the
-background, never waiting on it, and a turn on a locked model, which waits up
-to 2 seconds for it before it is refused. A session with no turn running loads the held
-catalog on its next `config/read` or turn. Loading the held catalog never
-fetches.
+publishes `config/changed`, as does a session that loads a new one. Three
+paths refresh a catalog, each in the process that holds it:
+
+- a `config/read` (the model picker, which a client re-reads as the user
+  returns to it) refreshes an old catalog in the background;
+- a `config/read` with `refreshModelCatalog` (the picker opening), when the
+  catalog locks a model, fetches it right away whatever its age and waits
+  for the fetch, so a user back from upgrading their plan sees the unlocked
+  models;
+- a turn on a locked model refreshes an old catalog and waits up to 2 seconds
+  for it before it is refused.
+
+A session with no turn running loads the held catalog on its next
+`config/read` or turn. Loading the held catalog never fetches.
 
 MCP tool descriptors take steps 1 and 4 only. `MCPDiscoveryService` holds the
 process's Harness `MCPDiscoveryFlights`, which every session's MCP runtime

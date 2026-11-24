@@ -1524,6 +1524,7 @@ async def test_unified_adapter_preserves_canonical_queue_entries(
         session_id = "session-1"
         started_by_session_id: str | None = None
         cwd: str | None = None
+        active_turn_id: str | None = None
 
         has_active_work = False
         turn_waits = False
@@ -1859,7 +1860,7 @@ async def test_unified_state_updates_reproject_only_changed_entries(
 
 def test_history_projection_recognises_a_rebuilt_entry_by_identity() -> None:
     # Prepare
-    from vibe.app_server._unified_harness_backend_adapter import _HistoryProjections
+    from vibe.app_server._session_projection import HistoryProjections
 
     comparisons = 0
 
@@ -1879,7 +1880,7 @@ def test_history_projection_recognises_a_rebuilt_entry_by_identity() -> None:
         "role": "user",
         "content": [{"type": "text", "text": "Stream please"}],
     }
-    projections = _HistoryProjections()
+    projections = HistoryProjections()
     first = projections.project([entry], ())
     rebuilt = CountingEntry(entry)
 
@@ -1896,7 +1897,7 @@ def test_history_projection_reprojects_when_the_display_roots_change(
     tmp_path: Path,
 ) -> None:
     # Prepare
-    from vibe.app_server._unified_harness_backend_adapter import _HistoryProjections
+    from vibe.app_server._session_projection import HistoryProjections
 
     path = tmp_path / "repo" / "README.md"
     entry: JsonObject = {
@@ -1916,7 +1917,7 @@ def test_history_projection_reprojects_when_the_display_roots_change(
         },
         "state": {"status": "running", "outputText": ""},
     }
-    projections = _HistoryProjections()
+    projections = HistoryProjections()
 
     # Do
     under_repo = projections.project([entry], (tmp_path / "repo",))
@@ -1941,7 +1942,7 @@ async def test_unified_compact_keeps_session_loops(tmp_path: Path) -> None:
     pytest.importorskip("mistralai_vibe_local_harness.vibe")
 
     # Prepare
-    from vibe.app_server._unified_harness_backend_adapter import _project_scheduled_loop
+    from vibe.app_server._session_projection import project_scheduled_loop
 
     session = _CompactingSession()
     adapter = _stats_adapter(tmp_path, session)
@@ -1960,7 +1961,7 @@ async def test_unified_compact_keeps_session_loops(tmp_path: Path) -> None:
     # Assert
     assert len(adapter._pretranslated_events) == 1
     _events, current = next(iter(adapter._pretranslated_events.values()))
-    assert current.session.loops == [_project_scheduled_loop(loop)]
+    assert current.session.loops == [project_scheduled_loop(loop)]
 
 
 @pytest.mark.asyncio
@@ -2355,6 +2356,60 @@ async def test_unified_adapter_stops_listing_a_live_child_the_harness_deleted(
     assert [(c.id, c.status.type) for c in read.state.child_sessions] == [
         ("session-child", "archived")
     ]
+
+
+@pytest.mark.asyncio
+async def test_unified_adapter_stops_listing_a_live_child_no_record_names(
+    tmp_path: Path,
+) -> None:
+    """*Prepare*: A root adapter listing two live children.
+    *Do*: One child's record leaves every place the Host reads, then the root
+    is read.
+    *Assert*: That child is listed as stopped; the other stays live.
+    """
+    # Prepare
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    sessions = {}
+    for child_id in ("session-kept", "session-dropped"):
+        child = _RecordingSession()
+        child.session_id = child_id
+        child.sent.append(SimpleNamespace(message=[TextContentBlock(text="child")]))
+        sessions[child_id] = child
+    idle = _persisted_child_states()["idle"]
+
+    class FakeHost:
+        child_ids: tuple[str, ...] = ("session-kept", "session-dropped")
+
+        def child_session_records(self, root_session_id: str) -> tuple[Any, ...]:
+            assert root_session_id == "session-1"
+            return tuple(
+                _persisted_child_record(f"agent-{child_id}", child_id, idle)
+                for child_id in self.child_ids
+            )
+
+        def references_child(self, root_session_id: str, child_session_id: str) -> bool:
+            return child_session_id in sessions
+
+        async def read(self, params: Any) -> object:
+            result = await sessions[params.session_id].read(params)
+            return SimpleNamespace(snapshot=result.snapshot, cwd=str(tmp_path))
+
+    host = FakeHost()
+    adapter = _inert_adapter(
+        _RecordingSession(), str(tmp_path), str(tmp_path), host=host
+    )
+    await adapter.seed_persisted_child_states()
+
+    # Do
+    host.child_ids = ("session-kept",)
+    read = await adapter.read(
+        SessionReadParams(session_id="session-1", history=PageRequest(limit=20))
+    )
+
+    # Assert
+    statuses = {c.id: c.status.type for c in read.state.child_sessions}
+    assert statuses["session-dropped"] == "archived"
+    assert statuses["session-kept"] != "archived"
 
 
 @pytest.mark.asyncio
@@ -2772,7 +2827,7 @@ def test_a_child_update_leaves_the_roots_context_gauge_alone(tmp_path: Path) -> 
     adapter = _inert_adapter(
         _session_stub(session_id="session-root", cwd=None), str(tmp_path), str(tmp_path)
     )
-    from vibe.app_server._unified_harness_backend_adapter import _HistoryProjections
+    from vibe.app_server._session_projection import HistoryProjections
 
     adapter._context_tokens_before = 4321
 
@@ -2786,7 +2841,7 @@ def test_a_child_update_leaves_the_roots_context_gauge_alone(tmp_path: Path) -> 
         20,
         cwd=str(tmp_path),
         metadata=None,
-        projections=_HistoryProjections(),
+        projections=HistoryProjections(),
         record_root_telemetry=False,
         started_by_session_id=None,
     )

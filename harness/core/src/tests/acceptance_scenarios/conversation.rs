@@ -345,7 +345,7 @@ fn compact(runtime: &mut SynchronousRuntime, summary: &str) {
         idle().observe(json!({
             "type":"context_compacted", "turn_id":null,
             "action_id":action["action_id"], "compaction_id":action["compaction_id"],
-            "attempt":1, "trigger":"manual", "summary":summary, "usage": {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
+            "attempt":1, "trigger":"manual", "summary":summary, "usage": {"input_tokens": 0, "output_tokens": 20, "total_tokens": 20, "cached_input_tokens": 0, "cache_write_tokens": 0, "reasoning_tokens": 0},
         })),
     );
 }

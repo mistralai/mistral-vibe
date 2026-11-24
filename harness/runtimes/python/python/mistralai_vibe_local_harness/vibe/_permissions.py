@@ -69,4 +69,17 @@ type PermissionResolver = Callable[[str, JsonObject], Awaitable[PermissionOutcom
 """Resolve one call, by its published tool name and arguments."""
 
 
-__all__ = ["ALWAYS_ASK", "PermissionOutcome", "PermissionResolver"]
+def approval_mode[ModeT: str](
+    mode: ModeT, *, bypass_approval: bool
+) -> ModeT | Literal["allow"]:
+    """The mode a gated call runs under once the session's bypass is applied.
+
+    ``bypass_approval`` turns an ``ask`` into ``allow``; any other mode stands.
+    The resolver refines only what is still ``ask``.
+    """
+    if mode == "ask" and bypass_approval:
+        return "allow"
+    return mode
+
+
+__all__ = ["ALWAYS_ASK", "PermissionOutcome", "PermissionResolver", "approval_mode"]

@@ -143,6 +143,7 @@ def test_project_methods_are_advertised() -> None:
         "projects/rename",
         "projects/retireCloud",
         "projects/setCloud",
+        "projects/setRoots",
     }.issubset(SERVER_METHODS)
 
 
@@ -437,6 +438,232 @@ async def test_remove_keeps_a_link_another_project_on_the_folder_uses(
 
 
 @pytest.mark.asyncio
+async def test_set_roots_replaces_the_folders_and_the_first_becomes_the_working_folder(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    first, second = root / "first", root / "second"
+    first.mkdir()
+    second.mkdir()
+    created = await _mutate("projects/create", {"rootPath": str(first)})
+
+    updated = await _mutate(
+        "projects/setRoots",
+        {"id": created.id, "rootPaths": [str(second), str(first), str(second)]},
+    )
+
+    assert updated.root_paths == [str(second), str(first)]
+    assert updated.updated_at >= created.updated_at
+    assert await _list() == [updated]
+    assert _read_store(config_dir)["projects"][0]["root_paths"] == [
+        str(second),
+        str(first),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("root_paths", [["relative/path"], ["/no/such/folder"]])
+async def test_set_roots_rejects_anything_but_absolute_folders(
+    config_dir: Path, tmp_path: Path, root_paths: list[str]
+) -> None:
+    created = await _mutate("projects/create", {"rootPath": str(tmp_path)})
+
+    code = await _failure(
+        "projects/setRoots", {"id": created.id, "rootPaths": root_paths}
+    )
+
+    assert code is ProtocolErrorCode.INVALID_PARAMS
+    assert await _list() == [created]
+
+
+@pytest.mark.asyncio
+async def test_set_roots_of_a_removed_project_is_not_found(tmp_path: Path) -> None:
+    gone = await _mutate("projects/create", {"rootPath": str(tmp_path)})
+    await _handler().dispatch("projects/remove", {"id": gone.id})
+
+    code = await _failure(
+        "projects/setRoots", {"id": gone.id, "rootPaths": [str(tmp_path)]}
+    )
+
+    assert code is ProtocolErrorCode.NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_set_roots_refuses_a_folder_linked_to_another_cloud_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    own, linked = root / "own", root / "linked"
+    own.mkdir()
+    linked.mkdir()
+    created = await _mutate("projects/create", {"rootPath": str(own)})
+    _link(config_dir, _local_link(linked, cloud_id="cloud-other"))
+    await _list()
+
+    code = await _failure(
+        "projects/setRoots", {"id": created.id, "rootPaths": [str(own), str(linked)]}
+    )
+
+    assert code is ProtocolErrorCode.CONFLICT
+
+
+@pytest.mark.asyncio
+async def test_set_roots_unlinks_a_removed_folder_so_the_import_does_not_add_it_back(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    first, later = root / "first", root / "later"
+    first.mkdir()
+    later.mkdir()
+    _link(config_dir, _local_link(first))
+    _link(config_dir, _local_link(later))
+    [backed] = await _list()
+    assert backed.root_paths == [str(first), str(later)]
+
+    await _mutate("projects/setRoots", {"id": backed.id, "rootPaths": [str(first)]})
+
+    [project] = await _list()
+    assert (project.root_paths, project.cloud) == ([str(first)], _backed("cloud-1"))
+    assert _linked_folders(config_dir) == {first}
+
+
+@pytest.mark.asyncio
+async def test_set_roots_refuses_to_drop_the_folder_linking_its_cloud_project(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    linked, other = root / "linked", root / "other"
+    linked.mkdir()
+    other.mkdir()
+    _link(config_dir, _local_link(linked))
+    [backed] = await _list()
+
+    code = await _failure(
+        "projects/setRoots", {"id": backed.id, "rootPaths": [str(other)]}
+    )
+
+    assert code is ProtocolErrorCode.INVALID_PARAMS
+    assert _linked_folders(config_dir) == {linked}
+    [project] = await _list()
+    assert project.root_paths == [str(linked)]
+
+
+@pytest.mark.asyncio
+async def test_set_roots_unlinks_a_removed_folder_of_a_retired_backing(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    first, later = root / "first", root / "later"
+    first.mkdir()
+    later.mkdir()
+    _link(config_dir, _local_link(first))
+    _link(config_dir, _local_link(later))
+    [backed] = await _list()
+    await _handler().dispatch("projects/retireCloud", {"cloudProjectId": "cloud-1"})
+
+    await _mutate("projects/setRoots", {"id": backed.id, "rootPaths": [str(first)]})
+    await _mutate(
+        "projects/link",
+        {"rootPath": str(first), "cloudProjectId": "cloud-1", "name": "Linked"},
+    )
+
+    [project] = await _list()
+    assert project.root_paths == [str(first)]
+    assert _linked_folders(config_dir) == {first}
+
+
+@pytest.mark.asyncio
+async def test_set_roots_keeps_a_folder_that_went_missing(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    first, gone, added = root / "first", root / "gone", root / "added"
+    for folder in (first, gone, added):
+        folder.mkdir()
+    created = await _mutate("projects/create", {"rootPath": str(first)})
+    await _mutate(
+        "projects/setRoots", {"id": created.id, "rootPaths": [str(first), str(gone)]}
+    )
+    gone.rmdir()
+
+    updated = await _mutate(
+        "projects/setRoots",
+        {"id": created.id, "rootPaths": [str(first), str(gone), str(added)]},
+    )
+
+    assert updated.root_paths == [str(first), str(gone), str(added)]
+
+
+@pytest.mark.asyncio
+async def test_set_roots_refuses_a_missing_folder_as_primary(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    first, gone = root / "first", root / "gone"
+    first.mkdir()
+    gone.mkdir()
+    created = await _mutate("projects/create", {"rootPath": str(first)})
+    await _mutate(
+        "projects/setRoots", {"id": created.id, "rootPaths": [str(first), str(gone)]}
+    )
+    gone.rmdir()
+
+    code = await _failure(
+        "projects/setRoots", {"id": created.id, "rootPaths": [str(gone), str(first)]}
+    )
+
+    assert code is ProtocolErrorCode.INVALID_PARAMS
+    assert [project.root_paths for project in await _list()] == [
+        [str(first), str(gone)]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_link_refuses_another_projects_other_folder(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    app, shared = root / "app", root / "shared"
+    app.mkdir()
+    shared.mkdir()
+    created = await _mutate("projects/create", {"rootPath": str(app)})
+    await _mutate(
+        "projects/setRoots", {"id": created.id, "rootPaths": [str(app), str(shared)]}
+    )
+
+    code = await _failure(
+        "projects/link",
+        {"rootPath": str(shared), "cloudProjectId": "cloud-D", "name": "D"},
+    )
+
+    assert code is ProtocolErrorCode.CONFLICT
+    [project] = await _list()
+    assert project.root_paths == [str(app), str(shared)]
+
+
+@pytest.mark.asyncio
+async def test_set_roots_lets_a_backed_project_take_an_unlinked_folder_first(
+    config_dir: Path, tmp_path: Path
+) -> None:
+    root = tmp_path.resolve()
+    linked, other = root / "linked", root / "other"
+    linked.mkdir()
+    other.mkdir()
+    _link(config_dir, _local_link(linked))
+    [backed] = await _list()
+
+    await _mutate(
+        "projects/setRoots", {"id": backed.id, "rootPaths": [str(other), str(linked)]}
+    )
+
+    [project] = await _list()
+    assert (project.root_paths, project.cloud) == (
+        [str(other), str(linked)],
+        _backed("cloud-1"),
+    )
+
+
+@pytest.mark.asyncio
 async def test_a_folder_linked_to_a_removed_projects_cloud_project_gets_its_own_project(
     config_dir: Path, tmp_path: Path
 ) -> None:
@@ -470,7 +697,7 @@ def test_a_removed_projects_sessions_join_the_project_on_their_folder(
         project=PublicSessionProject(kind="local", id=removed.id),
     )
 
-    stamps = _folder_stamps(store.list_projects(), store.project_ids(), [stamped])
+    stamps = _folder_stamps(store.list_projects(), store.project_ids(), [], [stamped])
 
     assert stamps == {"stamped": SessionProject(kind="local", id=live.id)}
 
@@ -646,9 +873,9 @@ async def test_a_project_an_older_server_hid_is_gone_even_when_the_purge_fails(
     assert await _failure("projects/rename", {"id": "lp_hidden", "name": "x"}) is (
         ProtocolErrorCode.NOT_FOUND
     )
-    assert _folder_stamps(store.list_projects(), store.project_ids(), [stamped]) == {
-        "stamped": SessionProject(kind="local", id="lp_live")
-    }
+    assert _folder_stamps(
+        store.list_projects(), store.project_ids(), [], [stamped]
+    ) == {"stamped": SessionProject(kind="local", id="lp_live")}
 
 
 @pytest.mark.asyncio
@@ -713,6 +940,7 @@ async def test_the_server_routes_project_calls_while_a_session_is_attached(
     server = AppServer(
         server_transport,
         oidc_tenants=fake_process_services().oidc_tenants,
+        platform_credential_lenders=fake_process_services().platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=_handler(),
     )
@@ -1163,7 +1391,7 @@ def test_a_worktree_session_of_a_merged_project_follows_it(
         project=PublicSessionProject(kind="local", id="lp_second"),
     )
 
-    stamps = _folder_stamps(store.list_projects(), store.project_ids(), [session])
+    stamps = _folder_stamps(store.list_projects(), store.project_ids(), [], [session])
 
     assert stamps == {"session-1": SessionProject(kind="local", id="lp_first")}
 

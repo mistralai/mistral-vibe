@@ -244,6 +244,8 @@ def get_base_config() -> dict[str, Any]:
         "enable_telemetry": False,
         # Connectors fetch the real bootstrap endpoint; connector tests opt in.
         "enable_connectors": False,
+        # The model catalog fetches the real endpoint too; catalog tests opt in.
+        "enable_model_catalog": False,
     }
 
 
@@ -569,6 +571,10 @@ def _prepare_test_config_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     # enable_pr_monitoring=True. Sessions built from config files (api_host,
     # HarnessProcess) keep the schema default, which is on.
     kwargs.setdefault("enable_pr_monitoring", False)
+    # The model catalog replaces the configured models once it lands; off in
+    # the configs built here so a test's models stay the only ones. Catalog
+    # tests pass enable_model_catalog=True.
+    kwargs.setdefault("enable_model_catalog", False)
     # Use the lightweight test system prompt unless a test asks for a real one.
     kwargs.setdefault("system_prompt_id", "tests")
     # Keep the test prompt minimal: skip project-context discovery unless a

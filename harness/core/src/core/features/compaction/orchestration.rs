@@ -168,9 +168,10 @@ fn refit_refused_summary_request(
     let refused_estimate = pending
         .projection()
         .request_estimate(tools, inputs.budgets.request)?;
+    // The model that writes summaries refused it, so its window is the measure.
     let correction = state
         .estimate_correction
-        .after_refusal(limits.context_window, refused_estimate);
+        .after_refusal(limits.summary_window, refused_estimate);
     state.estimate_correction = correction;
     let mut outcome = Outcome::quiet();
     outcome.observe(request_too_long_warning(
@@ -179,7 +180,7 @@ fn refit_refused_summary_request(
             .map(|(turn_id, _)| turn_id.to_string()),
         refused_estimate,
         correction,
-        limits.context_window,
+        limits.summary_window,
     ));
     let refit_limit = EstimateCorrection::refit_limit(refused_estimate);
     let resolution = refit_refused_compaction(

@@ -17,8 +17,10 @@ def _project(project_id: str, *roots: Path, created_at: int = 1) -> LocalProject
     )
 
 
-def _matched_id(projects: list[LocalProject], cwd: Path | None) -> str | None:
-    project = ProjectFolders(projects).match(None if cwd is None else str(cwd))
+def _matched_id(
+    projects: list[LocalProject], cwd: Path | None, linked: tuple[Path, ...] = ()
+) -> str | None:
+    project = ProjectFolders(projects, linked).match(None if cwd is None else str(cwd))
     return project.id if project is not None else None
 
 
@@ -87,7 +89,25 @@ def test_a_single_folder_project_wins_a_tie(tmp_path: Path) -> None:
     assert _matched_id(projects, repo) == "single"
 
 
-def test_then_the_project_whose_primary_folder_it_is(tmp_path: Path) -> None:
+def test_a_secondary_folder_claims_no_session(tmp_path: Path) -> None:
+    repo, other = tmp_path / "repo", tmp_path / "other"
+    projects = [_project("multi", repo, other)]
+
+    assert _matched_id(projects, other) is None
+    assert _matched_id(projects, other / "sub") is None
+    assert _matched_id(projects, repo / "sub") == "multi"
+
+
+def test_a_linked_secondary_folder_claims_its_sessions(tmp_path: Path) -> None:
+    repo, checkout = tmp_path / "repo", tmp_path / "checkout"
+    projects = [_project("backed", repo, checkout)]
+
+    assert _matched_id(projects, checkout / "sub", linked=(checkout,)) == "backed"
+
+
+def test_a_primary_folder_beats_an_older_project_holding_it_as_secondary(
+    tmp_path: Path,
+) -> None:
     repo, other = tmp_path / "repo", tmp_path / "other"
     projects = [
         _project("secondary", other, repo, created_at=0),

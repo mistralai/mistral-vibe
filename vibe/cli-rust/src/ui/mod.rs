@@ -58,13 +58,13 @@ pub mod rail;
 pub mod rail_window;
 pub mod recording_indicator;
 pub mod release_notes;
-pub mod resume_picker;
 pub mod reverse_search;
 pub mod rewind;
 pub mod rng;
 pub mod scrollbar;
 pub(crate) mod search_field;
 pub mod selection;
+pub mod sessions_page;
 pub mod skills_browser;
 pub mod storage_panel;
 mod storage_review;
@@ -72,6 +72,8 @@ pub mod storage_rows;
 mod styled_text;
 pub mod subagent_list;
 pub mod tab_cells;
+pub mod task_output;
+pub mod tasks_window;
 pub mod theme;
 pub mod theme_picker;
 pub mod thinking_picker;
@@ -100,6 +102,14 @@ pub fn draw(app: &mut App, f: &mut Frame) {
     let area = f.area();
     draw_active_screen(app, f, area);
     list_hover::paint(app, f);
+}
+
+/// The width the session screen gets in a `width`-column terminal, beside
+/// the docked plan panel and debug console.
+pub fn session_screen_width(app: &App, width: u16) -> u16 {
+    let area = ratatui::layout::Rect::new(0, 0, width, u16::MAX);
+    let (main, _) = todo::split(app, area);
+    debug_console::split(app, main).0.width
 }
 
 fn draw_active_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect) {
@@ -133,7 +143,7 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::VoiceApp => voice_app::draw(app, f, area),
         Focus::BranchApp => branch_app::draw(app, f, area),
         Focus::ProxySetup => proxy_setup::draw(app, f, area),
-        Focus::ResumePicker => resume_picker::draw(app, f, area),
+        Focus::SessionsPage => sessions_page::draw(app, f, area),
         Focus::Storage => storage_panel::draw(app, f, area),
         Focus::Mcp => mcp::draw(app, f, area),
         Focus::Plugins => plugins::draw(app, f, area),
@@ -147,7 +157,8 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
         Focus::ModelPicker => model_picker::draw(app, f, area),
         Focus::LogLevelPicker => log_level_picker::draw(app, f, area),
         Focus::ThinkingPicker => thinking_picker::draw(app, f, area),
-        Focus::Loops => loops::draw(app, f, area),
+        // The rail's letters over the loop list keep the list drawn, like the other rail windows.
+        Focus::Loops | Focus::Rail if app.loops.open => loops::draw(app, f, area),
         Focus::Goal => goal_panel::draw(app, f, area),
         Focus::Config => {
             draw_base(app, f, area);
@@ -164,8 +175,10 @@ fn draw_session_screen(app: &mut App, f: &mut Frame, area: ratatui::layout::Rect
 
 /// Input-box height: rendered chat rows, capped near 50vh.
 pub fn input_box_height(app: &App, area_width: u16, area_height: u16) -> u16 {
-    let lines = chat_input::content_height(app, area_width);
     let max_content = (area_height / 2).max(3);
+    let input = &app.chat_input;
+    let lines =
+        composer_layout::capped_height(&input.input, input.mode.marker(), area_width, max_content);
     lines.clamp(3, max_content) + 2
 }
 

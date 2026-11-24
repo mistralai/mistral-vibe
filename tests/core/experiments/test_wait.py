@@ -6,15 +6,14 @@ from typing import Any
 
 import pytest
 
-from tests.stubs.experiment_responses import routing_eval_response
+from tests.stubs.experiment_responses import behavior_eval_response
 from vibe.core.config import build_default_orchestrator
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG
 from vibe.core.experiments.manager import config_variants_from_response
 from vibe.core.experiments.models import EvalResponse
 import vibe.core.experiments.wait as wait_module
-from vibe.core.experiments.wait import ExperimentsWait, experiments_pending
-from vibe.core.utils.fetch_wait import FetchFailures
+from vibe.core.experiments.wait import experiments_pending, experiments_wait
 
 
 async def _config(**fields: Any) -> Any:
@@ -28,7 +27,7 @@ async def _config(**fields: Any) -> Any:
 
 @pytest.mark.asyncio
 async def test_an_unpinned_session_without_a_cached_eval_waits() -> None:
-    assert experiments_pending(await _config(), FetchFailures()) is True
+    assert experiments_pending(await _config()) is True
 
 
 @pytest.mark.asyncio
@@ -37,7 +36,7 @@ async def test_a_set_model_still_waits() -> None:
     # a first turn on a set model checks that itself.
     orchestrator = await _config(active_model=DEFAULT_ACTIVE_MODEL_CONFIG.alias)
 
-    assert experiments_pending(orchestrator, FetchFailures()) is True
+    assert experiments_pending(orchestrator) is True
 
 
 @pytest.mark.asyncio
@@ -50,14 +49,14 @@ async def test_a_cached_eval_means_no_wait(monkeypatch: pytest.MonkeyPatch) -> N
         }),
     )
 
-    assert experiments_pending(await _config(), FetchFailures()) is False
+    assert experiments_pending(await _config()) is False
 
 
 @pytest.mark.asyncio
 async def test_a_cached_eval_the_session_loaded_means_no_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cached = routing_eval_response("experiment-routed")
+    cached = behavior_eval_response("Experiment behavior.")
     monkeypatch.setattr(
         wait_module, "load_cached_eval_response", lambda _c, _credentials=None: cached
     )
@@ -66,7 +65,7 @@ async def test_a_cached_eval_the_session_loaded_means_no_wait(
     assert isinstance(layer, GrowthbookLayer)
     layer.set_variants(config_variants_from_response(cached))
 
-    assert experiments_pending(orchestrator, FetchFailures()) is False
+    assert experiments_pending(orchestrator) is False
 
 
 @pytest.mark.asyncio
@@ -75,12 +74,12 @@ async def test_a_cached_eval_written_after_the_config_was_built_still_waits(
 ) -> None:
     # Another session's eval landed between this config's build and its open.
     orchestrator = await _config()
-    cached = routing_eval_response("experiment-routed")
+    cached = behavior_eval_response("Experiment behavior.")
     monkeypatch.setattr(
         wait_module, "load_cached_eval_response", lambda _c, _credentials=None: cached
     )
 
-    assert experiments_pending(orchestrator, FetchFailures()) is True
+    assert experiments_pending(orchestrator) is True
 
 
 @pytest.mark.asyncio
@@ -90,7 +89,7 @@ async def test_a_cached_eval_written_after_the_config_was_built_still_waits(
     ids=["telemetry-off", "experiments-off"],
 )
 async def test_no_eval_means_no_wait(fields: dict[str, Any]) -> None:
-    assert experiments_pending(await _config(**fields), FetchFailures()) is False
+    assert experiments_pending(await _config(**fields)) is False
 
 
 @pytest.mark.asyncio
@@ -101,30 +100,21 @@ async def test_no_mistral_credential_means_no_wait(
         wait_module, "mistral_credentials", lambda _config, _credentials=None: None
     )
 
-    assert experiments_pending(await _config(), FetchFailures()) is False
+    assert experiments_pending(await _config()) is False
 
 
 @pytest.mark.asyncio
-async def test_no_wait_once_an_eval_failed_in_this_process() -> None:
-    failures = FetchFailures()
-    failures.mark()
-
-    assert experiments_pending(await _config(), failures) is False
-
-
-@pytest.mark.asyncio
-async def test_an_eval_slower_than_the_cap_fails_the_eval(
+async def test_an_eval_slower_than_the_cap_ends_the_wait(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(wait_module, "EVAL_WAIT_CAP_SECONDS", 0.01)
     task = asyncio.create_task(asyncio.sleep(3600))
-    failures = FetchFailures()
-    wait = ExperimentsWait(task, failures)
+    wait = experiments_wait(task)
 
     await wait.wait()
 
     assert not task.done()
-    assert failures.failed is True
+    assert wait.done is True
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task

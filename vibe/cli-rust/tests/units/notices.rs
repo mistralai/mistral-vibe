@@ -6,6 +6,11 @@ use vibe_rs::notices;
 use vibe_rs::server::{HistoryEntry, MessageContent};
 use vibe_rs::utils::text::{MESSAGE_MAX_CHARS, MESSAGE_TRUNCATION_MARKER};
 
+fn clear(app: &mut App) {
+    let state = json!({"eventId": 1, "session": {"id": "s2"}, "history": []});
+    vibe_rs::commands::clear::apply_cleared(app, &serde_json::from_value(state).unwrap());
+}
+
 /// Every message entry as `(role, text)`, in transcript order.
 fn messages(app: &App) -> Vec<(String, String)> {
     app.view
@@ -180,7 +185,7 @@ fn a_clear_drops_the_startup_warnings() {
     let mut app = App::default();
     notices::warn(&mut app, "before clear");
 
-    vibe_rs::commands::clear::apply_cleared(&mut app, "s2".to_owned(), None, Vec::new());
+    clear(&mut app);
     notices::warn(&mut app, "after clear");
 
     assert_eq!(
@@ -194,7 +199,7 @@ fn a_clear_after_a_turn_reopens_the_startup_box() {
     let mut app = App::default();
     notices::close_startup(&mut app);
 
-    vibe_rs::commands::clear::apply_cleared(&mut app, "s2".to_owned(), None, Vec::new());
+    clear(&mut app);
     notices::warn(&mut app, "after clear");
 
     assert_eq!(

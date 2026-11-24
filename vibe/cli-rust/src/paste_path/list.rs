@@ -7,6 +7,21 @@ use super::{
     strip_matched_quotes,
 };
 
+/// One typed or pasted path as a shell reads it: `'My Folder'` and `My\ Folder`
+/// are both `My Folder`.
+pub fn shell_path(text: &str) -> String {
+    shell_path_on(text, cfg!(windows))
+}
+
+pub fn shell_path_on(text: &str, windows: bool) -> String {
+    let text = text.trim();
+    let unquoted = strip_matched_quotes(text);
+    match unquoted.len() == text.len() {
+        true => unescape(text, windows),
+        false => unquoted.to_owned(),
+    }
+}
+
 /// Longer pasted path lists stay raw text.
 pub const MAX_PASTED_PATHS: usize = 100;
 
@@ -96,6 +111,24 @@ fn split_path_tokens(text: &str, windows: bool) -> Option<Vec<String>> {
         paths.push(token);
         pos = end;
     }
+}
+
+/// `text` with its backslash escapes read as a shell reads them, untrimmed.
+pub fn unescape_on(text: &str, windows: bool) -> String {
+    unescape(text, windows)
+}
+
+/// `name` escaped so `shell_path_on` reads it back whole: a space everywhere,
+/// and on POSIX a backslash or quote too.
+pub fn escape_on(name: &str, windows: bool) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch == ' ' || (!windows && matches!(ch, '\\' | '\'' | '"')) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 fn unescape(text: &str, windows: bool) -> String {

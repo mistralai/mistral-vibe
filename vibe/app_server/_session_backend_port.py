@@ -57,6 +57,7 @@ from vibe.app_server.protocol import (
     SessionListParams,
     SessionListResponse,
     SessionMarkAsSeenParams,
+    SessionMarkAsUnseenParams,
     SessionMoveParams,
     SessionMoveResponse,
     SessionPinParams,
@@ -94,6 +95,8 @@ from vibe.app_server.protocol import (
     TurnQueueResumeResponse,
     TurnQueueSteerParams,
     TurnQueueSteerResponse,
+    TurnRetryParams,
+    TurnRetryResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnSteerParams,
@@ -518,6 +521,10 @@ class SessionBackend(Protocol):
         self, params: TurnSteerParams
     ) -> SessionBackendResult[TurnSteerResponse]: ...
 
+    async def retry_turn(
+        self, params: TurnRetryParams
+    ) -> SessionBackendResult[TurnRetryResponse]: ...
+
     async def interrupt_turn(
         self, params: TurnInterruptParams
     ) -> SessionBackendResult[TurnInterruptResponse]: ...
@@ -628,6 +635,14 @@ class SessionBackendOpenCallbacks(Protocol):
 
 
 @runtime_checkable
+class SessionBackendTurnWork(Protocol):
+    """Optional report that a turn runs, waits, is queued or still settles."""
+
+    @property
+    def has_turn_work(self) -> bool: ...
+
+
+@runtime_checkable
 class SessionBackendRunningTurnAnnouncement(Protocol):
     """Optional re-announcement of a running turn to a newly attached client."""
 
@@ -681,6 +696,13 @@ class SessionBackendHostPin(Protocol):
 
 
 @runtime_checkable
+class SessionBackendHostStorageRoot(Protocol):
+    async def storage_root(self) -> Path:
+        """The store sessions are saved in, as a session read finds it."""
+        ...
+
+
+@runtime_checkable
 class SessionBackendHostLeaseWatch(Protocol):
     def watch_leases(self) -> AsyncGenerator[dict[str, SessionLeaseHolder | None]]: ...
 
@@ -690,6 +712,10 @@ class SessionBackendHostSeenState(Protocol):
     """Optional selected-backend ownership of durable session seen state."""
 
     async def mark_as_seen(self, params: SessionMarkAsSeenParams) -> EmptyResponse: ...
+
+    async def mark_as_unseen(
+        self, params: SessionMarkAsUnseenParams
+    ) -> EmptyResponse: ...
 
 
 @runtime_checkable
@@ -791,6 +817,8 @@ class SessionBackendHostClientLoss(Protocol):
     """Optional report that the client went away without a ``session/stop``."""
 
     def mark_client_disconnected(self) -> None: ...
+
+    def mark_client_reconnected(self) -> None: ...
 
 
 @runtime_checkable

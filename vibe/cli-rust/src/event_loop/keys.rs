@@ -173,7 +173,6 @@ fn handle_input_event(
                 | Focus::Approval
                 | Focus::VoiceApp
                 | Focus::BranchApp
-                | Focus::ResumePicker
                 | Focus::Storage
                 | Focus::McpOAuth
                 | Focus::ConnectorAuth
@@ -181,8 +180,10 @@ fn handle_input_event(
                 | Focus::ThemePicker
                 | Focus::LogLevelPicker
                 | Focus::ThinkingPicker
-                | Focus::RailWindow
                 | Focus::ContextApp => {}
+                Focus::RailWindow => {
+                    crate::tasks_panel::paste(app, &text);
+                }
                 Focus::Loops => crate::loops::paste(app, &text),
                 Focus::Goal => crate::goal::paste(app, &text),
                 Focus::Question => crate::question_input::handle_paste(app, text),
@@ -190,6 +191,7 @@ fn handle_input_event(
                 Focus::Config => config::handle_paste(app, text),
                 Focus::ReleaseNotes => crate::release_notes::paste(app, &text),
                 Focus::Mcp => crate::mcp::search::paste(app, &text),
+                Focus::SessionsPage => crate::sessions_page::keys::paste(app, &text),
                 Focus::ModelPicker => crate::model_picker::paste_search(app, &text),
                 Focus::Plugins => crate::plugins::paste(app, &text),
                 Focus::TrustedFolders => crate::trusted_folders::paste(app, client, &text),
@@ -202,9 +204,10 @@ fn handle_input_event(
             }
             InputOutcome::Redraw { reset_blink: false }
         }
-        Some(Event::Resize(_, _)) => {
+        Some(Event::Resize(width, _)) => {
             let _ = crate::terminal::sync_pixel_reports();
             crate::config_edit::resized(app);
+            crate::sessions_page::folders::resized(app, width);
             InputOutcome::Redraw { reset_blink: false }
         }
         Some(Event::FocusGained) => {
@@ -250,7 +253,7 @@ pub(crate) fn dispatch_key(
     // Any key answers a refusal, whichever surface has focus.
     crate::ui::notice::answered(app);
     if app.focus() == Focus::Trust {
-        return crate::trust_folders::handle_key(app, key);
+        return crate::trust_gate::handle_key(app, client, key);
     }
     if crate::rail::enter_from_box(app, client, &key) {
         return false;
@@ -279,7 +282,7 @@ pub(crate) fn dispatch_key(
         Focus::VoiceApp => crate::voice_app::handle_key(app, client, key),
         Focus::BranchApp => crate::branch_app::handle_key(app, key),
         Focus::ProxySetup => crate::proxy_setup::handle_key(app, client, key),
-        Focus::ResumePicker => crate::resume_picker::handle_key(app, client, key),
+        Focus::SessionsPage => crate::sessions_page::keys::handle_key(app, client, key),
         Focus::Storage => crate::storage_panel::handle_key(app, client, key),
         Focus::Mcp => input::handle_mcp_key(app, client, key),
         Focus::Plugins => crate::plugins::handle_key(app, client, key),
@@ -298,6 +301,9 @@ pub(crate) fn dispatch_key(
         Focus::RailWindow => crate::rail::handle_window_key(app, client, key),
         // The rail owns its keys; any other key leaves it and reaches the prompt.
         Focus::Rail if crate::rail::handle_key(app, client, &key) => {}
+        Focus::Composer if crate::sessions_page::left_opens(app, &key) => {
+            crate::sessions_page::open(app, client, crate::sessions_page::Trigger::Left)
+        }
         Focus::Rail | Focus::SubagentList | Focus::Composer => {
             return crate::vim::route(app, key, vim_pending, |app, key| {
                 input::handle_key(app, client, config_tx, key)

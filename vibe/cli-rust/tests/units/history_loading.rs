@@ -1,12 +1,10 @@
 //! Session histories prepare bottom-up without paging or moving old scroll state.
 
 use serde_json::{json, Value};
-use vibe_rs::app::App;
-use vibe_rs::resume_picker::{self, Event};
 use vibe_rs::transcript::Transcript;
 use vibe_rs::utils::transcript_cache::TranscriptCache;
 
-use crate::support::{session_state, stub};
+use crate::support::session_state;
 
 fn message(index: usize) -> Value {
     json!({"id": format!("message-{index}"), "type": "message", "role": "assistant",
@@ -91,113 +89,4 @@ fn a_tool_group_is_never_split_from_its_header() {
     let first = transcript.lines_from(cache.history_from()).next().unwrap();
     assert_eq!(first.id, "tool-0");
     assert!(first.group.unwrap().first);
-}
-
-#[test]
-fn accepting_a_preview_starts_at_the_bottom_even_mid_preparation() {
-    let mut app = App::default();
-    app.resume_picker.open = true;
-    app.resume_picker.preview_request = 2;
-    app.view
-        .transcript
-        .load_snapshot(&session_state("old", (0..100).map(message).collect()));
-    app.view.transcript_cache.start_history(100);
-    app.view.scroll = 20;
-    app.view.scroll_target = 40;
-    app.view.last_total = 200;
-    app.view.scroll_to_entry = Some(5);
-    resume_picker::apply_event(
-        &mut app,
-        &stub(),
-        Event::Preview {
-            request: 2,
-            state: session_state("new", (0..3).map(message).collect()),
-        },
-    );
-    assert_eq!(app.view.scroll, 0);
-    assert_eq!(app.view.scroll_target, 0);
-    assert_eq!(app.view.last_total, 0);
-    assert_eq!(app.view.scroll_to_entry, None);
-    assert_eq!(app.view.transcript.entry_count(), 3);
-    assert_eq!(app.view.transcript_cache.history_from(), 3);
-}
-
-#[test]
-fn a_stale_preview_does_not_replace_or_reset_the_selected_session() {
-    let mut app = App::default();
-    app.resume_picker.open = true;
-    app.resume_picker.preview_request = 2;
-    app.view
-        .transcript
-        .load_snapshot(&session_state("selected", vec![message(99)]));
-    app.view.scroll = 20;
-    app.view.scroll_target = 20;
-    resume_picker::apply_event(
-        &mut app,
-        &stub(),
-        Event::Preview {
-            request: 1,
-            state: session_state("old", vec![message(0)]),
-        },
-    );
-    assert_eq!(app.view.transcript.entry(0).unwrap().id, "message-99");
-    assert_eq!(app.view.scroll, 20);
-    assert_eq!(app.view.scroll_target, 20);
-}
-
-#[test]
-fn reopening_on_the_current_session_rejects_the_previous_picker_reply() {
-    let client = stub();
-    let mut app = App::default();
-    app.session.session_id = Some("current".into());
-    app.resume_picker.preview_request = 1;
-    app.view
-        .transcript
-        .load_snapshot(&session_state("current", vec![message(42)]));
-    resume_picker::open(&mut app, &client);
-    resume_picker::apply_event(
-        &mut app,
-        &client,
-        Event::Loaded(vec![resume_picker::Session {
-            id: "current".into(),
-            ..Default::default()
-        }]),
-    );
-    resume_picker::apply_event(
-        &mut app,
-        &client,
-        Event::Preview {
-            request: 1,
-            state: session_state("old", vec![message(0)]),
-        },
-    );
-    assert_eq!(app.view.transcript.entry(0).unwrap().id, "message-42");
-}
-
-#[test]
-fn reopening_the_picker_cannot_accept_an_old_preview() {
-    let client = stub();
-    let mut app = App::default();
-    app.resume_picker.preview_request = 1;
-    app.view
-        .transcript
-        .load_snapshot(&session_state("current", vec![message(42)]));
-    resume_picker::open(&mut app, &client);
-    resume_picker::apply_event(
-        &mut app,
-        &client,
-        Event::Loaded(vec![resume_picker::Session {
-            id: "new".into(),
-            ..Default::default()
-        }]),
-    );
-    resume_picker::apply_event(
-        &mut app,
-        &client,
-        Event::Preview {
-            request: 1,
-            state: session_state("old", vec![message(0)]),
-        },
-    );
-    assert_eq!(app.view.transcript.entry(0).unwrap().id, "message-42");
 }

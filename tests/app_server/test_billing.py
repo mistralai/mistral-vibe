@@ -44,7 +44,6 @@ _SUBSCRIPTION = {
     "vibe_payg_enabled": True,
     "enterprise": False,
 }
-# The Vibe budget is the only included budget left; there is no API budget.
 _BUDGET = {
     "vibe_budget": {
         "usage_percentage": 42.5,
@@ -52,7 +51,13 @@ _BUDGET = {
         "currency": "EUR",
         "reset_at": "2026-11-01T00:00:00Z",
         "payg_enabled": False,
-    }
+    },
+    "api_budget": {
+        "usage_percentage": 3.0,
+        "initial_budget": 50.0,
+        "currency": "EUR",
+        "reset_at": "2026-11-01T00:00:00Z",
+    },
 }
 
 

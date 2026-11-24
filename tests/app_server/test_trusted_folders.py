@@ -23,7 +23,7 @@ from vibe.app_server.protocol import (
     WorkspaceTrustFoldersResponse,
 )
 from vibe.core.config.harness_files import HarnessFilesManager
-from vibe.core.paths import TRUSTED_FOLDERS_FILE
+from vibe.core.paths import SCRATCH_DIR, TRUSTED_FOLDERS_FILE
 from vibe.core.trusted_folders import TrustedFoldersManager, trusted_folders_manager
 
 
@@ -320,6 +320,22 @@ def test_a_stored_home_or_root_cannot_be_flipped_to_trusted(tmp_path: Path) -> N
         with pytest.raises(WorkspaceTrustError, match="Cannot trust"):
             update_trusted_folder(trust_store, _resolved(folder), "trusted")
 
+    assert trust_store.persisted_decisions()["trusted"] == []
+
+
+def test_a_scratch_folder_is_offered_but_cannot_be_trusted(tmp_path: Path) -> None:
+    scratch = SCRATCH_DIR.path / "session"
+    scratch.mkdir(parents=True)
+    trust_store = TrustedFoldersManager()
+
+    response = inspect_trust_folder(trust_store, str(scratch), tmp_path)
+
+    assert response.candidates[0].problem == "scratch"
+    with pytest.raises(WorkspaceTrustError, match="Cannot trust"):
+        add_trusted_folder(trust_store, str(scratch), tmp_path)
+    trust_store.add_untrusted(scratch)
+    with pytest.raises(WorkspaceTrustError, match="Cannot trust"):
+        update_trusted_folder(trust_store, _resolved(scratch), "trusted")
     assert trust_store.persisted_decisions()["trusted"] == []
 
 

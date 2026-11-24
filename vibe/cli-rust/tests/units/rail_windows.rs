@@ -174,7 +174,7 @@ fn a_chip_click_closes_the_picker_in_the_box_and_opens_its_window() {
 
     let y = app.rail.area.y;
     click(&mut app, x, y);
-    assert!(!app.resume_picker.open);
+    assert!(!app.theme_picker.open);
     assert_eq!(rail::window(&app), Some(Item::Plan));
 }
 

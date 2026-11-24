@@ -32,6 +32,8 @@ from vibe.app_server._goal_notices import (
     GoalNotice,
     change_notice,
     continuation_notice,
+    made_in_turn,
+    with_block_cause,
     with_turn_failure,
 )
 from vibe.app_server._goal_store import (
@@ -317,6 +319,8 @@ class UnifiedSessionGoal:
         if change.source == "user" or change.action == "set":
             notice = change_notice(change.action, change.previous, change.goal)
             if notice is not None:
+                if change.source == "model":
+                    notice = made_in_turn(notice, change.turn_id)
                 self._pending_notices.append((notice, None))
         else:
             self._note_stop(change.previous, change.goal)
@@ -462,6 +466,53 @@ class UnifiedSessionGoal:
         )
         await self._report_stop(end)
         await self.flush_notices()
+
+    async def block(self, goal_id: str, cause: str) -> bool:
+        """Block the active goal ``goal_id`` that cannot go on; whether it was.
+
+        For a goal no turn can work on (its model needs a plan upgrade, its
+        next turn would not start, its session is archived): left active, it
+        would wait with nothing to tell the user it stopped. The reason is
+        ``turn_failed``, the goal's next turn could not run, which a released
+        app server reads too, and the notice says why, in ``cause``.
+        """
+        outcome: list[tuple[PublicGoal, PublicGoal]] = []
+
+        def mutation(
+            current: PublicGoal | None, accounting: GoalAccounting
+        ) -> tuple[PublicGoal | None, GoalAccounting]:
+            if (
+                current is None
+                or current.goal_id != goal_id
+                or current.status is not GoalStatus.ACTIVE
+            ):
+                return current, accounting
+            blocked = current.model_copy(
+                update={
+                    "status": GoalStatus.BLOCKED,
+                    "status_reason": GoalStatusReason.TURN_FAILED,
+                    "revision": current.revision + 1,
+                    "updated_at": now_ms(),
+                }
+            )
+            outcome.append((current, blocked))
+            return blocked, accounting
+
+        try:
+            await self.store.update(mutation)
+        except GoalStoreError as exc:
+            logger.warning("Failed to block the goal", exc_info=exc)
+            return False
+        if not outcome:
+            return False
+        previous, blocked = outcome[0]
+        _record_change(self._hooks, "engine", previous, blocked)
+        self._publish()
+        notice = change_notice(None, previous, blocked)
+        if notice is not None:
+            self._pending_notices.append((with_block_cause(notice, cause), None))
+        await self.flush_notices()
+        return True
 
     def _note_stop(self, previous: PublicGoal | None, goal: PublicGoal | None) -> None:
         """Remember a stop until its turn ends, and the turns then bound to it."""

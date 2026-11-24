@@ -330,6 +330,20 @@ fn track_state_without_a_worktree_keeps_the_client_cwd() {
     assert_eq!(app.session.worktree, Some(demo_worktree(true)));
 }
 
+/// A session `/cd` moved out of its worktree reopens outside it: the worktree
+/// effect still in its history does not track the worktree again.
+#[test]
+fn track_state_ignores_a_worktree_the_session_left() {
+    let mut app = App::default();
+    let state = state_with(
+        vec![worktree_effect(Some("Created"), Some("Created"))],
+        Some("/repo"),
+    );
+    assert!(!track_state(&mut app, &state));
+    assert_eq!(app.session.worktree, None);
+    assert_ne!(app.session.cwd.as_deref(), Some("/wt/demo"));
+}
+
 #[test]
 fn track_state_never_retargets_this_runs_prepared_worktree() {
     // The exit cleanup's pin is this run's announce, not the session's

@@ -41,3 +41,18 @@ fn rows_wrap_between_pairs_and_never_split_one() {
     );
     assert!(hints::rows(&[], 10).is_empty());
 }
+
+#[test]
+fn fit_keeps_the_last_and_the_others_in_order_while_they_fit_beside_more() {
+    let more = ("?", action::MORE_KEYS);
+    let list = [hints::NAVIGATE, hints::SELECT, hints::SEARCH, hints::CLOSE];
+    assert_eq!(hints::fit(&list, 200, more), Some(list.to_vec()));
+    let room =
+        hints::width(&[hints::NAVIGATE, hints::SELECT, hints::CLOSE]) + 2 + hints::width(&[more]);
+    assert_eq!(
+        hints::fit(&list, room, more),
+        Some(vec![hints::NAVIGATE, hints::SELECT, hints::CLOSE]),
+        "the row stops at the first hint that does not fit"
+    );
+    assert_eq!(hints::fit(&list, 20, more), None);
+}

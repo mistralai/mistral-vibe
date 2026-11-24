@@ -259,9 +259,12 @@ def _build_project_context_section(
     return _with_extra_roots(
         context,
         [
-            root
-            for root in harness_files.project_roots
-            if root.resolve() != cwd_resolved
+            *(
+                root
+                for root in harness_files.project_roots
+                if root.resolve() != cwd_resolved
+            ),
+            *harness_files.access_roots,
         ],
     )
 
@@ -633,6 +636,7 @@ def _utility_provider_route(
         credentials=credentials,
         reasoning_field_name=provider_cfg.reasoning_field_name,
         emits_finish_reason=provider_cfg.emits_finish_reason,
+        tool_result_images=provider_cfg.sends_tool_result_images,
         extra_headers=with_user_agent(provider_cfg.extra_headers, provider_cfg.backend),
         project_id=provider_cfg.project_id,
         region=provider_cfg.region,
@@ -669,8 +673,14 @@ if TYPE_CHECKING:
     from vibe.app_server._account import AccountGateway
     from vibe.app_server._agent_socket import AgentSocketMount
     from vibe.app_server._identity import IdentityGateway
+    from vibe.app_server._left_turns import (
+        LeftTurns,
+        ListOnOwnChannel,
+        OpenLeftTurnChannel,
+    )
     from vibe.app_server._local_projects import LocalProjectStore
     from vibe.app_server._mcp_auth import MCPAuthenticationService
+    from vibe.app_server._open_sessions import OpenSessions
     from vibe.app_server._org_config_service import OrgConfigKey
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
     from vibe.app_server._plugins import SessionPlugins, UnifiedPluginProvider
@@ -1335,6 +1345,7 @@ class HarnessProcess:
                 org_config=org_config,
                 session_spawner=session_spawner_for(services),
                 session_peers=session_peers_for(services),
+                reply_route=services,
                 agent_worktrees=services.client_capabilities().agent_worktrees,
                 agent_projects=services.client_capabilities().agent_projects,
             )
@@ -1487,6 +1498,7 @@ class HarnessProcess:
         org_config: OrgConfigSource = OrgConfigSource.CACHED,
         session_spawner: SessionSpawner | None = None,
         session_peers: SessionPeers | None = None,
+        reply_route: SessionPeers | None = None,
         agent_worktrees: bool = False,
         agent_projects: bool = False,
     ) -> UnifiedSessionContext:
@@ -1522,6 +1534,7 @@ class HarnessProcess:
                     entrypoint=entrypoint,
                     session_spawner=session_spawner,
                     session_peers=session_peers,
+                    reply_route=reply_route,
                     agent_worktrees=agent_worktrees,
                     agent_projects=agent_projects,
                 )
@@ -1564,6 +1577,7 @@ class HarnessProcess:
         entrypoint: AgentEntrypoint,
         session_spawner: SessionSpawner | None,
         session_peers: SessionPeers | None,
+        reply_route: SessionPeers | None,
         agent_worktrees: bool,
         agent_projects: bool,
     ) -> UnifiedSessionContext:
@@ -1605,7 +1619,10 @@ class HarnessProcess:
             sandbox_path,
             tool_catalog_for_config,
         )
-        from vibe.app_server._agents_md_hooks import merge_agents_md_hook
+        from vibe.app_server._agents_md_hooks import (
+            merge_agents_md_hook,
+            register_access_roots,
+        )
         from vibe.app_server._completion_facts import (
             ModelFactsError,
             SavedCatalogue,
@@ -1682,7 +1699,11 @@ class HarnessProcess:
                 roots=(
                     cwd,
                     *(Path(root).expanduser() for root in options.workspace_roots),
+                    *harness_files.access_roots,
                 ),
+            )
+            register_access_roots(
+                workspace.cwd, workspace.roots, harness_files.access_roots
             )
         else:
             # Sandbox paths: normalized, never resolved against the host.
@@ -2279,6 +2300,10 @@ class HarnessProcess:
                                 enter_worktree=agent_worktrees,
                                 # A sandbox cannot reach the user's project folders.
                                 projects=agent_projects and sandbox is None,
+                                session_peer_rename=(
+                                    session_peers is not None
+                                    and session_peers.client_capabilities().session_peer_rename
+                                ),
                                 session_peer_restore=(
                                     session_peers is not None
                                     and session_peers.client_capabilities().session_peer_restore
@@ -2380,6 +2405,7 @@ class HarnessProcess:
                     thinking=model_facts.agent_thinking,
                     reasoning_field_name=provider.reasoning_field_name,
                     emits_finish_reason=provider.emits_finish_reason,
+                    tool_result_images=provider.sends_tool_result_images,
                     extra_headers=with_user_agent(
                         provider.extra_headers, provider.backend
                     ),
@@ -2516,6 +2542,7 @@ class HarnessProcess:
             client_tools=self._client_tools,
             session_spawner=session_spawner,
             session_peers=session_peers,
+            reply_route=reply_route,
             hooks=hooks,
             post_agent_scoped_hooks_count=scoped_post_agent_hooks,
             post_agent_main_hooks_count=main_post_agent_hooks,
@@ -2579,7 +2606,10 @@ class HarnessProcess:
             # The cwd and any worktree the agent entered are never opened as
             # projects (see ``session_harness_files``).
             harness_files = session_harness_files(
-                self.harness_files, cwd, workspace_roots
+                self.harness_files,
+                cwd,
+                workspace_roots,
+                (Path(root) for root in options.access_roots),
             )
             if options.trust_workspace:
                 harness_files.trust_store.trust_for_session(cwd)
@@ -2697,8 +2727,10 @@ class HarnessProcess:
             installed_plugin_scopes,
             resolve_session_plugins,
         )
+        from vibe.core.plugins.remote import refresh_remote_plugins
 
         config = session_config.config_orchestrator.config
+        await refresh_remote_plugins(config, self.credentials, trigger="session_start")
         plugin_mcp = self._build_plugin_mcp_catalog(config)
         connector_registry = await self._build_connector_registry(
             session_config.config_orchestrator
@@ -2709,6 +2741,7 @@ class HarnessProcess:
             plugin_mcp=plugin_mcp,
             connector_registry=connector_registry,
             builtin_plugin_roots=self._builtin_plugin_roots,
+            credentials=self.credentials,
         )
 
         def agent_tools() -> AgentToolCatalogue:
@@ -2751,6 +2784,7 @@ class HarnessProcess:
             agent_rejections=lambda: workspace_agent_rejections(agents),
             sandbox_skills=self._sandbox_skills,
             client_tool_groups=self._client_tool_groups,
+            credentials=self.credentials,
         )
         # The process-wide runner checks the caller's session against these.
         provider.observe_bind_commits(self._remember_bound_plugins)
@@ -2829,8 +2863,14 @@ async def create_harness_server(
     process: HarnessProcess,
     account_gateway: AccountGateway | None = None,
     identity_gateway: IdentityGateway | None = None,
+    open_sessions: OpenSessions | None = None,
+    left_turns: LeftTurns | None = None,
+    open_left_turn_channel: OpenLeftTurnChannel | None = None,
+    list_on_own_channel: ListOnOwnChannel | None = None,
+    left_turn_session: str | None = None,
 ) -> HarnessServer:
-    """Build a server over ``transport``.
+    """Build a server over ``transport``. With ``open_sessions``, a session
+    still running when its channel closes is parked there for another channel.
 
     ``account_gateway``/``identity_gateway`` reach the platform API and are left
     unset in production, where ``AppServer`` builds the HTTP ones. They exist so
@@ -2854,11 +2894,17 @@ async def create_harness_server(
         account_gateway=account_gateway,
         identity_gateway=identity_gateway,
         oidc_tenants=process.services.oidc_tenants,
+        platform_credential_lenders=process.services.platform_credential_lenders,
         configure_agent_plugins=process.configure_agent_plugins,
+        open_sessions=open_sessions,
+        left_turns=left_turns,
+        open_left_turn_channel=open_left_turn_channel,
+        list_on_own_channel=list_on_own_channel,
+        left_turn_session=left_turn_session,
     )
     # One process per channel, except the in-process host, which every
     # connection of one entry point shares: the selection is the same for all.
-    process.credentials.bind(server.platform_credentials)
+    process.credentials.bind(server.session_link.platform_credentials)
     return HarnessServer(
         _server=server,
         _transport=transport,

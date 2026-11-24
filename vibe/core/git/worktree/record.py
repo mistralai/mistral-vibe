@@ -306,6 +306,9 @@ class WorktreeClaim:
     def is_starting(self) -> bool:
         return bool(self._live_holders(include={_STARTING_HOLDER}))
 
+    def is_removing(self) -> bool:
+        return bool(self._live_holders(include={REMOVING_HOLDER}))
+
     @contextmanager
     def removing(self, *, excluding: str | None = None) -> Iterator[bool]:
         marker = self._holder_path(REMOVING_HOLDER)

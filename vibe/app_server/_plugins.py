@@ -51,6 +51,7 @@ from vibe.core.plugins import (
     MaterializedPluginSet,
     PluginAgentDefinition,
     PluginConfigIssue,
+    PluginDescriptor,
     PluginKnowledgeDefinition,
     PluginMaterializer,
     PluginMCPServerDefinition,
@@ -73,6 +74,7 @@ from vibe.core.plugins import (
     user_facing_issues,
     validate_resolved_plugin_snapshot,
 )
+from vibe.core.plugins.unsupported import unsupported_note
 from vibe.core.skills.models import SkillInfo, SkillScope
 
 if TYPE_CHECKING:
@@ -98,6 +100,7 @@ if TYPE_CHECKING:
     from vibe.app_server._plugin_mcp import PluginMCPCatalog
     from vibe.app_server._sandbox_skills import SandboxSkills
     from vibe.core.config.models import MCPServer
+    from vibe.core.platform_auth import PlatformCredentialFactory
     from vibe.core.tools.connectors.connector_registry import ConnectorRegistry
 
 logger = logging.getLogger(__name__)
@@ -147,6 +150,7 @@ async def resolve_session_plugins(
     plugin_mcp: PluginMCPCatalog | None = None,
     connector_registry: ConnectorRegistry | None = None,
     builtin_plugin_roots: list[Path] | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> SessionPlugins:
     """Resolve, materialize, and project the plugins visible to a session.
 
@@ -166,7 +170,11 @@ async def resolve_session_plugins(
     if builtin_plugin_roots is None:
         builtin_plugin_roots = packaged_builtin_plugin_roots()
     resolution = await asyncio.to_thread(
-        _resolve_installed, harness_files, config_orchestrator, builtin_plugin_roots
+        _resolve_installed,
+        harness_files,
+        config_orchestrator,
+        builtin_plugin_roots,
+        credentials,
     )
     materialized = await _materialize(
         resolution,
@@ -185,6 +193,7 @@ def _resolve_installed(
     harness_files: HarnessFilesManager,
     config_orchestrator: ConfigOrchestrator[VibeConfigSchema] | None,
     builtin_roots: list[Path],
+    credentials: PlatformCredentialFactory | None = None,
 ) -> ResolvedPluginSet:
     """Discover and resolve the installed plugin tree, off the event loop.
 
@@ -199,6 +208,7 @@ def _resolve_installed(
         builtin_roots=builtin_roots,
         data_root_base=VIBE_HOME.path / "plugin-data",
         config_orchestrator=config_orchestrator,
+        credentials=credentials,
     ).resolve()
 
 
@@ -207,6 +217,7 @@ async def resolve_plugin_skills(
     *,
     config_orchestrator: ConfigOrchestrator[VibeConfigSchema],
     builtin_plugin_roots: Sequence[Path] | None = None,
+    credentials: PlatformCredentialFactory | None = None,
 ) -> tuple[Mapping[str, SkillInfo], list[RustPluginContextDefinition]]:
     """Plugin skills only: listing must not connect MCP servers or seed libraries."""
     roots = (
@@ -215,7 +226,7 @@ async def resolve_plugin_skills(
         else list(builtin_plugin_roots)
     )
     resolution = await asyncio.to_thread(
-        _resolve_installed, harness_files, config_orchestrator, roots
+        _resolve_installed, harness_files, config_orchestrator, roots, credentials
     )
     return resolution.skills, _plugin_contexts(resolution, knowledge={}, agents={})
 
@@ -326,8 +337,11 @@ class UnifiedPluginProvider:
         sandbox_skills: SandboxSkills | None = None,
         client_tool_groups: Callable[[SessionPlugins], list[RustToolGroupDefinition]]
         | None = None,
+        credentials: PlatformCredentialFactory | None = None,
     ) -> None:
         self._plugins_root = Path(storage_root).expanduser().resolve() / "plugins"
+        # Kept so ``plugin/reload`` reads the library plugins of the same account.
+        self._credentials = credentials
         self._workdir = workdir
         self._installed_roots = dict(installed_roots)
         self._plugin_scopes = dict(installed_scopes or {})
@@ -424,6 +438,7 @@ class UnifiedPluginProvider:
             plugin_mcp=self._plugin_mcp,
             connector_registry=self._connector_registry,
             builtin_plugin_roots=self._builtin_plugin_roots,
+            credentials=self._credentials,
         )
         self._installed_roots = {
             plugin.name: plugin.root
@@ -1191,7 +1206,7 @@ def _plugin_contexts(
     return [
         RustPluginContextDefinition(
             name=plugin.name,
-            description=plugin.description,
+            description=_described_with_unsupported_parts(plugin),
             path=str(plugin.root),
             capabilities=RustHarnessCapabilitySet(
                 skills=skills[plugin.name],
@@ -1201,6 +1216,12 @@ def _plugin_contexts(
         )
         for plugin in sorted(resolution.plugins, key=lambda item: item.name)
     ]
+
+
+def _described_with_unsupported_parts(plugin: PluginDescriptor) -> str:
+    """The plugin's description, and the parts not supported here (DSK-2284)."""
+    note = unsupported_note(plugin)
+    return plugin.description if note is None else f"{plugin.description} {note}"
 
 
 def _core_skills(

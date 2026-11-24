@@ -12,6 +12,7 @@ from pydantic import JsonValue
 
 from mistralai_vibe_local_harness.session_api.app_server.session.models import (
     CheckpointHistoryEntry,
+    CheckpointKind,
     ContentBlock,
     EmbeddedResourceContentBlock,
     HistoryEntry,
@@ -122,9 +123,19 @@ def _message_entry(raw: JsonObject, base: dict[str, Any]) -> HistoryEntry:
     )
 
 
+# The local checkpoint kinds the Session API names; any other is a `custom` one.
+_API_CHECKPOINT_KINDS: dict[str, CheckpointKind] = {
+    "compaction": "compaction",
+    "model_change": "model_change",
+}
+
+
 def _checkpoint_entry(raw: JsonObject, base: dict[str, Any]) -> HistoryEntry:
     kind = raw.get("kind")
-    api_kind = "compaction" if kind == "compaction" else "custom"
+    # A saved kind is any JSON value; one that is not a string is a `custom` one too.
+    api_kind = (
+        _API_CHECKPOINT_KINDS.get(kind, "custom") if isinstance(kind, str) else "custom"
+    )
     annotations = dict(base.pop("annotations"))
     if api_kind == "custom" and isinstance(kind, str):
         annotations[VIBE_ANNOTATION_PREFIX + "checkpointKind"] = kind

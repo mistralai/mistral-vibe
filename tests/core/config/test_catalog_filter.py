@@ -15,8 +15,11 @@ from vibe.core.config import (
     _catalog_filter,
     build_default_orchestrator,
 )
+from vibe.core.config.layers.admin import AdminConfigLayer
 from vibe.core.config.layers.growthbook import GrowthbookLayer
 from vibe.core.config.layers.model_catalog import apply_model_catalog
+from vibe.core.config.orchestrator import ConfigOrchestrator, ConfigPatchValidationError
+from vibe.core.config.patch import AddOperationPatch
 from vibe.core.config.vibe_schema import DEFAULT_ACTIVE_MODEL_CONFIG, DEFAULT_MODELS
 from vibe.core.experiments.active import ExperimentName
 from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
@@ -76,8 +79,7 @@ async def _config(
         growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
         assert isinstance(growthbook, GrowthbookLayer)
         growthbook.set_variants({
-            ExperimentName.MODEL_CATALOG.value: True,
-            ExperimentName.MODEL_CATALOG_FILTER.value: catalog_filter,
+            ExperimentName.MODEL_CATALOG_FILTER.value: catalog_filter
         })
     await apply_model_catalog(orchestrator, _catalog())
     # Written once the catalog is in the stack, like a session sees it.
@@ -458,3 +460,206 @@ async def test_the_filter_does_not_reach_a_user_setting_check() -> None:
     config = await _config({"hide": [_FLASH]})
 
     assert config.validation_warnings == ()
+
+
+_MEDIUM_ACME = {
+    "name": "acme-medium-3-5",
+    "provider": "mistral",
+    "alias": "medium",
+    "display_name": "Medium (Acme)",
+}
+_BUILTIN_ALIASES = {model.alias for model in DEFAULT_MODELS}
+
+
+@pytest.fixture
+def no_user_models(config_dir: Path) -> None:
+    """The test user config without its own model, unpinned."""
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config.pop("models", None)
+    config["active_model"] = ""
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+
+
+def _set_admin(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], data: dict[str, Any]
+) -> None:
+    """Fill the org admin config; the caller reloads."""
+    admin = orchestrator.get_layer(AdminConfigLayer.NAME)
+    assert isinstance(admin, AdminConfigLayer)
+    admin.restore(data)
+
+
+async def _orchestrator_with_admin(
+    admin_data: dict[str, Any],
+) -> ConfigOrchestrator[VibeConfigSchema]:
+    orchestrator = await build_default_orchestrator()
+    _set_admin(orchestrator, admin_data)
+    await orchestrator.reload()
+    return orchestrator
+
+
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_builtin_models_off_leaves_only_the_defined_models() -> None:
+    config = (
+        await _orchestrator_with_admin({
+            "enable_builtin_models": False,
+            "models": [_MEDIUM_ACME],
+        })
+    ).config
+
+    assert list(config.models) == ["medium"]
+    assert config.get_active_model().alias == "medium"
+
+
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_builtin_models_are_offered_next_to_the_defined_models_by_default() -> (
+    None
+):
+    config = (await _orchestrator_with_admin({"models": [_MEDIUM_ACME]})).config
+
+    assert set(config.models) == _BUILTIN_ALIASES | {"medium"}
+    assert config.get_active_model().alias == DEFAULT_ACTIVE_MODEL_CONFIG.alias
+
+
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_builtin_models_off_with_no_model_left_fails_the_config() -> None:
+    orchestrator = await build_default_orchestrator()
+    _set_admin(orchestrator, {"enable_builtin_models": False})
+
+    with pytest.raises(ValueError, match="No models are configured"):
+        await orchestrator.reload()
+
+
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_builtin_models_off_keeps_the_catalog_models() -> None:
+    orchestrator = await build_default_orchestrator()
+    await apply_model_catalog(orchestrator, _catalog())
+    _set_admin(orchestrator, {"enable_builtin_models": False})
+    await orchestrator.reload()
+
+    config = orchestrator.config
+    assert set(config.models) == {_LARGE, _GLM, _FLASH, _DEVSTRAL}
+    assert config.get_active_model().alias == _LARGE
+
+
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_builtin_models_off_keeps_a_model_defined_under_a_builtin_name() -> None:
+    builtin = DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    config = (
+        await _orchestrator_with_admin({
+            "enable_builtin_models": False,
+            "models": [{"name": "acme-large", "provider": "mistral", "alias": builtin}],
+        })
+    ).config
+
+    assert list(config.models) == [builtin]
+    assert config.models[builtin].name == "acme-large"
+
+
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_builtin_models_off_turns_a_pin_on_a_builtin_into_the_notice(
+    config_dir: Path,
+) -> None:
+    builtin = DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    _write_user_config(config_dir, active_model=builtin)
+
+    config = (
+        await _orchestrator_with_admin({
+            "enable_builtin_models": False,
+            "models": [_MEDIUM_ACME],
+        })
+    ).config
+
+    assert config.get_active_model().alias == "medium"
+    assert config.validation_warnings == (
+        f"Model '{builtin}' is not available — running 'Medium (Acme)'. "
+        "Pick another model to stop this notice.",
+    )
+
+
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_builtin_models_off_ignores_the_settings_of_a_builtin(
+    config_dir: Path,
+) -> None:
+    builtin = DEFAULT_ACTIVE_MODEL_CONFIG.alias
+    _write_user_config(config_dir, models={builtin: {"temperature": 0.2}})
+
+    config = (
+        await _orchestrator_with_admin({
+            "enable_builtin_models": False,
+            "models": [_MEDIUM_ACME],
+        })
+    ).config
+
+    assert list(config.models) == ["medium"]
+    assert config.validation_warnings == (
+        f"Settings for model '{builtin}' are ignored: no such model is available.",
+    )
+
+
+@pytest.mark.parametrize(
+    ("admin", "user", "builtins_offered"),
+    [(False, True, False), (True, False, True), (None, False, False)],
+)
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_the_admin_value_wins_over_the_users(
+    config_dir: Path, admin: bool | None, user: bool, builtins_offered: bool
+) -> None:
+    _write_user_config(config_dir, enable_builtin_models=user, models=[_MEDIUM_ACME])
+    admin_data = {} if admin is None else {"enable_builtin_models": admin}
+
+    config = (await _orchestrator_with_admin(admin_data)).config
+
+    assert (DEFAULT_ACTIVE_MODEL_CONFIG.alias in config.models) is builtins_offered
+
+
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_the_environment_turns_the_builtin_models_off(
+    config_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_user_config(config_dir, models=[_MEDIUM_ACME])
+    monkeypatch.setenv("VIBE_ENABLE_BUILTIN_MODELS", "false")
+
+    config = (await build_default_orchestrator()).config
+
+    assert list(config.models) == ["medium"]
+
+
+@pytest.mark.usefixtures("no_user_models")
+@pytest.mark.asyncio
+async def test_turning_the_builtin_models_off_with_no_model_left_is_refused(
+    config_dir: Path,
+) -> None:
+    orchestrator = await build_default_orchestrator()
+
+    with pytest.raises(ConfigPatchValidationError, match="No models are configured"):
+        await orchestrator.apply_patch(
+            [AddOperationPatch(path="/enable_builtin_models", value=False)],
+            reason="toggle",
+        )
+
+    assert orchestrator.config.enable_builtin_models is True
+    assert DEFAULT_ACTIVE_MODEL_CONFIG.alias in orchestrator.config.models
+    stored = tomllib.loads((config_dir / "config.toml").read_text(encoding="utf-8"))
+    assert "enable_builtin_models" not in stored
+
+
+@pytest.mark.asyncio
+async def test_turning_the_builtin_models_off_keeps_the_other_models() -> None:
+    orchestrator = await build_default_orchestrator()
+
+    await orchestrator.apply_patch(
+        [AddOperationPatch(path="/enable_builtin_models", value=False)], reason="toggle"
+    )
+
+    assert list(orchestrator.config.models) == ["devstral-latest"]

@@ -15,8 +15,10 @@ from pathlib import Path
 import time
 from typing import Literal
 
+from mistralai_vibe_local_harness.vibe._mcp_apps import require_mcp_app_consent
 from mistralai_vibe_local_harness.vibe._mcp_cache import MCPDescriptorCache
 from mistralai_vibe_local_harness.vibe._mcp_models import (
+    MCP_DESCRIPTOR_CACHE_FORMAT_VERSION,
     MCP_DISCOVERY_PENDING,
     JsonObject,
     MCPAuthorizationProvider,
@@ -36,6 +38,7 @@ from mistralai_vibe_local_harness.vibe._mcp_models import (
     MCPSamplingCallback,
     MCPSamplingCompletion,
     MCPSourceState,
+    MCPToolDescriptor,
     MCPTransportFactory,
     ResolvedMCPCatalog,
     ResolvedMCPServerConfig,
@@ -645,12 +648,130 @@ class MCPRuntime:
             raise MCPRuntimeFailure(
                 "mcp_unknown_route", "The provided tool route is not available"
             )
-        server = self._server(route.descriptor.server_name)
+        return await self._call_tool(
+            self._server(route.descriptor.server_name),
+            route.descriptor.remote_name,
+            arguments,
+        )
+
+    async def server_tools(self, server_name: str) -> tuple[MCPToolDescriptor, ...]:
+        """Every listed tool of ``server_name``, routed to the model or not.
+
+        Waits for the server's discovery in flight, as a call to it does.
+        """
+        self._guard_open()
+        await self._wait_for_discovery(server_name)
+        self._guard_open()
+        return tuple(
+            tool for tool in self._snapshot.tools if tool.server_name == server_name
+        )
+
+    async def call_server_tool(
+        self,
+        *,
+        server_name: str,
+        remote_name: str,
+        arguments: JsonObject,
+        expected_fingerprint: str | None = None,
+    ) -> MCPNormalizedResult:
+        """Call a listed tool by its server's name for it, without a model route.
+
+        An MCP App calls its server's tools this way, including those it hides
+        from the model. ``expected_fingerprint`` is the one the user consented
+        to: a config server refuses any other, or none
+        (``require_mcp_app_consent``); a plugin's server ignores it.
+        """
+        self._guard_open()
+        server = await self._listed_server(server_name)
+        # No await from here to the call: the server checked is the one called.
+        require_mcp_app_consent(server, expected_fingerprint)
+        if not any(
+            tool.server_name == server_name and tool.remote_name == remote_name
+            for tool in self._snapshot.tools
+        ):
+            raise MCPRuntimeFailure(
+                "mcp_unknown_tool", "The MCP server does not list this tool"
+            )
+        return await self._call_tool(server, remote_name, arguments)
+
+    async def read_resource(
+        self, *, server_name: str, uri: str, expected_fingerprint: str | None = None
+    ) -> JsonObject:
+        """Send ``resources/read`` to ``server_name``; return its result as JSON.
+
+        ``expected_fingerprint`` as for ``call_server_tool``.
+        """
+        self._guard_open()
+        server = await self._listed_server(server_name)
+        # No await from here to the read: the server checked is the one read.
+        require_mcp_app_consent(server, expected_fingerprint)
+        if server.transport == "stdio":
+            return await self._stdio_lease().read_resource(server, uri=uri)
+        sampling_callback = self._sampling_callback(server)
+
+        async def read(authorization: MCPAuthorizationSnapshot) -> JsonObject:
+            from mistralai_vibe_local_harness.vibe._mcp_transport import (
+                read_resource_http,
+            )
+
+            return await read_resource_http(
+                server,
+                authorization,
+                http_transport_policy=self._http_transport_policy,
+                uri=uri,
+                sampling_callback=sampling_callback,
+            )
+
+        return await self._run_authorized(server, read)
+
+    async def _listed_server(self, server_name: str) -> ResolvedMCPServerConfig:
+        await self._wait_for_discovery(server_name)
+        self._guard_open()
+        server = self._server(server_name)
+        # A suspension withdraws the server in the snapshot only: refuse it
+        # as the model's calls are, before contacting (or respawning) it.
+        status = next(
+            (
+                source.status
+                for source in self._snapshot.sources
+                if source.name == server_name
+            ),
+            None,
+        )
+        if status == "needs_auth":
+            raise MCPRuntimeFailure(
+                "mcp_authorization_required", "MCP server requires authorization"
+            )
+        if server.disabled or status == "disabled":
+            raise MCPRuntimeFailure("mcp_unknown_server", "MCP server is disabled")
+        return server
+
+    async def _call_tool(
+        self, server: ResolvedMCPServerConfig, remote_name: str, arguments: JsonObject
+    ) -> MCPNormalizedResult:
         if server.transport == "stdio":
             return await self._stdio_lease().call_tool(
-                server, name=route.descriptor.remote_name, arguments=arguments
+                server, name=remote_name, arguments=arguments
             )
         sampling_callback = self._sampling_callback(server)
+
+        async def call(authorization: MCPAuthorizationSnapshot) -> MCPNormalizedResult:
+            return await self._call_http(
+                server, authorization, remote_name, arguments, sampling_callback
+            )
+
+        return await self._run_authorized(server, call)
+
+    async def _run_authorized[T](
+        self,
+        server: ResolvedMCPServerConfig,
+        operation: Callable[[MCPAuthorizationSnapshot], Awaitable[T]],
+    ) -> T:
+        """Run an HTTP ``operation`` with the server's current authorization.
+
+        A missing credential withdraws the server's routes; a rejected one is
+        retried once with its replacement.
+        """
         authorization = await self._authorization_provider.resolve(server.authorization)
         if isinstance(authorization, MCPAuthorizationRequired):
             async with self._lock:
@@ -670,21 +791,10 @@ class MCPRuntime:
                 "mcp_authorization_required", "MCP server requires authorization"
             )
         try:
-            return await self._call_http(
-                server,
-                authorization,
-                route.descriptor.remote_name,
-                arguments,
-                sampling_callback,
-            )
+            return await operation(authorization)
         except MCPAuthorizationRejected as rejected:
-            return await self._retry_rejected_call(
-                server,
-                authorization,
-                rejected,
-                route.descriptor.remote_name,
-                arguments,
-                sampling_callback,
+            return await self._retry_rejected(
+                server, authorization, rejected, operation
             )
 
     async def aclose(self) -> None:
@@ -793,22 +903,18 @@ class MCPRuntime:
         configuration would route again what it took away.
         """
         _, descriptors, source, _ = self._current_resolution(server)
-        routed = {
-            route.descriptor.remote_name
-            for route in self._snapshot.routes.values()
-            if route.descriptor.server_name == server.name
-        }
+        # Every listed tool, routed or not: a tool only an MCP App may call is
+        # never routed, and only a suspension or a filter disables a tool.
+        listed = [
+            tool for tool in self._snapshot.tools if tool.server_name == server.name
+        ]
         if descriptors is None:
             return server, None, source, None
-        if not routed:
+        if not listed:
             return replace(server, disabled=True), descriptors, source, None
-        unrouted = frozenset(
-            descriptor.remote_name
-            for descriptor in descriptors
-            if descriptor.remote_name not in routed
-        )
+        suspended = frozenset(tool.remote_name for tool in listed if tool.user_disabled)
         return (
-            replace(server, disabled_tools=server.disabled_tools | unrouted),
+            replace(server, disabled_tools=server.disabled_tools | suspended),
             descriptors,
             source,
             None,
@@ -1269,7 +1375,7 @@ class MCPRuntime:
         self, server: ResolvedMCPServerConfig, descriptor_revision: str
     ) -> None:
         key = MCPDescriptorCacheKey(
-            format_version=1,
+            format_version=MCP_DESCRIPTOR_CACHE_FORMAT_VERSION,
             naming_version=NAMING_VERSION,
             server_fingerprint=server.authorization.server_fingerprint,
             authorization_descriptor_revision=descriptor_revision,
@@ -1310,15 +1416,13 @@ class MCPRuntime:
             replacement, observed_connection_revision=authorization.connection_revision
         )
 
-    async def _retry_rejected_call(
+    async def _retry_rejected[T](
         self,
         server: ResolvedMCPServerConfig,
         authorization: MCPAuthorizationSnapshot,
         rejected: MCPAuthorizationRejected,
-        tool_name: str,
-        arguments: JsonObject,
-        sampling_callback: MCPSamplingCallback | None,
-    ) -> MCPNormalizedResult:
+        operation: Callable[[MCPAuthorizationSnapshot], Awaitable[T]],
+    ) -> T:
         replacement = await self._authorization_provider.reject(
             server.authorization,
             observed_connection_revision=authorization.connection_revision,
@@ -1329,9 +1433,7 @@ class MCPRuntime:
             and replacement.connection_revision != authorization.connection_revision
         ):
             try:
-                return await self._call_http(
-                    server, replacement, tool_name, arguments, sampling_callback
-                )
+                return await operation(replacement)
             except MCPAuthorizationRejected as retry_rejected:
                 replacement = await self._authorization_provider.reject(
                     server.authorization,
@@ -1504,7 +1606,7 @@ def _credential_fingerprint(authorization: MCPAuthorizationSnapshot) -> str:
 
 def _cache_key(server: ResolvedMCPServerConfig) -> MCPDescriptorCacheKey:
     return MCPDescriptorCacheKey(
-        format_version=1,
+        format_version=MCP_DESCRIPTOR_CACHE_FORMAT_VERSION,
         naming_version=NAMING_VERSION,
         server_fingerprint=server.authorization.server_fingerprint,
         authorization_descriptor_revision=server.authorization.descriptor_revision,

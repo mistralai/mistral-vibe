@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 import signal
 import sys
@@ -80,7 +81,7 @@ from vibe.acp.auth import (
     OnboardingContextLoader,
     TenantDomainResolver,
 )
-from vibe.acp.commands import AcpCommandController, AcpCommandRegistry, InjectedPrompt
+from vibe.acp.commands import AcpCommandController, AcpCommandRegistry, RetryTurn
 from vibe.acp.content import ProjectedPrompt, project_prompt
 from vibe.acp.exceptions import (
     ConfigurationError,
@@ -116,10 +117,10 @@ from vibe.acp.utils import (
     is_jetbrains_client,
     make_thinking_response,
 )
-from vibe.acp.voice import VoiceController
 from vibe.app_server._auth_context import OnboardingContextReader
 from vibe.app_server._integration_resources import MCPResource
-from vibe.app_server.config import ConfigView
+from vibe.app_server._model import ProtocolModel
+from vibe.app_server._service_resources import VoiceNotificationListener
 from vibe.app_server.events import (
     AppServerEvent,
     CallbackRequested,
@@ -157,6 +158,11 @@ from vibe.app_server.models import (
 )
 from vibe.app_server.protocol import (
     INTEGRATIONS_UNAVAILABLE_WARNING,
+    NOTHING_TO_RETRY_REASON,
+    VOICE_NARRATION_DONE_METHOD,
+    VOICE_NARRATION_ERROR_METHOD,
+    VOICE_NARRATION_PREP_METHOD,
+    VOICE_TRANSCRIPTION_DELTA_METHOD,
     AppServerResponseError,
     CallbackKind,
     CallbackResultError,
@@ -173,6 +179,10 @@ from vibe.app_server.protocol import (
     SessionMCPServer,
     SessionMCPStdioServer,
     SessionOptions,
+    VoiceNarrationDoneParams,
+    VoiceNarrationErrorParams,
+    VoiceNarrationPrepParams,
+    VoiceTranscriptionDeltaParams,
 )
 from vibe.app_server.session import AppServerSession, AppServerTurnError
 from vibe.core.utils.signals import waking_loop_on_signals
@@ -288,7 +298,15 @@ class _TurnInput:
     resources: list[UserResource] = field(default_factory=list)
     user_display_content: UserDisplayContent | None = None
     mention_stats: MentionStats | None = None
-    injected: bool = False
+
+
+def _is_nothing_to_retry(exc: Exception) -> bool:
+    return (
+        isinstance(exc, AppServerResponseError)
+        and exc.error.code is ProtocolErrorCode.CONFLICT
+        and isinstance(exc.error.data, dict)
+        and exc.error.data.get("reason") == NOTHING_TO_RETRY_REASON
+    )
 
 
 def _early_stop_reason(turn: PublicTurn | None) -> StopReason | None:
@@ -422,6 +440,43 @@ class SessionRetryingNotification(BaseModel):
     detail: str
 
 
+class _VoiceForwarder(VoiceNotificationListener):
+    """The app server's voice pushes, as ACP ext notifications.
+
+    Dictation and narration run in the app server now, so the lifecycle
+    the host used to get from the subprocess's own audio managers arrives
+    here instead. The bare names keep the wire the clients already
+    subscribe to (`_voice/transcriptionDelta`, `_voice/narrationPrep`,
+    `_voice/narrationDone`, `_voice/narrationError`).
+    """
+
+    def __init__(self, client_getter: Callable[[], Client]) -> None:
+        self._client_getter = client_getter
+
+    def _emit(self, method: str, params: ProtocolModel) -> None:
+        asyncio.ensure_future(self._safe_emit(method, params))
+
+    async def _safe_emit(self, method: str, params: ProtocolModel) -> None:
+        try:
+            await self._client_getter().ext_notification(
+                method, params.model_dump(mode="json", by_alias=True, exclude_none=True)
+            )
+        except Exception:
+            logger.warning("Failed to emit %s", method, exc_info=True)
+
+    def on_transcription_delta(self, params: VoiceTranscriptionDeltaParams) -> None:
+        self._emit(VOICE_TRANSCRIPTION_DELTA_METHOD, params)
+
+    def on_narration_prep(self, params: VoiceNarrationPrepParams) -> None:
+        self._emit(VOICE_NARRATION_PREP_METHOD, params)
+
+    def on_narration_done(self, params: VoiceNarrationDoneParams) -> None:
+        self._emit(VOICE_NARRATION_DONE_METHOD, params)
+
+    def on_narration_error(self, params: VoiceNarrationErrorParams) -> None:
+        self._emit(VOICE_NARRATION_ERROR_METHOD, params)
+
+
 class VibeAcpAgent(AcpAgent):
     client: Client
 
@@ -472,7 +527,6 @@ class VibeAcpAgent(AcpAgent):
         self._command_controller = AcpCommandController(
             lambda: self.client, self._send_config_options
         )
-        self._voice = VoiceController(lambda: self.client)
 
     @override
     async def initialize(
@@ -647,6 +701,10 @@ class VibeAcpAgent(AcpAgent):
         session_id = acp_session_id or app_server.session_id
         client_tool_handler.bind_session(session_id)
         commands = AcpCommandRegistry()
+        # The app server owns dictation and narration: its voice pushes reach
+        # the host under the ACP ext names they always had (see
+        # ``_VoiceForwarder``).
+        app_server.resources.voice.add_listener(_VoiceForwarder(lambda: self.client))
         session = AcpSession(
             session_id=session_id,
             app_server=app_server,
@@ -834,17 +892,15 @@ class VibeAcpAgent(AcpAgent):
         match command_result:
             case PromptResponse() as response:
                 return response
-            case InjectedPrompt(text=injected_text):
-                turn_input = _TurnInput(text=injected_text, injected=True)
+            case RetryTurn(turn_id=turn_id, instructions=instructions):
+                start_turn = partial(session.app_server.retry, turn_id, instructions)
             case None:
                 self._record_skill_command(session, text)
                 turn_input = await self._prepare_turn_input(
                     session, content, message_id=message_id, display=display
                 )
-
-        async def run_turn() -> None:
-            async with aclosing(
-                session.app_server.act(
+                start_turn = partial(
+                    session.app_server.act,
                     turn_input.text,
                     client_message_id=turn_input.client_message_id,
                     auto_title=turn_input.auto_title,
@@ -852,9 +908,10 @@ class VibeAcpAgent(AcpAgent):
                     resources=turn_input.resources,
                     user_display_content=turn_input.user_display_content,
                     mention_stats=turn_input.mention_stats,
-                    injected=turn_input.injected,
                 )
-            ) as events:
+
+        async def run_turn() -> None:
+            async with aclosing(start_turn()) as events:
                 async for event in events:
                     await self._forward_event(session, event)
 
@@ -878,6 +935,8 @@ class VibeAcpAgent(AcpAgent):
                 )
             raise from_public_error(exc.error) from exc
         except Exception as exc:
+            if isinstance(command_result, RetryTurn) and _is_nothing_to_retry(exc):
+                return await self._command_controller.reply_nothing_to_retry(session)
             capture_sentry_exception(
                 exc,
                 fatal=False,
@@ -1033,7 +1092,6 @@ class VibeAcpAgent(AcpAgent):
             await self._passive_host.close()
             self._passive_host = None
         await self._harness_host.close()
-        await self._voice.close()
 
     def _notify_config_changed(self) -> None:
         """Tell the client the org config changed. Runs as a task so a slow
@@ -1266,57 +1324,39 @@ class VibeAcpAgent(AcpAgent):
         return result
 
     async def _voice_extension(self, method: str, params: dict) -> dict:
-        # Voice features need the current session's app server resources
-        # (ConfigView, NarrationResource, telemetry) to construct the
-        # CLI's VoiceManager and NarratorManager.
-        #
-        # The webview gates on VS Code settings (voice.enabled /
-        # voiceNarration.enabled) before calling narrate/transcribeStart, so by
-        # the time we get here the user has explicitly opted in. The CLI's own
-        # narrator_enabled / voice_mode_enabled flags come from the CLI config
-        # file and are unrelated to the VS Code toggles, so we force them to True
-        # to let the CLI managers actually materialize and run.
+        # Voice runs on the app server now: the session's voice resource owns
+        # the audio managers, and pushes the lifecycle notifications we
+        # forward to the host (see ``_VoiceForwarder``). The wire shapes the
+        # VS Code webview already speaks stay: ``language`` on
+        # ``voice/transcribeStart``, ``userMessage``/``assistantText`` on
+        # ``voice/narrate``, and the ``ok``/``error``/``text`` answers.
         try:
             session = next(iter(self.sessions.values()), None)
-
-            def config_getter() -> ConfigView:
-                assert session is not None
-                return session.app_server.resources.config.current.model_copy(
-                    update={"narrator_enabled": True, "voice_mode_enabled": True}
-                )
-
-            narration_resource = (
-                session.app_server.resources.narration if session else None
-            )
-            telemetry = session.app_server.resources.telemetry if session else None
-
+            if session is None:
+                return {"ok": False, "error": "No active session"}
+            voice = session.app_server.resources.voice
             match method:
                 case "voice/transcribeStart":
-                    return await self._voice.transcribe_start(
-                        language=params.get("language", "en"),
-                        config_getter=config_getter,
-                        narration_resource=narration_resource,
-                        telemetry=telemetry,
+                    response = await voice.transcribe_start(
+                        language=params.get("language", "en")
                     )
                 case "voice/transcribeStop":
-                    return await self._voice.transcribe_stop()
+                    response = await voice.transcribe_stop()
                 case "voice/transcribeCancel":
-                    return await self._voice.transcribe_cancel()
+                    response = await voice.transcribe_cancel()
                 case "voice/narrate":
-                    return await self._voice.narrate(
+                    response = await voice.narrate(
                         user_message=params.get("userMessage", ""),
                         assistant_text=params.get("assistantText", ""),
-                        config_getter=config_getter,
-                        narration_resource=narration_resource,
-                        telemetry=telemetry,
                     )
                 case "voice/narrateCancel":
-                    return await self._voice.narrate_cancel()
+                    response = await voice.narrate_cancel()
                 case _:
                     raise NotImplementedMethodError(method)
         except Exception:
             logger.error("voice extension method %s failed", method, exc_info=True)
             raise
+        return response.model_dump(mode="json", by_alias=True, exclude_none=True)
 
     async def _config_schema(self) -> dict[str, Any]:
         response = await (await self._host_resources()).read_config_schema()
@@ -1523,8 +1563,10 @@ class VibeAcpAgent(AcpAgent):
                 request = LoopsCreateRequest.model_validate(params)
             elif method == "loops/delete":
                 request = LoopsDeleteRequest.model_validate(params)
-            else:
+            elif method == "loops/clear":
                 request = LoopsClearRequest.model_validate(params)
+            else:
+                raise NotImplementedMethodError(method)
         except ValidationError as exc:
             raise InvalidRequestError(f"Invalid ACP loops request: {exc}") from exc
 

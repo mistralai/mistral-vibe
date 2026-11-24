@@ -32,7 +32,7 @@ pub(super) fn apply_done(
     // The rewound turns are gone, so no `/retry` offer survives them.
     crate::commands::retry::cancel(app);
     let new_session_id = state.session.id.clone();
-    app.set_session_id(new_session_id.clone());
+    crate::background_work::adopt_session(app, &state);
     app.session.active_turn_id = None;
     // Drop the queued prompts and rebuild every row from the returned
     // history, so no client-owned entry survives the rewind.
@@ -44,8 +44,7 @@ pub(super) fn apply_done(
     app.view.expanded.clear();
     app.view.transcript.load_snapshot(&state);
     crate::worktree::adopt_state(app, &state);
-    crate::background_work::adopt_state(app, &state);
-    crate::loops::adopt_state(app, &state);
+    crate::subagents::refresh(app);
     app.expand_rebuilt_tools();
     if !inplace {
         local::add_rewind_fork(

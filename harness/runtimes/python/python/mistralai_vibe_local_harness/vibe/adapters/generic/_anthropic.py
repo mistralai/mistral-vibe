@@ -6,6 +6,7 @@ import base64
 import binascii
 from collections.abc import Sequence
 from functools import cache
+from http import HTTPStatus
 import json
 import logging
 import re
@@ -20,6 +21,7 @@ from mistralai_vibe_local_harness.vibe.adapters.generic._base import (
 )
 from mistralai_vibe_local_harness.vibe.adapters.generic._image import to_base64
 from mistralai_vibe_local_harness.vibe.adapters.generic._model import (
+    REASONING_BLOCK_TYPES,
     AvailableTool,
     FunctionCall,
     LLMChunk,
@@ -47,6 +49,16 @@ logger = logging.getLogger(__name__)
 THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 THINKING_BLOCK_BINDING: dict[str, Any] = {"prefix_mismatch_behavior": "drop_block"}
 
+# The HTTP status of each transient error type, so an error event inside a
+# stream is retried like the same error before the stream. 529 is Anthropic's
+# overloaded status, which HTTPStatus does not name.
+_TRANSIENT_ERROR_STATUS: dict[str, int] = {
+    "rate_limit_error": HTTPStatus.TOO_MANY_REQUESTS,
+    "api_error": HTTPStatus.INTERNAL_SERVER_ERROR,
+    "timeout_error": HTTPStatus.GATEWAY_TIMEOUT,
+    "overloaded_error": 529,
+}
+
 
 def _parse_stop_info(reason: str | None, raw: Any) -> StopInfo | None:
     if reason is None and not isinstance(raw, dict):
@@ -63,7 +75,6 @@ def _text_blocks(text: str | None) -> list[dict[str, Any]]:
     return [{"type": "text", "text": text}]
 
 
-REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
 # With thinking on, the Messages API refuses a lower ``top_p`` than this.
 THINKING_MIN_TOP_P = 0.95
 
@@ -541,7 +552,8 @@ class AnthropicAdapter(APIAdapter):
             error_type = error.get("type", "unknown_error")
             error_message = error.get("message", "Unknown streaming error")
             raise ProviderStreamError(
-                f"Anthropic stream error ({error_type}): {error_message}", None
+                f"Anthropic stream error ({error_type}): {error_message}",
+                _TRANSIENT_ERROR_STATUS.get(error_type),
             )
         return empty_chunk
 
@@ -642,4 +654,4 @@ class AnthropicAdapter(APIAdapter):
         )
 
 
-__all__ = ["REASONING_BLOCK_TYPES", "AnthropicAdapter", "AnthropicMapper"]
+__all__ = ["AnthropicAdapter", "AnthropicMapper"]

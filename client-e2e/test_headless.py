@@ -19,6 +19,8 @@ def test_headless_scenario(name: str) -> None:
     assert captured.returncode == scenario.headless_returncode, captured.stderr
     assert captured.stdout_before_completion == list(scenario.stdout_before_completion)
     assert captured.stdout == list(scenario.stdout_before_completion)
+    if scenario.headless_stdout is not None:
+        assert captured.stdout_text == scenario.headless_stdout
     if scenario.headless_stderr is not None:
         assert captured.stderr == scenario.headless_stderr
     sent = {request.method for request in captured.requests}

@@ -55,6 +55,28 @@ pub fn offer(app: &mut App, turn_id: Option<&str>, row: Option<String>) {
         .get_or_insert_with(Default::default);
     presentation.active = false;
     app.session.can_retry = true;
+    show_interrupt_hint(app, true);
+}
+
+/// Show the `/retry` hint on the newest marker the live offer covers, or hide it on all of them.
+fn show_interrupt_hint(app: &mut App, retryable: bool) {
+    let Some(presentation) = &app.session.retry_presentation else {
+        return;
+    };
+    let transcript = &mut app.view.transcript;
+    let markers: Vec<&String> = presentation
+        .transient_ids
+        .iter()
+        .filter(|id| crate::transcript::local::is_interrupt(transcript, id))
+        .collect();
+    let newest = markers.len().saturating_sub(1);
+    for (index, id) in markers.into_iter().enumerate() {
+        crate::transcript::local::set_interrupt_retryable(
+            transcript,
+            id,
+            retryable && index == newest,
+        );
+    }
 }
 
 /// Track the marker Esc left on the turn it interrupts, for the next offer to replace.
@@ -92,6 +114,7 @@ pub fn drop_pending_interrupt(app: &mut App) {
 
 /// Drop the offer; the rows stay mounted.
 pub fn cancel(app: &mut App) {
+    show_interrupt_hint(app, false);
     app.session.retry_presentation = None;
     app.session.can_retry = false;
 }
@@ -155,6 +178,7 @@ fn send(app: &mut App, client: &Arc<Client>, cmd_args: &str) -> bool {
         return false;
     };
     app.session.can_retry = false;
+    show_interrupt_hint(app, false);
     if let Some(presentation) = &mut app.session.retry_presentation {
         presentation.active = true;
     }

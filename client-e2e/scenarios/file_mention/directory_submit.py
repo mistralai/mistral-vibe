@@ -1,4 +1,4 @@
-"""An accepted directory mention submits on the next Enter."""
+"""Enter on the typed directory row closes the popup; the next Enter submits it."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ screen_contains = ("Directory received.",)
 timeline: Timeline = [
     "@data",
     "\t",
+    "\r",
     "\r",
     turn_started(),
     user_msg("@data/"),

@@ -134,6 +134,38 @@ def test_a_known_model_takes_its_input_modalities_from_the_table_when_unset() ->
     assert declared_off.agent.input_modalities == _TEXT_ONLY
 
 
+@pytest.mark.parametrize(
+    ("name", "modalities"),
+    [("azure_ai/gpt-5.5", _TEXT_ONLY), ("azure_ai/claude-opus-5-5", _TEXT_AND_IMAGE)],
+)
+def test_the_gateway_gpt_5_5_reads_no_images(
+    name: str, modalities: tuple[InputModality, ...]
+) -> None:
+    """*Prepare*: The internal AI gateway, which sends tool-result images, and
+    gpt-5.5 on it with images unset: the gateway answers HTTP 500 to any image
+    sent to that model. Claude on the same gateway reads them.
+    *Do*: Compile the session's facts.
+    *Assert*: gpt-5.5 reads text only, so Core sends it ``[Image]`` in place of
+    every image, tool results included; Claude keeps its images.
+    """
+    # Prepare
+    provider = ProviderConfig(
+        name="p",
+        api_base="https://internal-ai-gateway.mistralai.com",
+        backend=Backend.GENERIC,
+        api_style="openai",
+    )
+    model = _model(name)
+
+    # Do
+    facts = compile_session_model_facts(provider, model, model)
+
+    # Assert
+    assert provider.sends_tool_result_images is True
+    assert facts.agent.input_modalities == modalities
+    assert facts.compaction.input_modalities == modalities
+
+
 def test_only_the_agent_route_warns() -> None:
     """*Prepare*: A known agent model and an unknown compaction model.
     *Do*: Compile the session's facts.

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from itertools import islice, repeat
+from operator import indexOf
 from typing import Any, Literal, cast
 
 from pydantic import JsonValue
@@ -66,6 +68,8 @@ from mistralai_vibe_local_harness.vibe._storage import (
     ProjectionStateV1,
     SessionApiFactsV1,
     compute_projection_delta,
+    projection_entry_ids,
+    replace_projection_entry,
 )
 
 _PREVIEW_MAX_CHARS = 200
@@ -257,7 +261,7 @@ class SessionProjector:
                 existing = next(
                     (
                         candidate
-                        for candidate in entries
+                        for candidate in _from_turn(entries, observation.turn_id)
                         if candidate.get("type") == "message"
                         and candidate.get("role") == "user"
                         and candidate.get("turnId") == observation.turn_id
@@ -553,6 +557,7 @@ class SessionProjector:
                         code=observation.error.code,
                         message=observation.error.message,
                         details=observation.error.details,
+                        retryable=observation.error.retryable,
                     ),
                 )
 
@@ -1028,6 +1033,24 @@ def _is_provisional(entry: JsonObject) -> bool:
     )
 
 
+def _from_turn(entries: Sequence[JsonObject], turn_id: str) -> Iterable[JsonObject]:
+    """``entries`` from the first one of ``turn_id`` on, found in C; none if none is."""
+    try:
+        start = indexOf(map(dict.get, entries, repeat("turnId")), turn_id)
+    except ValueError:
+        return ()
+    return islice(entries, start, None)
+
+
+def _has_in_progress_entry(entries: Sequence[JsonObject]) -> bool:
+    """Whether any entry is in progress; read in C, without a Python step per entry.
+
+    Only an in-progress entry can be provisional (_is_provisional), so most
+    calls on a long history end here.
+    """
+    return "in_progress" in map(dict.get, entries, repeat("generationStatus"))
+
+
 def _restore_live_completion_entries(
     stored: Sequence[JsonObject], live: Sequence[JsonObject]
 ) -> list[JsonObject]:
@@ -1047,6 +1070,11 @@ def _restore_live_completion_entries(
     kept across later rebases until it is journaled: a published entry is never
     retracted, so dropping it would leave it in progress on the client.
     """
+    # The usual rebase, after a durable advance with nothing streaming: the
+    # store holds exactly the live entries, and none is in progress, so none
+    # can be restored. The list comparison takes each shared entry by identity.
+    if list(live) == list(stored) and not _has_in_progress_entry(live):
+        return list(stored)
     stored_ids = {
         entry_id for entry in stored if isinstance(entry_id := entry.get("id"), str)
     }
@@ -1266,6 +1294,8 @@ def _cleared_provisional_entries(
 def _without_provisional(state: PublicSessionState) -> PublicSessionState:
     """The journalable view of ``state``: everything but live streamed content."""
     entries = state.history.entries
+    if not _has_in_progress_entry(entries):
+        return state
     durable = [entry for entry in entries if not _is_provisional(entry)]
     if len(durable) == len(entries):
         return state
@@ -2122,6 +2152,24 @@ def _completed_effect_detail(
     return cast(JsonObject, completed)
 
 
+def effect_output_text(state: Mapping[str, Any]) -> str:
+    """A settled effect's text output: its ``outputText``, else its output's text content."""
+    text = state.get("outputText")
+    if isinstance(text, str):
+        return text
+    output = state.get("output")
+    content = output.get("content") if isinstance(output, Mapping) else None
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        block["text"]
+        for block in content
+        if isinstance(block, Mapping)
+        and block.get("type") == "text"
+        and isinstance(block.get("text"), str)
+    )
+
+
 def effect_entry_id(entries: Sequence[JsonObject], action_id: str, turn_id: str) -> str:
     """The public history ID of the effect entry for a tool Action.
 
@@ -2134,38 +2182,50 @@ def effect_entry_id(entries: Sequence[JsonObject], action_id: str, turn_id: str)
     starting, approving and completing it all resolve to the same ID.
     """
     entry_id = f"effect-{action_id}"
+    owner = _find_entry(entries, entry_id)
+    if owner is None or _owned_by(owner, turn_id):
+        return entry_id
+    # The ID was reused: one pass finds every earlier run's entry.
     owners: dict[str, JsonObject] = {}
     for entry in entries:
         found = entry.get("id")
         if isinstance(found, str) and found.startswith(entry_id):
             owners.setdefault(found, entry)
-    occurrence = 0
+    occurrence = 1
     while True:
-        candidate = entry_id if occurrence == 0 else f"{entry_id}-{occurrence}"
+        candidate = f"{entry_id}-{occurrence}"
         owner = owners.get(candidate)
-        if owner is None or (
-            owner.get("generationStatus") == "in_progress"
-            and owner.get("turnId") == turn_id
-        ):
+        if owner is None or _owned_by(owner, turn_id):
             return candidate
         occurrence += 1
 
 
+def _owned_by(entry: JsonObject, turn_id: str) -> bool:
+    """Whether ``entry`` can be a tool Action's own: still in progress in its Turn."""
+    return (
+        entry.get("generationStatus") == "in_progress"
+        and entry.get("turnId") == turn_id
+    )
+
+
 def _find_entry(entries: Sequence[JsonObject], entry_id: str) -> JsonObject | None:
-    for entry in entries:
-        if entry.get("id") == entry_id:
-            return entry
-    return None
+    """The first entry with ``entry_id``, found in C."""
+    index = _entry_index(entries, entry_id)
+    return None if index is None else entries[index]
 
 
 def _replace_entry(
     entries: list[JsonObject], entry_id: str, replacement: JsonObject
 ) -> bool:
-    for index, entry in enumerate(entries):
-        if entry.get("id") == entry_id:
-            entries[index] = replacement
-            return True
-    return False
+    return replace_projection_entry(entries, entry_id, replacement)
+
+
+def _entry_index(entries: Sequence[JsonObject], entry_id: str) -> int | None:
+    """Where the first entry with ``entry_id`` is, found in C."""
+    try:
+        return indexOf(projection_entry_ids(entries), entry_id)
+    except ValueError:
+        return None
 
 
 def _entry_title(entry: JsonObject | None) -> str | None:
@@ -2235,4 +2295,9 @@ def _turn_queue_item_id(latest_turn: object, turn_id: str) -> str | None:
     return None
 
 
-__all__ = ["ProjectionUpdate", "SessionProjector", "effect_entry_id"]
+__all__ = [
+    "ProjectionUpdate",
+    "SessionProjector",
+    "effect_entry_id",
+    "effect_output_text",
+]

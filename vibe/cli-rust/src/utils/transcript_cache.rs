@@ -30,6 +30,8 @@ pub struct TranscriptLayout {
     pub queue_top: Option<u16>,
     /// Positions in `entries` of the settled user prompts, in order.
     pub prompts: Vec<usize>,
+    /// Positions in `entries` of the messages steered into a turn, in order.
+    pub steers: Vec<usize>,
     /// The `Worked for` groups laid out, in transcript order.
     pub details: Vec<TurnDetails>,
 }
@@ -194,6 +196,7 @@ impl TranscriptCache {
             entries,
             queue_top,
             prompts,
+            steers: Vec::new(),
             details: Vec::new(),
         };
         &mut self.layouts[slot]

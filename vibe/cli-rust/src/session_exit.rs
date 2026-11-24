@@ -8,8 +8,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::app::App;
-use crate::resume_picker;
 use crate::server::{method, Client, TokenUsage};
+use crate::sessions_page;
 use crate::utils::text::thousands;
 
 /// Bound on the quit-time `session/log/read`: a hung server must not stall the
@@ -78,14 +78,14 @@ pub fn session_resume_message(
             ));
             text.push_str(&format!(
                 "Or: {code}vibe --resume {}{RESET}\n",
-                resume_picker::short_id(session_id)
+                sessions_page::short_id(session_id)
             ));
         }
         None => {
             text.push_str("To continue this session, run: vibe --continue\n");
             text.push_str(&format!(
                 "Or: vibe --resume {}\n",
-                resume_picker::short_id(session_id)
+                sessions_page::short_id(session_id)
             ));
         }
     }

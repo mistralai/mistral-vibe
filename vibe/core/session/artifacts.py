@@ -85,6 +85,7 @@ class _PullRequestSharedEnrichment(BaseModel):
     target_branch: str
     author: str
     state: PullRequestLifecycleState
+    is_in_merge_queue: bool = False
     provider_created_at: str | None
     # When the PR/MR was last read from its provider, successfully (the same
     # meaning as cloud sessions'). A failed read keeps the previous value.

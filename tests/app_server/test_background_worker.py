@@ -18,6 +18,7 @@ from vibe.app_server._background_worker import (
     _default_command,
 )
 from vibe.app_server._background_worker_process import FLAG
+from vibe.app_server._storage_usage.files import _alive
 
 _TEST_JOBS = "tests.stubs.background_worker_jobs:test_jobs"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -169,7 +170,7 @@ async def test_a_worker_that_died_with_work_queues_its_recovery() -> None:
 async def test_closing_stops_the_worker_and_fails_what_was_left(
     worker: BackgroundWorker,
 ) -> None:
-    await worker.run("test.pid")
+    pid = await worker.run("test.pid")
     in_flight = worker.submit("test.sleep", 30)
 
     await worker.close()
@@ -179,6 +180,7 @@ async def test_closing_stops_the_worker_and_fails_what_was_left(
     with pytest.raises(BackgroundWorkerClosedError):
         await worker.run("test.pid")
     assert worker.pid is None
+    assert not _alive(pid)
 
 
 @pytest.mark.asyncio

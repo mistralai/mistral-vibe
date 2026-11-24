@@ -151,6 +151,7 @@ def with_cached_status(artifact: SessionArtifact) -> SessionArtifact:
             "details": details.model_copy(
                 update={
                     "state": snapshot.state,
+                    "is_in_merge_queue": snapshot.is_in_merge_queue,
                     "source_branch": snapshot.source_branch or details.source_branch,
                     "target_branch": snapshot.target_branch or details.target_branch,
                     "author": snapshot.author or details.author,
@@ -1017,6 +1018,7 @@ def _enrichment_fields(
         "target_branch": details.target_branch,
         "author": details.author,
         "state": details.state,
+        "is_in_merge_queue": details.is_in_merge_queue,
         "provider_created_at": details.provider_created_at,
         "provider_updated_at": details.provider_updated_at,
         "provider_closed_at": details.provider_closed_at,

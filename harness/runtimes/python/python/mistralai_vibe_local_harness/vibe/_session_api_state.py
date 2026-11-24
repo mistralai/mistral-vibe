@@ -17,8 +17,10 @@ Two pieces of memory carry what one state cannot tell:
 ``_session_api_entries`` converts each public entry.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import compress, count, islice
+from operator import is_not
 from typing import Any, cast
 
 from pydantic import JsonValue
@@ -51,6 +53,7 @@ from mistralai_vibe_local_harness.session_protocol import (
     PublicTurn,
     RunningSessionStatus,
 )
+from mistralai_vibe_local_harness.vibe._completion_budget import budget_limit_cause
 from mistralai_vibe_local_harness.vibe._session_api_entries import (
     ENTRY_BUILDERS,
     TOOL_CALL_SUFFIX,
@@ -63,6 +66,19 @@ from mistralai_vibe_local_harness.vibe._session_api_entries import (
 from mistralai_vibe_local_harness.vibe._storage import SessionApiFactsV1
 
 _PAGE_CURSOR_PREFIX = "index:"
+
+
+def unchanged_prefix(before: Sequence[object], after: Sequence[object]) -> int:
+    """How many leading items of ``after`` are the very objects ``before`` has there.
+
+    The Runtime replaces a history entry instead of changing it, so a step that
+    read ``before`` can skip that prefix of ``after``. The comparison runs in C
+    and never calls ``__eq__``: on a long Session, an update then costs what it
+    changed, not the length of the history.
+    """
+    return next(
+        compress(count(), map(is_not, before, after)), min(len(before), len(after))
+    )
 
 
 class SessionApiStateError(ValueError):
@@ -151,6 +167,10 @@ class TurnLedger:
 
     def to_json(self) -> dict[str, JsonObject]:
         return dict(self._ended_json)
+
+    def ended(self) -> Mapping[str, JsonObject]:
+        """The saved form of each ended Turn, in the order they ended; read only."""
+        return self._ended_json
 
     @classmethod
     def from_json(cls, value: Mapping[str, JsonObject]) -> "TurnLedger":
@@ -296,9 +316,15 @@ class SessionApiView:
     _saved_agent_config: JsonObject | None = None
     _saved_tool_calls: set[str] = field(default_factory=set)
     _converted: dict[str, _ConvertedEntry] = field(default_factory=dict)
+    # The history ``observe`` last read: its entries have their positions.
+    _observed: Sequence[JsonObject] = ()
     # ``all_facts`` until a fact changes: the Runtime asks for it on every
     # published state, and most states, such as streamed text, add none.
     _facts: SessionApiFactsV1 | None = None
+    # How many leading items of each fact dict are saved. The dicts only grow
+    # and keep their order, and a saved item's value never changes, so
+    # ``unsaved_facts`` reads only what follows.
+    _saved_lead: dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_facts(cls, facts: SessionApiFactsV1 | None) -> "SessionApiView":
@@ -340,7 +366,13 @@ class SessionApiView:
         state it publishes, so the facts are ready before the state is saved.
         """
         next_index = self.history_index.next_index
-        for raw in state.history.entries:
+        entries = tuple(state.history.entries)
+        # The Runtime replaces an entry instead of changing it, and a position
+        # is never taken back: the entries still the objects the last call
+        # read are positioned already.
+        start = unchanged_prefix(self._observed, entries)
+        self._observed = entries
+        for raw in entries[start:]:
             for api_id in history_position_ids(raw):
                 self.history_index.position(api_id)
         ended = self.turns.observe(state.latest_turn)
@@ -349,7 +381,9 @@ class SessionApiView:
 
     def all_facts(self) -> SessionApiFactsV1:
         if self._facts is None:
-            self._facts = SessionApiFactsV1(
+            # Built from this view's own checked values, so not validated
+            # again: that would cost the Session's length on every new entry.
+            self._facts = SessionApiFactsV1.model_construct(
                 next_history_index=self.history_index.next_index,
                 history_positions=dict(self.history_index.positions),
                 turn_outcomes=self.turns.to_json(),
@@ -363,22 +397,26 @@ class SessionApiView:
         """The facts added since the last ``mark_saved``, or None if nothing is new."""
         positions = {
             entry_id: index
-            for entry_id, index in self.history_index.positions.items()
+            for entry_id, index in self._after_saved_lead(
+                "positions", self.history_index.positions
+            )
             if entry_id not in self._saved_positions
         }
         outcomes = {
             turn_id: outcome
-            for turn_id, outcome in self.turns.to_json().items()
+            for turn_id, outcome in self._after_saved_lead("turns", self.turns.ended())
             if self._saved_turns.get(turn_id) != outcome
         }
         receipts = {
             key: receipt
-            for key, receipt in self.message_receipts.items()
+            for key, receipt in self._after_saved_lead(
+                "receipts", self.message_receipts
+            )
             if key not in self._saved_receipts
         }
         tool_calls = {
             entry_id: call
-            for entry_id, call in self.tool_calls.items()
+            for entry_id, call in self._after_saved_lead("tool_calls", self.tool_calls)
             if entry_id not in self._saved_tool_calls
         }
         config = (
@@ -386,7 +424,7 @@ class SessionApiView:
         )
         if not (positions or outcomes or receipts or tool_calls or config):
             return None
-        return SessionApiFactsV1(
+        return SessionApiFactsV1.model_construct(
             next_history_index=self.history_index.next_index,
             history_positions=positions,
             turn_outcomes=outcomes,
@@ -404,6 +442,43 @@ class SessionApiView:
         self._saved_tool_calls.update(facts.tool_calls)
         if facts.agent_config is not None:
             self._saved_agent_config = facts.agent_config
+        self._extend_saved_lead(
+            "positions",
+            self.history_index.positions,
+            lambda key, _value: key in self._saved_positions,
+        )
+        self._extend_saved_lead(
+            "turns",
+            self.turns.ended(),
+            lambda key, value: self._saved_turns.get(key) == value,
+        )
+        self._extend_saved_lead(
+            "receipts",
+            self.message_receipts,
+            lambda key, _value: key in self._saved_receipts,
+        )
+        self._extend_saved_lead(
+            "tool_calls",
+            self.tool_calls,
+            lambda key, _value: key in self._saved_tool_calls,
+        )
+
+    def _after_saved_lead(
+        self, name: str, items: Mapping[str, Any]
+    ) -> Iterator[tuple[str, Any]]:
+        """The items of ``items`` after its leading saved ones."""
+        return islice(items.items(), self._saved_lead.get(name, 0), None)
+
+    def _extend_saved_lead(
+        self, name: str, items: Mapping[str, Any], is_saved: Callable[[str, Any], bool]
+    ) -> None:
+        """Count the saved items that now lead ``items``, from where it stopped."""
+        lead = self._saved_lead.get(name, 0)
+        for key, value in self._after_saved_lead(name, items):
+            if not is_saved(key, value):
+                break
+            lead += 1
+        self._saved_lead[name] = lead
 
     def history_entries(self, state: PublicSessionState) -> list[HistoryEntry]:
         """Every public history entry in Session API form, ordered by position.
@@ -734,11 +809,15 @@ def _turn_record(turn: PublicTurn) -> TurnRecord:
                 error=ProtocolError(
                     message=turn.error.message,
                     code=turn.error.code,
+                    retryable=turn.error.retryable,
                     details=turn.error.details,
                 )
             )
         case InterruptedPublicTurn():
-            termination = CancelledTermination(reason=turn.reason)
+            # The interrupt keeps only its reason; a spent limit's reason names the budget.
+            termination = CancelledTermination(
+                reason=turn.reason, cause=budget_limit_cause(turn.reason)
+            )
     return TurnRecord(turn.id, turn.started_at, turn.completed_at, termination)
 
 

@@ -1,5 +1,12 @@
 [
  {
+  "method": "session/list",
+  "params": {
+   "includeArchived": true,
+   "limit": 500
+  }
+ },
+ {
   "method": "storage/usage/refresh",
   "params": {
    "maxAgeMs": 600000

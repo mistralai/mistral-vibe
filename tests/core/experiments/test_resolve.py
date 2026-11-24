@@ -44,36 +44,38 @@ def test_config_variants_drops_baseline_keeps_typed_deviation() -> None:
     r = _resp({
         ExperimentName.SYSTEM_PROMPT.value: {"defaultValue": "cli"},  # baseline
         ExperimentName.SMART_APPROVE.value: {"defaultValue": True},  # deviation (bool)
-        ExperimentName.CLI_MODEL_ROUTING.value: {"defaultValue": {}},  # baseline ({})
+        ExperimentName.MODEL_CATALOG_FILTER.value: {
+            "defaultValue": {}
+        },  # baseline ({})
     })
     assert resolve.config_variants(r) == {ExperimentName.SMART_APPROVE.value: True}
 
 
 def test_config_variants_returns_typed_object() -> None:
-    payload = {"active_model": "glm-5-2"}
-    r = _resp({ExperimentName.CLI_MODEL_ROUTING.value: {"defaultValue": payload}})
+    payload = {"default": "glm-5-2"}
+    r = _resp({ExperimentName.MODEL_CATALOG_FILTER.value: {"defaultValue": payload}})
     assert resolve.config_variants(r) == {
-        ExperimentName.CLI_MODEL_ROUTING.value: payload
+        ExperimentName.MODEL_CATALOG_FILTER.value: payload
     }
 
 
 def test_assignments_projects_in_experiment_track() -> None:
     r = _resp({
-        ExperimentName.CLI_EXTRA_MODELS.value: {
+        ExperimentName.MODEL_CATALOG_FILTER.value: {
             "defaultValue": {},
             "rules": [
                 {
-                    "force": {"models": []},
+                    "force": {"hide": []},
                     "tracks": [
                         {
                             "experiment": {"key": "exp-key"},
                             "result": {
                                 "variationId": 1,
-                                "value": {"models": []},
+                                "value": {"hide": []},
                                 "inExperiment": True,
                                 "hashAttribute": "userId",
                                 "hashValue": "u1",
-                                "featureId": ExperimentName.CLI_EXTRA_MODELS.value,
+                                "featureId": ExperimentName.MODEL_CATALOG_FILTER.value,
                             },
                         }
                     ],
@@ -83,7 +85,7 @@ def test_assignments_projects_in_experiment_track() -> None:
     })
     a = resolve.assignments(r)
     assert len(a) == 1
-    assert a[0].experiment_id == ExperimentName.CLI_EXTRA_MODELS.value
+    assert a[0].experiment_id == ExperimentName.MODEL_CATALOG_FILTER.value
     assert a[0].experiment_name == "exp-key"
     assert a[0].in_experiment is True
 

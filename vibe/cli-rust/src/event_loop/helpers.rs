@@ -77,19 +77,18 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
             session_id,
             artifacts,
         } => crate::artifacts::apply_list(app, &session_id, artifacts),
+        CommandEvent::TaskOutput(page) => crate::tasks_panel::follow::apply(app, client, *page),
         CommandEvent::UntrustedConfig(warning) => {
             if let Some(text) = warning {
                 local::add_warning(&mut app.view.transcript, &id, &text);
             }
         }
         CommandEvent::Cleared {
-            session_id,
-            usage,
-            child_sessions,
+            state,
             previous_session_id,
             seed,
         } => {
-            clear::apply_cleared(app, session_id.clone(), usage, child_sessions);
+            clear::apply_cleared(app, &state);
             local::add_command_status(
                 &mut app.view.transcript,
                 &id,
@@ -102,7 +101,7 @@ pub(super) fn apply_command(app: &mut App, client: &Arc<Client>, command: Comman
                     "user",
                     &seed.text,
                 );
-                clear::start_seed_turn(app, client, session_id, seed);
+                clear::start_seed_turn(app, client, state.session.id, seed);
             }
         }
         CommandEvent::Compacted { state, status_id } => {

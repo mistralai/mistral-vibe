@@ -6,11 +6,8 @@ fetch, for at most ``MODEL_CATALOG_WAIT_CAP_SECONDS`` from when the session
 starts waiting on it. A pick of a model the config does not offer yet waits
 for it too, within the same cap, whatever the session's model.
 
-Once a fetch fails, or is still running when a readiness cap expires, no later
-session or ``/clear`` in the process waits: the process's
-``ModelCatalogService`` holds that memory. A pick's cap is not remembered, so a
-pick only shortens its own wait. A fetch cancelled with its session is not a
-failure: the next session still waits for its own fetch.
+A failed fetch, or one still running at the cap, is handled as described in
+``vibe.core.utils.fetch_wait``.
 """
 
 from __future__ import annotations
@@ -20,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from vibe.core.config.layers.model_catalog import ModelCatalogLayer
 from vibe.core.model_catalog._constants import MODEL_CATALOG_WAIT_CAP_SECONDS
-from vibe.core.utils.fetch_wait import FetchFailures, FetchWait
+from vibe.core.utils.fetch_wait import FetchWait
 
 if TYPE_CHECKING:
     from vibe.core.config import VibeConfigSchema
@@ -30,7 +27,6 @@ if TYPE_CHECKING:
 
 def model_catalog_wait_needed(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
-    failures: FetchFailures,
     credentials: PlatformCredentialFactory | None = None,
 ) -> bool:
     """Whether a session opening on *orchestrator* must wait for its catalog
@@ -43,19 +39,18 @@ def model_catalog_wait_needed(
     """
     if orchestrator.config.active_model:
         return False
-    return model_catalog_pending(orchestrator, failures, credentials)
+    return model_catalog_pending(orchestrator, credentials)
 
 
 def model_catalog_pending(
     orchestrator: ConfigOrchestrator[VibeConfigSchema],
-    failures: FetchFailures,
     credentials: PlatformCredentialFactory | None = None,
 ) -> bool:
     """Whether a catalog fetch may still bring models to *orchestrator*: the
-    catalog is on, none is loaded, none failed, and a fetch can run.
+    catalog is on, none is loaded, and a fetch can run.
     """
     config = orchestrator.config
-    if not config.experimental_enable_model_catalog or failures.failed:
+    if not config.enable_model_catalog:
         return False
     # Imported here, as in the fetch: it keeps the HTTP stack off this
     # module's import path.
@@ -72,11 +67,7 @@ def model_catalog_pending(
     return isinstance(layer, ModelCatalogLayer) and layer.catalog is None
 
 
-class ModelCatalogWait(FetchWait):
-    def __init__(self, task: asyncio.Future[Any], failures: FetchFailures) -> None:
-        super().__init__(
-            task,
-            name="Model catalog",
-            cap_seconds=MODEL_CATALOG_WAIT_CAP_SECONDS,
-            failures=failures,
-        )
+def model_catalog_wait(task: asyncio.Future[Any]) -> FetchWait:
+    return FetchWait(
+        task, name="Model catalog", cap_seconds=MODEL_CATALOG_WAIT_CAP_SECONDS
+    )

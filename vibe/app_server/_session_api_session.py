@@ -74,6 +74,7 @@ from mistralai_vibe_local_harness.vibe._session_api_extensions import (
     VibeExtensionEvent,
     VibeSessionReadResponse,
 )
+from vibe.app_server._content_text import text_block_texts
 from vibe.app_server._session_api_projection import (
     VIBE_PREFIX,
     ApiHistoryProjection,
@@ -107,8 +108,13 @@ class AppliedBatch:
     """Callbacks the batch opened, in the Runtime's callback entry format."""
     resolved_callbacks: list[JsonObject] = field(default_factory=list)
     """Callbacks the batch resolved, with their final state."""
-    turn_terminated: bool = False
-    """Whether the batch ended a Turn: a boundary for parked configuration."""
+    terminated_turns: list[TurnState] = field(default_factory=list)
+    """The Turns the batch ended, in order."""
+
+    @property
+    def turn_terminated(self) -> bool:
+        """Whether the batch ended a Turn: a boundary for parked configuration."""
+        return bool(self.terminated_turns)
 
 
 @dataclass(slots=True)
@@ -195,6 +201,13 @@ class ApiSessionState:
     def history(self) -> list[PublicHistoryEntry]:
         return self.history_projection.history
 
+    def final_answer_of(self, turn_id: str) -> str | None:
+        """The final answer of ``turn_id`` when it is the latest Turn, else None."""
+        turn = self._turn
+        if turn is None or turn.id != turn_id:
+            return None
+        return final_answer(turn)
+
     def runtime_state(self) -> HarnessPublicSessionState:
         """The Runtime's public state, without its history entries."""
         session = self._session
@@ -269,12 +282,24 @@ class ApiSessionState:
         turn = self._turn
         if turn is None:
             return None
+        return self.runtime_turn(turn)
+
+    def runtime_turn(self, turn: TurnState) -> JsonObject:
+        """Vibe's Turn in the Runtime's format, with the details this state saw."""
+        session = self._session
+        if session is None:
+            raise RuntimeError("The Session state was not read yet")
         return runtime_turn(
             turn,
             self.session_id,
             self._turn_details.get(turn.id, {}),
             fallback_started_at=session.created_at,
         )
+
+    @property
+    def latest_turn_state(self) -> TurnState | None:
+        """The API's latest Turn, as the last read or batch left it."""
+        return self._turn
 
     def open_callback_entry(self, callback: SessionCallback) -> JsonObject | None:
         """The Runtime's entry for ``callback``, which the Runtime holds open.
@@ -408,7 +433,7 @@ class ApiSessionState:
                     turn = turn.model_copy(update={"started_at": item.emitted_at})
                 self._turn = turn
             case TurnTerminatedEvent(turn=turn):
-                applied.turn_terminated = True
+                applied.terminated_turns.append(turn)
                 # A batch can start a new Turn before it ends an older one.
                 if self._turn is None or self._turn.id == turn.id:
                     self._turn = turn
@@ -484,10 +509,12 @@ def runtime_turn(
                     else None
                 ),
             }
+            # A reason's text blocks are joined with nothing between them, as the
+            # local runtime's ``_output_text`` (``vibe/_projection.py``) joins them.
             if stop_reason == "skipped":
-                completed["skipReason"] = output if isinstance(output, str) else ""
+                completed["skipReason"] = "".join(_output_texts(output))
             elif stop_reason == "rejected":
-                completed["rejectReason"] = output if isinstance(output, str) else ""
+                completed["rejectReason"] = "".join(_output_texts(output))
             return completed
         case FailedTermination(error=error):
             return {
@@ -515,6 +542,36 @@ def runtime_turn(
                 "completedAt": completed_at,
                 "reason": f"The turn ended with an outcome this version does not know: {outcome}",
             }
+
+
+_ANSWER_STOP_REASONS = frozenset({"iteration_limit", "output_limit"})
+"""Stop reasons whose output is still the model's answer. Any other one, a hook's
+skip or reject, Core's stop or one a newer runtime adds, states a reason instead."""
+
+
+def final_answer(turn: TurnState) -> str | None:
+    """The text of the answer that ended ``turn``, from its completed termination.
+
+    The runtime sets the output to the answer it accepted, so a draft a hook
+    sent back for a retry is never it. None for a Turn that did not complete,
+    one that ended with a stated reason instead of an answer, or an answer with
+    no text: the local runtime reports only stated reasons, so it never has one.
+    """
+    match turn.termination:
+        case CompletedTermination(stop_reason=stop_reason, output=output) if (
+            stop_reason is None or str(stop_reason) in _ANSWER_STOP_REASONS
+        ):
+            answer = "\n\n".join(_output_texts(output))
+            return answer if answer.strip() else None
+        case _:
+            return None
+
+
+def _output_texts(output: JsonValue) -> list[str]:
+    """The texts of a termination's output: content blocks on the target runtime,
+    a plain string on the local runtime.
+    """
+    return [output] if isinstance(output, str) else text_block_texts(output)
 
 
 def _rewound_past(turn: TurnState | None, entries: Sequence[HistoryEntry]) -> bool:
@@ -551,4 +608,4 @@ def _resolved_state(outcome: CallbackOutcome | None) -> JsonObject:
             return {"status": "cancelled", "reason": ""}
 
 
-__all__ = ["ApiSessionState", "AppliedBatch", "runtime_turn"]
+__all__ = ["ApiSessionState", "AppliedBatch", "final_answer", "runtime_turn"]

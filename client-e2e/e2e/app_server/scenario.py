@@ -142,6 +142,8 @@ class Scenario:
     """Headless expected exact stderr text (bare, no `Error:` prefix)."""
     headless_requests: tuple[str, ...] = ()
     """Client-to-server methods a headless run must have sent before exiting."""
+    headless_stdout: str | None = None
+    """Headless expected exact stdout, for a text run that prints after the turn."""
 
     def event_batches(self) -> list[list[AppServerEvent]]:
         """Return non-empty server-event batches in input order."""
@@ -257,6 +259,7 @@ def _build_scenario(module: ModuleType, name: str, origin: str) -> Scenario:
         headless_returncode=getattr(module, "headless_returncode", 0),
         headless_stderr=getattr(module, "headless_stderr", None),
         headless_requests=tuple(getattr(module, "headless_requests", ())),
+        headless_stdout=getattr(module, "headless_stdout", None),
     )
 
 

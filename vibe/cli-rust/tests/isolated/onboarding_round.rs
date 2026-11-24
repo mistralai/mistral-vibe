@@ -93,6 +93,7 @@ fn run_handshake(
                 trust_workspace: true,
                 ..Default::default()
             },
+            start_model: Default::default(),
             notifications: None,
             pre_initialized: server_version,
             trust_already_resolved: false,

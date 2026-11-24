@@ -11,8 +11,10 @@ from datetime import UTC, datetime
 from enum import StrEnum
 import hashlib
 import io
+from itertools import compress, count, filterfalse, repeat
 import json
 import logging
+from operator import indexOf, is_not
 import os
 from pathlib import Path
 import re
@@ -22,6 +24,7 @@ from stat import S_ISREG
 from threading import RLock
 import time
 from typing import Annotated, Any, Literal, Self, assert_never, cast
+import zlib
 
 from pydantic import (
     BaseModel,
@@ -31,6 +34,7 @@ from pydantic import (
     JsonValue,
     SerializerFunctionWrapHandler,
     TypeAdapter,
+    ValidationError,
     ValidationInfo,
     WrapSerializer,
     field_validator,
@@ -118,7 +122,8 @@ from mistralai_vibe_local_harness.vibe.completion_profile import (
 )
 
 STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
-# Readers accept lower minor versions and reject higher ones.
+# Readers accept minor versions up to READABLE_STORE_FORMAT_MINOR and reject higher
+# ones.
 # 2: projection deltas; 3: checkpoint-derived interop exports;
 # 4: chunked transcripts; 5: checkpoint capability baselines;
 # 6: self-describing reservations and abandoned receipts;
@@ -131,8 +136,15 @@ STORE_FORMAT = "mistral.vibe.unified-session-store/v1"
 # An additive field needs no bump: an older reader keeps what it cannot
 # interpret and writes it back. Bump only for a change an older reader must not
 # attempt, which is the one thing this number is allowed to mean.
-# Downgrading after a newer build writes the store is unsupported.
+# Downgrading after a newer build writes the store is unsupported, except to a
+# build that already reads that minor (READABLE_STORE_FORMAT_MINOR).
 STORE_FORMAT_MINOR = 10
+# 11, read ahead of being written: a generation names a pooled chunk held only
+# gzip-compressed, which a reader before 11 cannot find. It means that alone, so
+# this build writes 11 exactly while its generation names such a chunk and 10
+# once none is left; a reader-breaking change other than gzip chunks takes 12.
+_GZIP_CHUNKS_MINOR = 11
+READABLE_STORE_FORMAT_MINOR = _GZIP_CHUNKS_MINOR
 # A reader before this minor replays a missing baseline under its own configuration.
 _GENERATION_BASELINE_MINOR = 10
 # Sealing a chunk once its contents pass this size makes a chunk's identity a
@@ -142,7 +154,18 @@ _CHUNK_TARGET_BYTES = 64 * 1024
 _CHUNKS_DIRNAME = "chunks"
 _QUARANTINE_DIRNAME = "quarantine"
 logger = logging.getLogger(__name__)
-_CHUNK_FILE_PATTERN = re.compile(r"^[0-9a-f]{64}\.json$")
+# A chunk is named by the digest of its uncompressed canonical bytes whatever its
+# codec: a pooled chunk is either plain ``<digest>.json`` or gzip-compressed
+# ``<digest>.json.gz``, so reuse and collection never depend on the codec and a
+# store holding both still reads.
+_CHUNK_FILE_PATTERN = re.compile(r"^([0-9a-f]{64})\.json(?:\.gz)?$")
+_COMPRESSED_CHUNK_SUFFIX = ".json.gz"
+_PLAIN_CHUNK_SUFFIX = ".json"
+_GZIP_WBITS = 31
+# A chunk is unbounded by the document cap: it holds one item past the seal
+# target, and an item can be large. This ceiling only stops a corrupt or hostile
+# gzip file from inflating without limit; a plain chunk has no limit at all.
+_MAX_INFLATED_CHUNK_BYTES = 1024 * 1024 * 1024
 # A load re-reads most of the transcript it read last time, so without a cache
 # the pool turns one document read into one read per chunk. Chunks are named by
 # their digest, so a cached body can never be stale; overflowing the budget
@@ -501,7 +524,7 @@ class CurrentPointerV1(_StoredModel):
         minor = document.get("store_format_minor")
         if isinstance(minor, bool) or not isinstance(minor, int):
             return None
-        return minor if minor > STORE_FORMAT_MINOR else None
+        return minor if minor > READABLE_STORE_FORMAT_MINOR else None
 
 
 class StoredFileV1(_StoredModel):
@@ -1303,6 +1326,10 @@ def _fold_session_api_facts(
 
 
 _SPARSE_HISTORY_KEY = "sparse_history"
+# The validation context key of the set a load collects, across the projection
+# state and every journal record, the error types of the sparse positions it
+# drops, so that it warns once.
+_UNREADABLE_SPARSE_HISTORY_KEY = "unreadable_sparse_history"
 """The saved form of ``history_positions`` and ``next_history_index``.
 
 Saved documents hold positions there and leave the two fields empty, unless an
@@ -1344,14 +1371,18 @@ def _saved_session_api(
     return document
 
 
-def _loaded_session_api(value: object, snapshot: PublicSessionState | None) -> object:
+def _loaded_session_api(
+    value: object, snapshot: PublicSessionState | None, unreadable: set[str]
+) -> object:
     """The facts a document saved beside ``snapshot``, every one of them.
 
     Undoes ``_saved_session_api``. When the history is no longer the one the
     positions were saved against, because a build that does not know the
     sparse form rewrote it, the positions are dropped: the Session API view
-    numbers the history again in order, as that build does. Anything but a
-    saved document passes through to validation.
+    numbers the history again in order, as that build does. Positions saved in
+    a shape this build cannot read are dropped too, and their error types
+    added to ``unreadable``. Anything but a saved document passes through to
+    validation.
     """
     if not isinstance(value, dict):
         return value
@@ -1362,9 +1393,9 @@ def _loaded_session_api(value: object, snapshot: PublicSessionState | None) -> o
     if saved_sparse is not None and not facts.history_positions:
         # Otherwise a build that does not know the sparse form numbered the
         # history again and saved every position it gave: those are shown.
-        sparse = SparseHistoryPositionsV1.model_validate(saved_sparse)
-        positions = _dense_positions(sparse, entries)
-        if positions is not None:
+        sparse = _readable_sparse_positions(saved_sparse, unreadable)
+        positions = _dense_positions(sparse, entries) if sparse is not None else None
+        if sparse is not None and positions is not None:
             facts = facts.model_copy(
                 update={
                     "history_positions": positions,
@@ -1384,6 +1415,46 @@ def _loaded_session_api(value: object, snapshot: PublicSessionState | None) -> o
             }
         )
     return facts
+
+
+def _readable_sparse_positions(
+    saved: JsonValue, unreadable: set[str]
+) -> SparseHistoryPositionsV1 | None:
+    """``saved`` as sparse positions, or None if a later build gave it a shape this one cannot read.
+
+    The error types of a shape it cannot read are added to ``unreadable``.
+    """
+    try:
+        return SparseHistoryPositionsV1.model_validate(saved)
+    except ValidationError as error:
+        # Only the error types: the saved values name history entries.
+        unreadable.update(detail["type"] for detail in error.errors())
+        return None
+
+
+def _warn_unreadable_sparse_positions(session_id: str, unreadable: set[str]) -> None:
+    """Warn once that a load of ``session_id`` dropped positions it could not read."""
+    if not unreadable:
+        return
+    error_types = sorted(unreadable)
+    logger.warning(
+        "Saved Session API history positions of session %s are unreadable "
+        "(%s); dropping them",
+        session_id,
+        ", ".join(error_types),
+        extra={"session_id": session_id, "error_types": error_types},
+    )
+
+
+def _unreadable_sparse_history(info: ValidationInfo) -> set[str]:
+    """The set the running load collects dropped positions' error types in.
+
+    A validation without one (a record or document this build has just
+    written, which it can always read) gets a set nobody reads.
+    """
+    context = info.context if isinstance(info.context, dict) else {}
+    unreadable = context.get(_UNREADABLE_SPARSE_HISTORY_KEY)
+    return unreadable if isinstance(unreadable, set) else set()
 
 
 def _sparse_positions(
@@ -1500,8 +1571,8 @@ def _walk_sha256(api_ids: Sequence[str]) -> str:
     return hashlib.sha256("\n".join(api_ids).encode()).hexdigest()
 
 
-def _load_journal_session_api(value: object) -> object:
-    return _loaded_session_api(value, None)
+def _load_journal_session_api(value: object, info: ValidationInfo) -> object:
+    return _loaded_session_api(value, None, _unreadable_sparse_history(info))
 
 
 def _dump_journal_session_api(
@@ -1534,7 +1605,9 @@ class ProjectionStateV1(_StoredModel):
     def _load_session_api(cls, value: object, info: ValidationInfo) -> object:
         snapshot = info.data.get("snapshot")
         return _loaded_session_api(
-            value, snapshot if isinstance(snapshot, PublicSessionState) else None
+            value,
+            snapshot if isinstance(snapshot, PublicSessionState) else None,
+            _unreadable_sparse_history(info),
         )
 
 
@@ -1628,16 +1701,24 @@ def compute_projection_delta(
     """
     prior_entries = prior.history.entries
     new_entries = new.history.entries
-    prior_by_id = {cast(str, entry.get("id")): entry for entry in prior_entries}
-    new_ids = {cast(str, entry.get("id")) for entry in new_entries}
-    entry_ops: list[ProjectionOp] = []
-    for entry in prior_entries:
-        entry_id = cast(str, entry.get("id"))
-        if entry_id not in new_ids:
-            entry_ops.append(RemoveEntryOp(id=entry_id))
-    for entry in new_entries:
-        entry_id = cast(str, entry.get("id"))
-        existing = prior_by_id.get(entry_id)
+    # The usual passes over a whole history run in C: builders replace what
+    # they change, so most entries are the very objects prior holds, and only
+    # the others take a Python step. A removal and the fallbacks below still
+    # take a Python step per entry. The ops are the ones a step-by-step
+    # comparison of every entry gives.
+    prior_ids = cast(list[str], list(projection_entry_ids(prior_entries)))
+    new_id_list = cast(list[str], list(projection_entry_ids(new_entries)))
+    prior_by_id = dict(zip(prior_ids, prior_entries, strict=True))
+    new_ids = set(new_id_list)
+    entry_ops: list[ProjectionOp] = [
+        RemoveEntryOp(id=entry_id)
+        for entry_id in filterfalse(new_ids.__contains__, prior_ids)
+    ]
+    existing_entries = list(map(prior_by_id.get, new_id_list))
+    for index in compress(count(), map(is_not, existing_entries, new_entries)):
+        entry_id = new_id_list[index]
+        entry = new_entries[index]
+        existing = existing_entries[index]
         if existing is None:
             entry_ops.append(AppendEntryOp(entry=entry))
         elif existing != entry:
@@ -1693,7 +1774,7 @@ def apply_projection_delta(
             case AppendEntryOp(entry=entry):
                 entries.append(entry)
             case ReplaceEntryOp(id=entry_id, entry=entry):
-                if not _replace_projection_entry(entries, entry_id, entry):
+                if not replace_projection_entry(entries, entry_id, entry):
                     raise ValueError("projection delta replaces an absent entry")
             case RemoveEntryOp(id=entry_id):
                 remaining = [item for item in entries if item.get("id") != entry_id]
@@ -1709,14 +1790,21 @@ def apply_projection_delta(
     )
 
 
-def _replace_projection_entry(
+def replace_projection_entry(
     entries: list[JsonObject], entry_id: str, replacement: JsonObject
 ) -> bool:
-    for index, entry in enumerate(entries):
-        if entry.get("id") == entry_id:
-            entries[index] = replacement
-            return True
-    return False
+    """Replace the first entry with entry_id, found in C."""
+    try:
+        index = indexOf(projection_entry_ids(entries), entry_id)
+    except ValueError:
+        return False
+    entries[index] = replacement
+    return True
+
+
+def projection_entry_ids(entries: Iterable[JsonObject]) -> Iterator[JsonValue]:
+    """Each entry's id, or None, read in C."""
+    return map(dict.get, entries, repeat("id"))
 
 
 class UnifiedInteropSourceV1(_StoredModel):
@@ -2734,6 +2822,7 @@ class ChunkPublicationStats:
     reused: int = 0
     bytes_written: int = 0
     sealed: int = 0
+    reused_compressed_only: int = 0
 
     def __add__(self, other: ChunkPublicationStats) -> ChunkPublicationStats:
         return ChunkPublicationStats(
@@ -2741,6 +2830,8 @@ class ChunkPublicationStats:
             reused=self.reused + other.reused,
             bytes_written=self.bytes_written + other.bytes_written,
             sealed=self.sealed + other.sealed,
+            reused_compressed_only=self.reused_compressed_only
+            + other.reused_compressed_only,
         )
 
 
@@ -2761,7 +2852,7 @@ class _ChunkCache:
         if cached is not None:
             self._bodies.move_to_end(digest)
             return cached
-        body = _read_document_body(chunk_root / f"{digest}.json")
+        body = _read_pooled_chunk(chunk_root, digest)
         if _sha256(body) != digest:
             raise ValueError(f"stored chunk digest mismatch: {digest}")
         self._admit(digest, body)
@@ -2953,9 +3044,14 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             _fsync_directory(staging)
             _durable_replace(staging, final_dir)
             _fsync_directory(generation_root)
+            written_minor = (
+                _GZIP_CHUNKS_MINOR
+                if chunk_stats.reused_compressed_only
+                else STORE_FORMAT_MINOR
+            )
             current = CurrentPointerV1(
                 session_id=self.session_id,
-                store_format_minor=STORE_FORMAT_MINOR,
+                store_format_minor=written_minor,
                 generation=generation,
                 snapshot_sequence=sequence,
                 manifest_sha256=_sha256(manifest_bytes),
@@ -2998,7 +3094,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                 else projection_state.model_copy(
                     update={
                         "session_api": _loaded_session_api(
-                            saved_session_api, projection_state.snapshot
+                            saved_session_api, projection_state.snapshot, set()
                         )
                     }
                 )
@@ -3007,6 +3103,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             manifest_sha256=current.manifest_sha256,
             current=current_bytes,
             journal_path=journal_path,
+            store_format_minor=written_minor,
         )
         return manifest
 
@@ -3262,6 +3359,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         manifest_sha256: str,
         current: bytes,
         journal_path: Path,
+        store_format_minor: int,
     ) -> None:
         # Reading the documents back to digest them keeps what the post-publication
         # `load` did for the writer -- proving the bytes landed -- without the parse.
@@ -3294,7 +3392,7 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
                     runtime_state=runtime_state,
                     projection_state=projection_state,
                     journal=(),
-                    store_format_minor=STORE_FORMAT_MINOR,
+                    store_format_minor=store_format_minor,
                     published_runtime_state=runtime_state,
                     published_projection_state=projection_state,
                 ),
@@ -3383,7 +3481,12 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
             )
             _attach_transcript(projection_value, _PROJECTION_HISTORY_PATH, history)
             loaded_bytes += chunk_bytes
-        projection_state = ProjectionStateV1.model_validate(projection_value)
+        # One warning per load, however many records dropped their positions.
+        unreadable_sparse_history: set[str] = set()
+        projection_state = ProjectionStateV1.model_validate(
+            projection_value,
+            context={_UNREADABLE_SPARSE_HISTORY_KEY: unreadable_sparse_history},
+        )
         runtime_state = _load_runtime_state(runtime_state_value, projection_state)
         # No read of interop-export.json: a generation written before minor 3 still
         # carries one, and `StoredSession.interop_export` derives the same value from
@@ -3406,8 +3509,11 @@ class UnifiedSessionStore:  # noqa: PLR0904 - cohesive session store surface
         # record a size that already covers records this load never saw.
         journal_stat = os.lstat(journal_path)
         journal = _read_journal(
-            journal_path, manifest.recovery_journal_segment.first_sequence
+            journal_path,
+            manifest.recovery_journal_segment.first_sequence,
+            unreadable_sparse_history,
         )
+        _warn_unreadable_sparse_positions(self.session_id, unreadable_sparse_history)
         effective_runtime, effective_projection = _apply_journal(
             runtime_state, projection_state, journal
         )
@@ -5856,7 +5962,9 @@ def _process_notification_id(process_id: str) -> str:
     return f"background-process:{process_id}:terminal"
 
 
-def _read_journal(path: Path, first_sequence: int) -> tuple[JournalRecordV1, ...]:
+def _read_journal(
+    path: Path, first_sequence: int, unreadable_sparse_history: set[str]
+) -> tuple[JournalRecordV1, ...]:
     _reject_symlink(path)
     data = path.read_bytes()
     if len(data) > _MAX_DOCUMENT_BYTES:
@@ -5872,7 +5980,9 @@ def _read_journal(path: Path, first_sequence: int) -> tuple[JournalRecordV1, ...
             raise ValueError("recovery journal has an unterminated interior record")
         raw = line[:-1]
         try:
-            record = _JOURNAL_RECORD_ADAPTER.validate_json(raw)
+            record = _JOURNAL_RECORD_ADAPTER.validate_json(
+                raw, context={_UNREADABLE_SPARSE_HISTORY_KEY: unreadable_sparse_history}
+            )
         except Exception as exc:
             raise ValueError(
                 f"invalid recovery journal record {expected_sequence}"
@@ -6124,9 +6234,12 @@ def _write_chunks(chunk_root: Path, plan: _ChunkPlan | None) -> ChunkPublication
         return ChunkPublicationStats()
     stats = ChunkPublicationStats()
     for chunk in plan.chunks:
-        path = chunk_root / f"{chunk.sha256}.json"
+        path = chunk_root / f"{chunk.sha256}{_PLAIN_CHUNK_SUFFIX}"
         if path.exists():
             stats += ChunkPublicationStats(reused=1)
+            continue
+        if (chunk_root / f"{chunk.sha256}{_COMPRESSED_CHUNK_SUFFIX}").exists():
+            stats += ChunkPublicationStats(reused=1, reused_compressed_only=1)
             continue
         body = chunk.body
         if body is None:
@@ -6157,6 +6270,25 @@ def _write_pooled_chunk(path: Path, body: bytes) -> None:
     finally:
         if temporary.exists():
             temporary.unlink()
+
+
+def _read_pooled_chunk(chunk_root: Path, digest: str) -> bytes:
+    compressed = chunk_root / f"{digest}{_COMPRESSED_CHUNK_SUFFIX}"
+    _reject_symlink(compressed)
+    try:
+        data = compressed.read_bytes()
+    except FileNotFoundError:
+        return _read_document_body(chunk_root / f"{digest}{_PLAIN_CHUNK_SUFFIX}")
+    inflater = zlib.decompressobj(wbits=_GZIP_WBITS)
+    try:
+        body = inflater.decompress(data, _MAX_INFLATED_CHUNK_BYTES + 1)
+    except zlib.error as exc:
+        raise ValueError(f"stored chunk is not valid gzip: {digest}") from exc
+    if inflater.unconsumed_tail:
+        raise ValueError(f"stored chunk inflates past its size limit: {digest}")
+    if not inflater.eof or inflater.unused_data:
+        raise ValueError(f"stored chunk is not valid gzip: {digest}")
+    return _strip_document_newline(body, compressed.name)
 
 
 def _read_chunked_transcript(
@@ -6232,9 +6364,9 @@ def _collect_chunks(session_root: Path, generation_root: Path) -> None:
     chunk_root = session_root / _CHUNKS_DIRNAME
     try:
         pooled = [
-            path
+            (path, match.group(1))
             for path in chunk_root.iterdir()
-            if _CHUNK_FILE_PATTERN.fullmatch(path.name) is not None
+            if (match := _CHUNK_FILE_PATTERN.fullmatch(path.name)) is not None
         ]
         generations = [
             path
@@ -6256,10 +6388,10 @@ def _collect_chunks(session_root: Path, generation_root: Path) -> None:
         referenced.update(manifest.checkpoint.chunks or ())
         referenced.update(manifest.projection_state.chunks or ())
         referenced.update(manifest.runtime_state.chunks or ())
-    for path in pooled:
+    for path, digest in pooled:
         # The generation is already published, so nothing here may fail the
         # commit. What survives stays unreachable and the next sweep collects it.
-        if path.stem in referenced or path.is_symlink():
+        if digest in referenced or path.is_symlink():
             continue
         try:
             path.unlink()
@@ -6347,9 +6479,12 @@ def _read_document_body(path: Path) -> bytes:
     # No size limit: publication enforces the cap, and a generation an earlier
     # build grew past it is recovered or deleted only by reading it.
     _reject_symlink(path)
-    data = path.read_bytes()
+    return _strip_document_newline(path.read_bytes(), path.name)
+
+
+def _strip_document_newline(data: bytes, name: str) -> bytes:
     if not data.endswith(b"\n"):
-        raise ValueError(f"stored JSON document is not newline terminated: {path.name}")
+        raise ValueError(f"stored JSON document is not newline terminated: {name}")
     return data[:-1]
 
 

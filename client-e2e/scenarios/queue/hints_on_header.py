@@ -15,7 +15,7 @@ timeline: Timeline = [
 ]
 
 screen_contains = (
-    "» Queued   Enter steer  Ctrl+C cancel last queued message",
+    "» Queued — Enter to steer · Ctrl+C to cancel last queued message",
     "Esc to interrupt)",
 )
-screen_excludes = ("Enter to steer", "to cancel last queued")
+screen_excludes = ("Esc to interrupt · Enter",)

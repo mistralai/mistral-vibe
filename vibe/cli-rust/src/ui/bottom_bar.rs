@@ -38,13 +38,12 @@ pub fn draw(app: &mut App, f: &mut Frame, area: Rect) {
     super::reverse_search::draw_hints(app, f, below);
     let area = Rect { height: 1, ..area };
     crate::mouse::register_region(app, area, crate::mouse::MouseTarget::BottomBar);
-    let cwd = crate::replay::footer_cwd(
-        app.session
-            .cwd
-            .as_deref()
-            .map(collapse_home)
-            .unwrap_or_else(|| "-".into()),
-    );
+    let cwd = app
+        .session
+        .cwd
+        .clone()
+        .map(crate::replay::footer_cwd)
+        .map_or_else(|| "-".into(), |cwd| collapse_home(&cwd));
     let muted = theme::muted_style();
     // While a quit is pending the left side is replaced by the confirm hint.
     let quit = app.quit.active().map(|pending| {

@@ -58,6 +58,11 @@ def _content_before(v: Any) -> str:
 Content = Annotated[str, BeforeValidator(_content_before)]
 
 
+# The Anthropic content blocks that carry a reply's reasoning, kept in
+# `LLMMessage.reasoning_payloads` and sent back unchanged.
+REASONING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+
+
 class Role(StrEnum):
     system = auto()
     user = auto()
@@ -179,6 +184,7 @@ class LLMChunk(BaseModel):
 
 
 __all__ = [
+    "REASONING_BLOCK_TYPES",
     "AvailableFunction",
     "AvailableTool",
     "Content",

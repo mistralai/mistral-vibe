@@ -234,6 +234,7 @@ pub fn retry_handshake(
             show_unready_config: run.show_unready_config,
             resume: run.app.session.startup_resume.clone(),
             agent_config: run.app.session.agent_config.clone(),
+            start_model: run.app.session.start_model.clone(),
             notifications,
             pre_initialized: server_version,
             trust_already_resolved,

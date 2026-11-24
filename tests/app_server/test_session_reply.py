@@ -70,12 +70,14 @@ def _runtime_path(
 class _Peers:
     """Records the replies; answers nothing else."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, session_peers: bool = True, refuse: bool = False) -> None:
         self.sends: list[SessionPeerSendParams] = []
         self.sent = asyncio.Event()
+        self._session_peers = session_peers
+        self._refuse = refuse
 
     def client_capabilities(self) -> ClientCapabilities:
-        return ClientCapabilities(session_peers=True)
+        return ClientCapabilities(session_peers=self._session_peers)
 
     async def list_peer_sessions(
         self, params: SessionPeerListParams
@@ -92,6 +94,8 @@ class _Peers:
     ) -> SessionPeerSendResponse:
         self.sends.append(params)
         self.sent.set()
+        if self._refuse:
+            raise SessionPeerError("no local thread in this bot")
         return SessionPeerSendResponse(
             session_id=params.target_session_id, queued=False
         )
@@ -316,6 +320,113 @@ async def test_a_handed_task_replies_once_with_its_final_message(
     assert reply.sender.session_id == child.session_id
     assert not child._session.has_turn_work
     await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_task_a_vibebot_thread_handed_over_replies_without_session_tools(
+    tmp_path: Path, respx_mock: respx.MockRouter
+) -> None:
+    """*Prepare*: A client that offers no session tools (`sessionPeers` off).
+    *Do*: A Vibebot thread starts a session with a task, which ends.
+    *Assert*: The reply still goes back to the bot, and the task does not
+        tell the model to use `send_to_session`, which it does not have.
+    """
+    # Prepare
+    requests = _waits_then_answers(respx_mock)
+    respx_mock.post(f"{MISTRAL_BASE_URL}{CHAT_COMPLETIONS_PATH}").mock(
+        side_effect=lambda request: (
+            requests.append(request.content.decode()),
+            httpx.Response(
+                200,
+                content=b"data: "
+                + json.dumps(_chunk("ALLOWQA")).encode()
+                + b"\n\ndata: [DONE]",
+                headers={"Content-Type": "text/event-stream"},
+            ),
+        )[1]
+    )
+    peers = _Peers(session_peers=False)
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+    host = cast(Any, _harness_backend_host(config, reply_route=peers))
+    bot_thread = "vibebot:vibe-bot--u1--default:local_typescript:1:a:0:tool:0"
+
+    # Do
+    started = await host.start(
+        SessionStartParams(
+            started_by_session_id=bot_thread,
+            first_turn=SessionStartTurn(message=[TextContentBlock(text="Say it")]),
+        )
+    )
+    child = started.backend
+    turn = await child.start_turn(
+        TurnStartParams(
+            session_id=child.session_id, message=[TextContentBlock(text="Say it")]
+        )
+    )
+    if turn.after_response is not None:
+        turn.after_response()
+    await _settled(child)
+
+    # Assert
+    [reply] = peers.sends
+    assert (reply.target_session_id, reply.text) == (bot_thread, "ALLOWQA")
+    assert "send_to_session" not in requests[0]
+    await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_a_vibebot_thread_refuses_is_settled_without_session_tools(
+    tmp_path: Path, respx_mock: respx.MockRouter
+) -> None:
+    """*Prepare*: No session tools (`sessionPeers` off); the bot refuses the reply.
+    *Do*: A task a Vibebot thread handed over ends.
+    *Assert*: The refusal is final: the reply is sent once and owed no more.
+    """
+    # Prepare
+    _answers(respx_mock, "ALLOWQA")
+    peers = _Peers(session_peers=False, refuse=True)
+    config = build_test_vibe_config(
+        session_logging=SessionLoggingConfig(
+            enabled=True, save_dir=str(tmp_path / "sessions")
+        )
+    )
+    host = cast(Any, _harness_backend_host(config, reply_route=peers))
+
+    # Do
+    started = await host.start(
+        SessionStartParams(
+            started_by_session_id="vibebot:vibe-bot--u1--default:local_c:1",
+            first_turn=SessionStartTurn(message=[TextContentBlock(text="Say it")]),
+        )
+    )
+    child = started.backend
+    turn = await child.start_turn(
+        TurnStartParams(
+            session_id=child.session_id, message=[TextContentBlock(text="Say it")]
+        )
+    )
+    if turn.after_response is not None:
+        turn.after_response()
+    async with asyncio.timeout(_WAIT_SECONDS):
+        await _settled(child)
+
+    # Assert
+    assert len(peers.sends) == 1
+    assert child._owed_replies() == []
+    await host.shutdown()
+
+
+def _chunk(text: str) -> dict[str, Any]:
+    chunk = mistral_completion(text)
+    chunk["object"] = "chat.completion.chunk"
+    [choice] = chunk["choices"]
+    choice["delta"] = {"role": "assistant", "content": text}
+    del choice["message"]
+    return chunk
 
 
 @pytest.mark.asyncio

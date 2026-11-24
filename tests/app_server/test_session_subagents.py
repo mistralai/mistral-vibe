@@ -367,6 +367,49 @@ async def test_interrupt_interrupts_a_running_subagent_with_the_reason(
 
 
 @pytest.mark.asyncio
+async def test_a_subagent_closed_to_make_room_is_still_read_as_closed(
+    client: _Client, project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """*Prepare*: Room for one live subagent, and a parent that spawns one
+    subagent, waits for it, then spawns another and waits for it.
+    *Do*: Run the turn, so the second spawn closes the first subagent and its
+    record leaves the root's state for the Harness's closed log; then read
+    the subagents and the session.
+    *Assert*: The read lists the first subagent closed, with its usage, beside
+    the second; the session lists it as gone.
+    """
+    # Prepare
+    monkeypatch.setenv("VIBE_MAX_SUBAGENTS", "1")
+    model = _HeldChildModel({
+        _SPAWNING_TASK: [
+            ("run_typescript", {"code": spawn_and_wait("first", _CHILD_TASK)}),
+            ("run_typescript", {"code": spawn_and_wait("second", _CHILD_TASK)}),
+        ]
+    })
+    model.release.set()
+    monkeypatch.setattr(EXECUTE_COMPLETION, model)
+    session = await _start(client, project)
+
+    # Do
+    await session.run_turn(_SPAWNING_TASK)
+    read = await session.call("session/subagents/read")
+    state = await session.call("session/read")
+
+    # Assert
+    runs = {subagent["name"]: subagent for subagent in read["subagents"]}
+    assert set(runs) == {"first", "second"}
+    assert runs["first"]["status"] == "closed"
+    assert runs["first"]["usage"]["totalTokens"] > 0
+    assert runs["second"]["status"] == "idle"
+    statuses = {
+        child["id"]: child["status"]["type"]
+        for child in state["state"]["childSessions"]
+    }
+    assert statuses[runs["first"]["sessionId"]] == "archived"
+    assert statuses[runs["second"]["sessionId"]] != "archived"
+
+
+@pytest.mark.asyncio
 async def test_a_failed_interrupt_is_reported_for_its_subagent_only(
     client: _Client, project: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

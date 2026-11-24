@@ -193,7 +193,7 @@ class CompletedTermination(SessionModel):
 
 
 # Open: a newer server may name a cause this client does not know yet.
-type CancelledCause = Literal["lifetime_limit", "idle_limit"] | str
+type CancelledCause = Literal["lifetime_limit", "idle_limit", "budget_limit"] | str
 
 
 class CancelledTermination(SessionModel):
@@ -201,7 +201,7 @@ class CancelledTermination(SessionModel):
     reason: str | None = None
     # Why the work ended, when more than an interrupt ended it: `cancelled` when the Session was
     # cancelled, `lifetime_limit` when it reached its maximum lifetime, `idle_limit` when it stayed
-    # idle too long.
+    # idle too long, `budget_limit` when its Session Tree spent the budget its Host set.
     cause: CancelledCause | None = None
     output: JsonValue = Field(default=None, exclude_if=lambda value: value is None)
     encrypted_output: EncryptedValue | None = Field(

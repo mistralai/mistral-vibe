@@ -10,7 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 import re
 from types import MappingProxyType
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 
 from pydantic import JsonValue
 
@@ -84,6 +84,12 @@ class ResolvedMCPServerConfig:
     sampling_enabled: bool = False
     disabled: bool = False
     disabled_tools: frozenset[str] = frozenset()
+    # The project whose config declares the server, if one does: the same
+    # command there is another program, so its app another one.
+    project_root: Path | None = None
+    # Who declared it: a plugin, whose install is its apps' consent, or the
+    # user's or the project's config, whose apps need the user's.
+    owner: Literal["config", "plugin"] = "config"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
@@ -159,6 +165,8 @@ class MCPRemoteToolDescriptor:
     input_schema: JsonSchema = field(default_factory=dict)
     output_schema: JsonSchema | None = None
     annotations: JsonValue = None
+    # The tool's ``_meta`` as listed, such as an MCP App's ``ui`` entry.
+    meta: JsonValue = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,9 +186,18 @@ class MCPHTTPTransportPolicy:
     enable_system_trust_store: bool = False
 
 
+# Bumped when a cached descriptor gains a field: a record written before is a
+# miss, so its server is listed again rather than routed without the field.
+# Each format keeps its records in its own folder of the cache root
+# (``MCPDescriptorCache``), so a build sharing the home with another (an older
+# CLI) never reads, nor evicts, the other's records.
+type MCPDescriptorCacheFormatVersion = Literal[2]
+MCP_DESCRIPTOR_CACHE_FORMAT_VERSION: Final[MCPDescriptorCacheFormatVersion] = 2
+
+
 @dataclass(frozen=True, slots=True)
 class MCPDescriptorCacheKey:
-    format_version: Literal[1]
+    format_version: int
     naming_version: str
     server_fingerprint: str
     authorization_descriptor_revision: str
@@ -207,6 +224,14 @@ class MCPToolDescriptor:
     output_schema: JsonSchema | None
     annotations: JsonValue
     enabled: bool
+    meta: JsonValue = None
+    # The user's ``disabled_tools`` or the Host tool filter leaves the tool
+    # out, whatever its model visibility.
+    user_disabled: bool = False
+    # Who may call the tool, from its ``_meta.ui.visibility``: the model, the
+    # server's MCP App, or both.
+    model_visible: bool = True
+    app_visible: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +269,9 @@ class MCPRouteSnapshot:
     groups: tuple[MCPToolGroup, ...]
     routes: Mapping[tuple[str, str], MCPToolRoute]
     sources: tuple[MCPSourceState, ...]
+    # Every listed tool of a routed server, enabled or not, such as a tool
+    # only an MCP App may call.
+    tools: tuple[MCPToolDescriptor, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,8 +316,11 @@ class MCPTransportDisconnected(MCPRuntimeFailure):
 
 
 class MCPHTTPStatusFailure(MCPRuntimeFailure):
-    def __init__(self, status_code: int, message: str) -> None:
+    def __init__(
+        self, status_code: int, message: str, *, retry_after_s: int | None = None
+    ) -> None:
         self.status_code = status_code
+        self.retry_after_s = retry_after_s
         super().__init__("mcp_http_error", message)
 
 
@@ -299,6 +330,8 @@ class MCPClientConnection(Protocol):
     async def call_tool(
         self, name: str, arguments: JsonObject, *, timeout_s: float
     ) -> MCPNormalizedResult: ...
+
+    async def read_resource(self, uri: str, *, timeout_s: float) -> JsonObject: ...
 
     async def aclose(self) -> None: ...
 
@@ -341,6 +374,7 @@ class MCPTransportFactory(Protocol):
 
 
 __all__ = [
+    "MCP_DESCRIPTOR_CACHE_FORMAT_VERSION",
     "MCP_DISCOVERY_PENDING",
     "JsonObject",
     "JsonSchema",
@@ -352,6 +386,7 @@ __all__ = [
     "MCPAuthorizationResult",
     "MCPAuthorizationSnapshot",
     "MCPClientConnection",
+    "MCPDescriptorCacheFormatVersion",
     "MCPDescriptorCacheKey",
     "MCPDescriptorCachePolicy",
     "MCPDescriptorCacheRecordV1",

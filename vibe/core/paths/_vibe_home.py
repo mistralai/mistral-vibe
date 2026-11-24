@@ -17,6 +17,8 @@ VIBE_HOME = GlobalPath(get_vibe_home)
 GLOBAL_ENV_FILE = GlobalPath(lambda: VIBE_HOME.path / ".env")
 SESSION_LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs" / "session")
 WORKTREES_DIR = GlobalPath(lambda: VIBE_HOME.path / "worktrees")
+# The working folders of projectless sessions, never trusted.
+SCRATCH_DIR = GlobalPath(lambda: VIBE_HOME.path / "scratch")
 TRUSTED_FOLDERS_FILE = GlobalPath(lambda: VIBE_HOME.path / "trusted_folders.toml")
 LOG_DIR = GlobalPath(lambda: VIBE_HOME.path / "logs")
 LOG_FILE = GlobalPath(lambda: VIBE_HOME.path / "logs" / "vibe.log")

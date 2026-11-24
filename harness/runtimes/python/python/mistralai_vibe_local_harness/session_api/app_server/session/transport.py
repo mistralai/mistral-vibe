@@ -1,7 +1,7 @@
 """Transport contract for the stateless Session Protocol."""
 
 from collections.abc import AsyncIterator
-from typing import Literal, Protocol, Self, runtime_checkable
+from typing import Final, Literal, Protocol, Self, runtime_checkable
 from uuid import UUID
 
 from .models.base import SessionModel
@@ -78,7 +78,12 @@ class SessionTerminatedError(RuntimeError):
 
 
 class SessionIdempotencyConflictError(RuntimeError):
-    """An idempotency key was reused with different input."""
+    """An idempotency key was reused with different input.
+
+    A repeated key returns its first request's result, so the hosts in this
+    package do not raise it. A key reused with a different request gets an
+    unspecified result.
+    """
 
     def __init__(self, *, idempotency_key: str) -> None:
         self.idempotency_key = idempotency_key
@@ -117,6 +122,31 @@ class SessionInstructionsRejectedError(RuntimeError):
     def __init__(self, message: str, *, code: str | None = None) -> None:
         super().__init__(message)
         self.code = code
+
+
+class SessionEncryptionMismatchError(RuntimeError):
+    """A part of the request is not in the encryption form of its Session; nothing was applied.
+
+    An encrypted Session takes content only in its encrypted form, and a Session that is not
+    encrypted takes it only in plain form. Send the part in the Session's form. A host sends it
+    as the code ``encryption_mismatch``. This error is experimental: a minor release can change it.
+    """
+
+    code: Final = "encryption_mismatch"
+    """Always ``"encryption_mismatch"``, the code a host sends for this refusal."""
+
+
+class SessionEncryptionRequiredError(RuntimeError):
+    """This Session must be encrypted and is not; nothing applied.
+
+    The operator requires payload encryption, or the agent's worker runs encrypted Sessions
+    only, so start an encrypted Session instead. Where the operator requires the ``full`` mode,
+    the host takes no Session. A host sends it as the code ``encryption_required``. This error
+    is experimental: a minor release can change it.
+    """
+
+    code: Final = "encryption_required"
+    """Always ``"encryption_required"``, the code a host sends for this refusal."""
 
 
 class SessionCallbackSettledError(RuntimeError):
@@ -366,6 +396,8 @@ __all__ = [
     "SessionCompactionFailedError",
     "SessionConfigRejectedCode",
     "SessionConfigRejectedError",
+    "SessionEncryptionMismatchError",
+    "SessionEncryptionRequiredError",
     "SessionEventStreamLostError",
     "SessionIdempotencyConflictError",
     "SessionMessageRejectedCode",

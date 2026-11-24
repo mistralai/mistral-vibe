@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 import tomllib
 from typing import Any, cast
 from unittest.mock import Mock
 
+from pydantic import JsonValue
 import pytest
 import tomli_w
 
@@ -17,13 +19,14 @@ import vibe.app_server._runtime as runtime_module
 from vibe.app_server.protocol import SessionOptions
 from vibe.core.config.default_orchestrator import build_default_orchestrator
 from vibe.core.config.layers.model_catalog import apply_model_catalog
+from vibe.core.config.orchestrator import ConfigOrchestrator
+from vibe.core.config.patch import PatchOp
+from vibe.core.config.vibe_schema import VibeConfigSchema
 from vibe.core.model_catalog import ModelCatalogResponse, parse_model_catalog_response
 
 
 async def _orchestrator_with_catalog(catalog: ModelCatalogResponse) -> Any:
-    orchestrator = await build_default_orchestrator({
-        "experimental_enable_model_catalog": True
-    })
+    orchestrator = await build_default_orchestrator({"enable_model_catalog": True})
     await apply_model_catalog(orchestrator, catalog)
     return orchestrator
 
@@ -45,7 +48,7 @@ def _runnable_catalog(model_id: str) -> ModelCatalogResponse:
 def _enable_model_catalog(config_dir: Path) -> None:
     config_file = config_dir / "config.toml"
     config = tomllib.loads(config_file.read_text(encoding="utf-8"))
-    config["experimental_enable_model_catalog"] = True
+    config["enable_model_catalog"] = True
     config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
 
 
@@ -62,8 +65,7 @@ async def _hold(
 
     model_catalog_server.serve(catalog)
     key = await ModelCatalogKey.of(
-        VibeConfigSchema.model_validate({"experimental_enable_model_catalog": True}),
-        None,
+        VibeConfigSchema.model_validate({"enable_model_catalog": True}), None
     )
     assert key is not None
     assert await process_services.model_catalog.ensure(key) == catalog
@@ -85,12 +87,12 @@ async def test_the_held_catalog_reaches_the_session_config(
 
 
 @pytest.mark.asyncio
-async def test_the_held_catalog_is_ignored_with_the_flag_off(
+async def test_the_held_catalog_is_ignored_with_the_setting_off(
     process_services: ProcessServices, model_catalog_server: FakeModelCatalogServer
 ) -> None:
     await _hold(process_services, model_catalog_server, _runnable_catalog("held"))
     load = Mock(wraps=process_services.model_catalog.load)
-    orchestrator = await build_default_orchestrator()
+    orchestrator = await build_default_orchestrator({"enable_model_catalog": False})
 
     await apply_held_model_catalog(orchestrator, cast(Any, Mock(load=load)))
 
@@ -124,92 +126,126 @@ async def test_a_field_write_to_a_catalog_model_stays_settings_only() -> None:
     assert patch.value == 0.5
 
 
-@pytest.mark.asyncio
-async def test_a_field_write_to_a_growthbook_model_stays_settings_only() -> None:
-    import json
-
-    from vibe.app_server._config_write import config_write_ops_to_patches
-    from vibe.app_server.protocol import ConfigWriteOpWire
-    from vibe.core.config.layers.growthbook import GrowthbookLayer
-    from vibe.core.config.patch import AddOperationPatch
-    from vibe.core.experiments.active import ExperimentName
-
-    orchestrator = await build_default_orchestrator()
-    growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
-    assert isinstance(growthbook, GrowthbookLayer)
-    growthbook.set_variants({
-        ExperimentName.CLI_EXTRA_MODELS.value: json.dumps([
-            {"name": "routed-model", "provider": "mistral", "alias": "routed-model"}
-        ])
-    })
-    await orchestrator.reload()
-
-    patches = config_write_ops_to_patches(
-        orchestrator.config,
-        [
-            ConfigWriteOpWire(
-                op="set", path="/models/routed-model/temperature", value=0.5
-            )
-        ],
-        sparse_override_model_aliases=(
-            await orchestrator.sparse_override_model_aliases()
-        ),
-    )
-
-    # GrowthBook models exist regardless of the catalog flag: the write is
-    # settings-only here too.
-    assert len(patches) == 1
-    patch = patches[0]
-    assert isinstance(patch, AddOperationPatch)
-    assert patch.path == "/models/routed-model/temperature"
-    assert patch.value == 0.5
+_ADMIN_GATEWAY = {
+    "providers": [{"name": "gateway", "api_base": "https://gateway.example.com"}],
+    "models": {
+        "admin-model": {
+            "name": "azure_ai/admin-model",
+            "provider": "gateway",
+            "alias": "admin-model",
+        }
+    },
+}
 
 
-@pytest.mark.asyncio
-async def test_a_field_write_to_an_admin_model_keeps_its_identity() -> None:
-    from vibe.app_server._config_write import config_write_ops_to_patches
-    from vibe.app_server.protocol import ConfigWriteOpWire
+async def _orchestrator_with_admin(
+    admin_data: dict[str, Any],
+) -> ConfigOrchestrator[VibeConfigSchema]:
     from vibe.core.config.layers.admin import AdminConfigLayer
-    from vibe.core.config.patch import AddOperationPatch
 
     orchestrator = await build_default_orchestrator()
     admin = orchestrator.get_layer(AdminConfigLayer.NAME)
     assert isinstance(admin, AdminConfigLayer)
-    admin.restore({
-        "models": {
-            "admin-model": {
-                "name": "admin-model",
-                "provider": "mistral",
-                "alias": "admin-model",
-            }
-        }
-    })
+    admin.restore(admin_data)
     await orchestrator.reload()
+    return orchestrator
+
+
+async def _write_through_picker(
+    orchestrator: ConfigOrchestrator[VibeConfigSchema], path: str, value: JsonValue
+) -> list[PatchOp]:
+    from vibe.app_server._config_write import config_write_ops_to_patches
+    from vibe.app_server.protocol import ConfigWriteOpWire
 
     patches = config_write_ops_to_patches(
         orchestrator.config,
-        [
-            ConfigWriteOpWire(
-                op="set", path="/models/admin-model/temperature", value=0.5
-            )
-        ],
+        [ConfigWriteOpWire(op="set", path=path, value=value)],
         sparse_override_model_aliases=(
             await orchestrator.sparse_override_model_aliases()
         ),
     )
+    assert await orchestrator.apply_patch(patches, reason="test") == []
+    return patches
 
-    # No layer redefines an admin model at launch, so a sparse entry would be
-    # an orphan next launch: the write still carries the identity fields.
-    assert len(patches) == 1
-    patch = patches[0]
+
+@pytest.mark.asyncio
+async def test_a_field_write_to_an_admin_model_is_settings_only(
+    config_dir: Path,
+) -> None:
+    from vibe.core.config.patch import AddOperationPatch
+
+    orchestrator = await _orchestrator_with_admin(_ADMIN_GATEWAY)
+
+    patches = await _write_through_picker(
+        orchestrator, "/models/admin-model/thinking", "high"
+    )
+
+    # The admin layer defines the model again at every launch: copied identity
+    # would keep the model running once the admin removes it.
+    (patch,) = patches
     assert isinstance(patch, AddOperationPatch)
-    assert patch.path == "/models/admin-model"
-    assert patch.value == {
-        "name": "admin-model",
-        "provider": "mistral",
-        "alias": "admin-model",
-        "temperature": 0.5,
-    }
+    assert patch.path == "/models/admin-model/thinking"
+    assert patch.value == "high"
+    assert orchestrator.config.models["admin-model"].thinking == "high"
+    saved = tomllib.loads((config_dir / "config.toml").read_text())
+    assert [m for m in saved["models"] if m["alias"] == "admin-model"] == [
+        {"alias": "admin-model", "thinking": "high"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_admin_model_the_admin_removed_is_gone_for_its_pin(
+    config_dir: Path,
+) -> None:
+    orchestrator = await _orchestrator_with_admin(_ADMIN_GATEWAY)
+    await _write_through_picker(orchestrator, "/active_model", "admin-model")
+    await _write_through_picker(orchestrator, "/models/admin-model/thinking", "high")
+
+    # The admin removes the model and keeps its provider.
+    relaunched = await _orchestrator_with_admin({
+        "providers": _ADMIN_GATEWAY["providers"]
+    })
+
+    config = relaunched.config
+    assert "admin-model" not in config.models
+    assert config.get_active_model().alias == "mistral-large-4-0"
+    assert config.missing_model_warnings == (
+        "Model 'admin-model' is not available — running 'Mistral Large 4'. "
+        "Pick another model to stop this notice.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_admin_model_the_admin_removed_leaves_its_settings_ignored(
+    config_dir: Path,
+) -> None:
+    orchestrator = await _orchestrator_with_admin(_ADMIN_GATEWAY)
+    await _write_through_picker(orchestrator, "/models/admin-model/thinking", "high")
+
+    relaunched = await _orchestrator_with_admin({
+        "providers": _ADMIN_GATEWAY["providers"]
+    })
+
+    assert "admin-model" not in relaunched.config.models
+    assert relaunched.config.validation_warnings == (
+        "Settings for model 'admin-model' are ignored: no such model is available.",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_admin_set_field_wins_over_the_users_settings_only_write(
+    config_dir: Path,
+) -> None:
+    admin_data = copy.deepcopy(_ADMIN_GATEWAY)
+    admin_data["models"]["admin-model"]["temperature"] = 0.2
+    orchestrator = await _orchestrator_with_admin(admin_data)
+
+    await _write_through_picker(orchestrator, "/models/admin-model/thinking", "high")
+    await _write_through_picker(orchestrator, "/models/admin-model/temperature", 0.9)
+
+    model = orchestrator.config.models["admin-model"]
+    assert model.thinking == "high"
+    assert model.temperature == 0.2
 
 
 @pytest.mark.asyncio
@@ -258,43 +294,3 @@ async def test_a_cached_catalog_applies_a_sparse_override_from_the_first_build(
 
     assert effective.models["cached-model"].temperature == 0.5
     assert effective.validation_warnings == ()
-
-
-def _cached_eval(*, catalog_on: bool) -> Any:
-    from tests.stubs.experiment_responses import routing_eval_response
-    from vibe.core.experiments.models import EvalResponse
-
-    features = routing_eval_response("glm-5-3").model_dump()["features"]
-    features["vibe_cli_model_catalog"] = {"defaultValue": catalog_on, "rules": []}
-    return EvalResponse.model_validate({"features": features})
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("catalog_on", [True, False])
-async def test_a_cached_flag_decides_the_cached_catalog(
-    catalog_on: bool,
-    tmp_path: Path,
-    config_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    process_services: ProcessServices,
-    model_catalog_server: FakeModelCatalogServer,
-) -> None:
-    config_file = config_dir / "config.toml"
-    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
-    config.update({"active_model": "", "enable_telemetry": True})
-    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
-    monkeypatch.setattr(
-        "vibe.app_server._cached_layers.load_cached_eval_response",
-        lambda _config, _credentials=None: _cached_eval(catalog_on=catalog_on),
-    )
-    await _hold(
-        process_services, model_catalog_server, _runnable_catalog("zai-glm-5-3")
-    )
-
-    session_config = await runtime_module.HarnessProcess(
-        services=process_services
-    )._build_session_config(SessionOptions(cwd=str(tmp_path)))
-    effective = session_config.config_orchestrator.config
-
-    assert ("zai-glm-5-3" in effective.models) is catalog_on
-    assert ("glm-5-3" in effective.models) is not catalog_on

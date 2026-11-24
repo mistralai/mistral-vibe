@@ -26,14 +26,18 @@ from mistralai_vibe_local_harness.protocol import (
     RustHarnessCapabilitySet,
     RustHarnessConfig,
     RustHarnessHookBinding,
+    RustHookSkip,
+    RustHookToolCall,
     RustImageContentBlock,
     RustPluginContextDefinition,
     RustProtocolError,
+    RustProvidedToolCall,
     RustProvidedToolCallAction,
     RustResourceLinkContentBlock,
     RustRuntimeBuiltinToolCallAction,
     RustTextContentBlock,
     RustTextResourceContents,
+    RustToolKeysHookSelector,
     RustToolSucceededEvent,
     RustToolSuccessResult,
     RustUserMessageEvent,
@@ -138,8 +142,11 @@ from mistralai_vibe_local_harness.vibe._local_actions import (
     gated_tool_name,
     streams_provisional_content,
 )
+from mistralai_vibe_local_harness.vibe._mcp_apps import MCPAppToolDenied
 from mistralai_vibe_local_harness.vibe._mcp_models import (
+    MCPNormalizedResult,
     MCPRouteSnapshot,
+    MCPToolDescriptor,
     ResolvedMCPCatalog,
 )
 from mistralai_vibe_local_harness.vibe._mcp_runtime import MCPRuntime
@@ -430,6 +437,8 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         # reported ended twice, and a stranded turn's failure lands late, after
         # later turns ended.
         self._queue_terminal_turn_ids: set[str] = set()
+        # Injected turns started past a paused queue: completing one resumes it.
+        self._queue_resuming_turn_ids: set[str] = set()
         self._turn_terminal_events: dict[str, asyncio.Event] = {}
         # Resolved once Core accepts a scheduled turn, or once its task ends.
         self._turn_admissions: dict[str, asyncio.Future[None]] = {}
@@ -455,6 +464,8 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         self._approvals_closed_turn_id: str | None = None
         self._event_subscriptions = SessionEventSubscriptions()
         self._event_observers: dict[str, Callable[[JsonObject], None]] = {}
+        # Observers that leave held notices for a reader that can place them.
+        self._notice_blind_observers: set[str] = set()
         if runtime is not None:
             runtime.configure_work_state_callback(self._notify_work_state_changed)
         self._buffered_events: list[JsonObject] | None = None
@@ -1336,19 +1347,30 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
             return self._snapshot(0)
 
     def observe_events(
-        self, observer_id: str, observer: Callable[[JsonObject], None]
+        self,
+        observer_id: str,
+        observer: Callable[[JsonObject], None],
+        *,
+        places_notices: bool = True,
     ) -> SessionSnapshot:
         """Atomically attach a non-consuming event observer and return its watermark.
 
         Notices published before any subscriber stay held: the caller releases them with
         `_publish_held_notices` once its own readers can place them, as a parent does after it
-        publishes the child's registration.
+        publishes the child's registration. An observer with ``places_notices`` false, one that
+        follows the session without showing it to anyone, keeps them held: they still wait for
+        the first subscriber or observer that places them.
         """
         self._event_observers[observer_id] = observer
+        if places_notices:
+            self._notice_blind_observers.discard(observer_id)
+        else:
+            self._notice_blind_observers.add(observer_id)
         return self._snapshot(500)
 
     def stop_observing_events(self, observer_id: str) -> None:
         self._event_observers.pop(observer_id, None)
+        self._notice_blind_observers.discard(observer_id)
 
     def publish_child_event(self, child_session_id: str, event: JsonObject) -> None:
         """Publish a child event on the already-bound parent subscription."""
@@ -1598,6 +1620,96 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         runtime = self._require_mcp_runtime()
         return runtime.snapshot
 
+    # The four MCP App calls below are ADR 0020 gaps (HAR-1419): the Session
+    # API has no procedure for an app's requests to its server yet.
+    async def mcp_server_tools(self, server_name: str) -> tuple[MCPToolDescriptor, ...]:
+        """Every listed tool of an MCP server, including those the model cannot see."""
+        return await self._require_mcp_runtime().server_tools(server_name)
+
+    async def read_mcp_resource(
+        self, *, server_name: str, uri: str, expected_fingerprint: str | None = None
+    ) -> JsonObject:
+        """Read an MCP server's resource; ``expected_fingerprint`` as below."""
+        return await self._require_mcp_runtime().read_resource(
+            server_name=server_name, uri=uri, expected_fingerprint=expected_fingerprint
+        )
+
+    async def call_mcp_server_tool(
+        self,
+        *,
+        server_name: str,
+        remote_name: str,
+        arguments: JsonObject,
+        expected_fingerprint: str | None = None,
+    ) -> MCPNormalizedResult:
+        """Call an MCP server's tool by its remote name, outside any turn.
+
+        On a config server nothing runs unless ``expected_fingerprint`` is its
+        current app fingerprint (``MCPAppConsentRequired``). No hook runs here:
+        the caller passes the arguments ``gate_mcp_app_tool_call`` returned, once
+        it has checked them and asked for any approval on them, as a model
+        call's hooks run before its approval.
+        """
+        return await self._require_mcp_runtime().call_server_tool(
+            server_name=server_name,
+            remote_name=remote_name,
+            arguments=arguments,
+            expected_fingerprint=expected_fingerprint,
+        )
+
+    async def gate_mcp_app_tool_call(
+        self, *, server_name: str, remote_name: str, arguments: JsonObject
+    ) -> JsonObject:
+        """The arguments an app's call to a tool runs with, once the hooks let it.
+
+        The session's ``pre_tool_call`` hooks judge it as they judge a model's
+        call to the same tool, under the same route name: a deny refuses it
+        (``MCPAppToolDenied``); otherwise the arguments they returned, which
+        the caller checks against the tool's schema before it asks for any
+        approval and calls ``call_mcp_server_tool`` with them. A tool the
+        server does not list keeps its arguments: the call fails on its own.
+        """
+        runtime = self._require_mcp_runtime()
+        tool = next(
+            (
+                tool
+                for tool in await runtime.server_tools(server_name)
+                if tool.remote_name == remote_name
+            ),
+            None,
+        )
+        if tool is None or self._action_adapter is None:
+            return arguments
+        route = RustProvidedToolCall(
+            group_name=tool.group_name,
+            tool_name=tool.programmatic_name,
+            arguments=arguments,
+        )
+        bindings = sorted(
+            (
+                binding
+                for binding in self._hook_bindings()
+                if binding.point == "pre_tool_call" and _binding_selects(binding, route)
+            ),
+            key=lambda binding: binding.order,
+        )
+        if not bindings:
+            return arguments
+        call_id = f"mcp-app-{secrets.token_hex(8)}"
+        output = await self._action_adapter.gate_app_tool_call(
+            [binding.id for binding in bindings],
+            RustHookToolCall(action_id=call_id, call_id=call_id, call=route),
+        )
+        if isinstance(output, RustHookSkip):
+            raise MCPAppToolDenied(
+                "".join(
+                    block.text
+                    for block in output.reason
+                    if isinstance(block, RustTextContentBlock)
+                )
+            )
+        return output.effective_arguments
+
     async def reconfigure_mcp(
         self,
         configuration: ResolvedMCPCatalog,
@@ -1796,11 +1908,17 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
     ) -> object:
         self._reject_compaction()
         self._reject_active_turn()
-        if self._turn_queue:
+        if self._turn_queue and not self._turn_queue.paused:
             raise HarnessTurnQueuePendingError()
         payload = _turn_start_payload(
             params, image_source_roots=self._image_source_roots
         )
+        # A paused queue waits for the user, who may still re-run the turn that
+        # paused it: a host-injected turn starts ahead of it, and the queue
+        # resumes once that turn completes.
+        resumes_queue = self._turn_queue.paused and content_is_injected(payload.content)
+        if self._turn_queue and not resumes_queue:
+            raise HarnessTurnQueuePendingError()
         runtime = await self._runtime_for_turn_locked(
             promotion_conflict_id=payload.turn_id
         )
@@ -1811,6 +1929,8 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         started_at = _now_milliseconds()
         self._reserved_turn_id = payload.turn_id
         self._reserved_turn_started_at = started_at
+        if resumes_queue:
+            self._queue_resuming_turn_ids.add(payload.turn_id)
         scheduled_notice = (
             _scheduled_loop_notice(self._session_id, payload.turn_id, scheduled_loop_id)
             if scheduled_loop_id is not None
@@ -1834,6 +1954,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 return
             self._reserved_turn_id = None
             self._reserved_turn_started_at = None
+            self._queue_resuming_turn_ids.discard(payload.turn_id)
             self._schedule_turn_queue_drain()
 
         return _SessionBackendResult(
@@ -3169,6 +3290,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
                 errors.append(exc)
         self._event_subscriptions.close()
         self._event_observers.clear()
+        self._notice_blind_observers.clear()
         if len(errors) == 1:
             raise errors[0]
         if errors:
@@ -3183,7 +3305,7 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         if (
             event.get("type") == "notice"
             and held is not None
-            and not self._event_observers
+            and self._event_observers.keys() <= self._notice_blind_observers
         ):
             if len(held) < _NOTICES_HELD_BEFORE_SUBSCRIBER:
                 held.append(event)
@@ -3500,10 +3622,14 @@ class UnifiedHarnessSessionBackend:  # noqa: PLR0904 - implements app-server ses
         if turn_id in self._queue_terminal_turn_ids:
             return
         self._queue_terminal_turn_ids.add(turn_id)
+        resumes_queue = turn_id in self._queue_resuming_turn_ids
+        self._queue_resuming_turn_ids.discard(turn_id)
         if status in {"failed", "interrupted"}:
             if self._turn_queue.pause():
                 self._publish_turn_queue_updated()
             return
+        if resumes_queue and self._turn_queue.resume():
+            self._publish_turn_queue_updated()
         self._schedule_turn_queue_drain()
 
     def _emit_event(self, event: JsonObject) -> None:
@@ -5218,6 +5344,20 @@ def _now_milliseconds() -> int:
     import time
 
     return int(time.time() * 1000)
+
+
+def _binding_selects(
+    binding: RustHarnessHookBinding, call: RustProvidedToolCall
+) -> bool:
+    """Whether the Core would dispatch ``binding`` for ``call``, as for a model call."""
+    selector = binding.selector
+    if isinstance(selector, RustToolKeysHookSelector):
+        name = f"{call.group_name}.{call.tool_name}"
+        return any(
+            key.target == "provided" and key.qualified_name == name
+            for key in selector.tool_keys
+        )
+    return True
 
 
 __all__ = ["HarnessSessionSubscription", "UnifiedHarnessSessionBackend"]

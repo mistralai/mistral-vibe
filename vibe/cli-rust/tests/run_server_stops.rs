@@ -52,7 +52,7 @@ fn a_run_past_its_hard_stop_still_ends_and_frees_its_slot() {
     server.initialize();
     server.start_run("wedge", json!({}));
     server.start_run("b", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
+    server.wait_for_call("wedge", "session/ready/wait");
 
     let stopped = Instant::now();
     server.request("run/stop", json!({"runId": "wedge"}));
@@ -69,7 +69,6 @@ fn a_run_past_its_hard_stop_still_ends_and_frees_its_slot() {
         json!({}),
         "the run's slot is free"
     );
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(server.app_servers(), 1, "and so is its app-server's");
 }
 
@@ -79,12 +78,14 @@ fn a_close_never_acknowledged_frees_its_slot_and_retires_the_app_server() {
     let mut server = RunServer::start_with_env(
         "fake",
         &["--runs-per-app-server", "2"],
-        &[("VIBE_TEST_CLOSE_ACK_TIMEOUT_MS", "500")],
+        &[
+            ("VIBE_TEST_CLOSE_ACK_TIMEOUT_MS", "500"),
+            ("VIBE_TEST_SHUTDOWN_GRACE_MS", "200"),
+        ],
     );
     server.initialize();
     server.start_run("mute", json!({}));
     server.start_run("b", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     let first = server.app_server_pids();
 
     server.request("run/stop", json!({"runId": "mute"}));
@@ -92,9 +93,8 @@ fn a_close_never_acknowledged_frees_its_slot_and_retires_the_app_server() {
         server.ended("mute", Duration::from_secs(5))["outcome"],
         "terminated"
     );
-    std::thread::sleep(Duration::from_millis(1000));
+    server.wait_for_log("did not acknowledge closing a run's channel");
     server.start_run("c", json!({}));
-    std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         server.app_servers(),
         2,
@@ -112,19 +112,17 @@ fn a_close_never_acknowledged_frees_its_slot_and_retires_the_app_server() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(server
-        .logs()
-        .contains("did not acknowledge closing a run's channel"));
 }
 
 #[cfg(unix)]
 #[test]
 fn ending_does_not_wait_for_a_close_never_acknowledged() {
     for sigterm in [false, true] {
-        let mut server = RunServer::start("fake", &[]);
+        let mut server =
+            RunServer::start_with_env("fake", &[], &[("VIBE_TEST_SHUTDOWN_GRACE_MS", "200")]);
         server.initialize();
         server.start_run("mute", json!({}));
-        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(server.app_servers(), 1);
 
         let ending = Instant::now();
         if sigterm {

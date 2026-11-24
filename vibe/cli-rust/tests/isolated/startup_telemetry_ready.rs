@@ -168,17 +168,14 @@ async fn a_config_without_mouse_capture_reports_it_off() {
 }
 
 #[tokio::test]
-async fn a_warm_start_without_picker_or_trust_prompt_reports_all_three_false() {
+async fn a_warm_start_with_resume_reports_the_sessions_page_shown() {
     let mut startup = Startup::painted();
     startup.app.session.startup_resume = StartupResume::Picker;
     startup.ready(false);
 
     let properties = &startup.startup_events()[0];
     assert_eq!(properties["is_cold_start"], false);
-    assert_eq!(
-        properties["show_resume_picker"], false,
-        "requested but its list never arrived"
-    );
+    assert_eq!(properties["show_resume_picker"], true);
     assert_eq!(properties["prompt_for_workspace_trust"], false);
 }
 
@@ -188,11 +185,8 @@ async fn the_picker_and_trust_prompt_shown_before_ready_are_reported() {
     startup.app.session.startup_resume = StartupResume::Picker;
     let details = serde_json::from_value(json!({"cwd": "/workspace"})).unwrap();
     startup.apply(StartupEvent::Trust(Box::new(details)));
-    let listed = json!({"items": [{"id": "saved", "title": "Saved", "updatedAt": 1}]});
-    startup.apply(StartupEvent::Sessions(Box::new(listed)));
-    assert!(startup.app.resume_picker.open);
-
     startup.ready(true);
+    assert!(startup.app.sessions_page.open);
 
     let properties = &startup.startup_events()[0];
     assert_eq!(properties["show_resume_picker"], true);
@@ -271,4 +265,22 @@ fn write_update_cache(source: &str, stored_at: i64, source_stored_at: i64) {
         source_stored_at: Some(source_stored_at),
     };
     FileSystemUpdateCacheRepository.set(&cache).unwrap();
+}
+
+#[tokio::test]
+async fn resume_without_an_id_leaves_the_release_notes_unseen() {
+    let mut startup = Startup::painted();
+    let home = std::env::var("VIBE_HOME").unwrap();
+    let stale = "[update_cache]\nlatest_version = \"0.0.1\"\nstored_at_timestamp = 1\nseen_whats_new_version = \"0.0.0\"\n";
+    std::fs::write(std::path::Path::new(&home).join("cache.toml"), stale).unwrap();
+    startup.app.session.startup_resume = StartupResume::Picker;
+    startup.ready(false);
+    assert!(startup.app.sessions_page.open);
+
+    let cache = std::fs::read_to_string(std::path::Path::new(&home).join("cache.toml")).unwrap();
+    let current = format!("seen_whats_new_version = \"{}\"", env!("CARGO_PKG_VERSION"));
+    assert!(
+        !cache.contains(&current),
+        "the version is still unseen:\n{cache}"
+    );
 }

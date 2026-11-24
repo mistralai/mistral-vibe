@@ -1,0 +1,10 @@
+{
+  "code": "forbidden",
+  "message": "The MCP server 'user-charts' needs the user's consent for its app",
+  "data": {
+    "code": "mcp_app_consent_required",
+    "server": "user-charts",
+    "fingerprint": "5d1f2a3c4b6e7d8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f",
+    "command": "/usr/bin/python3 /srv/charts/fake_mcp_app_server.py /tmp/calls.jsonl"
+  }
+}

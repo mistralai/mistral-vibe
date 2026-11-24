@@ -47,6 +47,7 @@ fn selected_owner(
         RegionId::BottomApp => &mut app.view.bottom_app_selection_region,
         RegionId::RailWindow => &mut app.view.rail_window_selection_region,
         RegionId::CodePreview => &mut app.code_preview.selection,
+        RegionId::Preview => &mut app.sessions_page.preview.view.selection,
     };
     region.area = chat;
     region.end_exclusive = end_exclusive;

@@ -99,10 +99,10 @@ fn draw_box(app: &mut App, f: &mut Frame, area: Rect, layout: Layout) {
     if area.height < CHROME + 1 {
         return;
     }
-    let title = if app.loops.form.is_some() {
-        "New loop"
-    } else {
-        "Loops"
+    let title = match &app.loops.form {
+        Some(form) if form.editing.is_some() => "Edit loop",
+        Some(_) => "New loop",
+        None => "Loops",
     };
     browser_box::draw_frame(f, area, title);
     let body = Rect::new(
@@ -194,23 +194,27 @@ fn footer(app: &App) -> Vec<Hint> {
 fn list_hints(app: &App) -> Vec<Hint> {
     let mut hints = Vec::new();
     if !rows(app).is_empty() {
-        hints.extend([hints::NAVIGATE, ("d", action::DELETE)]);
+        hints.extend([
+            hints::NAVIGATE,
+            (key::ENTER_E, action::EDIT),
+            ("r", action::RUN_NOW),
+            ("d", action::DELETE),
+        ]);
     }
     hints.extend([("n", action::NEW), hints::CLOSE]);
     hints
 }
 
 fn form_hints(app: &App) -> Vec<Hint> {
-    let mut hints = vec![
-        (key::ARROWS_TAB, action::NAVIGATE),
-        (key::ENTER, action::CREATE),
-    ];
-    let instructions = app
-        .loops
-        .form
-        .as_ref()
-        .is_some_and(|form| form.focused_field() == FormField::Instructions);
-    if instructions {
+    let Some(form) = &app.loops.form else {
+        return Vec::new();
+    };
+    let enter = match form.editing {
+        Some(_) => action::SAVE,
+        None => action::CREATE,
+    };
+    let mut hints = vec![(key::ARROWS_TAB, action::NAVIGATE), (key::ENTER, enter)];
+    if form.focused_field() == FormField::Instructions {
         hints.push((key::CTRL_J, action::NEWLINE));
     }
     hints.push(hints::BACK);

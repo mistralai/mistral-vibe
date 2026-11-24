@@ -4,11 +4,12 @@ from pathlib import Path
 from typing import cast
 from unittest.mock import MagicMock
 
-from acp.schema import AgentMessageChunk
+from acp.schema import AgentMessageChunk, TextContentBlock
 import pytest
 
 from tests.stubs.fake_client import FakeClient
-from vibe.acp.commands.controller import AcpCommandController, InjectedPrompt
+from vibe.acp.agent import VibeAcpAgent
+from vibe.acp.commands.controller import AcpCommandController, RetryTurn
 from vibe.acp.commands.registry import AcpCommandRegistry
 from vibe.acp.session import AcpSession
 from vibe.app_server.models import (
@@ -17,8 +18,13 @@ from vibe.app_server.models import (
     PublicTurnStatus,
     TurnErrorCode,
 )
+from vibe.app_server.protocol import (
+    NOTHING_TO_RETRY_REASON,
+    AppServerResponseError,
+    ProtocolError,
+    ProtocolErrorCode,
+)
 from vibe.app_server.session import AppServerSession
-from vibe.utils.retry_prompt import build_retry_prompt
 
 
 def _turn(status: PublicTurnStatus, code: TurnErrorCode | None = None) -> PublicTurn:
@@ -78,7 +84,7 @@ async def test_retry_reruns_an_interrupted_or_retryable_failed_turn(
 
     result = await controller.execute(session, "/retry keep it short", "message-1")
 
-    assert result == InjectedPrompt(build_retry_prompt("keep it short"))
+    assert result == RetryTurn("turn-1", "keep it short")
 
 
 @pytest.mark.asyncio
@@ -98,5 +104,33 @@ async def test_retry_with_nothing_to_retry_says_so_and_runs_no_turn(
 
     result = await controller.execute(session, "/retry", "message-1")
 
-    assert not isinstance(result, InjectedPrompt)
+    assert not isinstance(result, RetryTurn)
+    assert _agent_messages(client) == ["No failed or interrupted response to retry."]
+
+
+@pytest.mark.asyncio
+async def test_retry_the_server_refuses_says_there_is_nothing_to_retry() -> None:
+    _controller, session, client = _controller_and_session(
+        _turn(PublicTurnStatus.FAILED, TurnErrorCode.BACKEND_ERROR)
+    )
+    app_server = cast(MagicMock, session.app_server)
+    app_server.retry = MagicMock(
+        side_effect=AppServerResponseError(
+            ProtocolError(
+                code=ProtocolErrorCode.CONFLICT,
+                message="No failed or interrupted response to retry",
+                data={"reason": NOTHING_TO_RETRY_REASON},
+            )
+        )
+    )
+    agent = VibeAcpAgent()
+    agent.client = client
+    agent.sessions[session.id] = session
+
+    response = await agent.prompt(
+        session.id, [TextContentBlock(type="text", text="/retry")]
+    )
+
+    app_server.retry.assert_called_once_with("turn-1", "")
+    assert response.stop_reason == "end_turn"
     assert _agent_messages(client) == ["No failed or interrupted response to retry."]

@@ -119,6 +119,15 @@ class TestParseGithubPullRequest:
             "closed"
         )
 
+    def test_queued_pr(self):
+        # GitHub PullRequest.isInMergeQueue is independent of its OPEN state.
+        # https://docs.github.com/en/graphql/reference/pulls#pullrequest
+        snapshot = parse_github_pull_request([_github_page(isInMergeQueue=True)], "")
+        assert snapshot.state == "open"
+        assert snapshot.is_in_merge_queue is True
+        unqueued = parse_github_pull_request([_github_page(isInMergeQueue=False)], "")
+        assert unqueued.is_in_merge_queue is False
+
     @pytest.mark.parametrize(
         ("merge_state", "expected"),
         [
@@ -585,6 +594,58 @@ class TestBatchedGitHubReads:
         assert snapshot.checks is not None
         assert snapshot.checks.state == "fail"
         assert len(queries) == 2
+
+    @pytest.mark.parametrize("checks_first", [True, False])
+    def test_a_host_without_merge_queue_can_still_sync(self, monkeypatch, checks_first):
+        import vibe.core.git.forge_sync as fs
+
+        monkeypatch.setattr(fs, "_HOSTS_WITHOUT_MERGE_QUEUE", set())
+        page = _pull_request(_github_page())
+        queries: list[str] = []
+
+        def run(cmd, env_name, host, label):
+            query = cmd[-1]
+            queries.append(query)
+            if host.lower() == "ghe.corp" and "isInMergeQueue" in query:
+                # GitHub GraphQL reports missing PullRequest fields as undefinedField.
+                return _gh_process(
+                    json.dumps({
+                        "errors": [
+                            {
+                                "extensions": {
+                                    "code": "undefinedField",
+                                    "fieldName": "isInMergeQueue",
+                                }
+                            }
+                        ]
+                    }),
+                    returncode=1,
+                )
+            return _gh_process(_batch_answer(page))
+
+        monkeypatch.setattr(fs, "_run_process", run)
+        refs = [fs.GitHubPullRequestRef("o", "r", 1)]
+
+        def full_read():
+            snapshot = fs.read_github_pull_requests("gh", "ghe.corp", refs, "T")[0][
+                refs[0]
+            ]
+            assert isinstance(snapshot, fs.PullRequestSnapshot)
+            assert snapshot.state == "open"
+            assert snapshot.is_in_merge_queue is False
+
+        def check_read():
+            assert fs.read_github_checks("gh", "GHE.corp", refs)[0][refs[0]] is not None
+
+        first, second = (
+            (check_read, full_read) if checks_first else (full_read, check_read)
+        )
+        first()
+        second()
+        assert ["isInMergeQueue" in query for query in queries] == [True, False, False]
+
+        fs.read_github_checks("gh", "github.com", refs)
+        assert "isInMergeQueue" in queries[-1]
 
     def test_the_check_fingerprint_follows_the_checks(self, monkeypatch):
         import vibe.core.git.forge_sync as fs

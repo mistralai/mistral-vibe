@@ -31,6 +31,7 @@ from vibe.core.git.worktree import (
     RetainedRepositoryMapping,
     WorktreeProgressCallback,
     WorktreeRepository,
+    access_roots_at,
 )
 from vibe.core.git.worktree.naming import worktree_name_from_text
 from vibe.core.llm.utility_credentials import UtilityCredentialsFactory
@@ -44,7 +45,7 @@ from vibe.core.session.worktrees import (
     WorktreeRequest,
 )
 from vibe.core.telemetry.types import LaunchContext
-from vibe.core.trusted_folders import TrustedFoldersManager
+from vibe.core.trusted_folders import TrustedFoldersManager, is_in_scratch_dir
 from vibe.core.utils.slug import create_slug
 
 type MoveSession = Callable[[SessionOptions], Awaitable[None]]
@@ -292,7 +293,7 @@ class SessionWorktrees:
 
     @staticmethod
     def relocation_checkout(previous_cwd: Path, target: Path) -> Path | None:
-        """Return the counterpart checkout containing an allowed destination."""
+        """Return the counterpart checkout containing the destination, if any."""
         try:
             with WorktreeRepository.open(previous_cwd) as repository:
                 for worktree in repository.linked():
@@ -386,14 +387,18 @@ def _same_directory(left: Path, right: Path) -> bool:
 
 
 def session_harness_files(
-    harness_files: HarnessFilesManager, cwd: Path, roots: Iterable[Path]
+    harness_files: HarnessFilesManager,
+    cwd: Path,
+    roots: Iterable[Path],
+    access_roots: Iterable[Path] = (),
 ) -> HarnessFilesManager:
     """The manager for a session at ``cwd`` with ``roots`` open beside it.
 
     The cwd is never listed: a listed root's project files are read even when
     untrusted, which the cwd's are not. A worktree the agent entered may be on
-    anyone's branch, so it is writable but its hooks, skills and AGENTS.md
-    are not read either.
+    anyone's branch, and a scratch folder holds what a projectless session
+    wrote, so both are writable but their hooks, skills and AGENTS.md are not
+    read either. Nor are those of ``access_roots``.
     """
     here = cwd.expanduser().resolve()
     listed: list[Path] = []
@@ -402,12 +407,14 @@ def session_harness_files(
         resolved = root.expanduser().resolve()
         if resolved == here:
             continue
-        (writable if ManagedWorktree.at(resolved) is not None else listed).append(
-            resolved
-        )
+        unread = ManagedWorktree.at(resolved) is not None or is_in_scratch_dir(resolved)
+        (writable if unread else listed).append(resolved)
     return replace(
         harness_files.for_session(cwd, workspace_roots=listed),
         writable_roots=tuple(writable),
+        access_roots=access_roots_at(
+            here, (root.expanduser() for root in access_roots)
+        ),
     )
 
 

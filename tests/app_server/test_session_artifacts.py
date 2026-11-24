@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime
 import json
 import logging
 from pathlib import Path
@@ -738,6 +739,7 @@ class TestToPublicArtifact:
         """The raw provider-neutral statuses ride the wire projection."""
         github.snapshot = _snapshot(
             state="open",
+            is_in_merge_queue=True,
             checks=ChecksSummary(state="fail"),
             review_decision="APPROVED",
             merge_status="blocked",
@@ -748,6 +750,8 @@ class TestToPublicArtifact:
         )
 
         wire = to_public_artifact(artifact).model_dump(mode="json", by_alias=True)
+        assert wire["details"]["state"] == "open"
+        assert wire["details"]["isInMergeQueue"] is True
         assert wire["details"]["prStatus"] == "action_needed"
         assert wire["details"]["prStatusReason"] == "checks_failing"
         assert wire["details"]["checksStatus"] == "failing"
@@ -758,6 +762,7 @@ class TestToPublicArtifact:
         # The status is a read of the provider, not session state.
         stored = json.loads((service._session_dir / "meta.json").read_text())
         assert stored["artifacts"][0]["details"]["checks_status"] is None
+        assert stored["artifacts"][0]["details"]["is_in_merge_queue"] is False
 
     @pytest.mark.asyncio
     async def test_details_none(self, service: SessionArtifactService):
@@ -1330,6 +1335,25 @@ class TestTerminalShellEffect:
         assert effect.stdout == GH_STDOUT
         assert effect.status == "failed"
 
+    def test_falls_back_to_the_content_text_of_a_failed_command(self) -> None:
+        """A failed compound command saved without ``outputText`` keeps the URL
+        in its output's text content.
+        """
+        from vibe.app_server._unified_harness_backend_adapter import (
+            _terminal_shell_effect,
+        )
+
+        entry = _shell_effect_entry(
+            "effect-1",
+            GH_COMMAND,
+            status="failed",
+            output={"content": [{"type": "text", "text": GH_STDOUT}]},
+        )
+        effect = _terminal_shell_effect(entry)
+        assert effect is not None
+        assert effect.stdout == GH_STDOUT
+        assert effect.status == "failed"
+
     def test_output_text_not_duplicated_when_already_in_stdout(self) -> None:
         from vibe.app_server._unified_harness_backend_adapter import (
             _terminal_shell_effect,
@@ -1817,6 +1841,211 @@ class TestBuildUnifiedSessionMetadata:
             self._harness_session(), "/tmp/cwd", previous=None
         )
         assert result.artifacts == []
+
+    def test_repository_is_recorded_from_the_folder(self, tmp_path: Path) -> None:
+        pytest.importorskip("mistralai_vibe_local_harness.vibe")
+        from vibe.app_server._unified_harness_backend_adapter import (
+            _build_unified_session_metadata,
+        )
+
+        root = tmp_path.resolve()
+        (root / ".git").mkdir()
+        (root / "src").mkdir()
+
+        result = _build_unified_session_metadata(
+            self._harness_session(), str(root / "src"), previous=None
+        )
+        assert result.repository_root == str(root)
+        assert result.checkout_root == str(root)
+
+    def test_recorded_repository_survives_the_folder_going_away(self) -> None:
+        pytest.importorskip("mistralai_vibe_local_harness.vibe")
+        from vibe.app_server._unified_harness_backend_adapter import (
+            _build_unified_session_metadata,
+        )
+
+        previous = SessionMetadata(
+            session_id=SESSION_ID,
+            start_time="2026-10-13T10:00:00+00:00",
+            end_time=None,
+            git_commit=None,
+            git_branch=None,
+            environment={"working_directory": "/gone/worktree"},
+            username="tester",
+            repository_root="/gone/repository",
+            checkout_root="/gone/worktree",
+        )
+        result = _build_unified_session_metadata(
+            self._harness_session(), "/gone/worktree", previous=previous
+        )
+        assert result.repository_root == "/gone/repository"
+        assert result.checkout_root == "/gone/worktree"
+
+    def test_repository_is_looked_up_again_when_the_folder_changes(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("mistralai_vibe_local_harness.vibe")
+        from vibe.app_server._unified_harness_backend_adapter import (
+            _build_unified_session_metadata,
+        )
+
+        root = tmp_path.resolve()
+        (root / ".git").mkdir()
+        previous = SessionMetadata(
+            session_id=SESSION_ID,
+            start_time="2026-10-13T10:00:00+00:00",
+            end_time=None,
+            git_commit=None,
+            git_branch=None,
+            environment={"working_directory": "/gone/worktree"},
+            username="tester",
+            repository_root="/gone/repository",
+        )
+        result = _build_unified_session_metadata(
+            self._harness_session(), str(root), previous=previous
+        )
+        assert result.repository_root == str(root)
+
+
+class TestListedFolderFacts:
+    """What a listing adds about each row's folder."""
+
+    def test_a_present_folder_reports_its_repository(self, tmp_path: Path) -> None:
+        pytest.importorskip("mistralai_vibe_local_harness.vibe")
+        from vibe.app_server._unified_harness_backend_adapter import (
+            _with_repository_roots,
+        )
+
+        root = tmp_path.resolve()
+        (root / ".git").mkdir()
+        session = _listed_session(cwd=str(root), repository_root="/recorded")
+
+        [listed] = _with_repository_roots([session])
+
+        assert listed.repository_root == str(root)
+        assert listed.checkout_root == str(root)
+        assert listed.cwd_missing is False
+
+    def test_a_missing_folder_keeps_the_recorded_repository(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("mistralai_vibe_local_harness.vibe")
+        from vibe.app_server._unified_harness_backend_adapter import (
+            _with_repository_roots,
+        )
+
+        session = _listed_session(
+            cwd=str(tmp_path / "removed-worktree"), repository_root="/recorded"
+        )
+
+        [listed] = _with_repository_roots([session])
+
+        assert listed.repository_root == "/recorded"
+        assert listed.cwd_missing is True
+
+    def test_a_gone_folder_never_recorded_takes_its_siblings_repository(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("mistralai_vibe_local_harness.vibe")
+        from vibe.app_server._unified_harness_backend_adapter import (
+            _with_repository_roots,
+        )
+
+        root = (tmp_path / "repository").resolve()
+        (root / ".git" / "worktrees" / "live").mkdir(parents=True)
+        git_dir = root / ".git" / "worktrees" / "live"
+        (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+        live = (tmp_path / "worktrees" / "live").resolve()
+        live.mkdir(parents=True)
+        (live / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+        gone = live.parent / "removed"
+        session = _listed_session(cwd=str(gone), repository_root=None)
+
+        [listed] = _with_repository_roots([session])
+
+        assert listed.repository_root == str(root)
+        assert listed.checkout_root == str(gone)
+        assert listed.cwd_missing is True
+
+    def test_gone_folders_sharing_a_parent_scan_it_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        pytest.importorskip("mistralai_vibe_local_harness.vibe")
+        from vibe.app_server._unified_harness_backend_adapter import (
+            _with_repository_roots,
+        )
+
+        root = (tmp_path / "repository").resolve()
+        git_dir = root / ".git" / "worktrees" / "live"
+        git_dir.mkdir(parents=True)
+        (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+        live = (tmp_path / "worktrees" / "live").resolve()
+        live.mkdir(parents=True)
+        (live / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+        sessions = [
+            _listed_session(cwd=str(live.parent / f"removed-{index}"))
+            for index in range(5)
+        ]
+        scanned: list[Path] = []
+        iterdir = Path.iterdir
+
+        def counting_iterdir(self: Path) -> Any:
+            scanned.append(self)
+            return iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+
+        listed = _with_repository_roots(sessions)
+
+        assert scanned == [live.parent]
+        assert [session.repository_root for session in listed] == [str(root)] * 5
+
+    def test_a_retained_worktree_keeps_its_recorded_checkout(
+        self, tmp_path: Path
+    ) -> None:
+        pytest.importorskip("mistralai_vibe_local_harness.vibe")
+        from vibe.app_server._unified_harness_backend_adapter import (
+            _with_repository_roots,
+        )
+        from vibe.core.git.worktree.record import WorktreeClaim, WorktreeRecoveryRecord
+        from vibe.core.paths import WORKTREES_DIR
+
+        project = (tmp_path / "project").resolve()
+        project.mkdir()
+        worktree = WORKTREES_DIR.path.resolve() / "bucket" / "retained"
+        WorktreeClaim(bucket="bucket", name="retained").write_recovery(
+            WorktreeRecoveryRecord(
+                name="retained",
+                branch="vibe/retained",
+                repo_root=project,
+                base_commit="0" * 40,
+                snapshot_ref="refs/vibe/reaped/retained",
+                removed_at=datetime.now(UTC),
+            )
+        )
+        session = _listed_session(
+            cwd=str(worktree), repository_root=str(project), checkout_root=str(worktree)
+        )
+
+        [listed] = _with_repository_roots([session])
+
+        assert listed.repository_root == str(project)
+        assert listed.checkout_root == str(worktree)
+        assert listed.cwd_missing is True
+
+
+def _listed_session(
+    *, cwd: str, repository_root: str | None = None, checkout_root: str | None = None
+) -> PublicSession:
+    return PublicSession(
+        id=SESSION_ID,
+        status=IdleSessionStatus(),
+        created_at=1,
+        updated_at=1,
+        cwd=cwd,
+        repository_root=repository_root,
+        checkout_root=checkout_root,
+    )
 
 
 class TestAdapterDispatchArtifacts:
@@ -2795,12 +3024,22 @@ class TestDiscoverAndCreate:
         ]
 
     @pytest.mark.asyncio
-    async def test_finds_a_new_pr_when_the_cache_read_the_old_one_merged(
-        self, session_dir: Path, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize(
+        ("state", "is_in_merge_queue", "skip_heads"),
+        [
+            ("merged", False, set()),
+            ("open", True, {("github.com", "mistralai/vibe", "branch-123")}),
+        ],
+    )
+    async def test_discovery_uses_cached_state_to_skip_open_prs(
+        self,
+        session_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        state: str,
+        is_in_merge_queue: bool,
+        skip_heads: set[tuple[str, str, str]],
     ):
-        """The stored artifact keeps the state it was created with; a merge
-        is only in the pull request cache's read.
-        """
+        """A cached merge allows rediscovery, while a queued PR is still open."""
         from vibe.app_server import _pull_request_cache as cache_module
 
         stored = _github_artifact(source_branch="branch-123")
@@ -2812,7 +3051,7 @@ class TestDiscoverAndCreate:
             cache_module.pull_request_cache()._directory,
             cache_module.CachedPullRequest(
                 external_key=stored.external_key,
-                snapshot=_snapshot(state="merged"),
+                snapshot=_snapshot(state=state, is_in_merge_queue=is_in_merge_queue),
                 read_at=now,
                 full_read_at=now,
             ),
@@ -2825,7 +3064,7 @@ class TestDiscoverAndCreate:
 
         await service.discover_and_create(Path("/repo"))
 
-        discover.assert_called_once_with(Path("/repo"), skip_heads=set())
+        discover.assert_called_once_with(Path("/repo"), skip_heads=skip_heads)
 
     @pytest.mark.asyncio
     async def test_adds_the_new_branch_pr_and_keeps_the_old_one(
@@ -3705,6 +3944,7 @@ class TestTurnEndPrDiscovery:
 def _snapshot(
     *,
     state: str = "open",
+    is_in_merge_queue: bool = False,
     title: str = "Fix login",
     checks: ChecksSummary | None = None,
     review_decision: Literal["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"]
@@ -3718,6 +3958,7 @@ def _snapshot(
 
     return PullRequestSnapshot(
         state=state,  # type: ignore[arg-type]
+        is_in_merge_queue=is_in_merge_queue,
         title=title,
         source_branch="fix/login",
         target_branch="main",

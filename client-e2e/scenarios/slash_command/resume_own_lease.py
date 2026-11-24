@@ -14,7 +14,7 @@ handshake = {
 }
 request_methods = {"session/resume"}
 
-# Enter submits /resume (the picker highlights the current session), Up
+# Enter submits /resume (the page highlights the current session), Up
 # selects the row our own app-server holds a lease on, and its Enter resumes
 # instead of refusing: the holder is this client's own server process.
 timeline: Timeline = ["/resume", "\r", "\x1b[A", "\r"]

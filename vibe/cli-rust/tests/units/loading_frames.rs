@@ -5,11 +5,11 @@ use vibe_rs::app::{App, Status};
 use vibe_rs::commands::submission;
 use vibe_rs::config;
 use vibe_rs::event_handler::apply_startup_event;
-use vibe_rs::resume_picker::Session;
+use vibe_rs::sessions_page::Session;
 use vibe_rs::startup::StartupEvent;
 use vibe_rs::ui;
 
-use crate::resume_picker_outcomes::{picking, SAVED};
+use crate::sessions_page_outcomes::{picking, SAVED};
 use crate::support::{render, rows, stub};
 
 const WIDTH: u16 = 120;
@@ -20,17 +20,20 @@ fn screen(app: &mut App) -> Vec<String> {
 }
 
 #[test]
-fn an_open_picker_shows_a_loading_line_until_its_sessions_arrive() {
+fn an_open_page_shows_a_loading_line_until_its_sessions_arrive() {
     let mut app = picking();
-    app.resume_picker.sessions.clear();
-    assert!(screen(&mut app).join("\n").contains("Loading sessions..."));
-    app.resume_picker.sessions = vec![Session {
+    app.sessions_page.sessions.clear();
+    vibe_rs::sessions_page::relayout(&mut app);
+    assert!(screen(&mut app).join("\n").contains("Loading sessions…"));
+    app.sessions_page.loading = false;
+    app.sessions_page.sessions = vec![Session {
         id: SAVED.into(),
         title: "Saved implementation".into(),
         ..Session::default()
     }];
+    vibe_rs::sessions_page::relayout(&mut app);
     let listed = screen(&mut app).join("\n");
-    assert!(!listed.contains("Loading sessions..."));
+    assert!(!listed.contains("Loading sessions…"));
     assert!(listed.contains("Saved implementation"));
 }
 

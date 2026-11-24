@@ -8,7 +8,7 @@ fn strips_csi_osc_and_two_byte_escapes() {
         clean_output("\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\"),
         "link"
     );
-    assert_eq!(clean_output("a\x1bcb"), "acb");
+    assert_eq!(clean_output("a\x1bcb"), "ab");
     assert_eq!(clean_output("\x1b[?25lhide"), "hide");
     // An unterminated OSC still consumes its `ESC ]` pair.
     assert_eq!(clean_output("\x1b]no term"), "no term");
@@ -41,4 +41,23 @@ fn normalises_crlf_to_lf() {
 #[test]
 fn drops_control_bytes_but_keeps_tabs() {
     assert_eq!(clean_output("a\tb\x00\x7f\x01"), "a\tb");
+}
+
+#[test]
+fn strips_every_escape_family() {
+    let cases = [
+        ("\x1b(B\x1b[mtput sgr0", "tput sgr0"),
+        ("\x1b%Gcharset", "charset"),
+        ("\x1b7saved\x1b8", "saved"),
+        ("\x1b=keypad\x1b>", "keypad"),
+        ("\x1bPdcs\x1b\\after", "after"),
+        ("\x1b_Gf=100;QUFB\x1b\\image", "image"),
+        ("\x1bXsos\x1b\\x\x1b^pm\x07y", "xy"),
+        ("\u{9b}31mred\u{9b}0m", "red"),
+        ("\u{9d}0;title\u{9c}body", "body"),
+        ("\u{90}q\u{9c}x\u{85}y", "xy"),
+    ];
+    for (raw, shown) in cases {
+        assert_eq!(clean_output(raw), shown, "{raw:?}");
+    }
 }

@@ -20,6 +20,7 @@ from vibe.app_server._model_catalog_service import (
     MODEL_CATALOG_POLICY,
     ModelCatalogKey,
 )
+from vibe.app_server.protocol import ConfigReadResponse
 from vibe.core.config.harness_files import HarnessFilesManager
 
 
@@ -38,7 +39,7 @@ async def test_a_refreshed_model_catalog_tells_subscribed_clients_once(
     published: list[None] = []
     services.config_changes.subscribe(lambda: published.append(None))
     key = await ModelCatalogKey.of(
-        build_test_vibe_config(experimental_enable_model_catalog=True), None
+        build_test_vibe_config(enable_model_catalog=True), None
     )
     assert key is not None
     try:
@@ -67,8 +68,9 @@ async def test_a_picker_config_read_refreshes_an_old_model_catalog(
     # with no open session learns it.
     config_file = config_dir / "config.toml"
     config_file.write_text(
-        "experimental_enable_model_catalog = true\n"
-        + config_file.read_text(encoding="utf-8"),
+        config_file.read_text(encoding="utf-8").replace(
+            "enable_model_catalog = false", "enable_model_catalog = true"
+        ),
         encoding="utf-8",
     )
     server = FakeModelCatalogServer()
@@ -87,7 +89,7 @@ async def test_a_picker_config_read_refreshes_an_old_model_catalog(
         model_catalog=services.model_catalog,
     )
     key = await ModelCatalogKey.of(
-        build_test_vibe_config(experimental_enable_model_catalog=True), None
+        build_test_vibe_config(enable_model_catalog=True), None
     )
     assert key is not None
     try:
@@ -116,8 +118,9 @@ async def test_a_picker_read_refreshes_a_catalog_locking_a_model_after_30s(
     # for a background refresh, and still locks the model the plan now includes.
     config_file = config_dir / "config.toml"
     config_file.write_text(
-        "experimental_enable_model_catalog = true\n"
-        + config_file.read_text(encoding="utf-8"),
+        config_file.read_text(encoding="utf-8").replace(
+            "enable_model_catalog = false", "enable_model_catalog = true"
+        ),
         encoding="utf-8",
     )
     server = FakeModelCatalogServer()
@@ -136,7 +139,7 @@ async def test_a_picker_read_refreshes_a_catalog_locking_a_model_after_30s(
         model_catalog=services.model_catalog,
     )
     key = await ModelCatalogKey.of(
-        build_test_vibe_config(experimental_enable_model_catalog=True), None
+        build_test_vibe_config(enable_model_catalog=True), None
     )
     assert key is not None
     client = ClientInfo(name="test", version="0")
@@ -156,5 +159,53 @@ async def test_a_picker_read_refreshes_a_catalog_locking_a_model_after_30s(
         assert server.fetches == 2
         assert published == [None]
         assert await services.model_catalog.load(key) == runnable_catalog("paid-model")
+    finally:
+        await services.close()
+
+
+@pytest.mark.asyncio
+async def test_a_host_picker_opening_fetches_a_recent_catalog_locking_a_model(
+    config_dir: Path,
+) -> None:
+    # Seconds after the last fetch, the user upgraded their plan: the read that
+    # opens the picker fetches at once and answers once it lands.
+    config_file = config_dir / "config.toml"
+    config_file.write_text(
+        config_file.read_text(encoding="utf-8").replace(
+            "enable_model_catalog = false", "enable_model_catalog = true"
+        ),
+        encoding="utf-8",
+    )
+    server = FakeModelCatalogServer()
+    server.serve(locked_catalog("paid-model"), runnable_catalog("paid-model"))
+    services = fake_process_services(model_catalog_server=server)
+    published: list[None] = []
+    services.config_changes.subscribe(lambda: published.append(None))
+    handler = HostRequestHandler(
+        HarnessFilesManager(sources=("user",)),
+        org_config=services.org_config,
+        worktrees=services.worktrees,
+        experiments=services.experiments,
+        model_catalog=services.model_catalog,
+    )
+    key = await ModelCatalogKey.of(
+        build_test_vibe_config(enable_model_catalog=True), None
+    )
+    assert key is not None
+    client = ClientInfo(name="test", version="0")
+    try:
+        await services.model_catalog.ensure(key)
+
+        result = await handler.dispatch(
+            "config/read", {"refreshModelCatalog": True}, client_info=client
+        )
+
+        assert server.fetches == 2
+        assert published == [None]
+        assert await services.model_catalog.load(key) == runnable_catalog("paid-model")
+        response = result.response
+        assert isinstance(response, ConfigReadResponse)
+        paid = next(m for m in response.config.models if m.alias == "paid-model")
+        assert paid.requires is None
     finally:
         await services.close()

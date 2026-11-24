@@ -12,8 +12,9 @@ the events after a bookmark and wait for new ones.
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from itertools import chain, compress, count, islice, repeat
 import secrets
 from typing import cast
 
@@ -57,6 +58,7 @@ from mistralai_vibe_local_harness.vibe._session_api_state import (
     blocked_turn_id,
     session_callback,
     session_from_public,
+    unchanged_prefix,
 )
 
 DEFAULT_RETAINED_EVENTS = 2_000
@@ -144,6 +146,23 @@ class SessionApiEventProducer:
             events.append(SessionUpdatedEvent(session=session))
         return events
 
+    def published_turn_state(
+        self, state: PublicSessionState, turn_id: str
+    ) -> TurnState | None:
+        """``turn_id``'s state, when ``state`` is the last state this producer published.
+
+        It reads the Turn index the producer keeps, so it costs the Turn's
+        entries, not the Session's history. None when the index is not
+        ``state``'s, or when ``turn_states(state)`` would not list the Turn.
+        """
+        if self._published is not state.history.entries:
+            return None
+        index = self._turn_index
+        latest = state.latest_turn
+        if not index.has(turn_id) and (latest is None or latest.id != turn_id):
+            return None
+        return self.view.turn_state(state, index, turn_id)
+
     def _remember(
         self,
         state: PublicSessionState,
@@ -184,12 +203,23 @@ class SessionApiEventProducer:
         # Tool calls are only ever added, so the new ones are the last keys.
         tool_calls = self.view.tool_calls
         recorded = (
-            set(list(tool_calls)[self._published_tool_calls :])
+            set(islice(tool_calls, self._published_tool_calls, None))
             if len(tool_calls) != self._published_tool_calls
             else set()
         )
+        # The leading entries that are still the objects last published are
+        # skipped in C; among them, only those whose tool call was just
+        # recorded convert anew.
+        start = unchanged_prefix(previous, current)
+        positions: Iterable[int] = range(start, len(current))
+        if recorded:
+            ids = map(dict.get, islice(current, start), repeat("id"))
+            positions = chain(
+                compress(count(), map(recorded.__contains__, ids)), positions
+            )
         changed: list[HistoryEntry] = []
-        for position, raw in enumerate(current):
+        for position in positions:
+            raw = current[position]
             if position < len(previous):
                 old = previous[position]
                 if raw is old and (not recorded or raw.get("id") not in recorded):

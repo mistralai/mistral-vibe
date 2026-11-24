@@ -65,15 +65,15 @@ pub enum CommandEvent {
         operation_id: String,
         error: Option<String>,
     },
+    /// A page of the output the background tasks window shows.
+    TaskOutput(Box<crate::tasks_panel::Page>),
     /// The untrusted-config read answered; the warning body, or `None` when the
     /// folders are all acknowledged.
     UntrustedConfig(Option<String>),
     /// `session/history/clear` answered with the replacement session; the seed
     /// turn only starts once the new id is live on the main thread.
     Cleared {
-        session_id: String,
-        usage: Option<crate::server::TokenUsage>,
-        child_sessions: Vec<crate::server::PublicChildSession>,
+        state: Box<crate::server::PublicSessionState>,
         /// The replaced session, when its log can be resumed.
         previous_session_id: Option<String>,
         seed: Option<QueuedPrompt>,

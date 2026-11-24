@@ -29,7 +29,9 @@ def is_required_plugin(plugin: PluginDescriptor) -> bool:
 
 
 def is_plugin_enabled(plugin: PluginDescriptor, config: VibeConfigSchema) -> bool:
-    if is_required_plugin(plugin):
+    # le-chat decides a library plugin (only those that are on are synced),
+    # so ``disabled_plugins`` naming it cannot turn it off.
+    if is_required_plugin(plugin) or plugin.scope is SkillScope.REMOTE:
         return True
     if plugin.name in config.disabled_plugins:
         return False

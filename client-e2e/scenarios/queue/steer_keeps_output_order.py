@@ -38,8 +38,8 @@ on_request = {
 screen_excludes = ("Queued",)
 screen_rows = {
     12: "  Subagent finished.",
-    15: "> second",
-    18: "  Continued after steer.",
+    14: "↳ second",
+    16: "  Continued after steer.",
 }
 
 timeline: Timeline = [

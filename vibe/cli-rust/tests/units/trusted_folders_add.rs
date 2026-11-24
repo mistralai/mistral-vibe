@@ -81,17 +81,25 @@ fn a_path_naming_no_folder_says_its_closest_parent_is_offered() {
 }
 
 #[test]
-fn home_and_already_trusted_folders_are_listed_but_not_addable() {
+fn home_scratch_and_already_trusted_folders_are_listed_but_not_addable() {
     let home = TrustFolderCandidate {
         problem: Some("home".to_owned()),
         ..candidate("/home/user")
+    };
+    let scratch = TrustFolderCandidate {
+        problem: Some("scratch".to_owned()),
+        ..candidate("/home/user/.vibe/scratch/1")
     };
     let trusted = TrustFolderCandidate {
         stored: Some("trusted".to_owned()),
         ..candidate("/srv/repo")
     };
 
-    for (candidate, note) in [(home, "home folder"), (trusted, "already trusted")] {
+    for (candidate, note) in [
+        (home, "home folder"),
+        (scratch, "scratch folder"),
+        (trusted, "already trusted"),
+    ] {
         let add = add(None, vec![candidate.clone()]);
 
         assert!(!add.addable());

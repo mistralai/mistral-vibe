@@ -1,4 +1,4 @@
-"""Ctrl+X then `b` opens the background tasks window; Enter stops nothing, `s` stops the highlighted task and the rail counts one less."""
+"""Ctrl+X then `b` opens the background tasks window; `s` stops the highlighted task and the rail counts one less."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from scenarios.rail._fixtures import CTRL_X, SETUP, handshake
 
 __all__ = ["handshake"]
 
-timeline: Timeline = [*SETUP, CTRL_X, "b", take_snapshot("panel"), "\r", "s"]
+timeline: Timeline = [*SETUP, CTRL_X, "b", take_snapshot("panel"), "s"]
 
 request_methods = ("session/backgroundProcess/stop",)
 

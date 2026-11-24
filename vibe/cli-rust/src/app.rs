@@ -194,6 +194,10 @@ pub struct Session {
     pub status: Status,
     /// Working directory resolved once at startup; sent on `session/start` and shown in the footer.
     pub cwd: Option<String>,
+    /// The folder the last `cwd::follow` left, for `/cd -`.
+    pub previous_cwd: Option<String>,
+    /// The latest `/cd`'s number: an older one asks no trust and shows no failure.
+    pub cd_ticket: u64,
     /// The app-server-prepared worktree the session moved into (`--worktree`),
     /// tracked from the `worktree` transcript effect; follows the footer.
     pub worktree: Option<crate::worktree::WorktreeInfo>,
@@ -216,10 +220,10 @@ pub struct Session {
     pub startup_resume: StartupResume,
     /// The interactive CLI flags, resent on every resume.
     pub agent_config: crate::server::AgentConfig,
+    /// `--model` / `--thinking`, sent with the startup session only.
+    pub start_model: crate::cli::StartModel,
     /// The positional `vibe <prompt>` argument, sent once startup has converged.
     pub initial_prompt: Option<String>,
-    /// A `session/resume` has landed, so the handshake's own session is stale.
-    pub resumed: bool,
     /// The workspace-trust gate opened during this startup.
     pub trust_prompted: bool,
     /// The `--resume` picker opened during this startup.
@@ -354,6 +358,8 @@ pub struct View {
     pub scroll_to_entry: Option<usize>,
     /// Entry index and painted rows of the prompt pinned over the transcript top last frame.
     pub sticky_prompt: Option<(usize, u16)>,
+    /// Entry index and screen row of the steer pinned under that prompt last frame.
+    pub sticky_steer: Option<(usize, u16)>,
     /// The `enable_sticky_prompt` config value.
     pub sticky_prompt_enabled: bool,
     /// Entry an expand/collapse toggle holds steady, consumed by the next render.
@@ -419,6 +425,7 @@ impl Default for View {
             app_focus: true,
             scroll_to_entry: None,
             sticky_prompt: None,
+            sticky_steer: None,
             sticky_prompt_enabled: true,
             scroll_anchor: None,
             entry_rows: Vec::new(),
@@ -445,6 +452,8 @@ pub struct Completion {
     pub skills: Vec<crate::skill::Skill>,
     /// Files below `cwd`, maintained by a background watcher the handle owns.
     pub files: FileIndexHandle,
+    /// Directories listed on demand for `@/`, `@~/`, `@./` and `@../` queries.
+    pub dirs: crate::dir_complete::DirListings,
     /// Entries currently displayed by the shared `/` and `@` popup.
     pub entries: Vec<CompletionEntry>,
     /// Selected entry index in the completion popup (Up/Down, wrap-around).
@@ -453,8 +462,13 @@ pub struct Completion {
     pub scroll: usize,
     /// Set on keyboard selection: the next render scrolls just enough to reveal it.
     pub reveal: bool,
+    /// The arrows moved the highlight since the list last changed: Enter
+    /// takes the highlighted entry rather than what was typed.
+    pub picked: bool,
     /// Esc hides the current popup until the input changes again.
     pub dismissed: bool,
+    /// Subfolders listed for the `/cd ` popup.
+    pub cd_dirs: crate::dir_completion::Dirs,
 }
 
 /// Voice-mode state: config projection, recording lifecycle, and mic level.
@@ -575,6 +589,10 @@ pub struct ModelPicker {
     pub default_display_name: String,
     /// Alias the Default row resolves to (`defaultModelAlias`).
     pub default_alias: String,
+    /// The last runtime listed a model the plan locks (hidden from the rows).
+    pub has_locked_models: bool,
+    /// Catalog checks started by opening the picker that have not answered yet.
+    pub checks_in_flight: usize,
 }
 
 /// The PR window the rail opens: the session's PR/MR links.
@@ -619,36 +637,6 @@ pub struct ThinkingPicker {
     pub levels: Vec<String>,
     /// A `/model` pick held until its chained thinking level is chosen or skipped.
     pub model_pick: Option<crate::thinking_picker::ModelPick>,
-}
-
-/// `/resume` picker state.
-#[derive(Default)]
-pub struct ResumePicker {
-    pub open: bool,
-    pub sessions: Vec<crate::resume_picker::Session>,
-    pub list: crate::option_list::OptionList<crate::option_list::MultiAction>,
-    /// Folder the listed sessions belong to, from the server-filtered list. It
-    /// is the attached session's cwd too.
-    pub cwd: Option<String>,
-    pub delete_confirm: Option<String>,
-    /// Id of the session whose `session/delete` is in flight; keys are blocked
-    /// until it answers.
-    pub deleting: Option<String>,
-    /// Set once a preview replaced the transcript, so returning to the current
-    /// session reloads it.
-    pub previewing: bool,
-    pub preview_request: u64,
-    /// A `session/resume` is in flight; only Esc acts on the picker until it answers.
-    pub resuming: bool,
-    /// Sessions whose lease another process holds, drawn with a lock.
-    pub locked: std::collections::HashSet<String>,
-    /// Sessions a lease notification already decided; a late snapshot keeps them.
-    pub lease_notified: std::collections::HashSet<String>,
-    /// The lease watch ended, so a late snapshot must not restore locks.
-    pub lease_ended: bool,
-    /// Whether the lease watch subscription already fired this process.
-    pub subscribed: bool,
-    pub transcript: Option<crate::transcript::Snapshot>,
 }
 
 /// Rewind bottom-app state, including whether rewind mode is on.
@@ -876,8 +864,9 @@ pub struct App {
     pub log_level_picker: LogLevelPicker,
     pub thinking_picker: ThinkingPicker,
     pub artifacts_modal: ArtifactsModal,
+    /// The full-screen Sessions page.
+    pub sessions_page: crate::sessions_page::SessionsPage,
     pub loops: crate::loops::LoopsApp,
-    pub resume_picker: ResumePicker,
     /// The `/storage` panel.
     pub storage: crate::storage_panel::State,
     /// The latest written todo list, never seeded from history.
@@ -976,6 +965,7 @@ impl App {
             crate::artifacts_modal::close(self);
             // The old session's background work is not the new one's.
             self.session.background_tasks.clear();
+            self.tasks_panel.close_output();
             self.session.wait_target = None;
             self.session.loops.clear();
             crate::loops::close(self);

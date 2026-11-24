@@ -2,11 +2,13 @@
 """Layer 3: facts shipped in the code for models we know, used with no network.
 
 Rows are tried in order and the first match wins, so a specific pattern comes before a
-general one. A pattern matches the lowercased model id after its last `/`. Rows never
-carry a threshold; the threshold comes from the user or the rule.
+general one. A pattern matches the lowercased model id after its last `/`; a pattern
+with a `/` matches the whole lowercased id, for a fact true only on one route prefix.
+Rows never carry a threshold; the threshold comes from the user or the rule.
 """
 
 from collections.abc import Sequence
+from dataclasses import replace
 from fnmatch import fnmatchcase
 
 from .types import (
@@ -73,6 +75,11 @@ def _openai_model(
         input_modalities=TEXT_AND_IMAGE,
         reasoning=reasoning,
     )
+
+
+_GPT_5_5 = _openai_model(
+    1_050_000, ReasoningSupport(_OPENAI_TO_XHIGH, can_turn_off=True)
+)
 
 
 # The most one image costs on these Mistral models: a 1,540-pixel side in 28-pixel
@@ -164,10 +171,12 @@ KNOWN_MODELS: Sequence[KnownModelRow] = (
         ),
         _openai_model(1_050_000, ReasoningSupport(_ALL_LEVELS, can_turn_off=True)),
     ),
-    (
-        _openai("gpt-5.5", "gpt-5.4"),
-        _openai_model(1_050_000, ReasoningSupport(_OPENAI_TO_XHIGH, can_turn_off=True)),
-    ),
+    # A deployment limit, not a model fact: an Azure AI deployment of gpt-5.5 served
+    # under the `azure_ai/` route id answers HTTP 500 to any image, in a user or a
+    # tool message, so it gets `[Image]` instead. Remove this row once that route
+    # answers an image in a user message.
+    (_openai("azure_ai/gpt-5.5"), replace(_GPT_5_5, input_modalities=TEXT_ONLY)),
+    (_openai("gpt-5.5", "gpt-5.4"), _GPT_5_5),
     (_openai("gpt-5.5-pro", "gpt-5.4-pro"), _openai_model(1_050_000, _OPENAI_PRO)),
     (
         _openai("gpt-5-pro"),
@@ -213,8 +222,12 @@ def find_known_model(
     model: str, rows: Sequence[KnownModelRow] = KNOWN_MODELS
 ) -> KnownModel | None:
     """Return the first row matching the model id, or `None`."""
-    name = model.rsplit("/", 1)[-1].lower()
+    model_id = model.lower()
+    name = model_id.rsplit("/", 1)[-1]
     for patterns, known in rows:
-        if any(fnmatchcase(name, pattern) for pattern in patterns):
+        if any(
+            fnmatchcase(model_id if "/" in pattern else name, pattern)
+            for pattern in patterns
+        ):
             return known
     return None

@@ -27,6 +27,7 @@ from vibe.app_server._agents_md_hooks import (
     AGENTS_MD_HOOK_BINDING_ID,
     agents_md_hook,
     merge_agents_md_hook,
+    register_access_roots,
 )
 from vibe.core.config.harness_files import HarnessFilesManager
 from vibe.core.git.worktree import WorktreeRepository
@@ -235,6 +236,28 @@ async def test_an_entered_worktree_injects_no_agents_md(
     )
 
     # Assert
+    assert len(result.output.tool_result.content) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_read_in_an_access_root_brings_in_no_agents_md(tmp_path: Path) -> None:
+    primary, other = (tmp_path / "primary").resolve(), (tmp_path / "other").resolve()
+    primary.mkdir()
+    (other / "sub").mkdir(parents=True)
+    (other / "sub" / "AGENTS.md").write_text("# Other", encoding="utf-8")
+    (other / "sub" / "file.py").write_text("hello", encoding="utf-8")
+    register_access_roots(primary, (primary, other), (other,))
+    handler = agents_md_hook(HarnessFilesManager(sources=("user", "project")))
+    context = HookContext(
+        config=LocalRuntimeAdapterConfig.at(cwd=primary, roots=(primary, other)),
+        messages=(),
+        session_id="session-1",
+    )
+
+    result = await handler(
+        _hook_input(_read_call(str(other / "sub" / "file.py")), _success()), context
+    )
+
     assert len(result.output.tool_result.content) == 1
 
 

@@ -24,10 +24,10 @@ pub(crate) struct SelectionSlice {
 }
 
 /// Lines painted as one block, with their folds and the indexes of their spacing rows.
-struct Painted<'a> {
-    lines: &'a [Line<'static>],
-    folds: &'a [Option<Fold>],
-    gaps: &'a [usize],
+pub(super) struct Painted<'a> {
+    pub lines: &'a [Line<'static>],
+    pub folds: &'a [Option<Fold>],
+    pub gaps: &'a [usize],
 }
 
 pub(crate) fn selection_slice(app: &App) -> Option<SelectionSlice> {
@@ -187,7 +187,7 @@ pub(super) fn hang_cells(
 }
 
 /// Record the fold and margin rows of `painted`, laid out from row `top`, through the `visible` rows.
-fn push_rows(
+pub(super) fn push_rows(
     rows: &mut Vec<(u16, Fold)>,
     margins: &mut Vec<u16>,
     top: u16,

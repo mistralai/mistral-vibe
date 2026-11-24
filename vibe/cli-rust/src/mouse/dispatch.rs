@@ -11,11 +11,10 @@ use crate::config;
 use crate::option_list::{Click, MultiAction, OptionList, OptionView, SingleAction};
 use crate::selection::{self, RegionId, Release};
 use crate::server::Client;
-use crate::transcript::grouping::KEY_PREFIX;
 use crate::utils::scroll::ScrollAnchor;
 use crate::{
     approval, artifacts_modal, connector_auth, external_url, mcp, mcp_oauth, model_picker,
-    question_input, resume_picker, thinking_picker,
+    question_input, thinking_picker,
 };
 
 pub(super) fn dispatch(
@@ -26,7 +25,9 @@ pub(super) fn dispatch(
     event: MouseEvent,
 ) {
     match target {
-        MouseTarget::Transcript | MouseTarget::Composer => selection_event(app, target, event),
+        MouseTarget::Transcript | MouseTarget::Composer => {
+            selection_event(app, client, target, event)
+        }
         MouseTarget::BottomBar => bottom_bar_event(app, client, event),
         MouseTarget::Loading => loading_event(app, event),
         MouseTarget::CodePreview => owned_region_event(app, event, |app, at| {
@@ -61,10 +62,10 @@ pub(super) fn dispatch(
                 crate::input::select_theme(app, client);
             }
         }
-        // A click only highlights a task: stopping one takes `s`.
+        // A click highlights a task and a click on the highlight shows its output; stopping one takes `s`.
         MouseTarget::TasksPanel => {
-            if let Some(index) = app.tasks_panel.list.mouse(event) {
-                app.tasks_panel.list.select(index);
+            if app.tasks_panel.list.confirmed(event).is_some() {
+                crate::tasks_panel::show_output(app, client);
             }
         }
         MouseTarget::ThinkingPicker => {
@@ -73,19 +74,19 @@ pub(super) fn dispatch(
                 thinking_picker::select(app, client, scope);
             }
         }
-        // A click must not move the highlight off the session being resumed or deleted.
-        MouseTarget::ResumePicker if resume_picker::frozen(app) => {}
-        MouseTarget::ResumePicker => {
-            let click = option_gesture(app, event, RegionId::BottomApp, |app| {
-                &mut app.resume_picker.list
-            });
-            if let Some(click) = click {
-                resume_picker::click(app, client, click);
-            }
+        MouseTarget::SessionsPage | MouseTarget::SessionsPreview => {
+            crate::sessions_page::mouse::dispatch(app, client, event)
         }
         MouseTarget::ProxySetup => bottom_app_event(app, event, |app, event| {
             if event.kind == MouseEventKind::Down(MouseButton::Left) {
                 crate::proxy_setup::press(app, (event.column, event.row));
+            }
+        }),
+        MouseTarget::LoopsForm => bottom_app_event(app, event, |app, event| {
+            if event.kind == MouseEventKind::Down(MouseButton::Left) {
+                if let Some(form) = app.loops.form.as_mut() {
+                    form.press((event.column, event.row));
+                }
             }
         }),
         MouseTarget::LogLevelPicker => {
@@ -98,9 +99,11 @@ pub(super) fn dispatch(
                 artifacts_modal::select(app);
             }
         }
-        // A click highlights a loop; deleting stays on `d`.
+        // A click highlights a loop and a click on the highlight edits it; deleting stays on `d`.
         MouseTarget::Loops => {
-            let _ = option_gesture(app, event, RegionId::BottomApp, |app| &mut app.loops.list);
+            if confirmed(app, event, |app| &mut app.loops.list) {
+                crate::loops::edit(app);
+            }
         }
         MouseTarget::GoalConfirm => {
             if picked(app, event, |app| &mut app.goal.list) {
@@ -116,11 +119,21 @@ pub(super) fn dispatch(
         }
         MouseTarget::StickyPrompt => {
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
-                app.view.scroll_to_entry = app.view.sticky_prompt.map(|(index, _)| index);
+                let steer = app.view.sticky_steer.filter(|&(_, row)| row == event.row);
+                let prompt = app.view.sticky_prompt.map(|(index, _)| index);
+                app.view.scroll_to_entry = steer.map(|(index, _)| index).or(prompt);
             }
         }
+        // A press on a task output's search row focuses it; one on its text leaves it and selects.
         MouseTarget::RailWindow => owned_region_event(app, event, |app, at| {
-            selection::press_owned(app, at, selection::RegionId::RailWindow)
+            let search = app.tasks_panel.shown_mut().map(|view| &mut view.search);
+            let focused = search.is_some_and(|search| {
+                search.focused = search.area.contains(at.into());
+                search.focused
+            });
+            if !focused {
+                selection::press_owned(app, at, selection::RegionId::RailWindow);
+            }
         }),
         MouseTarget::Rail => {
             let press = matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
@@ -177,7 +190,7 @@ pub(crate) fn option_list(app: &mut App, target: MouseTarget) -> Option<&mut dyn
         MouseTarget::ArtifactsModal => &mut app.artifacts_modal.list,
         MouseTarget::Loops => &mut app.loops.list,
         MouseTarget::GoalConfirm => &mut app.goal.list,
-        MouseTarget::ResumePicker => &mut app.resume_picker.list,
+        MouseTarget::SessionsPage => crate::sessions_page::mouse::list(app),
         MouseTarget::Mcp => &mut app.mcp.list,
         MouseTarget::Plugins => &mut app.plugins.list,
         MouseTarget::TrustedFolders => {
@@ -333,7 +346,7 @@ fn bottom_bar_event(app: &mut App, client: &Arc<Client>, event: MouseEvent) {
     }
 }
 
-fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
+fn selection_event(app: &mut App, client: &Arc<Client>, target: MouseTarget, event: MouseEvent) {
     let at = (event.column, event.row);
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => {
@@ -373,23 +386,16 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
             {
                 // The second press of a double click starts afresh instead of selecting a word.
                 app.selection.chain = Default::default();
-                model_picker::open(app);
+                model_picker::open(app, client);
                 crate::telemetry::slash_command_clicked(app, "/model", "composer");
                 return;
             }
             if target != MouseTarget::Transcript || matches!(released, Release::Selected) {
                 return;
             }
-            if let Some(link) = app.view.link_hitmap.iter().find(|link| link.contains(at)) {
-                match link.kind() {
-                    crate::ui::markdown::LinkKind::External => external_url::open(link.target()),
-                    crate::ui::markdown::LinkKind::Attachment => {
-                        external_url::open_file(link.target())
-                    }
-                    crate::ui::markdown::LinkKind::InlineImage => {
-                        crate::inline_images::open(app, link.target())
-                    }
-                }
+            let link = app.view.link_hitmap.iter().find(|link| link.contains(at));
+            if let Some(link) = link.cloned() {
+                open_link(app, &link);
             } else if matches!(released, Release::RegionClick) {
                 // A plain click on the resting cat replays its animation round,
                 // unless the user disabled the animation; the click stays a no-op.
@@ -410,6 +416,17 @@ fn selection_event(app: &mut App, target: MouseTarget, event: MouseEvent) {
     }
 }
 
+/// Open a clicked markdown link: a URL in the browser, a file, or an inline image.
+pub fn open_link(app: &mut App, link: &crate::ui::markdown::Link) {
+    match link.kind() {
+        crate::ui::markdown::LinkKind::External => external_url::open(link.target()),
+        crate::ui::markdown::LinkKind::Attachment => external_url::open_file(link.target()),
+        crate::ui::markdown::LinkKind::InlineImage => {
+            crate::inline_images::open(app, link.target())
+        }
+    }
+}
+
 /// Toggle the entry or group a transcript row hit, following the viewed
 /// child's transcript and cache when a sub-agent view is open.
 pub fn toggle_effect_at(app: &mut App, row: u16) {
@@ -427,39 +444,27 @@ pub fn toggle_effect_at(app: &mut App, row: u16) {
         return;
     }
     // The child view swaps its transcript and cache in only at render time,
-    // so the expandability check and the layout cache to invalidate both
-    // follow the viewed child, like `App::toggle_tools`.
-    let lone = if let Some(child) = app
+    // so the fold and the layout cache to invalidate both follow the viewed
+    // child, like `App::toggle_tools`.
+    let expanded = &mut app.view.expanded;
+    let reveal = if let Some(child) = app
         .subagents
         .viewed_subagent_id
         .as_deref()
         .and_then(|child_id| app.subagents.transcripts.child_mut(child_id))
     {
-        if !child.transcript.is_expandable(&id) {
+        let Some(reveal) = child.transcript.toggle_fold(expanded, &id) else {
             return;
-        }
+        };
         child.cache.invalidate_layouts();
-        child.transcript.group_of(&id).is_none()
+        reveal
     } else {
-        if !app.view.transcript.is_expandable(&id) {
+        let Some(reveal) = app.view.transcript.toggle_fold(expanded, &id) else {
             return;
-        }
+        };
         app.view.transcript_cache.invalidate_layouts();
-        app.view.transcript.group_of(&id).is_none()
+        reveal
     };
-    let reveal = !app.view.expanded.remove(&id);
-    // A lone call carries its fold into the group a later call may open under its id.
-    let turn = id.starts_with(crate::transcript::TURN_DETAILS_PREFIX);
-    if lone && !turn && !id.starts_with(KEY_PREFIX) {
-        let group_key = format!("{KEY_PREFIX}{id}");
-        app.view.expanded.remove(&group_key);
-        if reveal {
-            app.view.expanded.insert(group_key);
-        }
-    }
-    if reveal {
-        app.view.expanded.insert(id.clone());
-    }
     // A toggling click ends the chain, so the next click toggles again instead of selecting a word.
     app.selection.chain = Default::default();
     anchor_toggle(app, row, id, reveal);

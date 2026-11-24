@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 from vibe.app_server._local_projects import LocalProject
@@ -12,12 +12,17 @@ __all__ = ["ProjectFolders"]
 
 
 class ProjectFolders:
-    """A folder matches itself and its subfolders; the deepest project folder wins."""
+    """A primary or linked folder claims sessions: itself and its subfolders, the deepest wins."""
 
-    def __init__(self, projects: Sequence[LocalProject]) -> None:
+    def __init__(
+        self, projects: Sequence[LocalProject], linked_folders: Collection[Path]
+    ) -> None:
+        linked = {_canonical(folder) for folder in linked_folders}
         candidates: dict[Path, list[LocalProject]] = {}
         for project in projects:
-            for root in dict.fromkeys(_canonical(root) for root in project.root_paths):
+            primary, *others = (_canonical(root) for root in project.root_paths)
+            claimed = [primary, *(root for root in others if root in linked)]
+            for root in dict.fromkeys(claimed):
                 candidates.setdefault(root, []).append(project)
         self._by_folder = {
             folder: _preferred(folder, projects)

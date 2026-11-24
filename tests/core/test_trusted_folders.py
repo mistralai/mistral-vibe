@@ -12,7 +12,7 @@ from unittest.mock import patch
 import pytest
 import tomli_w
 
-from vibe.core.paths import AGENTS_MD_FILENAME, TRUSTED_FOLDERS_FILE
+from vibe.core.paths import AGENTS_MD_FILENAME, SCRATCH_DIR, TRUSTED_FOLDERS_FILE
 from vibe.core.trusted_folders import (
     TrustedFoldersManager,
     TrustFileError,
@@ -562,6 +562,22 @@ class TestSessionTrustScopes:
         first.revoke_session_trust(tmp_path)
         assert first.is_trusted(tmp_path) is False
         assert second.is_trusted(tmp_path) is True
+
+    def test_no_decision_trusts_a_scratch_folder(self, tmp_path: Path) -> None:
+        persisted = TrustedFoldersManager()
+        scratch = SCRATCH_DIR.path / "session-1"
+        scratch.mkdir(parents=True)
+        persisted.add_trusted(SCRATCH_DIR.path.parent)
+        persisted.add_trusted(scratch)
+        manager = persisted.for_session()
+
+        manager.trust_for_session(scratch)
+        manager.trust_for_session(tmp_path)
+
+        assert manager.is_trusted(scratch / "nested") is False
+        assert manager.trust_status(scratch) is WorkspaceTrustStatus.UNTRUSTED
+        assert manager.find_trust_root(scratch) is None
+        assert manager.is_trusted(tmp_path) is True
 
     def test_persistent_changes_reach_existing_scopes_and_survive_reload(
         self, tmp_path: Path

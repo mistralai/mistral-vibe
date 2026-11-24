@@ -25,6 +25,7 @@ from vibe.app_server.protocol import (
     ProtocolErrorCode,
     ServerRequest,
     SessionMarkAsSeenParams,
+    SessionMarkAsUnseenParams,
     SessionReadResponse,
 )
 from vibe.app_server.server import _SESSION_BACKEND_METHODS, AppServer
@@ -47,6 +48,7 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "replace_queued_turn",
         "respond_to_callback",
         "resume_turn_queue",
+        "retry_turn",
         "session_id",
         "shutdown",
         "start_turn",
@@ -83,6 +85,7 @@ def test_session_backend_contract_covers_the_complete_session_lifecycle() -> Non
         "session/turn/queue/steer",
         "session/turn/queue/resume",
         "turn/interrupt",
+        "turn/retry",
         "turn/start",
         "turn/steer",
     }
@@ -138,6 +141,7 @@ def test_app_server_passes_services_to_session_backend_host_factory(
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=factory,
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
@@ -148,7 +152,8 @@ def test_app_server_passes_services_to_session_backend_host_factory(
         ),
     )
 
-    assert captured_services is server
+    assert captured_services is server.session_link
+    assert server.session_link.server is server
     assert server._session_backend_host is expected_host
 
 
@@ -164,6 +169,7 @@ def test_app_server_rejects_empty_session_backend_host_factory_result(
         AppServer(
             server_transport,
             oidc_tenants=process_services.oidc_tenants,
+            platform_credential_lenders=process_services.platform_credential_lenders,
             session_backend_host_factory=empty_factory,
             host_handler=HostRequestHandler(
                 HarnessFilesManager(sources=("user", "project")),
@@ -183,6 +189,7 @@ async def test_pin_requires_the_optional_host_capability(
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
@@ -209,6 +216,7 @@ async def test_mark_as_seen_requires_the_optional_host_capability(
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
@@ -239,10 +247,16 @@ async def test_mark_as_seen_routes_to_the_selected_backend_host(
             received = params
             return EmptyResponse()
 
+        async def mark_as_unseen(
+            self, params: SessionMarkAsUnseenParams
+        ) -> EmptyResponse:
+            return EmptyResponse()
+
     _, server_transport = memory_transport_pair()
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(
             SessionBackendHost, SeenStateHost()
         ),
@@ -260,6 +274,49 @@ async def test_mark_as_seen_routes_to_the_selected_backend_host(
     )
 
     assert received == SessionMarkAsSeenParams(session_id="saved-session")
+    assert result is not None
+    assert result.response == EmptyResponse()
+
+
+@pytest.mark.asyncio
+async def test_mark_as_unseen_routes_to_the_selected_backend_host(
+    process_services: ProcessServices,
+) -> None:
+    received: SessionMarkAsUnseenParams | None = None
+
+    class SeenStateHost:
+        async def mark_as_seen(self, params: SessionMarkAsSeenParams) -> EmptyResponse:
+            return EmptyResponse()
+
+        async def mark_as_unseen(
+            self, params: SessionMarkAsUnseenParams
+        ) -> EmptyResponse:
+            nonlocal received
+            received = params
+            return EmptyResponse()
+
+    _, server_transport = memory_transport_pair()
+    server = AppServer(
+        server_transport,
+        oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
+        session_backend_host_factory=lambda _: cast(
+            SessionBackendHost, SeenStateHost()
+        ),
+        host_handler=HostRequestHandler(
+            HarnessFilesManager(sources=("user", "project")),
+            org_config=process_services.org_config,
+            worktrees=process_services.worktrees,
+            experiments=process_services.experiments,
+            model_catalog=process_services.model_catalog,
+        ),
+    )
+
+    result = await server._dispatch_backend_host_operation(
+        "session/markAsUnseen", {"sessionId": "saved-session"}
+    )
+
+    assert received == SessionMarkAsUnseenParams(session_id="saved-session")
     assert result is not None
     assert result.response == EmptyResponse()
 
@@ -288,6 +345,7 @@ async def test_app_server_shutdown_waits_for_host_cleanup(
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _services: cast(SessionBackendHost, host),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
@@ -363,6 +421,7 @@ async def test_only_a_reopened_session_announces_its_running_turn(
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),
@@ -426,6 +485,7 @@ async def test_resume_sends_open_callbacks_after_the_held_turn_announcement(
     server = AppServer(
         server_transport,
         oidc_tenants=process_services.oidc_tenants,
+        platform_credential_lenders=process_services.platform_credential_lenders,
         session_backend_host_factory=lambda _: cast(SessionBackendHost, object()),
         host_handler=HostRequestHandler(
             HarnessFilesManager(sources=("user", "project")),

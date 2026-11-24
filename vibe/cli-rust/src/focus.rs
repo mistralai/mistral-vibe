@@ -12,7 +12,7 @@ pub enum Focus {
     VoiceApp,
     BranchApp,
     ProxySetup,
-    ResumePicker,
+    SessionsPage,
     Storage,
     Mcp,
     Plugins,
@@ -53,7 +53,7 @@ impl App {
             (self.voice_app.open, Focus::VoiceApp),
             (self.branch_app.open, Focus::BranchApp),
             (self.proxy_setup.open, Focus::ProxySetup),
-            (self.resume_picker.open, Focus::ResumePicker),
+            (self.sessions_page.open, Focus::SessionsPage),
             (self.storage.open, Focus::Storage),
             (self.mcp.open, Focus::Mcp),
             (self.plugins.open, Focus::Plugins),
@@ -91,7 +91,8 @@ impl App {
 /// Whether the focused surface moves through something with Tab, so Shift+Tab moves back through it instead of cycling agents.
 pub fn tab_navigates(app: &App) -> bool {
     match app.focus() {
-        Focus::Loops => app.loops.form.is_some(),
+        // The form's fields, else the rail windows the loop list is one of.
+        Focus::Loops => app.loops.form.is_some() || crate::rail::loop_list(app),
         Focus::Goal | Focus::ProxySetup => true,
         // A child view is no rail surface: Shift+Tab cycles agents there.
         Focus::SubagentList if app.subagents.viewed_subagent_id.is_some() => false,

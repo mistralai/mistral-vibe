@@ -181,6 +181,14 @@ class ConnectorGatewayClient:
                 raise ConnectorRuntimeFailure(
                     "connector_not_found", "Connector gateway route was not found"
                 ) from exc
+            if exc.status_code == HTTPStatus.TOO_MANY_REQUESTS:
+                # The same call succeeds once the gateway's window resets.
+                raise ConnectorRuntimeFailure(
+                    "connector_rate_limited",
+                    "Connector gateway rate limit reached",
+                    retryable=True,
+                    retry_after_s=exc.retry_after_s,
+                ) from exc
             raise ConnectorRuntimeFailure(
                 "connector_gateway_failed", "Connector gateway returned an HTTP error"
             ) from exc

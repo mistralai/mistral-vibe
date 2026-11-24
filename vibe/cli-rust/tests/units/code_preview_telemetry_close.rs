@@ -2,7 +2,7 @@
 
 use crossterm::event::MouseEventKind;
 use serde_json::json;
-use vibe_rs::resume_picker;
+use vibe_rs::sessions_page::{self, Trigger};
 use vibe_rs::telemetry::event;
 
 use crate::code_preview_telemetry::{done, line_link, numbered, Preview};
@@ -30,11 +30,17 @@ fn closed(reason: &str) -> serde_json::Value {
 #[tokio::test]
 async fn a_modal_taking_focus_closes_the_preview_with_focus_changed() {
     let mut preview = opened("[f.py](f.py:2)").await;
-    resume_picker::open(&mut preview.app, &stub());
+    sessions_page::open(&mut preview.app, &stub(), Trigger::SessionsCommand);
     preview.redraw();
     assert_eq!(
         preview.recorded(),
-        [(event::CODE_PREVIEW_DONE, closed("focus_changed"))]
+        [
+            (
+                event::SESSION_SEARCH_OPENED,
+                json!({"trigger": "sessions_command"})
+            ),
+            (event::CODE_PREVIEW_DONE, closed("focus_changed")),
+        ]
     );
 }
 

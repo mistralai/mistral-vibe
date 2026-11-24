@@ -42,7 +42,6 @@ from vibe.core.telemetry.send import (
     mistral_credential_cache_key,
     resolve_credential_cache_key,
 )
-from vibe.core.utils.fetch_wait import FetchFailures
 from vibe.core.utils.keyed_json_cache import load_keyed_record, store_keyed_entry
 from vibe.core.utils.remote_cache import (
     Cached,
@@ -248,9 +247,6 @@ class ExperimentsService:
     ) -> None:
         self._client_factory = client_factory or (lambda url: RemoteEvalClient(url=url))
         self._policy = policy
-        # Set once an eval failed or outlasted its cap: no later session of the
-        # process holds its first turn for one.
-        self.failures = FetchFailures()
         self._cache: RemoteCache[ExperimentsKey, HeldEval] = RemoteCache(
             "Experiments eval",
             policy,
@@ -270,9 +266,6 @@ class ExperimentsService:
             # wait here would give up on a fetch about to answer.
             entry = await self._cache.first(key, timeout_s=math.inf)
         except RemoteFetchFailedError as exc:
-            # Only a failure that leaves nothing held: a failed refresh behind
-            # one is no reason for a later session to skip its wait.
-            self.failures.mark()
             cause = exc.cause
             if isinstance(cause, ExperimentsEvalFailedError):
                 raise cause from None
@@ -280,7 +273,6 @@ class ExperimentsService:
                 str(cause) or type(cause).__name__
             ) from None
         if entry is None:
-            self.failures.mark()
             raise ExperimentsEvalFailedError("GrowthBook eval timed out")
         return entry.value
 
@@ -295,7 +287,6 @@ class ExperimentsService:
                 manager=manager,
                 launch_context=key.launch_context,
                 harness=ExperimentSurface.UNIFIED,
-                failures=FetchFailures(),
                 # Fresh for each fetch, so a refresh reads the current plan;
                 # /whoami's disk cache still saves the request.
                 resolve_identity=IdentityCache().resolve,

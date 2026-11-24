@@ -91,6 +91,7 @@ fn cache_and_copy(app: &mut App, f: &mut Frame, spans: &[RowSpan]) -> bool {
         return true;
     }
     let text = region::extract_document(app)
+        .or_else(|| crate::selection::copy_preview(app, f.buffer_mut()))
         .unwrap_or_else(|| fold::extract(f.buffer_mut(), spans, &region::folds(app, owner)));
     if !pending {
         if let Some(selection) = app.selection.region.as_mut() {

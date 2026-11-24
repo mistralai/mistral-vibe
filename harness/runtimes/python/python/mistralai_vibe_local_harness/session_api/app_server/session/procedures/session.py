@@ -395,8 +395,8 @@ class SessionStartParams(SessionModel):
         default=None,
         description=(
             "Start the first Turn with the Session. A start retried with the same "
-            "`idempotency_key` returns the same Turn. Send the same message on a retry: "
-            "a host may refuse a different one."
+            "`idempotency_key` returns the same Turn, whatever its message: a host does "
+            "not compare it with the first. Use a new key for a new start."
         ),
     )
     # Omitted when empty, so a server that predates the field accepts a default start.
@@ -607,9 +607,9 @@ class MessageSendParams(MessageSendInput):
     It needs a `message`, `context_messages`, or both. Context messages alone
     start no Turn, and take no `message_entry_id`.
 
-    Reusing `idempotency_key` with the same message, entry ID, and context
-    messages returns the original receipt; reusing it with any of them changed
-    is a conflict.
+    A repeat of `idempotency_key` returns the original receipt, whatever its
+    message, entry ID, or context messages: a host does not compare them with
+    the first send. Use a new key for each send.
     """
 
     idempotency_key: str | None = None

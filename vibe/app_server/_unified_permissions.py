@@ -47,6 +47,7 @@ from vibe.app_server._session_peers import (
     LIST_SESSIONS_TOOL_NAME,
     MARK_SESSIONS_SEEN_TOOL_NAME,
     READ_SESSION_TOOL_NAME,
+    RENAME_SESSION_TOOL_NAME,
 )
 from vibe.core.config import VibeConfigSchema
 from vibe.core.config.orchestrator import ConfigOrchestrator
@@ -79,15 +80,16 @@ from vibe.permissions import OutsideWorkdirPolicy, RequiredPermission
 _SHELL_TOOL_SOURCES = frozenset({"bash", "powershell", "git_bash"})
 """The shell tools: everything a foreground shell call and a background start do."""
 
-# Cron only schedules this session's own prompts, listing sessions or projects
-# or reading sessions changes nothing, and marking sessions seen only clears
-# their unread mark, so none of them asks by default.
+# Cron schedules this session's own prompts; session/project reads change
+# nothing. Marking seen and renaming only update session metadata. These tools
+# are allowed by default; explicit per-tool permissions still take precedence.
 _ALLOWED_BY_DEFAULT = frozenset({
     CRON_TOOL_NAME,
     LIST_PROJECTS_TOOL_NAME,
     LIST_SESSIONS_TOOL_NAME,
     MARK_SESSIONS_SEEN_TOOL_NAME,
     READ_SESSION_TOOL_NAME,
+    RENAME_SESSION_TOOL_NAME,
 })
 
 RUST_BUILTIN_TOOL_SOURCES: dict[RustRuntimeBuiltinToolName, frozenset[str]] = {

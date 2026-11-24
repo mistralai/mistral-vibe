@@ -5,12 +5,12 @@ use ratatui::text::{Line, Span};
 use crate::selection::{fold, Fold};
 use crate::ui::markdown::LinkedLines;
 use crate::ui::theme;
-use crate::utils::text;
+use crate::utils::{clean, text};
 
 /// The source rows, each at most `width` cells; a source blank once cleaned paints none.
 pub(super) fn lines(source: &str, width: u16) -> LinkedLines {
     let mut lines = LinkedLines::default();
-    let source = text::clean_output(source);
+    let source = clean::clean_output(source);
     if source.trim().is_empty() {
         return lines;
     }

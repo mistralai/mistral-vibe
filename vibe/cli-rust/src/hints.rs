@@ -11,10 +11,13 @@ pub mod key {
     pub const ARROWS: &str = "↑↓";
     pub const UP: &str = "↑";
     pub const LEFT_RIGHT: &str = "←→";
+    pub const LEFT: &str = "←";
     pub const LEFT_ESC: &str = "←/Esc";
     pub const RIGHT: &str = "→";
+    pub const RIGHT_ENTER: &str = "→/Enter";
     pub const ENTER: &str = "Enter";
     pub const ENTER_S: &str = "Enter/s";
+    pub const ENTER_E: &str = "Enter/e";
     pub const SPACE: &str = "Space";
     pub const SPACE_ENTER: &str = "Space/Enter";
     pub const YES_ENTER: &str = "y/Enter";
@@ -29,7 +32,9 @@ pub mod key {
     pub const BACKSPACE_CTRL_C: &str = "Backspace/Ctrl+C";
     pub const CTRL_C: &str = "Ctrl+C";
     pub const CTRL_J: &str = "Ctrl+J";
+    pub const CTRL_O: &str = "Ctrl+O";
     pub const CTRL_X: &str = "Ctrl+X";
+    pub const N_SHIFT_N: &str = "n/N";
     pub const SHIFT_ARROWS: &str = "Shift+↑↓";
     pub const CTRL_R: &str = "Ctrl+R";
     pub const CTRL_S: &str = "Ctrl+S";
@@ -64,9 +69,11 @@ pub mod action {
     pub const REFRESH: &str = "refresh";
     pub const RETRY: &str = "retry";
     pub const DELETE: &str = "delete";
+    pub const RUN_NOW: &str = "run now";
     pub const DISABLE: &str = "disable";
     pub const ENABLE: &str = "enable";
     pub const SHOW_TOOLS: &str = "show tools";
+    pub const SCROLL_PREVIEW: &str = "scroll preview";
     pub const CONNECT: &str = "connect";
     pub const WHY_BLOCKED: &str = "why blocked";
     pub const PREVIEW: &str = "preview";
@@ -89,7 +96,10 @@ pub mod action {
     pub const API_KEY: &str = "enter API key manually";
     pub const INTERRUPT: &str = "interrupt";
     pub const STEER: &str = "steer";
+    pub const SEND: &str = "send";
     pub const STOP: &str = "stop";
+    pub const NEXT_PREVIOUS: &str = "next/previous";
+    pub const KEEP: &str = "keep";
     pub const CANCEL_LAST_QUEUED: &str = "cancel last queued message";
     pub const REMOVE: &str = "remove";
     pub const DISCARD: &str = "discard";
@@ -102,6 +112,20 @@ pub mod action {
     pub const CHANGE: &str = "change";
     pub const PIN: &str = "pin";
     pub const UNPIN: &str = "unpin";
+    pub const SHOW: &str = "show";
+    pub const HIDE: &str = "hide";
+    pub const MORE_KEYS: &str = "all keys & marks";
+    pub const RENAME: &str = "rename";
+    pub const FOLD: &str = "fold";
+    pub const COLLAPSE: &str = "collapse";
+    pub const THIS_FOLDER: &str = "this folder";
+    pub const SORT: &str = "sort";
+    pub const ARCHIVED: &str = "archived";
+    pub const GONE_FOLDERS: &str = "gone folders";
+    pub const BY_ACTIVITY: &str = "sorted by activity";
+    pub const BY_CREATION_DATE: &str = "sorted by creation date";
+    pub const FOLDERS: &str = "folders";
+    pub const SESSIONS: &str = "sessions";
     pub const PAUSE: &str = "pause";
     pub const RESUME: &str = "resume";
     pub const CLEAR: &str = "clear";
@@ -157,4 +181,20 @@ pub fn rows(hints: &[Hint], width: u16) -> Vec<Vec<Hint>> {
         }
     }
     rows
+}
+
+/// The `hints` that fit one row of `width` beside `more` at its right edge: the last always, then the others in order until one does not fit. `None` when not even the first does.
+pub fn fit(hints: &[Hint], width: u16, more: Hint) -> Option<Vec<Hint>> {
+    let room = width.checked_sub(self::width(&[more]) + 2)?;
+    let (&last, rest) = hints.split_last()?;
+    let mut used = self::width(&[last]);
+    let kept: Vec<Hint> = rest
+        .iter()
+        .take_while(|&&hint| {
+            used += self::width(&[hint]) + 2;
+            used <= room
+        })
+        .copied()
+        .collect();
+    (rest.is_empty() || !kept.is_empty()).then(|| kept.into_iter().chain([last]).collect())
 }

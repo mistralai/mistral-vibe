@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import tomllib
 
@@ -340,20 +339,18 @@ def _mistral_model(alias: str) -> dict[str, str]:
 async def test_config_view_groups_models_by_their_highest_priority_source(
     config_dir: Path,
 ) -> None:
-    """Admin, GrowthBook, catalog (in catalog order), session, then local models.
+    """Admin, catalog (in catalog order), session, then local models.
 
     A model several layers define is one row, in the group of its highest
     defining layer. A setting without ``name`` and ``provider`` defines
-    nothing: a user or admin tweak never moves a catalog or GrowthBook model,
+    nothing: a user or admin tweak never moves a catalog model,
     and the thinking level a pick writes for the session never moves the
     picked model. The built-in default model is not listed: the catalog
     provides models, so it is not available anymore (VIBE-5548).
     """
     from vibe.core.config import build_default_orchestrator
     from vibe.core.config.layers.admin import AdminConfigLayer
-    from vibe.core.config.layers.growthbook import GrowthbookLayer
     from vibe.core.config.layers.model_catalog import apply_model_catalog
-    from vibe.core.experiments.active import ExperimentName
     from vibe.core.model_catalog import parse_model_catalog_response
 
     orchestrator = await build_default_orchestrator({
@@ -370,13 +367,6 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
             _mistral_model("admin-model"),
             {"alias": "zai-glm-5-3", "temperature": 0.1},
         ]
-    })
-    growthbook = orchestrator.get_layer(GrowthbookLayer.NAME)
-    assert isinstance(growthbook, GrowthbookLayer)
-    growthbook.set_variants({
-        ExperimentName.CLI_EXTRA_MODELS.value: json.dumps([
-            _mistral_model("growthbook-model")
-        ])
     })
     catalog = parse_model_catalog_response({
         "models": [
@@ -397,7 +387,6 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
         models=[
             _mistral_model("local-model"),
             {"name": "zai-glm-5-3", "temperature": 0.9},
-            {"alias": "growthbook-model", "temperature": 0.5},
         ],
     )
     config_file.write_text(tomli_w.dumps(user_config), encoding="utf-8")
@@ -408,7 +397,6 @@ async def test_config_view_groups_models_by_their_highest_priority_source(
 
     assert [(model.alias, model.source) for model in view.models] == [
         ("admin-model", "admin"),
-        ("growthbook-model", "growthbook"),
         ("zai-glm-5-3", "catalog"),
         ("mistral-large-3", "catalog"),
         ("mistral-medium-latest", "catalog"),
@@ -681,7 +669,7 @@ def test_config_view_image_support_widens_for_a_backend_that_can_fall_back() -> 
 
 
 @pytest.mark.asyncio
-async def test_apply_cached_experiment_variants_sets_routed_model(
+async def test_apply_cached_experiment_variants_sets_the_cached_variant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # End-to-end for the warm-cache startup path.
@@ -695,18 +683,16 @@ async def test_apply_cached_experiment_variants_sets_routed_model(
         cache, "_cache_key", lambda _config, _credentials=None: "user-abc"
     )
     orchestrator = await build_default_orchestrator()
-    routing = ExperimentName.CLI_MODEL_ROUTING.value
+    behavior = ExperimentName.SYSTEM_PROMPT_BEHAVIOR.value
     response = EvalResponse.model_validate({
-        "features": {
-            routing: {"rules": [{"force": '{"active_model": "magistral-medium"}'}]}
-        }
+        "features": {behavior: {"rules": [{"force": "Cached behavior."}]}}
     })
     cache.store_cached_eval_response(orchestrator.config, response)
-    assert not orchestrator.config.routed_default_model
+    assert not orchestrator.config.system_prompt_behavior
 
     await _apply_cached_experiment_variants(orchestrator)
 
-    assert orchestrator.config.routed_default_model == "magistral-medium"
+    assert orchestrator.config.system_prompt_behavior == "Cached behavior."
 
 
 @pytest.mark.asyncio
@@ -724,7 +710,7 @@ async def test_apply_cached_experiment_variants_noop_on_cold_cache(
 
     await _apply_cached_experiment_variants(orchestrator)
 
-    assert not orchestrator.config.routed_default_model
+    assert not orchestrator.config.system_prompt_behavior
 
 
 @pytest.mark.asyncio

@@ -580,6 +580,36 @@ class TelemetryClient:
         }
         self.send_telemetry_event("vibe.turn.failed", payload)
 
+    def send_remote_plugins_sync_done(
+        self,
+        *,
+        status: str,
+        error_type: str | None,
+        skip_reason: str | None,
+        trigger: str,
+        listed_count: int,
+        enabled_count: int,
+        downloaded_count: int,
+        failed_count: int,
+        duration_ms: int,
+    ) -> None:
+        """One sync of the user's plugin library (``vibe.core.plugins.remote``).
+
+        Counts and codes only: plugin names, ids and messages stay out.
+        """
+        payload = {
+            "status": status,
+            "error_type": error_type,
+            "skip_reason": skip_reason,
+            "trigger": trigger,
+            "listed_count": listed_count,
+            "enabled_count": enabled_count,
+            "downloaded_count": downloaded_count,
+            "failed_count": failed_count,
+            "duration_ms": duration_ms,
+        }
+        self.send_telemetry_event("vibe.remote_plugins.sync.done", payload)
+
     def send_hook_triggered(self, *, hook_type: str, from_plugin: bool) -> None:
         payload = {"hook_type": hook_type, "from_plugin": from_plugin}
         self.send_telemetry_event("vibe.hook.triggered", payload)

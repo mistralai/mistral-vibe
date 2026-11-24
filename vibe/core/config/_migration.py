@@ -147,6 +147,7 @@ def migrate_config(
     changed |= _migrate_unset_auto_compact_threshold(data)
     changed |= _migrate_removed_tool_paths(data)
     changed |= _migrate_renamed_worktree_copy_on_write(data)
+    changed |= _migrate_renamed_enable_model_catalog(data)
     return changed
 
 
@@ -375,6 +376,19 @@ def _migrate_renamed_worktree_copy_on_write(data: dict[str, Any]) -> bool:
         return False
     value = data.pop("experimental_worktree_copy_on_write")
     data.setdefault("worktree_copy_on_write", value)
+    return True
+
+
+def _migrate_renamed_enable_model_catalog(data: dict[str, Any]) -> bool:
+    """Rename ``experimental_enable_model_catalog``, keeping only an opt-out.
+
+    The catalog is now on by default, so an old ``true`` asks for nothing.
+    """
+    if "experimental_enable_model_catalog" not in data:
+        return False
+    value = data.pop("experimental_enable_model_catalog")
+    if value is False:
+        data.setdefault("enable_model_catalog", False)
     return True
 
 

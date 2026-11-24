@@ -487,6 +487,36 @@ class TestAgentManager:
             for record in caplog.records
         )
 
+    def test_an_unknown_tool_permission_is_ignored_in_an_agent_and_breaks_a_policy(
+        self,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        build_config: ConfigBuilder,
+        load_orchestrator: OrchestratorLoader[VibeConfigSchema],
+    ) -> None:
+        agents_dir = tmp_path / "agents"
+        agents_dir.mkdir()
+        for stem in ("custom", "accept-edits"):
+            (agents_dir / f"{stem}.toml").write_text(
+                '[tools.bash]\npermission = "auto"\n', encoding="utf-8"
+            )
+        config = build_config(agent_paths=[agents_dir])
+
+        with caplog.at_level("WARNING"):
+            manager = AgentManager(load_orchestrator(config), initial_agent="custom")
+
+        assert manager.active_agent.name == "custom"
+        assert "permission" not in manager.config.tools.get("bash", {})
+        assert (
+            manager.active_policy
+            is BUILTIN_APPROVAL_POLICIES[ApprovalPolicyName.ACCEPT_EDITS]
+        )
+        assert any(
+            "override of approval policy 'accept-edits'" in record.getMessage()
+            and "permission 'auto' is not one of" in record.getMessage()
+            for record in caplog.records
+        )
+
     def test_removed_plan_default_agent_starts_on_ask(
         self,
         caplog: pytest.LogCaptureFixture,

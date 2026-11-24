@@ -13,6 +13,7 @@ from vibe.core.config.harness_files import (
     HarnessFilesManager,
     get_harness_files_manager,
 )
+from vibe.core.git.worktree import access_roots_at
 from vibe.core.paths import DEFAULT_TOOL_DIR, dedup_paths
 from vibe.core.tools.base import BaseTool, BaseToolConfig, ToolPermission
 from vibe.core.tools.remote import MCPTool
@@ -469,6 +470,7 @@ class ToolManager:
                 writable_roots=tuple(
                     dedup_paths(r.resolve() for r in workspace_roots if r != here)
                 ),
+                access_roots=access_roots_at(here, self._harness_files.access_roots),
             )
             self._instances.clear()
 

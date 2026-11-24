@@ -161,17 +161,13 @@ def config_write_ops_to_patches(
     *,
     sparse_override_model_aliases: set[str],
 ) -> list[PatchOp]:
-    # A model no layer redefines needs its identity materialized: a sparse
-    # field-only override of one would be an orphan no layer completes on the
-    # next launch. Held per alias, not just for the active model: a pick that
-    # names another model writes that model's fields before it becomes the
-    # active one. Multiple field writes targeting the same alias in one batch
-    # fold into a single upsert so earlier changes are not silently
-    # overwritten.
-    #
-    # Every other model takes a bare field write: durable layers reconstruct
-    # it, and the catalog or GrowthBook layer re-fetches it — copied identity
-    # would keep a model running after its layer drops it (VIBE-4877).
+    # A model outside ``sparse_override_model_aliases`` (no layer rebuilds it
+    # at launch) needs its identity materialized; every other model takes a
+    # bare field write. Held per
+    # alias, not just for the active model: a pick that names another model
+    # writes that model's fields before it becomes the active one. Multiple
+    # field writes targeting the same alias in one batch fold into a single
+    # upsert so earlier changes are not silently overwritten.
     pending: dict[tuple[str | None, str], tuple[ModelConfig, dict[str, Any]]] = {}
     operations: list[PatchOp] = []
 

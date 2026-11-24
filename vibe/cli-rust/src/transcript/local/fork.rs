@@ -1,7 +1,7 @@
 //! The settled notice printed once a fork rewind forks the session.
 
 use super::Transcript;
-use crate::resume_picker::short_id as short_session;
+use crate::sessions_page::short_id as short_session;
 
 /// Mount the settled status message a fork rewind prints, naming the
 /// session before and after the fork.

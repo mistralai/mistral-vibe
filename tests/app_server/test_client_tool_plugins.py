@@ -369,7 +369,7 @@ async def test_client_tool_runner_uses_correlated_app_server_requests(
             break
         await asyncio.sleep(0)
     assert server._server._connection_attached
-    runner = _ConnectionClientToolRunner(server._server)
+    runner = _ConnectionClientToolRunner(server._server.session_link)
     incoming = client.incoming()
 
     async def next_message():
@@ -546,3 +546,47 @@ async def test_pinned_plugin_calls_client_over_existing_rpc(
     finally:
         await incoming.aclose()
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_client_tool_call_cut_by_a_close_says_it_may_have_run(
+    process_services: ProcessServices, tmp_path: Path
+) -> None:
+    from vibe.app_server._connection_protocol import ClientCapabilities, ClientInfo
+    from vibe.app_server._runtime import create_harness_server
+    from vibe.app_server.client import AppServerClient
+    from vibe.app_server.protocol import ServerRequest
+    from vibe.app_server.server import _ConnectionClientToolRunner
+    from vibe.app_server.transport import memory_transport_pair
+
+    client_transport, server_transport = memory_transport_pair()
+    server = await create_harness_server(
+        server_transport,
+        transport_kind="in_process",
+        process=HarnessProcess(services=process_services),
+    )
+    client = AppServerClient(client_transport, run_peer=server.serve)
+    await client.initialize(
+        ClientInfo(name="desktop-test", version="1"),
+        ClientCapabilities(client_tools=["tools/call"]),
+    )
+    await client.notify("initialized")
+    await client.request(
+        "session/start", {"agentConfig": {"cwd": str(tmp_path), "headless": True}}
+    )
+    runner = _ConnectionClientToolRunner(server._server.session_link)
+    incoming = client.incoming()
+    try:
+        calling = asyncio.create_task(runner.call_tool(_call()))
+        async for message in incoming:
+            if isinstance(message, ServerRequest) and message.method == "tools/call":
+                break
+        await server._server.close()
+        result = await asyncio.wait_for(calling, 5)
+    finally:
+        await incoming.aclose()
+        await client.close()
+
+    assert result.error is not None
+    assert result.error.code == "client_tool_unavailable"
+    assert "may or may not have run" in result.error.message

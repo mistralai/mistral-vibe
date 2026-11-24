@@ -162,7 +162,8 @@ async def serve_multiplexed(
         finally:
             await channel.close()
             channels.pop(channel_id, None)
-            # Acknowledge only after the harness has flushed and released its lease.
+            # Acknowledge only after the harness has flushed and released its
+            # lease, or parked a session whose turn still runs.
             await transport.send(close)
 
     try:

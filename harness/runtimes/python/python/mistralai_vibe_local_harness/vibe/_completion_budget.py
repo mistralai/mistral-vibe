@@ -5,11 +5,21 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import math
-from typing import Literal
+from typing import Literal, get_args
 
 from mistralai_vibe_local_harness.protocol import RustTokenUsage
 
 BudgetStopReason = Literal["token_limit", "price_limit", "pricing_unavailable"]
+BudgetLimitReason = Literal["token_limit", "price_limit"]
+"""The reasons of a spent limit, which interrupts the Turn; ``pricing_unavailable`` fails it."""
+
+BUDGET_LIMIT_CAUSE = "budget_limit"
+"""The Session API cause of a Turn that a spent limit interrupts."""
+
+
+def budget_limit_cause(reason: str | None) -> str | None:
+    """The Session API cause of an interrupted Turn with ``reason``, None unless a spent limit."""
+    return BUDGET_LIMIT_CAUSE if reason in get_args(BudgetLimitReason) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,7 +117,7 @@ class SharedCompletionBudget:
             if self._reason is None:
                 self._reason = self._limit_reason()
 
-    def _limit_reason(self) -> Literal["token_limit", "price_limit"] | None:
+    def _limit_reason(self) -> BudgetLimitReason | None:
         if (
             self.max_total_tokens is not None
             and self._total_tokens >= self.max_total_tokens

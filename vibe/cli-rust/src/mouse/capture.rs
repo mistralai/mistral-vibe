@@ -28,13 +28,15 @@ pub(crate) fn cancel_capture(app: &mut App, keep_selection: bool) {
                 | MouseTarget::ArtifactsModal
                 | MouseTarget::Loops
                 | MouseTarget::GoalConfirm
-                | MouseTarget::ResumePicker
+                | MouseTarget::SessionsPage
+                | MouseTarget::SessionsPreview
                 | MouseTarget::Mcp
                 | MouseTarget::Plugins
                 | MouseTarget::TrustedFolders
                 | MouseTarget::Skills
                 | MouseTarget::SkillsBody
                 | MouseTarget::LoopsDetails
+                | MouseTarget::LoopsForm
                 | MouseTarget::McpOAuth
                 | MouseTarget::ConnectorAuth
         ) {

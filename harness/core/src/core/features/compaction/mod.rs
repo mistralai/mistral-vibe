@@ -23,10 +23,13 @@ pub(crate) struct CompactionLimits {
     /// Compaction starts when the next agent request reaches this size.
     pub threshold: u64,
     /// The most a summary request may hold: the largest threshold the window
-    /// allows.
+    /// of the model that writes summaries allows.
     pub summary_budget: u64,
-    /// The model's context window.
+    /// The agent model's context window.
     pub context_window: u64,
+    /// The context window of the model that writes summaries: the agent
+    /// model's, unless a separate compaction model has its own.
+    pub summary_window: u64,
 }
 
 impl CompactionLimits {
@@ -34,10 +37,15 @@ impl CompactionLimits {
     pub(crate) fn from_settings(settings: &ContextSettings) -> Option<Self> {
         let threshold = settings.compaction_threshold()?;
         let facts = &settings.model_facts;
+        let (summary_window, summary_budget) = match settings.compaction_model_window {
+            Some(window) => (window.context_window, window.summary_budget),
+            None => (facts.context_window, facts.compaction_threshold_max),
+        };
         Some(Self {
             threshold,
-            summary_budget: facts.compaction_threshold_max,
+            summary_budget,
             context_window: facts.context_window,
+            summary_window,
         })
     }
 
@@ -45,6 +53,7 @@ impl CompactionLimits {
     /// between two configurations, so the correction no longer applies.
     pub(crate) fn model_facts_changed(current: &ContextSettings, next: &ContextSettings) -> bool {
         current.model_facts != next.model_facts
+            || current.compaction_model_window != next.compaction_model_window
             || current.effective_image_delivery() != next.effective_image_delivery()
     }
 }
@@ -170,6 +179,28 @@ mod tests {
             budgets.request.token_threshold,
             Some(facts.compaction_threshold_max)
         );
+        assert_eq!(
+            budgets.replacement.token_threshold,
+            Some(facts.compaction_threshold)
+        );
+    }
+
+    #[test]
+    fn a_separate_compaction_model_sizes_the_summary_request_but_not_the_rebuild() {
+        let mut settings = context(CompactionPolicy::Automatic);
+        settings.compaction_model_window = Some(crate::core::config::CompactionModelWindow {
+            context_window: 32_000,
+            summary_budget: 24_000,
+        });
+        let facts = settings.model_facts.clone();
+
+        let limits = CompactionLimits::from_settings(&settings).unwrap();
+        let budgets = CompactionBudgets::from_settings(&settings, EstimateCorrection::NONE);
+
+        assert_eq!(limits.summary_window, 32_000);
+        assert_eq!(limits.context_window, facts.context_window);
+        assert_eq!(limits.threshold, facts.compaction_threshold);
+        assert_eq!(budgets.request.token_threshold, Some(24_000));
         assert_eq!(
             budgets.replacement.token_threshold,
             Some(facts.compaction_threshold)

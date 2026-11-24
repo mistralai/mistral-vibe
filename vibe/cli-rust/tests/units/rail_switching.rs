@@ -290,7 +290,7 @@ fn ctrl_x_reaches_the_rail_from_a_picker_in_the_box() {
 
     assert!(rail::enter_from_box(&mut app, &stub(), &ctrl('x')));
     assert!(
-        !app.resume_picker.open,
+        !app.theme_picker.open,
         "the picker closes like for a chip click"
     );
     assert_eq!(app.focus(), Focus::Rail);

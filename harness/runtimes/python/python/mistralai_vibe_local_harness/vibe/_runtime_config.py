@@ -269,6 +269,7 @@ class LocalProviderRoute:
     credentials: ProviderCredentialProvider
     reasoning_field_name: str = "reasoning_content"
     emits_finish_reason: bool = True
+    tool_result_images: bool = False
     extra_headers: Mapping[str, str] = field(default_factory=dict)
     project_id: str = ""
     region: str = ""
@@ -409,6 +410,10 @@ class LocalRuntimeAdapterConfig:
     reasoning_field_name: str = "reasoning_content"
     # Some OpenAI-compatible endpoints never emit a finish reason.
     emits_finish_reason: bool = True
+    # Whether the endpoint takes images in a tool message, which the Chat
+    # Completions spec does not allow. Off, tool results carry `[Image]` in
+    # place of each image; an endpoint that takes them sets it to True.
+    tool_result_images: bool = False
     # Extra static headers merged into every provider request.
     extra_headers: dict[str, str] = field(default_factory=dict)
     affinity_id: AffinityIdSource | None = None
@@ -671,6 +676,7 @@ _LOCAL_RUNTIME_ADAPTER_BEHAVIOR_FIELDS = frozenset({
     "compaction_reasoning_limit_tokens",
     "reasoning_field_name",
     "emits_finish_reason",
+    "tool_result_images",
     "extra_headers",
     "project_id",
     "region",

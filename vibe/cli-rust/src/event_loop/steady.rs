@@ -137,7 +137,7 @@ impl EventLoop {
                         .viewed_child()
                         .is_some_and(|child| crate::subagents::is_active(child.status));
                     let active = self.app.view.command_loading
-                        || crate::resume_picker::spinning(&self.app)
+                        || crate::sessions_page::loading_shown(&self.app)
                         || self.app.compacting
                         || subagent_loading
                         || crate::commands::stress::running(&self.app)
@@ -269,6 +269,10 @@ impl EventLoop {
                     crate::ui_event::apply(&mut self.app, &self.client, event);
                     state.redraw_pending = true;
                 }
+                _ = clock::sleep_until(self.app.sessions_page.preview.at) => {
+                    crate::sessions_page::read_preview(&mut self.app, &self.client);
+                    state.redraw_pending = true;
+                }
                 _ = clock::sleep_until(self.app.agents.spinner_at) => {
                     crate::agents::show_switch_spinner(&mut self.app);
                     state.redraw_pending = true;
@@ -293,6 +297,7 @@ impl EventLoop {
                         if reset_blink {
                             blink.reset();
                         }
+                        crate::rail::save_use(&mut self.app);
                     }
                 },
                 changed = self.crash_rx.changed(), if !self.app.server_closed => {

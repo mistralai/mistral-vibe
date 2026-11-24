@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use super::event::{dispatch, CommandEvent};
 use super::submission::new_message_id;
 use crate::app::{App, Status};
-use crate::server::{method, Client};
+use crate::server::{method, Client, PublicSessionState};
 use crate::transcript::local;
 
 /// Start compaction. Does nothing while a turn is generating or if there is
@@ -52,9 +52,11 @@ pub fn start_compact(app: &mut App, client: &Arc<Client>, value: &str) {
             "extraInstructions": extra,
         });
         let event = match client.request(method::SESSION_COMPACT, params).await {
-            Ok(result) => match result.get("state").cloned().and_then(|state| {
-                serde_json::from_value::<crate::server::PublicSessionState>(state).ok()
-            }) {
+            Ok(result) => match result
+                .get("state")
+                .cloned()
+                .and_then(|state| serde_json::from_value::<PublicSessionState>(state).ok())
+            {
                 Some(state) => CommandEvent::Compacted {
                     state: Box::new(state),
                     status_id: status_id.clone(),
@@ -79,50 +81,35 @@ pub fn settle_compact(app: &mut App) {
 }
 
 /// Settle and adopt the session a compaction handed off to.
-pub fn apply_compacted(
-    app: &mut App,
-    session_id: String,
-    child_sessions: Vec<crate::server::PublicChildSession>,
-) {
+pub fn apply_compacted(app: &mut App, state: &PublicSessionState) {
     settle_compact(app);
-    app.set_session_id(session_id);
-    // The replacement session owns its own child sessions.
-    app.subagents.seed_snapshot(child_sessions);
+    crate::background_work::adopt_session(app, state);
     crate::subagents::refresh(app);
 }
 
-/// Read the replacement session a `session/compacted` handoff carries, with
-/// the child sessions the replacement state owns. The bare `sessionId`
-/// fallback has no state, so the replacement starts a fresh lineage.
-pub fn compacted_session_id(params: &Value) -> Option<String> {
-    compacted_handoff(params).map(|(id, _)| id)
+/// Apply a `session/compacted` handoff. The bare `sessionId` fallback has no
+/// state, so the replacement starts a fresh lineage.
+pub fn apply_compacted_notification(app: &mut App, params: &Value) {
+    if let Some(state) = handoff_state(params) {
+        return apply_compacted(app, &state);
+    }
+    settle_compact(app);
+    let Some(id) = params["sessionId"].as_str().filter(|id| !id.is_empty()) else {
+        return;
+    };
+    app.set_session_id(id.to_owned());
+    app.subagents.seed_snapshot(Vec::new());
+    crate::subagents::refresh(app);
 }
 
-/// The id and child sessions a compaction handoff carries, in one parse.
-pub fn compacted_handoff(
-    params: &Value,
-) -> Option<(String, Vec<crate::server::PublicChildSession>)> {
-    params
-        .get("state")
-        .cloned()
-        .and_then(|state| serde_json::from_value::<crate::server::PublicSessionState>(state).ok())
-        .map(|state| (state.session.id, state.child_sessions))
-        .or_else(|| {
-            params
-                .get("sessionId")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .map(|id| (id.to_owned(), Vec::new()))
-        })
+/// The replacement state a `session/compacted` or `session/contextCleared` handoff carries.
+pub fn handoff_state(params: &Value) -> Option<PublicSessionState> {
+    serde_json::from_value(params.get("state")?.clone()).ok()
 }
 
 /// Apply a successful manual `session/compact` response.
-pub fn apply_manual_compacted(
-    app: &mut App,
-    state: crate::server::PublicSessionState,
-    status_id: &str,
-) {
-    apply_compacted(app, state.session.id, state.child_sessions);
+pub fn apply_manual_compacted(app: &mut App, state: PublicSessionState, status_id: &str) {
+    apply_compacted(app, &state);
     // The server queue is cleared: dropped prompts lose their rows too.
     let ids: Vec<String> = app
         .queue

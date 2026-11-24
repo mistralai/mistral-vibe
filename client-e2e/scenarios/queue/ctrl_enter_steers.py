@@ -28,7 +28,7 @@ handshake = {
 }
 on_request = {"session/turn/queue/steer": [_STEERED]}
 
-screen_contains = ("> second", "Esc/Ctrl+C to interrupt")
+screen_contains = ("↳ second", "Esc/Ctrl+C to interrupt")
 screen_excludes = ("Queued", "Enter to steer")
 
 # CSI 13;5u is Ctrl+Enter in the kitty keyboard protocol.

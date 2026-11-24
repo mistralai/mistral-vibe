@@ -16,9 +16,9 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 if TYPE_CHECKING:
     from mistralai_vibe_local_harness.vibe import (
         SessionConfig,
-        UnifiedHarnessSessionBackend,
         UnifiedHarnessSessionBackendHost,
     )
+    from vibe.app_server._runtime_session_port import RuntimeSessionPort
     from vibe.app_server.protocol import (
         CallbackResultParams,
         TurnInterruptParams,
@@ -60,6 +60,15 @@ class CommandResult[ReplyT]:
 class SessionCommands(Protocol):
     """The commands the adapter sends to one root Session and its subagents."""
 
+    grant_before_answer: bool
+    """Whether an approval's grant is recorded before its answer goes out.
+
+    The local runtime asks Vibe's grants about the calls an answer releases, so
+    the grant must exist first. A runtime that settles callbacks on its own can
+    refuse the answer, for one it closed or timed out: there the grant waits
+    for a successful reply. That reply does not say the answer was used.
+    """
+
     async def start_turn(
         self, params: TurnStartParams
     ) -> CommandResult[StartedTurn]: ...
@@ -88,9 +97,11 @@ class DirectCommands(SessionCommands):
     a subagent reaches that subagent's Session.
     """
 
+    grant_before_answer = True
+
     def __init__(
         self,
-        session: UnifiedHarnessSessionBackend,
+        session: RuntimeSessionPort,
         host: UnifiedHarnessSessionBackendHost | None = None,
     ) -> None:
         self._session = session

@@ -806,6 +806,54 @@ async def test_migrate_config_layers_renames_experimental_worktree_copy_on_write
 
 
 @pytest.mark.asyncio
+async def test_migrate_config_layers_keeps_an_experimental_model_catalog_opt_out(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text("experimental_enable_model_catalog = false\n")
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted == {"enable_model_catalog": False}
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_drops_an_experimental_model_catalog_opt_in(
+    tmp_working_directory: Path,
+) -> None:
+    """The catalog is on by default: an old `true` asks for nothing."""
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text('active_model = "mine"\nexperimental_enable_model_catalog = true\n')
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted == {"active_model": "mine"}
+
+
+@pytest.mark.asyncio
+async def test_migrate_config_layers_keeps_enable_model_catalog_over_the_old_key(
+    tmp_working_directory: Path,
+) -> None:
+    path = tmp_working_directory / random_config_file_name()
+    path.write_text(
+        "enable_model_catalog = true\nexperimental_enable_model_catalog = false\n"
+    )
+    layer = UserConfigLayer(path=path)
+
+    await migrate_config_layers([layer])
+
+    with path.open("rb") as file:
+        persisted = tomllib.load(file)
+    assert persisted == {"enable_model_catalog": True}
+
+
+@pytest.mark.asyncio
 async def test_migrate_config_layers_unsets_the_old_unset_auto_compact_threshold(
     tmp_working_directory: Path,
 ) -> None:

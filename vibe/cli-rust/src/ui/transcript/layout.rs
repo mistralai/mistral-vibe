@@ -26,25 +26,35 @@ pub(super) fn build<'a>(
         let mut entries = Vec::new();
         let mut queue_top = None;
         let mut prompts = Vec::new();
+        let mut steers = Vec::new();
         let running = details.is_some_and(|context| context.running);
         let turn_at = |prompt: usize| {
-            let mut turn = details.and_then(|_| transcript.turn_details(prompt, running))?;
-            turn.close = transcript.closing_step(&turn, |key| expanded.contains(key));
-            Some(turn)
+            let mut turns =
+                details.map_or_else(Vec::new, |_| transcript.turn_details(prompt, running));
+            for turn in &mut turns {
+                turn.close = transcript.closing_step(turn, |key| expanded.contains(key));
+            }
+            turns
         };
         // History still preparing starts mid-turn: that turn's prompt sits above the laid-out rows.
         let start = cache.history_from();
         let mut groups: Vec<_> = (transcript.turn_prompt(start))
             .filter(|_| start > 0 && details.is_some())
-            .and_then(turn_at)
-            .into_iter()
-            .collect();
+            .map(turn_at)
+            .unwrap_or_default();
         for entry in transcript.lines_from(start) {
+            // A steer continues its turn: it pins under the turn's prompt, not instead of it.
             if transcript.settled_prompt(entry.index).is_some() {
-                prompts.push(entries.len());
-                groups.extend(turn_at(entry.index));
+                match entry.steer {
+                    true => steers.push(entries.len()),
+                    false => {
+                        prompts.push(entries.len());
+                        groups.extend(turn_at(entry.index));
+                    }
+                }
             }
-            let group = groups.last().filter(|group| group.contains(entry.index));
+            let at = groups.partition_point(|group| group.last < entry.index);
+            let group = groups.get(at).filter(|group| group.contains(entry.index));
             let step = group.map(|group| entry::DetailsView {
                 details: group,
                 expanded: expanded.contains(&group.key),
@@ -106,9 +116,8 @@ pub(super) fn build<'a>(
                 return None;
             }
         }
-        cache
-            .store_layout(revision, width, top, entries, queue_top, prompts)
-            .details = groups;
+        let layout = cache.store_layout(revision, width, top, entries, queue_top, prompts);
+        (layout.details, layout.steers) = (groups, steers);
     }
     cache.layout(revision, width)
 }

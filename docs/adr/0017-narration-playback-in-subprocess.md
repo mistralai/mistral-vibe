@@ -24,12 +24,18 @@ This created three problems:
 
 ## Decision
 
-Narration plays in the ACP subprocess through PortAudio (`sounddevice`), the
-same backend used for dictation's microphone capture. The host and webview
-receive only lifecycle notifications — `narrationPrep`, `narrationDone`,
-`narrationError` — never the audio bytes. This mirrors the dictation
-architecture: generation and I/O live where the API key and audio hardware
-live; the UI reflects state from pushed events.
+Narration plays in the process that hosts the app server — for `vibe-acp`,
+the ACP subprocess — through PortAudio (`sounddevice`), the same backend used
+for dictation's microphone capture. The host and webview receive only
+lifecycle notifications — `narrationPrep`, `narrationDone`, `narrationError` —
+never the audio bytes. This mirrors the dictation architecture: generation and
+I/O live where the API key and audio hardware live; the UI reflects state from
+pushed events.
+
+The controllers are the app server's `voice/*` capability (ADR 0018), wired to
+the CLI's audio manager ports. `vibe-acp` no longer runs its own: it forwards
+the `voice/*` requests it receives over the app server and re-emits the
+notifications to the host under the same method names.
 
 ### Device following
 
